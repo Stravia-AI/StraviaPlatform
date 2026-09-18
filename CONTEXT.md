@@ -51,6 +51,16 @@ _避免使用_：全量请求清单、失败列表（当指失败的请求视图
 Rejected Request Observation 是请求在形成 Inference Run 之前因解码、协议或认证错误被拒绝时形成的独立诊断投影。它不属于 Principal、Generation Chain 或 Connect Client Interaction。请求进入 Gateway 时 Debug 已开启的，可以附带只覆盖客户端请求与平台错误响应的 Rejected Request Debug Trace；没有上游方向不得表示为缺失抓包。
 _避免使用_：Connect Client Interaction、Anonymous Principal、孤立 Interaction
 
+## Observation Workspace
+
+Observation Workspace 是 WebUI 观测页（`/logs`）的编排深模块（`observation-workspace.ts` 的 `ObservationWorkspaceController` + `.svelte.ts` 壳）。它一次拥有五组编排职责：forest roots/cursor 和解、live 窗口算术、selection/range/failure 竞态守卫、live-block 保留与容量缺口、reset_required 恢复与 failures 分页、deep-link reveal；页面只保留 DOM 副作用（focus/fit/scroll）、对话框与 toast。竞态守卫是控制器内部 epoch，不外露为裸计数器。
+_避免使用_：把编排逻辑写回 `+page.svelte`、把 DOM 副作用带进控制器
+
+## Observation Timeline
+
+Observation Timeline 是把 Interaction Detail 或 Failed Request Detail 拍平为渲染视图的纯派生模块（`observation-timeline.ts` 的 `deriveTimeline`）。它返回完整视图包：title、按 started_at 排序的 runs、runIndex、events/timelines Map、stream 分组（连续 process 合并、同名 client_tool_handoff 折叠、2s gap 阈值与 rapid_continuation 绑定）、failure items、offsetLabel/gapLabel、usageRows 与 processGroup。i18n 与格式化调用留在模块内；组件一个 `$derived` 拿全部，不保留第二份派生。
+_避免使用_：在组件内维护平行的拍平逻辑、把 DOM 操作带进模块
+
 ## Wire Debug Capture
 
 Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；凭据值永久脱敏，结构化媒体内容以 Artifact 引用与必要元数据代替并明确标记已外置，其他内容保留。媒体部分不承诺原始 wire 字节保真，内容恢复受 Artifact 保留期约束。
@@ -143,6 +153,14 @@ _避免使用_：Raw Request、Wire Request
 Model Turn Executor 是执行一个 Model Turn 的深模块。调用方提交 Principal、Effective Model Request、授权方式、可选的允许转发上游提示，以及 cancel / deadline。授权方式是 Route 模型绑定，或 Advanced Capability grant；它不是 API Key 上的独立能力开关。Executor 负责授权、Route / Target 选择、第一次 canonical 输出之前的 Target failover、Provider Transport（含 Responses WebSocket 与可选 Target Continuation）以及 live canonical stream。它返回 Route、canonical stream 与本次 Target 身份。Target Continuation 由注入的 lookup 发现，不把 Generation Chain 纳入 interface。它不拥有 Hook、Platform Tool 循环、Client Output Commit、客户端交付、ingress 协议或 Generation Chain / Agent Turn 落盘；请求中的 tools 是 Target 的硬约束。调用方消费 stream，Executor 不另提供 unary 完成方法。
 _避免使用_：在 Inference Run 或 Agent Runner 内复制 Target 循环；让 Gateway 自身充当 Executor；把 Generation Chain Store 传入一次 Model Turn
 
+## Model Leg
+
+Model Leg 是 Inference Run 内消费一个 Model Turn 的完整生命周期：从腿开始（Hook 流腿开启、Completion Context 组装），经 canonical 事件的 transform、归并与终态检测，到腿收口（flush 合流、media reconcile、Completed 归并、Incomplete 判定）与推进（完成公开响应、Platform-only 隐藏续腿、Hook 响应或失败渲染）。一条腿终止为可见响应、Platform-only 续腿、Hook 响应或失败；Platform-only 续腿在同一腿循环内获取下一个 Model Turn，不外溢为新一轮请求处理。终态 StreamError / UnexpectedEof 在任何交付形态下都使整条腿失败。
+
+## Model Leg Consume
+
+Model Leg Consume 是消费一条 Model Leg 的深模块（`engine/leg.rs` 的 `ModelLegConsume`）。调用方按自己的 transport 泵入 CanonicalEvent 并执行返回的 LegReaction；模块拥有 leg 仪式、Hook transform 与 flush、Generation Chain 身份应用、early Platform 执行管线（检测→prepare→marker 交付→start）、seal 与 advance（含 follow-up Model Turn 获取）。交付差异经闭枚举 `LegOps`（Live / Buffered）注入：live 在泵中直接交付投影批并回报 wire 送达，buffered 累积腿体并把 staged 批记为 Sent。模块不拥有 transport 取消与断连监听、Client Projection Session 的创建、请求级 Hook、turn 选择策略或 Generation Chain 落盘。
+_避免使用_：在 buffered 与 live 两条调用路径各自复制腿生命周期；把 `LegOps` 当开放 trait 扩展点
 
 ## Agent Definition
 

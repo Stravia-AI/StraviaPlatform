@@ -10,18 +10,17 @@
 //!   3. Execute one shared Model Turn after hooks stabilize the effective request.
 //!   4. Run response/tool/client-output hooks and deliver the committed result.
 
-mod canonical_stream;
 mod claim;
 mod completion;
 mod delivery;
 mod errors;
 mod followup;
 mod ledger;
+mod leg;
 mod projection;
 mod settlement;
 mod stream;
 mod util;
-use self::canonical_stream::ai_response_to_deltas;
 use self::claim::*;
 use self::completion::*;
 use self::delivery::{
@@ -29,8 +28,12 @@ use self::delivery::{
 };
 use self::errors::*;
 pub(super) use self::errors::{error_response, hook_failure_response};
-use self::followup::{FollowupLeg, FollowupModelTurn, acquire_followup_model_turn};
+use self::followup::{
+    FollowupLeg, FollowupModelTurn, HookRespondError, HookRespondParts, HookResponsePlan,
+    acquire_followup_model_turn, prepare_hook_response,
+};
 pub(super) use self::ledger::RunLedger;
+use self::leg::*;
 use self::projection::*;
 use self::settlement::{Settlement, report_projected_delivery, settle};
 use self::util::{client_session_id, forwarded_client_headers};
@@ -45,91 +48,25 @@ use crate::Gateway;
 use crate::agent::ModelTurn;
 use crate::agent::ModelTurnExecutor;
 use crate::agent::TurnInput;
-#[cfg(test)]
-use crate::db::models::Provider;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::interaction_observation::{AdmissionFacts, IngressObserver, RunEvent, RunStart};
 use crate::model_turn::StreamResponseAccumulator;
-#[cfg(test)]
-use crate::provider::VendorRegistry;
-#[cfg(test)]
-use crate::provider::vendor::Vendor;
+use crate::model_turn::support::ai_response_to_deltas;
 use crate::proxy::context::RequestContext;
 use crate::proxy::security::{ClientCredential, Security};
 use stravia_runtime_contract::model_turn::CanonicalEvent;
-#[cfg(test)]
-use stravia_runtime_contract::protocol::ids::Protocol;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 
-#[cfg(test)]
-fn resolve_vendor_adapter(provider: &Provider, protocol: Protocol) -> Option<Arc<dyn Vendor>> {
-    let registry = VendorRegistry::global();
-    let vendor_id = provider
-        .vendor
-        .as_deref()
-        .map(str::trim)
-        .filter(|vendor| !vendor.is_empty());
-
-    if vendor_id.is_none() && protocol == Protocol::OpenResponses {
-        return registry
-            .get_vendor(crate::provider::registry::protocol_default_vendor(protocol))
-            .cloned();
-    }
-
-    registry
-        .get_vendor(vendor_id.unwrap_or("custom"))
-        .cloned()
-        .or_else(|| {
-            registry
-                .get_vendor(crate::provider::registry::protocol_default_vendor(protocol))
-                .cloned()
-        })
-}
-
-#[cfg(test)]
-fn is_openai_generation_target(
-    vendor: Option<&str>,
-    preset_key: Option<&str>,
-    _ingress: ProtocolId,
-    is_embedding_request: bool,
-) -> bool {
-    if is_embedding_request {
-        return false;
-    }
-
-    vendor
-        .map(str::trim)
-        .filter(|vendor| !vendor.is_empty())
-        .is_some_and(|vendor| vendor.eq_ignore_ascii_case("openai"))
-        && preset_key.map(str::trim).is_none_or(|preset_key| {
-            preset_key.is_empty() || preset_key.eq_ignore_ascii_case("openai")
-        })
-}
-
-pub(super) enum RoundOutcome {
-    Deliver {
-        response: Box<Response>,
-        delivery: DeliveryState,
-    },
-    NextRound {
-        run: Option<Box<crate::hook::InferenceRun>>,
-        phase: Option<PhaseTracker>,
-    },
-}
-
-impl RoundOutcome {
-    fn with_lifecycle(self, run: crate::hook::InferenceRun, phase: PhaseTracker) -> Self {
-        match self {
-            Self::NextRound { .. } => Self::NextRound {
-                run: Some(Box::new(run)),
-                phase: Some(phase),
-            },
-            other => other,
-        }
-    }
+/// Terminal result of the shared Model Turn path: the wire response plus how
+/// the body was delivered. Hidden Model Legs continue inside
+/// `execute_shared_model_turn`, so the outcome always reaches the caller as a
+/// finished response.
+pub(super) struct RoundOutcome {
+    pub response: Box<Response>,
+    pub delivery: DeliveryState,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DeliveryState {
@@ -138,21 +75,21 @@ pub(super) enum DeliveryState {
 }
 
 pub(super) fn buffered_response(response: Response) -> RoundOutcome {
-    RoundOutcome::Deliver {
+    RoundOutcome {
         response: Box::new(response),
         delivery: DeliveryState::Buffered,
     }
 }
 
 pub(super) fn buffered_completion(response: Response) -> RoundOutcome {
-    RoundOutcome::Deliver {
+    RoundOutcome {
         response: Box::new(response),
         delivery: DeliveryState::Buffered,
     }
 }
 
 pub(super) fn live_response(response: Response) -> RoundOutcome {
-    RoundOutcome::Deliver {
+    RoundOutcome {
         response: Box::new(response),
         delivery: DeliveryState::Live,
     }
@@ -929,204 +866,148 @@ async fn dispatch_round(
         projection,
         ledger,
     } = context;
-    let mut fixed_media_plan = request.meta.media_routing.clone();
-    'round: loop {
-        if request.meta.media_routing.is_none() {
-            request.meta.media_routing = fixed_media_plan.clone();
+    let fixed_media_plan = request.meta.media_routing.clone();
+    // Request hooks run before the route is selected so a hook may change the
+    // model or synthesize a response. Authorization is applied to the resulting
+    // model below.
+    let request_hook_pending = match phase.current() {
+        Phase::Request => true,
+        Phase::HiddenRound => true,
+        current => {
+            return hook_failure_response(format!(
+                "Inference Run entered request handling in {current:?}"
+            ));
         }
-        // Request hooks run before the route is selected so a hook may change the
-        // model or synthesize a response. Authorization is applied to the resulting
-        // model below.
-        let request_hook_pending = match phase.current() {
-            Phase::Request => true,
-            Phase::HiddenRound => true,
-            current => {
-                return hook_failure_response(format!(
-                    "Inference Run entered request handling in {current:?}"
-                ));
-            }
-        };
-        if ctx.cancellation.is_cancelled() {
-            return error_response(499, "request cancelled");
-        }
-        if request_hook_pending {
-            let request_hook_result = inference_run
-                .as_mut()
-                .expect("buffered Inference Run")
-                .on_request(request)
-                .await;
-            match request_hook_result {
-                Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
-                Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
-                    let mut response = *response;
-                    let run = inference_run.as_mut().expect("buffered Inference Run");
-                    run.set_route(stravia_runtime_contract::hook::RouteContext {
-                        model_id: request.model.clone(),
-                        provider_id: "hook".into(),
-                        target_id: "hook".into(),
-                        egress: ingress,
-                    });
-                    match run.on_client_output(&mut response).await {
-                        Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
-                        Ok(stravia_runtime_contract::hook::HookControl::Respond(replacement)) => {
-                            response = *replacement;
-                        }
-                        Ok(control) => {
-                            return render_hook_control(control, ingress, request.stream.enabled);
-                        }
-                        Err(error) => return hook_failure_response(error),
-                    }
-                    if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
-                        && let Some(write) = generation_chain.write.as_ref()
-                    {
-                        response.id = write.id().to_owned();
-                    }
-                    let projection_session = projection
-                        .as_mut()
-                        .expect("buffered Client Projection session");
-                    projection_session.begin_model_leg(
-                        thinking_carrier_facts(ingress, ingress),
-                        run.exposed_tool_names(),
-                        None,
-                    );
-                    let observer = ctx
-                        .extensions
-                        .get::<crate::interaction_observation::RunObserver>()
-                        .expect("admitted Inference Run observer");
-                    observer.record_debug(|| RunEvent::Checkpoint {
-                        stage: "response_after_hook".into(),
-                        model_turn_id: None,
-                        attempt_id: None,
-                        payload: checkpoint_payload(&observer, &response),
-                    });
-                    let staged_delivery =
-                        match projection_session.project_staged(&mut response, &[]).await {
-                            Ok(batch) => batch,
-                            Err(error) => return hook_failure_response(error),
-                        };
-                    observer.record_debug(|| RunEvent::Checkpoint {
-                        stage: "client_projection_event".into(),
-                        model_turn_id: None,
-                        attempt_id: None,
-                        payload: checkpoint_payload(&observer, &response),
-                    });
-                    ledger.stage_visible_response(ingress, &response);
-                    let pending_generation_chain =
-                        generation_chain.write.take().and_then(|mut write| {
-                            write.observe_effective(request.clone());
-                            write
-                                .stage(
-                                    &mut response,
-                                    &crate::generation_chain::GenerationSource::Hook {
-                                        protocol: ingress,
-                                    },
-                                    None,
-                                )
-                                .then_some(write)
-                        });
-                    if let Err(response) = enter_phase(phase, Phase::SemanticComplete) {
-                        return *response;
-                    }
-                    if let Err(response) = enter_phase(phase, Phase::AwaitingDelivery) {
-                        return *response;
-                    }
-                    let response = match projection_session.prepare_upload_delivery(&response).await
-                    {
-                        Ok(std::borrow::Cow::Borrowed(_)) => response,
-                        Ok(std::borrow::Cow::Owned(delivered)) => delivered,
-                        Err(error) => return hook_failure_response(error),
-                    };
-                    let response = render_hook_control(
-                        stravia_runtime_contract::hook::HookControl::Respond(Box::new(response)),
+    };
+    if ctx.cancellation.is_cancelled() {
+        return error_response(499, "request cancelled");
+    }
+    if request_hook_pending {
+        let request_hook_result = inference_run
+            .as_mut()
+            .expect("buffered Inference Run")
+            .on_request(request)
+            .await;
+        match request_hook_result {
+            Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+            Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
+                let run = inference_run.as_mut().expect("buffered Inference Run");
+                let observer = ctx
+                    .extensions
+                    .get::<crate::interaction_observation::RunObserver>()
+                    .expect("admitted Inference Run observer");
+                let plan = match prepare_hook_response(
+                    *response,
+                    HookRespondParts {
+                        request,
                         ingress,
-                        request.stream.enabled,
-                    );
-                    let mut projection = projection
-                        .take()
-                        .expect("delivered Hook Client Projection session");
-                    let gateway = gw.clone();
-                    let ledger = ledger.clone();
-                    let observer = observer.clone();
-                    return after_body_delivery(response, async move {
-                        settle(
-                            &gateway,
-                            &mut projection,
-                            &ledger,
-                            &observer,
-                            ingress,
-                            Settlement {
-                                staged_delivery: Some(staged_delivery),
-                                pending_generation_chain,
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    });
-                }
-                Ok(control) => {
-                    return render_hook_control(control, ingress, request.stream.enabled);
-                }
-                Err(error) => return hook_failure_response(error),
+                        inference_run: run,
+                        projection: projection
+                            .as_mut()
+                            .expect("buffered Client Projection session"),
+                        generation: generation_chain,
+                        ledger,
+                        phase,
+                        observer: Some(&observer),
+                    },
+                )
+                .await
+                {
+                    Ok(plan) => plan,
+                    Err(HookRespondError::Control(control)) => {
+                        return render_hook_control(*control, ingress, request.stream.enabled);
+                    }
+                    Err(HookRespondError::Failure(message)) => {
+                        return hook_failure_response(message);
+                    }
+                };
+                let HookResponsePlan {
+                    response,
+                    staged_delivery,
+                    pending_generation_chain,
+                } = plan;
+                ledger.stage_visible_response(ingress, &response);
+                let response = match projection
+                    .as_mut()
+                    .expect("buffered Client Projection session")
+                    .prepare_upload_delivery(&response)
+                    .await
+                {
+                    Ok(std::borrow::Cow::Borrowed(_)) => response,
+                    Ok(std::borrow::Cow::Owned(delivered)) => delivered,
+                    Err(error) => return hook_failure_response(error),
+                };
+                let response = render_hook_control(
+                    stravia_runtime_contract::hook::HookControl::Respond(Box::new(response)),
+                    ingress,
+                    request.stream.enabled,
+                );
+                let mut projection = projection
+                    .take()
+                    .expect("delivered Hook Client Projection session");
+                let gateway = gw.clone();
+                let ledger = ledger.clone();
+                let observer = observer.clone();
+                return after_body_delivery(response, async move {
+                    settle(
+                        &gateway,
+                        &mut projection,
+                        &ledger,
+                        &observer,
+                        ingress,
+                        Settlement {
+                            staged_delivery: Some(staged_delivery),
+                            pending_generation_chain: pending_generation_chain.map(|chain| *chain),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                });
             }
-        }
-        match (&fixed_media_plan, request.meta.media_routing.clone()) {
-            (None, Some(plan)) => fixed_media_plan = Some(plan),
-            (Some(plan), _) => request.meta.media_routing = Some(plan.clone()),
-            (None, None) => {}
-        }
-        if request
-            .meta
-            .media_routing
-            .as_ref()
-            .is_some_and(|plan| plan.mode == MediaRoutingMode::Bridge)
-            && !stabilize_media_generation_chain(generation_chain, request)
-        {
-            return coded_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "media_response_chain_invalid",
-                "Media bridge could not prepare the request",
-            );
-        }
-        if let Some(write) = generation_chain.write.as_mut() {
-            write.observe_effective(request.clone());
-        }
-        if let Err(response) = enter_phase(phase, Phase::Selecting) {
-            return *response;
-        }
-
-        let outcome = execute_shared_model_turn(SharedModelTurnInput {
-            executor: Arc::clone(&executor),
-            gateway: &gw,
-            request,
-            ingress,
-            request_context: ctx,
-            inference_run,
-            phase,
-            generation: generation_chain.clone(),
-            headers: &headers,
-            projection,
-            ledger,
-        })
-        .await;
-        match outcome {
-            RoundOutcome::NextRound {
-                run,
-                phase: next_phase,
-            } => {
-                if let Some(run) = run {
-                    *inference_run = Some(*run);
-                }
-                if let Some(next_phase) = next_phase {
-                    *phase = next_phase;
-                }
-                continue 'round;
+            Ok(control) => {
+                return render_hook_control(control, ingress, request.stream.enabled);
             }
-            RoundOutcome::Deliver { response, delivery } => {
-                *delivery_state = delivery;
-                return *response;
-            }
+            Err(error) => return hook_failure_response(error),
         }
     }
+    // Pin the entry media plan: hidden Model Legs re-apply it inside the
+    // leg loop rather than letting per-leg stripping leak back.
+    if let Some(plan) = &fixed_media_plan {
+        request.meta.media_routing = Some(plan.clone());
+    }
+    if request
+        .meta
+        .media_routing
+        .as_ref()
+        .is_some_and(|plan| plan.mode == MediaRoutingMode::Bridge)
+        && !stabilize_media_generation_chain(generation_chain, request)
+    {
+        return coded_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "media_response_chain_invalid",
+            "Media bridge could not prepare the request",
+        );
+    }
+    if let Err(response) = enter_phase(phase, Phase::Selecting) {
+        return *response;
+    }
+
+    let outcome = execute_shared_model_turn(SharedModelTurnInput {
+        executor: Arc::clone(&executor),
+        gateway: &gw,
+        request,
+        ingress,
+        request_context: ctx,
+        inference_run,
+        phase,
+        generation: generation_chain.clone(),
+        headers: &headers,
+        projection,
+        ledger,
+    })
+    .await;
+    *delivery_state = outcome.delivery;
+    *outcome.response
 }
 
 async fn acquire_turn(
@@ -1136,7 +1017,7 @@ async fn acquire_turn(
     request_context: &RequestContext,
     ledger: &RunLedger,
     inference_run: &mut crate::hook::InferenceRun,
-    generation: &GenerationChainRun,
+    generation: &mut GenerationChainRun,
 ) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
         let observer = request_context
@@ -1190,6 +1071,9 @@ async fn acquire_turn(
         }
         Err(error) => return Err(model_turn_execute_failure(error)),
     };
+    if let Some(write) = generation.write.as_mut() {
+        write.observe_effective(effective_request.clone());
+    }
     Ok((turn, effective_request))
 }
 
@@ -1202,7 +1086,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         request_context,
         inference_run,
         phase,
-        generation,
+        mut generation,
         headers,
         projection,
         ledger,
@@ -1214,7 +1098,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         request_context,
         ledger,
         inference_run.as_mut().expect("buffered Inference Run"),
-        &generation,
+        &mut generation,
     )
     .await
     {
@@ -1248,228 +1132,165 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .await;
     }
 
-    let projection_session = projection
-        .as_mut()
-        .expect("buffered Client Projection session");
-    projection_session.begin_model_leg(
-        thinking_carrier_facts(ingress, turn.route.egress),
-        inference_run
-            .as_ref()
-            .expect("buffered Inference Run before projection")
-            .exposed_tool_names(),
-        Some(crate::history_marker::ThinkingSource {
-            namespace: turn.target.namespace.clone(),
-            protocol: turn.route.egress,
-            actual_model: turn.target.actual_model.clone(),
-            target_id: turn.target.target_id.clone(),
-        }),
-    );
-
-    let route = turn.route.clone();
-    let streamed = turn.streamed;
-    let completion_context = CompletionContext::from_model_turn(
-        gateway.clone(),
-        generation,
-        ingress,
-        &turn.target,
-        turn.route.egress,
-        turn.model_turn_id.clone(),
-        request_context
-            .extensions
-            .get::<crate::interaction_observation::RunObserver>()
-            .expect("admitted Inference Run observer"),
-    );
-    let mut output = turn.output;
-    let mut completed_response = None;
-    let mut streamed_response = streamed.then(StreamResponseAccumulator::default);
-    if streamed {
-        let mut terminal_deltas = Vec::new();
-        let mut hook_leg = stream::HookLegGuard::new(
-            inference_run
-                .as_mut()
-                .expect("buffered Inference Run stream"),
+    let fixed_media_plan = request.meta.media_routing.clone();
+    let observer = request_context
+        .extensions
+        .get::<crate::interaction_observation::RunObserver>()
+        .expect("admitted Inference Run observer")
+        .clone();
+    let mut turn = turn;
+    let prepared = 'legs: loop {
+        let projection_session = projection
+            .as_mut()
+            .expect("buffered Client Projection session");
+        let run = inference_run.as_mut().expect("buffered Inference Run");
+        let mut leg = ModelLegConsume::begin(
+            gateway,
+            &generation,
+            ingress,
+            &turn,
+            run,
+            projection_session,
+            &observer,
+            LegPolicy {
+                emit_live: false,
+                early_platform: true,
+            },
         );
+        let mut hook_leg = HookLegGuard::new(run);
+        let mut ops = LegOps::Buffered(BufferedLegOps { ledger });
+        let mut output = turn.output;
         while let Some(event) = output.next().await {
-            match event {
-                Ok(CanonicalEvent::Delta(delta)) => {
-                    if let stravia_runtime_contract::protocol::ir::AiStreamDelta::StreamError {
-                        error,
-                    } = &delta
-                        && let Some(outcome) = compaction_stream_error_outcome(request, error)
+            match leg.feed(hook_leg.run_mut(), event) {
+                LegReaction::Absorbed => {}
+                LegReaction::Emit(deltas) => {
+                    match leg
+                        .perform_emit(&mut ops, hook_leg.run_mut(), projection_session, deltas)
+                        .await
                     {
-                        return outcome;
+                        LegFlow::Failed(failure) => {
+                            return render_leg_failure(
+                                failure,
+                                request,
+                                ingress,
+                                false,
+                                ClientOutputCommit::Pending,
+                            );
+                        }
+                        LegFlow::Open | LegFlow::Disrupted(_) | LegFlow::Faulted => {}
                     }
-                    let (terminal, deltas) = stream::partition_terminal_deltas(vec![delta]);
-                    terminal_deltas.extend(terminal);
-                    let transformed =
-                        match stream::transform_stream_deltas(hook_leg.run_mut(), deltas) {
-                            Ok(deltas) => deltas,
-                            Err(error) => {
-                                return buffered_response(hook_failure_response(error));
-                            }
-                        };
-                    streamed_response
-                        .as_mut()
-                        .expect("stream accumulator")
-                        .apply_all(&transformed);
                 }
-                Ok(CanonicalEvent::Completed(completed)) => {
-                    completed_response = Some(*completed);
-                    break;
-                }
-                Ok(CanonicalEvent::Compacted(_)) => {
-                    return model_turn_error_outcome(
-                        stravia_runtime_contract::model_turn::ModelTurnError::new(
-                            "unexpected_compaction_terminal",
-                            "Generation received a standalone compact result",
-                        ),
+                LegReaction::Ended => break,
+                LegReaction::Failed(failure) => {
+                    return render_leg_failure(
+                        failure,
+                        request,
+                        ingress,
+                        false,
+                        ClientOutputCommit::Pending,
                     );
                 }
-                Err(error) => return model_turn_error_outcome(error),
             }
         }
-        let flushed = match hook_leg.close().await {
-            Ok(flushed) => flushed,
-            Err(error) => return buffered_response(hook_failure_response(error)),
-        };
-        streamed_response
-            .as_mut()
-            .expect("stream accumulator")
-            .apply_all(&flushed);
-        streamed_response
-            .as_mut()
-            .expect("stream accumulator")
-            .apply_all(&terminal_deltas);
-    } else {
-        while let Some(event) = output.next().await {
-            match event {
-                Ok(CanonicalEvent::Delta(_)) => {}
-                Ok(CanonicalEvent::Completed(completed)) => {
-                    completed_response = Some(*completed);
-                    break;
-                }
-                Ok(CanonicalEvent::Compacted(_)) => {
-                    return model_turn_error_outcome(
-                        stravia_runtime_contract::model_turn::ModelTurnError::new(
-                            "unexpected_compaction_terminal",
-                            "Generation received a standalone compact result",
-                        ),
-                    );
-                }
-                Err(error) => return model_turn_error_outcome(error),
+        match leg
+            .seal(&mut ops, projection_session, hook_leg.close().await, false)
+            .await
+        {
+            SealOutcome::Ready => {}
+            SealOutcome::Failed(failure) => {
+                return render_leg_failure(
+                    failure,
+                    request,
+                    ingress,
+                    false,
+                    ClientOutputCommit::Pending,
+                );
+            }
+            SealOutcome::Disrupted(_) | SealOutcome::Aborted => {
+                unreachable!("buffered Model Leg emit cannot disrupt")
             }
         }
-    }
-    let Some(mut completed_response) = completed_response else {
-        return model_turn_error_outcome(
-            stravia_runtime_contract::model_turn::ModelTurnError::new(
-                "model_stream_incomplete",
-                "Model Turn ended without a completion",
-            ),
-        );
-    };
-    let mut response = streamed_response
-        .map(StreamResponseAccumulator::into_ai_response)
-        .unwrap_or_else(|| completed_response.clone());
-    if streamed
-        && let Err(error) = completion::reconcile_completed_media(
-            &mut response,
-            std::mem::take(&mut completed_response.items),
-        )
-    {
-        return model_turn_error_outcome(
-            stravia_runtime_contract::model_turn::ModelTurnError::new(
-                "output_media_reconciliation_failed",
-                error,
-            ),
-        );
-    }
-    if response.usage.prompt_tokens == 0 && response.usage.completion_tokens == 0 {
-        response.usage = completed_response.usage;
-    }
-    if response.id.is_empty() {
-        response.id = completed_response.id;
-    }
-    if response.stop_reason.is_none() {
-        response.stop_reason = completed_response.stop_reason;
-    }
-    let upstream_response_id = (!response.id.is_empty()).then(|| response.id.clone());
-    let completed = match complete_canonical_response(
-        &completion_context,
-        CompletionInput {
-            request,
-            run: inference_run
-                .as_mut()
-                .expect("buffered Inference Run completion"),
-            phase,
-            response,
-            upstream_response_id,
-            early_platform_executions: Vec::new(),
-            projection: projection_session,
-            ledger,
-        },
-    )
-    .await
-    {
-        CompletionOutcome::PlatformOnly {
-            continuation,
-            staged_delivery,
-        } => {
-            if let Err(error) = report_projected_delivery(
-                projection_session,
-                ledger,
-                staged_delivery,
-                ProjectionDelivery::Sent,
+        match leg
+            .advance(
+                &mut ops,
+                LegParts {
+                    request: &mut *request,
+                    run: hook_leg.run_mut(),
+                    phase: &mut *phase,
+                    projection: &mut *projection_session,
+                    ledger,
+                },
+                FollowupEnv {
+                    executor: executor.as_ref(),
+                    headers,
+                    request_context,
+                    generation: &mut generation,
+                    fixed_media_plan: fixed_media_plan.as_ref(),
+                },
             )
             .await
-            {
-                return buffered_response(render_completion_failure(
-                    CompletionFailure::hook(error, ClientOutputCommit::Pending),
-                    ingress,
-                    request.stream.enabled,
-                ));
+        {
+            LegAdvance::Ready(prepared) => break 'legs *prepared,
+            LegAdvance::NextLeg(next) => {
+                turn = *next;
             }
-            if let Err(failure) = continuation
-                .finish(
-                    &completion_context,
-                    ledger,
+            LegAdvance::HookResponse(HookResponsePlan {
+                response,
+                staged_delivery,
+                pending_generation_chain,
+            }) => {
+                ledger.stage_visible_response(ingress, &response);
+                let response = match projection_session.prepare_upload_delivery(&response).await {
+                    Ok(std::borrow::Cow::Borrowed(_)) => response,
+                    Ok(std::borrow::Cow::Owned(delivered)) => delivered,
+                    Err(error) => return buffered_response(hook_failure_response(error)),
+                };
+                let response = render_hook_control(
+                    stravia_runtime_contract::hook::HookControl::Respond(Box::new(response)),
+                    ingress,
+                    false,
+                );
+                let mut projection_session = projection
+                    .take()
+                    .expect("delivered Hook Client Projection session");
+                let gateway = gateway.clone();
+                let ledger = ledger.clone();
+                let observer = observer.clone();
+                return buffered_response(after_body_delivery(response, async move {
+                    settle(
+                        &gateway,
+                        &mut projection_session,
+                        &ledger,
+                        &observer,
+                        ingress,
+                        Settlement {
+                            staged_delivery: Some(staged_delivery),
+                            pending_generation_chain: pending_generation_chain.map(|chain| *chain),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }));
+            }
+            LegAdvance::StreamError(error) => {
+                return buffered_response(buffered_stream_error_response(&error));
+            }
+            LegAdvance::Outcome(outcome) => return outcome,
+            LegAdvance::Failed(failure) => {
+                return render_leg_failure(
+                    failure,
                     request,
-                    inference_run
-                        .as_mut()
-                        .expect("buffered Inference Run continuation"),
-                    phase,
-                )
-                .await
-            {
-                return buffered_response(render_completion_failure(
-                    failure,
                     ingress,
-                    request.stream.enabled,
-                ));
+                    false,
+                    ClientOutputCommit::Pending,
+                );
             }
-            return RoundOutcome::NextRound {
-                run: None,
-                phase: None,
-            };
-        }
-        CompletionOutcome::Ready(lease) => match (*lease).prepare(phase) {
-            Ok(delivery) => delivery,
-            Err(failure) => {
-                return buffered_response(render_completion_failure(
-                    failure,
-                    ingress,
-                    request.stream.enabled,
-                ));
+            LegAdvance::Disrupted(_) | LegAdvance::Aborted => {
+                unreachable!("buffered Model Leg emit cannot disrupt")
             }
-        },
-        CompletionOutcome::Failed(failure) => {
-            return buffered_response(render_completion_failure(
-                failure,
-                ingress,
-                request.stream.enabled,
-            ));
         }
     };
+    let route = turn.route.clone();
 
     let PreparedDelivery {
         response: prepared_response,
@@ -1477,7 +1298,10 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         pending_generation_chain,
         background_executions,
         started_executions,
-    } = completed;
+    } = prepared;
+    let projection_session = projection
+        .as_mut()
+        .expect("buffered Client Projection session");
     let mut delivery = if request.stream.enabled {
         DeliveryAdapter::buffered_stream(ingress, route.egress)
     } else {
@@ -1542,98 +1366,3 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
 }
 
 // StreamResponseAccumulator and ensure_tool_index are in accumulator.rs.
-
-#[cfg(test)]
-mod openai_generation_target_tests {
-    use super::*;
-    use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
-    fn unlabelled_provider() -> Provider {
-        Provider {
-            id: "provider".into(),
-            name: "Custom Provider".into(),
-            vendor: None,
-            protocol: "openai-compatible".into(),
-            base_url: "https://example.com/v1".into(),
-            preset_key: None,
-            channel: None,
-            models_source: None,
-            static_models: None,
-            api_key: "secret".into(),
-            adapter_credentials: r#"{"apiKey":"secret"}"#.into(),
-            vendor_options: "{}".into(),
-            auth_mode: "apikey".into(),
-            use_proxy: false,
-            last_test_success: None,
-            last_test_at: None,
-            is_enabled: true,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    #[test]
-    fn unlabelled_open_responses_target_uses_openai_vendor_adapter() {
-        let adapter = resolve_vendor_adapter(&unlabelled_provider(), Protocol::OpenResponses)
-            .expect("Open Responses vendor adapter");
-
-        assert_eq!(adapter.vendor_id(), "openai");
-    }
-
-    #[test]
-    fn unlabelled_chat_target_keeps_custom_vendor_adapter() {
-        let adapter = resolve_vendor_adapter(&unlabelled_provider(), Protocol::OpenAICompatible)
-            .expect("custom vendor adapter");
-
-        assert_eq!(adapter.vendor_id(), "custom");
-    }
-
-    #[test]
-    fn unlabelled_open_responses_target_does_not_enable_generation_transport() {
-        assert!(!is_openai_generation_target(
-            None,
-            None,
-            OPEN_RESPONSES_2026_04_24,
-            false
-        ));
-    }
-
-    #[test]
-    fn unlabelled_chat_target_does_not_change_protocol_negotiation() {
-        assert!(!is_openai_generation_target(
-            None,
-            None,
-            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            false
-        ));
-    }
-
-    #[test]
-    fn explicit_openai_target_keeps_generation_transport() {
-        assert!(is_openai_generation_target(
-            Some("openai"),
-            Some("openai"),
-            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            false
-        ));
-    }
-
-    #[test]
-    fn embeddings_never_use_responses_generation_transport() {
-        assert!(!is_openai_generation_target(
-            Some("openai"),
-            None,
-            OPEN_RESPONSES_2026_04_24,
-            true
-        ));
-    }
-
-    #[test]
-    fn catalog_openai_vendor_does_not_enable_generation_transport() {
-        assert!(!is_openai_generation_target(
-            Some("openai"),
-            Some("meta"),
-            OPEN_RESPONSES_2026_04_24,
-            false
-        ));
-    }
-}

@@ -1,3 +1,4 @@
+import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, RunDetail } from './types/observation'
 
 export interface ObservationChatMessage {
@@ -17,12 +18,7 @@ function runText(run: RunDetail): string {
   const text = run.events
     .filter((event) => event.kind === 'client_visible_content_delta' && event.run_id === run.id)
     .toSorted((a, b) => a.sequence - b.sequence)
-    .map((event) => {
-      const payload = event.payload
-      return payload && typeof payload === 'object' && 'text' in payload && typeof payload.text === 'string'
-        ? payload.text
-        : ''
-    })
+    .map((event) => payloadString(payloadRecord(event.payload).text) ?? '')
     .join('')
   committedText.set(run, text)
   return text
@@ -32,9 +28,7 @@ function runInputText(run: RunDetail): string | undefined {
   const payload = run.events.find(
     (event) => event.kind === 'input_preview_recorded' && event.run_id === run.id,
   )?.payload
-  return payload && typeof payload === 'object' && 'text' in payload && typeof payload.text === 'string'
-    ? payload.text
-    : undefined
+  return payloadString(payloadRecord(payload).text)
 }
 
 export function observationConversationMessages(

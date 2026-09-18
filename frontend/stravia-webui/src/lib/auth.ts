@@ -73,7 +73,7 @@ function unsafeHeaders(body: boolean): Headers {
   return headers
 }
 
-async function decode<T>(response: Response): Promise<T> {
+export async function decodeAdmin<T>(response: Response): Promise<T> {
   const text = await response.text()
   const payload = text ? parseJson(text) : undefined
   const object = payload !== null && typeof payload === 'object' ? (payload as ErrorPayload) : undefined
@@ -99,13 +99,13 @@ function parseJson(value: string): unknown {
 
 export async function getAuthState(): Promise<AuthState> {
   const response = await rawFetch('/auth/state', {}, isTauri)
-  return decode<AuthState>(response)
+  return decodeAdmin<AuthState>(response)
 }
 
 async function refreshServerSession(): Promise<boolean> {
   const run = async (): Promise<boolean> => {
     const stateResponse = await rawFetch('/auth/state', {}, false)
-    if (stateResponse.ok && (await decode<AuthState>(stateResponse)).authenticated) return true
+    if (stateResponse.ok && (await decodeAdmin<AuthState>(stateResponse)).authenticated) return true
     const response = await rawFetch('/auth/refresh', { method: 'POST', headers: unsafeHeaders(false) }, false)
     return response.ok
   }
@@ -139,8 +139,9 @@ export async function restoreAuthentication(state: AuthState): Promise<AuthState
 export async function authenticatedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   let response = await rawFetch(path, init)
   if (response.status !== 401) return response
-  if (!(await renewAuthentication())) return response
-  response = await rawFetch(path, init)
+  if (!(await renewAuthentication()) || (response = await rawFetch(path, init)).status === 401) {
+    if (window.location.pathname !== '/login') authenticationRequired()
+  }
   return response
 }
 
@@ -150,13 +151,13 @@ export async function login(username: string, password: string): Promise<Session
     { method: 'POST', headers: unsafeHeaders(true), body: JSON.stringify({ username, password }) },
     false,
   )
-  return decode<SessionSummary>(response)
+  return decodeAdmin<SessionSummary>(response)
 }
 
 export async function logout(): Promise<void> {
   if (isTauri) return
   const response = await authenticatedFetch('/auth/logout', { method: 'POST', headers: unsafeHeaders(false) })
-  await decode<void>(response)
+  await decodeAdmin<void>(response)
 }
 
 export async function changeCredentials(currentPassword: string, username: string, password: string): Promise<void> {
@@ -165,7 +166,7 @@ export async function changeCredentials(currentPassword: string, username: strin
     headers: unsafeHeaders(true),
     body: JSON.stringify({ current_password: currentPassword, username, password }),
   })
-  await decode<void>(response)
+  await decodeAdmin<void>(response)
 }
 
 export async function claimSetup(token: string): Promise<void> {
@@ -174,7 +175,7 @@ export async function claimSetup(token: string): Promise<void> {
     { method: 'POST', headers: unsafeHeaders(true), body: JSON.stringify({ token }) },
     false,
   )
-  await decode<void>(response)
+  await decodeAdmin<void>(response)
 }
 
 export async function testDatabase(database: DatabaseConfig): Promise<void> {
@@ -183,7 +184,7 @@ export async function testDatabase(database: DatabaseConfig): Promise<void> {
     { method: 'POST', headers: unsafeHeaders(true), body: JSON.stringify({ database }) },
     false,
   )
-  await decode<void>(response)
+  await decodeAdmin<void>(response)
 }
 
 export async function completeSetup(
@@ -201,7 +202,7 @@ export async function completeSetup(
     },
     false,
   )
-  return decode<AuthState>(response)
+  return decodeAdmin<AuthState>(response)
 }
 
 export function authenticationRequired(): never {

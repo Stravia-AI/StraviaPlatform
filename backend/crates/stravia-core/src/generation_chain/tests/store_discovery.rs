@@ -46,7 +46,10 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     };
     sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
         .bind(b.id()).execute(pool).await.unwrap();
-    backend.rebuild_generation_prefixes().await.unwrap();
+    backend
+        .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
+        .await
+        .unwrap();
     let restarted =
         GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
     let mut replay = history_a;
@@ -111,7 +114,10 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
             .unwrap()
             .contains("internal_chat_message_metadata_passthrough")
     );
-    backend.rebuild_generation_prefixes().await.unwrap();
+    backend
+        .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
+        .await
+        .unwrap();
     sqlx::query("UPDATE turn_chain_nodes SET expires_at = 0 WHERE id = ?")
         .bind(a.id())
         .execute(pool)
@@ -122,7 +128,10 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .execute(pool)
         .await
         .unwrap();
-    backend.rebuild_generation_prefixes().await.unwrap();
+    backend
+        .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
+        .await
+        .unwrap();
     let unavailable: (Option<String>, Option<String>, String) = sqlx::query_as(
         "SELECT prefix_namespace, parent_id, payload FROM turn_chain_nodes WHERE id = ?",
     )

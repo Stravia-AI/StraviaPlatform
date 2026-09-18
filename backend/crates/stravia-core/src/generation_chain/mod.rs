@@ -26,6 +26,7 @@ use stravia_runtime_contract::turn_chain::TurnCommit;
 use stravia_runtime_contract::turn_chain::TurnCommitError;
 use stravia_runtime_contract::turn_chain::TurnNodeId;
 use stravia_runtime_contract::turn_chain::TurnNodeKind;
+use stravia_runtime_contract::turn_chain::TurnUnavailable;
 
 mod materialize;
 pub(crate) use materialize::{client_items_from_payloads, rebuilt_prefix};
@@ -195,6 +196,12 @@ impl GenerationChain {
             compaction: None,
             ttl,
         }
+    }
+
+    /// Rebuild derived Generation prefix indexes before accepting requests.
+    /// Runs once at startup through the generic TurnChainStore capability.
+    pub(crate) async fn rebuild_prefixes(&self) -> Result<(), TurnUnavailable> {
+        self.store.rebuild_prefixes().await
     }
 
     pub(crate) fn with_history_markers(
@@ -819,6 +826,10 @@ struct ClientHistoryState {
     session_fingerprint: Option<String>,
 }
 
+/// Namespace generation stamped on stored reusable prefixes. Bumping the
+/// version makes every older index stale at startup rebuild.
+const GENERATION_PREFIX_NAMESPACE: &str = "stravia-generation-history-v2:";
+
 impl ClientHistoryState {
     fn from_request(request: &AiRequest, items: &[AiItem]) -> Self {
         Self {
@@ -837,11 +848,11 @@ impl ClientHistoryState {
 
     fn reusable_namespace(&self) -> String {
         if self.session_fingerprint.is_some() {
-            "stravia-generation-history-v2:session".into()
+            format!("{GENERATION_PREFIX_NAMESPACE}session")
         } else {
             format!(
-                "stravia-generation-history-v2:{}",
-                self.controls_fingerprint
+                "{}{}",
+                GENERATION_PREFIX_NAMESPACE, self.controls_fingerprint
             )
         }
     }

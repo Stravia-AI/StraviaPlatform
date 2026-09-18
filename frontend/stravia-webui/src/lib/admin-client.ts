@@ -1,6 +1,4 @@
-import * as m from '$lib/paraglide/messages.js'
-
-import { apiBase, authenticatedFetch, authenticationRequired, isTauri } from '$lib/auth'
+import { apiBase, authenticatedFetch, decodeAdmin, isTauri } from '$lib/auth'
 import type { ConnectClientApplyPlan } from '$lib/connect-client-apply'
 import type { ConnectClientApplyRequest } from '$lib/connect'
 import type { Locale } from '$lib/paraglide/runtime.js'
@@ -94,516 +92,250 @@ export interface ArtifactSettings {
 
 type HttpMethod = 'DELETE' | 'GET' | 'POST' | 'PUT'
 
-interface RequestMapping {
-  method: HttpMethod
-  path: string
-  body?: Record<string, unknown> | string
-}
-
-interface ResponsePayload {
-  data?: unknown
-  error?: unknown
-  code?: string
-  params?: Record<string, unknown>
-}
-
-// Path and query segments arrive as unknown through the command dispatch table;
-// the typed methods on `admin` always supply string or number values.
-function param(value: unknown): string {
-  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-}
-
-function numParam(value: unknown, fallback: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? String(value) : String(fallback)
-}
-
-function mapRequest(command: string, args?: Record<string, unknown>): RequestMapping {
-  switch (command) {
-    case 'listProviders':
-      return { method: 'GET', path: '/providers' }
-    case 'previewConnectClient':
-      return { method: 'POST', path: '/connect-clients/preview', body: args?.input as Record<string, unknown> }
-    case 'listCatalogProviders':
-      return { method: 'GET', path: '/catalog/providers' }
-    case 'listVendorMetadata':
-      return { method: 'GET', path: '/vendors' }
-    case 'listCanonicalModels':
-      return { method: 'GET', path: '/catalog/models' }
-    case 'refreshCatalog':
-      return { method: 'POST', path: '/catalog/refresh' }
-    case 'createProvider':
-      return { method: 'POST', path: '/providers', body: args?.input as Record<string, unknown> }
-    case 'previewProviderBaseUrl':
-      return {
-        method: 'POST',
-        path: '/providers/base-url/preview',
-        body: { vendor_id: args?.vendorId, adapter_credentials: args?.adapterCredentials, base_url: args?.baseUrl },
-      }
-    case 'copyProvider':
-      return {
-        method: 'POST',
-        path: `/providers/${param(args?.id)}/copy`,
-        body: (args?.options ?? {}) as Record<string, unknown>,
-      }
-    case 'updateProvider':
-      return { method: 'PUT', path: `/providers/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
-    case 'deleteProvider':
-      return { method: 'DELETE', path: `/providers/${param(args?.id)}` }
-    case 'testProvider':
-      return { method: 'GET', path: `/providers/${param(args?.id)}/test` }
-    case 'listWebProviders':
-      return { method: 'GET', path: '/web-providers' }
-    case 'createWebProvider':
-      return { method: 'POST', path: '/web-providers', body: args?.input as Record<string, unknown> }
-    case 'updateWebProvider':
-      return { method: 'PUT', path: `/web-providers/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
-    case 'deleteWebProvider':
-      return { method: 'DELETE', path: `/web-providers/${param(args?.id)}` }
-    case 'testWebProvider':
-      return { method: 'POST', path: `/web-providers/${param(args?.id)}/test` }
-    case 'getWebAccessSettings':
-      return { method: 'GET', path: '/web-access/settings' }
-    case 'updateWebAccessSettings':
-      return { method: 'PUT', path: '/web-access/settings', body: args?.input as Record<string, unknown> }
-    case 'getWebSearchConfig':
-      return { method: 'GET', path: '/web-search/config' }
-    case 'updateWebSearchConfig':
-      return { method: 'PUT', path: '/web-search/config', body: args?.input as Record<string, unknown> }
-    case 'listEligibleWebSearchModels':
-      return { method: 'GET', path: '/web-search/eligible-models' }
-    case 'listCompatibleCodexSearchProviders':
-      return { method: 'GET', path: '/web-search/codex-providers' }
-    case 'getMediaUnderstandingConfig':
-      return { method: 'GET', path: '/media-understanding' }
-    case 'updateMediaUnderstandingConfig':
-      return { method: 'PUT', path: '/media-understanding', body: args?.input as Record<string, unknown> }
-    case 'testProviderModels':
-      return { method: 'GET', path: `/providers/${param(args?.id)}/test-models` }
-    case 'listImageCapabilityDrifts':
-      return { method: 'GET', path: '/providers/image-capability-drifts' }
-    case 'listProviderModels':
-      return { method: 'GET', path: `/providers/${param(args?.id)}/models` }
-    case 'syncProviderModels':
-      return { method: 'POST', path: `/providers/${param(args?.id)}/models/sync` }
-    case 'prepareProviderModel':
-      return {
-        method: 'POST',
-        path: `/providers/${param(args?.id)}/model/prepare`,
-        body: { model_id: args?.modelId, template_id: args?.templateId },
-      }
-    case 'getProviderModel':
-      return {
-        method: 'GET',
-        path: `/providers/${param(args?.id)}/model?model=${encodeURIComponent(param(args?.modelId))}`,
-      }
-    case 'createManualProviderModel':
-      return {
-        method: 'POST',
-        path: `/providers/${param(args?.id)}/models`,
-        body: `{"model_id":${JSON.stringify(param(args?.modelId))},"metadata":${param(args?.metadataJson)}}`,
-      }
-    case 'updateProviderModel':
-      return {
-        method: 'PUT',
-        path: `/providers/${param(args?.id)}/model`,
-        body: `{"model_id":${JSON.stringify(param(args?.modelId))},"metadata":${param(args?.metadataJson)},"revision":${Number(args?.revision)}}`,
-      }
-    case 'updateProviderModelSelection':
-      return {
-        method: 'PUT',
-        path: `/providers/${param(args?.id)}/model/selection`,
-        body: { model_id: args?.modelId, policy: args?.policy, revision: args?.revision },
-      }
-    case 'reimportProviderModel':
-      return {
-        method: 'POST',
-        path: `/providers/${param(args?.id)}/model/reimport`,
-        body: { model_id: args?.modelId, revision: args?.revision },
-      }
-    case 'deleteManualProviderModel':
-      return {
-        method: 'DELETE',
-        path: `/providers/${param(args?.id)}/model?model=${encodeURIComponent(param(args?.modelId))}`,
-      }
-    case 'getModelCapabilities':
-      return {
-        method: 'GET',
-        path: `/providers/${param(args?.providerId)}/model-capabilities?model=${encodeURIComponent(param(args?.model))}`,
-      }
-    case 'getProviderOAuthStatus':
-      return { method: 'GET', path: `/providers/${param(args?.id)}/oauth/status` }
-    case 'reconnectProviderOAuth':
-      return { method: 'POST', path: `/providers/${param(args?.id)}/oauth/reconnect` }
-    case 'logoutProviderOAuth':
-      return { method: 'POST', path: `/providers/${param(args?.id)}/oauth/logout` }
-    case 'bindProviderOAuth':
-      return {
-        method: 'POST',
-        path: `/providers/${param(args?.providerId ?? args?.id)}/oauth/bind`,
-        body: { session_id: args?.sessionId },
-      }
-    case 'initOAuthSession':
-      return {
-        method: 'POST',
-        path: '/oauth/sessions/init',
-        body: {
-          vendor: args?.vendor,
-          use_proxy: args?.useProxy,
-          callback_mode: args?.callbackMode,
-          locale: args?.locale,
-        },
-      }
-    case 'getOAuthSessionStatus':
-      return { method: 'GET', path: `/oauth/sessions/${param(args?.sessionId)}/status` }
-    case 'cancelOAuthSession':
-      return { method: 'POST', path: `/oauth/sessions/${param(args?.sessionId)}/cancel` }
-    case 'updateOAuthSessionProxy':
-      return {
-        method: 'PUT',
-        path: `/oauth/sessions/${param(args?.sessionId)}/proxy`,
-        body: { use_proxy: args?.useProxy },
-      }
-    case 'completeOAuthSession':
-      return {
-        method: 'POST',
-        path: `/oauth/sessions/${param(args?.sessionId)}/complete`,
-        body: { callback_url: args?.callbackUrl, metadata: args?.metadata ?? {} },
-      }
-    case 'createOAuthProvider':
-      return { method: 'POST', path: '/providers/oauth', body: { session_id: args?.sessionId, input: args?.input } }
-    case 'listModels':
-      return { method: 'GET', path: '/models' }
-    case 'getModel':
-      return { method: 'GET', path: `/models/${encodeURIComponent(param(args?.routeId))}` }
-    case 'createModel':
-      return { method: 'POST', path: '/models', body: args?.input as Record<string, unknown> }
-    case 'bindRoute':
-      return { method: 'POST', path: '/models/bind', body: args?.input as Record<string, unknown> }
-    case 'unbindRoute':
-      return { method: 'POST', path: '/models/unbind', body: args?.input as Record<string, unknown> }
-    case 'updateModel':
-      return {
-        method: 'PUT',
-        path: `/models/${encodeURIComponent(param(args?.routeId))}`,
-        body: args?.input as Record<string, unknown>,
-      }
-    case 'deleteModel':
-      return { method: 'DELETE', path: `/models/${encodeURIComponent(param(args?.routeId))}` }
-    case 'resetTargetThinkingMapping':
-      return {
-        method: 'POST',
-        path: `/models/${encodeURIComponent(param(args?.routeId))}/targets/${param(args?.targetId)}/thinking-map/reset`,
-        body: { level: args?.level },
-      }
-    case 'regenerateTargetThinkingMap':
-      return {
-        method: 'POST',
-        path: `/models/${encodeURIComponent(param(args?.routeId))}/targets/${param(args?.targetId)}/thinking-map/regenerate`,
-      }
-    case 'listApiKeys':
-      return { method: 'GET', path: '/api-keys' }
-    case 'createApiKey':
-      return { method: 'POST', path: '/api-keys', body: args?.input as Record<string, unknown> }
-    case 'updateApiKey':
-      return { method: 'PUT', path: `/api-keys/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
-    case 'deleteApiKey':
-      return { method: 'DELETE', path: `/api-keys/${param(args?.id)}` }
-    case 'queryObservationForest':
-    case 'queryFailedRequests': {
-      const params = new URLSearchParams()
-      for (const [key, value] of Object.entries((args?.query as ForestQuery | undefined) ?? {})) {
-        if (value != null && value !== '') params.set(key, String(value))
-      }
-      const suffix = params.size > 0 ? `?${params}` : ''
-      const resource = command === 'queryObservationForest' ? 'interactions' : 'failed-requests'
-      return { method: 'GET', path: `/observations/${resource}${suffix}` }
-    }
-    case 'getObservationInteractionSummary': {
-      const params = new URLSearchParams()
-      for (const [key, value] of Object.entries((args?.query as ForestQuery | undefined) ?? {})) {
-        if (value != null && value !== '') params.set(key, String(value))
-      }
-      const suffix = params.size > 0 ? `?${params}` : ''
-      return {
-        method: 'GET',
-        path: `/observations/interactions/${encodeURIComponent(param(args?.id))}/summary${suffix}`,
-      }
-    }
-    case 'getObservationInteraction': {
-      const params = new URLSearchParams()
-      const query = (args?.query as ForestQuery | undefined) ?? {}
-      for (const key of ['provider', 'model', 'api_key', 'status', 'min_tokens'] as const) {
-        if (query[key]) params.set(key, String(query[key]))
-      }
-      const suffix = params.size > 0 ? `?${params}` : ''
-      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(param(args?.id))}${suffix}` }
-    }
-    case 'getObservationInteractionEvents': {
-      const params = new URLSearchParams()
-      for (const [key, value] of Object.entries((args?.query as InteractionEventsQuery | undefined) ?? {})) {
-        if (value != null) params.set(key, String(value))
-      }
-      return {
-        method: 'GET',
-        path: `/observations/interactions/${encodeURIComponent(param(args?.id))}/events?${params}`,
-      }
-    }
-    case 'getFailedRequest':
-      return {
-        method: 'GET',
-        path: `/observations/failed-requests/${encodeURIComponent(param(args?.kind))}/${encodeURIComponent(param(args?.id))}`,
-      }
-    case 'getObservationDebug':
-      return { method: 'GET', path: '/observations/debug' }
-    case 'setObservationDebug':
-      return {
-        method: 'PUT',
-        path: '/observations/debug',
-        body: { enabled: args?.enabled, confirmed: args?.enabled === true },
-      }
-    case 'clearObservationDebug':
-      return { method: 'DELETE', path: '/observations/debug' }
-    case 'clearObservationHistory':
-      return { method: 'DELETE', path: '/observations/history' }
-    case 'issueObservationBundleTicket': {
-      const resource = args?.kind === 'rejected_request' ? 'rejections' : 'interactions'
-      return {
-        method: 'POST',
-        path: `/observations/${resource}/${encodeURIComponent(param(args?.id))}/debug-bundle-tickets`,
-        body: args?.throughSequence == null ? {} : { through_sequence: args.throughSequence },
-      }
-    }
-    case 'getStatsOverview':
-      return { method: 'GET', path: statsPath('/stats/overview', args?.hours) }
-    case 'getStatsSeries': {
-      const params = new URLSearchParams()
-      params.set('hours', numParam(args?.hours, 24))
-      params.set('bucket', numParam(args?.bucket, 3600))
-      params.set('tz_offset', numParam(args?.tzOffset, 0))
-      return { method: 'GET', path: `/stats/series?${params}` }
-    }
-    case 'getStatsByModel':
-      return { method: 'GET', path: statsPath('/stats/models', args?.hours) }
-    case 'getStatsByProvider':
-      return { method: 'GET', path: statsPath('/stats/providers', args?.hours) }
-    case 'getStatsByApiKey':
-      return { method: 'GET', path: statsPath('/stats/api-keys', args?.hours) }
-    case 'listProviderAllowances':
-      return { method: 'GET', path: '/provider-allowances' }
-    case 'getProviderAllowance':
-      return { method: 'GET', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}` }
-    case 'refreshProviderAllowance':
-      return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(param(args?.providerId))}/refresh` }
-    case 'getCredentialRules':
-      return { method: 'GET', path: '/reversible-redaction/rules' }
-    case 'testCredentialText':
-      return { method: 'POST', path: '/reversible-redaction/test', body: { text: args?.text } }
-    case 'getCredentialDiscoveries': {
-      const params = new URLSearchParams()
-      const query = (args?.query as CredentialDiscoveryQuery | undefined) ?? {}
-      if (query.cursor) params.set('cursor', query.cursor)
-      if (query.limit != null) params.set('limit', String(query.limit))
-      return { method: 'GET', path: `/reversible-redaction/discoveries${params.size ? `?${params}` : ''}` }
-    }
-    case 'getSetting':
-      return { method: 'GET', path: `/settings/${param(args?.key)}` }
-    case 'setSetting':
-      return { method: 'PUT', path: `/settings/${param(args?.key)}`, body: { value: args?.value } }
-    case 'getGatewayStatus':
-      return { method: 'GET', path: '/status' }
-    case 'getUpdateStatus':
-      return { method: 'GET', path: '/updates' }
-    case 'checkForUpdates':
-      return { method: 'POST', path: '/updates/check', body: { mode: args?.mode } }
-    case 'setSkippedUpdateVersion':
-      return { method: 'PUT', path: '/updates/skipped-version', body: { version: args?.version ?? null } }
-    default:
-      throw new Error(`Unknown Stravia Admin operation: ${command}`)
+function queryString(query: object): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value != null && value !== '') params.set(key, String(value))
   }
+  return params.size > 0 ? `?${params}` : ''
 }
 
-function statsPath(path: string, hours: unknown): string {
-  return hours == null ? path : `${path}?hours=${param(hours)}`
+function statsPath(path: string, hours?: number): string {
+  return hours == null ? path : `${path}?hours=${hours}`
 }
 
-async function request<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const mapping = mapRequest(command, args)
+async function request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
   const headers = new Headers()
-  if (mapping.method !== 'GET') headers.set('X-Stravia-CSRF', '1')
-  if (mapping.body) headers.set('Content-Type', 'application/json')
-
-  const response = await authenticatedFetch(mapping.path, {
-    method: mapping.method,
+  if (method !== 'GET') headers.set('X-Stravia-CSRF', '1')
+  if (body !== undefined) headers.set('Content-Type', 'application/json')
+  const response = await authenticatedFetch(path, {
+    method,
     headers,
-    body: mapping.body ? (typeof mapping.body === 'string' ? mapping.body : JSON.stringify(mapping.body)) : undefined,
+    body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
   })
-
-  if (response.status === 401 && window.location.pathname !== '/login') authenticationRequired()
-
-  const text = await response.text()
-  const payload = text ? parseJson(text) : undefined
-  const responsePayload = payload !== null && typeof payload === 'object' ? (payload as ResponsePayload) : undefined
-  if (!response.ok) {
-    const message = typeof responsePayload?.error === 'string' ? responsePayload.error : `HTTP ${response.status}`
-    const error = new Error(message) as Error & { code?: string; params?: Record<string, unknown> }
-    if (responsePayload?.code) error.code = responsePayload.code
-    if (responsePayload?.params) error.params = responsePayload.params
-    throw error
-  }
-
-  if (typeof responsePayload?.error === 'string' && responsePayload.error.trim()) {
-    throw new Error(responsePayload.error)
-  }
-  return responsePayload && 'data' in responsePayload ? (responsePayload.data as T) : (payload as T)
-}
-
-function parseJson(value: string): unknown {
-  try {
-    return JSON.parse(value)
-  } catch {
-    throw new Error(m.frontend_error_invalid_admin_json())
-  }
+  return decodeAdmin<T>(response)
 }
 
 export const admin = {
   credentialProtection: {
-    rules: () => request<CredentialRuleCatalog>('getCredentialRules'),
+    rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
-      request<CredentialDiscoveryPage>('getCredentialDiscoveries', { query }),
-    test: (text: string) => request<{ matches: CredentialMatch[] }>('testCredentialText', { text }),
+      request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
+    test: (text: string) => request<{ matches: CredentialMatch[] }>('POST', '/reversible-redaction/test', { text }),
   },
   connectClients: {
-    preview: (input: ConnectClientApplyRequest) => request<ConnectClientApplyPlan>('previewConnectClient', { input }),
+    preview: (input: ConnectClientApplyRequest) =>
+      request<ConnectClientApplyPlan>('POST', '/connect-clients/preview', input),
   },
   providers: {
-    vendors: () => request<VendorMetadata[]>('listVendorMetadata'),
-    list: () => request<Provider[]>('listProviders'),
-    create: (input: CreateProvider) => request<Provider>('createProvider', { input }),
+    vendors: () => request<VendorMetadata[]>('GET', '/vendors'),
+    list: () => request<Provider[]>('GET', '/providers'),
+    create: (input: CreateProvider) => request<Provider>('POST', '/providers', input),
     previewBaseUrl: (vendorId: string, adapterCredentials: Record<string, string>, baseUrl?: string) =>
-      request<{ base_url: string }>('previewProviderBaseUrl', { vendorId, adapterCredentials, baseUrl }),
-    copy: (id: string, options: Record<string, unknown> = {}) => request<Provider>('copyProvider', { id, options }),
-    update: (id: string, input: UpdateProvider) => request<Provider>('updateProvider', { id, input }),
-    delete: (id: string) => request<void>('deleteProvider', { id }),
-    test: (id: string) => request<TestResult>('testProvider', { id }),
-    testModels: (id: string) => request<string[]>('testProviderModels', { id }),
-    capabilityDrifts: () => request<ImageCapabilityDrift[]>('listImageCapabilityDrifts'),
-    models: (id: string) => request<ProviderModelList>('listProviderModels', { id }),
-    syncModels: (id: string) => request<ProviderModelSyncSummary>('syncProviderModels', { id }),
+      request<{ base_url: string }>('POST', '/providers/base-url/preview', {
+        vendor_id: vendorId,
+        adapter_credentials: adapterCredentials,
+        base_url: baseUrl,
+      }),
+    copy: (id: string, options: Record<string, unknown> = {}) =>
+      request<Provider>('POST', `/providers/${id}/copy`, options),
+    update: (id: string, input: UpdateProvider) => request<Provider>('PUT', `/providers/${id}`, input),
+    delete: (id: string) => request<void>('DELETE', `/providers/${id}`),
+    test: (id: string) => request<TestResult>('GET', `/providers/${id}/test`),
+    testModels: (id: string) => request<string[]>('GET', `/providers/${id}/test-models`),
+    capabilityDrifts: () => request<ImageCapabilityDrift[]>('GET', '/providers/image-capability-drifts'),
+    models: (id: string) => request<ProviderModelList>('GET', `/providers/${id}/models`),
+    syncModels: (id: string) =>
+      request<ProviderModelSyncSummary>('POST', `/providers/${id}/models/sync`),
     prepareModel: (id: string, modelId: string, templateId?: string) =>
-      request<PreparedProviderModel>('prepareProviderModel', { id, modelId, templateId }),
-    model: (id: string, modelId: string) => request<ProviderModelDetail>('getProviderModel', { id, modelId }),
+      request<PreparedProviderModel>('POST', `/providers/${id}/model/prepare`, {
+        model_id: modelId,
+        template_id: templateId,
+      }),
+    model: (id: string, modelId: string) =>
+      request<ProviderModelDetail>('GET', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
     createManualModel: (id: string, modelId: string, metadataJson: string) =>
-      request<ProviderModelDetail>('createManualProviderModel', { id, modelId, metadataJson }),
+      request<ProviderModelDetail>(
+        'POST',
+        `/providers/${id}/models`,
+        `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson}}`,
+      ),
     updateModel: (id: string, modelId: string, metadataJson: string, revision: number) =>
-      request<ProviderModelDetail>('updateProviderModel', { id, modelId, metadataJson, revision }),
+      request<ProviderModelDetail>(
+        'PUT',
+        `/providers/${id}/model`,
+        `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson},"revision":${revision}}`,
+      ),
     updateModelSelection: (id: string, modelId: string, policy: ProviderModelSelectionPolicy, revision: number) =>
-      request<ProviderModelDetail>('updateProviderModelSelection', { id, modelId, policy, revision }),
+      request<ProviderModelDetail>('PUT', `/providers/${id}/model/selection`, {
+        model_id: modelId,
+        policy,
+        revision,
+      }),
     reimportModel: (id: string, modelId: string, revision: number) =>
-      request<ProviderModelDetail>('reimportProviderModel', { id, modelId, revision }),
-    deleteManualModel: (id: string, modelId: string) => request<void>('deleteManualProviderModel', { id, modelId }),
+      request<ProviderModelDetail>('POST', `/providers/${id}/model/reimport`, {
+        model_id: modelId,
+        revision,
+      }),
+    deleteManualModel: (id: string, modelId: string) =>
+      request<void>('DELETE', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
     capabilities: (providerId: string, model: string) =>
-      request<ModelCapabilities>('getModelCapabilities', { providerId, model }),
-    oauthStatus: (id: string) => request<ProviderOAuthStatusData>('getProviderOAuthStatus', { id }),
-    reconnectOAuth: (id: string) => request<void>('reconnectProviderOAuth', { id }),
-    logoutOAuth: (id: string) => request<void>('logoutProviderOAuth', { id }),
-    bindOAuth: (providerId: string, sessionId: string) => request<void>('bindProviderOAuth', { providerId, sessionId }),
+      request<ModelCapabilities>(
+        'GET',
+        `/providers/${providerId}/model-capabilities?model=${encodeURIComponent(model)}`,
+      ),
+    oauthStatus: (id: string) => request<ProviderOAuthStatusData>('GET', `/providers/${id}/oauth/status`),
+    reconnectOAuth: (id: string) => request<void>('POST', `/providers/${id}/oauth/reconnect`),
+    logoutOAuth: (id: string) => request<void>('POST', `/providers/${id}/oauth/logout`),
+    bindOAuth: (providerId: string, sessionId: string) =>
+      request<void>('POST', `/providers/${providerId}/oauth/bind`, { session_id: sessionId }),
     createOAuth: (sessionId: string, input: CreateProvider) =>
-      request<Provider>('createOAuthProvider', { sessionId, input }),
+      request<Provider>('POST', '/providers/oauth', { session_id: sessionId, input }),
   },
   catalog: {
-    providers: async () => (await request<CatalogProviderList>('listCatalogProviders')).providers,
-    canonicalModels: () => request<CanonicalModelList>('listCanonicalModels'),
-    refresh: () => request<CatalogRefreshSummary>('refreshCatalog'),
+    providers: async () =>
+      (await request<CatalogProviderList>('GET', '/catalog/providers')).providers,
+    canonicalModels: () => request<CanonicalModelList>('GET', '/catalog/models'),
+    refresh: () => request<CatalogRefreshSummary>('POST', '/catalog/refresh'),
   },
   webAccess: {
     providers: {
-      list: () => request<WebProvider[]>('listWebProviders'),
-      create: (input: CreateWebProvider) => request<WebProvider>('createWebProvider', { input }),
-      update: (id: string, input: UpdateWebProvider) => request<WebProvider>('updateWebProvider', { id, input }),
-      delete: (id: string) => request<void>('deleteWebProvider', { id }),
-      test: (id: string) => request<TestResult>('testWebProvider', { id }),
+      list: () => request<WebProvider[]>('GET', '/web-providers'),
+      create: (input: CreateWebProvider) => request<WebProvider>('POST', '/web-providers', input),
+      update: (id: string, input: UpdateWebProvider) =>
+        request<WebProvider>('PUT', `/web-providers/${id}`, input),
+      delete: (id: string) => request<void>('DELETE', `/web-providers/${id}`),
+      test: (id: string) => request<TestResult>('POST', `/web-providers/${id}/test`),
     },
     settings: {
-      get: () => request<WebAccessSettings>('getWebAccessSettings'),
-      update: (input: WebAccessSettings) => request<WebAccessSettings>('updateWebAccessSettings', { input }),
+      get: () => request<WebAccessSettings>('GET', '/web-access/settings'),
+      update: (input: WebAccessSettings) => request<WebAccessSettings>('PUT', '/web-access/settings', input),
     },
   },
   webSearch: {
     config: {
-      get: () => request<WebSearchConfigView>('getWebSearchConfig'),
-      update: (input: UpdateWebSearchConfig) => request<WebSearchConfigView>('updateWebSearchConfig', { input }),
+      get: () => request<WebSearchConfigView>('GET', '/web-search/config'),
+      update: (input: UpdateWebSearchConfig) => request<WebSearchConfigView>('PUT', '/web-search/config', input),
     },
-    eligibleModels: () => request<EligibleSearchModel[]>('listEligibleWebSearchModels'),
-    compatibleCodexProviders: () => request<CompatibleCodexProvider[]>('listCompatibleCodexSearchProviders'),
+    eligibleModels: () => request<EligibleSearchModel[]>('GET', '/web-search/eligible-models'),
+    compatibleCodexProviders: () =>
+      request<CompatibleCodexProvider[]>('GET', '/web-search/codex-providers'),
   },
   mediaUnderstanding: {
-    get: () => request<MediaUnderstandingConfigView>('getMediaUnderstandingConfig'),
+    get: () => request<MediaUnderstandingConfigView>('GET', '/media-understanding'),
     update: (input: UpdateMediaUnderstandingConfig) =>
-      request<MediaUnderstandingConfigView>('updateMediaUnderstandingConfig', { input }),
+      request<MediaUnderstandingConfigView>('PUT', '/media-understanding', input),
   },
   oauth: {
     init: (vendor: string, useProxy: boolean, callbackMode: OAuthCallbackMode, locale: Locale) =>
-      request<OAuthSessionInitData>('initOAuthSession', { vendor, useProxy, callbackMode, locale }),
-    status: (sessionId: string) => request<OAuthSessionStatusData>('getOAuthSessionStatus', { sessionId }),
-    cancel: (sessionId: string) => request<void>('cancelOAuthSession', { sessionId }),
+      request<OAuthSessionInitData>('POST', '/oauth/sessions/init', {
+        vendor,
+        use_proxy: useProxy,
+        callback_mode: callbackMode,
+        locale,
+      }),
+    status: (sessionId: string) =>
+      request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
+    cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${sessionId}/cancel`),
     updateProxy: (sessionId: string, useProxy: boolean) =>
-      request<OAuthSessionStatusData>('updateOAuthSessionProxy', { sessionId, useProxy }),
+      request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${sessionId}/proxy`, { use_proxy: useProxy }),
     complete: (sessionId: string, callbackUrl: string, metadata?: Record<string, unknown>) =>
-      request<void>('completeOAuthSession', { sessionId, callbackUrl, metadata }),
+      request<void>('POST', `/oauth/sessions/${sessionId}/complete`, {
+        callback_url: callbackUrl,
+        metadata: metadata ?? {},
+      }),
   },
   models: {
-    list: () => request<Route[]>('listModels'),
-    get: (routeId: string) => request<Route>('getModel', { routeId }),
-    create: (input: CreateRoute) => request<Route>('createModel', { input }),
-    bind: (input: BindRouteInput) => request<Route>('bindRoute', { input }),
-    unbind: (input: UnbindRouteInput) => request<Route | null>('unbindRoute', { input }),
-    update: (routeId: string, input: UpdateRoute) => request<Route>('updateModel', { routeId, input }),
-    delete: (routeId: string) => request<void>('deleteModel', { routeId }),
+    list: () => request<Route[]>('GET', '/models'),
+    get: (routeId: string) => request<Route>('GET', `/models/${encodeURIComponent(routeId)}`),
+    create: (input: CreateRoute) => request<Route>('POST', '/models', input),
+    bind: (input: BindRouteInput) => request<Route>('POST', '/models/bind', input),
+    unbind: (input: UnbindRouteInput) => request<Route | null>('POST', '/models/unbind', input),
+    update: (routeId: string, input: UpdateRoute) =>
+      request<Route>('PUT', `/models/${encodeURIComponent(routeId)}`, input),
+    delete: (routeId: string) => request<void>('DELETE', `/models/${encodeURIComponent(routeId)}`),
     resetThinkingMapping: (routeId: string, targetId: string, level: ThinkingLevel) =>
-      request<Route>('resetTargetThinkingMapping', { routeId, targetId, level }),
+      request<Route>('POST', `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/reset`, {
+        level,
+      }),
     regenerateThinkingMap: (routeId: string, targetId: string) =>
-      request<Route>('regenerateTargetThinkingMap', { routeId, targetId }),
+      request<Route>(
+        'POST',
+        `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/regenerate`,
+      ),
   },
   apiKeys: {
-    list: () => request<ApiKey[]>('listApiKeys'),
-    create: (input: CreateApiKey) => request<ApiKey>('createApiKey', { input }),
-    update: (id: string, input: UpdateApiKey) => request<ApiKey>('updateApiKey', { id, input }),
-    delete: (id: string) => request<void>('deleteApiKey', { id }),
+    list: () => request<ApiKey[]>('GET', '/api-keys'),
+    create: (input: CreateApiKey) => request<ApiKey>('POST', '/api-keys', input),
+    update: (id: string, input: UpdateApiKey) => request<ApiKey>('PUT', `/api-keys/${id}`, input),
+    delete: (id: string) => request<void>('DELETE', `/api-keys/${id}`),
   },
   observations: {
-    failures: (query: FailedRequestQuery) => request<FailedRequestPage>('queryFailedRequests', { query }),
+    failures: (query: FailedRequestQuery) =>
+      request<FailedRequestPage>('GET', `/observations/failed-requests${queryString(query)}`),
     failure: (kind: FailedRequestSummary['kind'], id: string) =>
-      request<FailedRequestDetail>('getFailedRequest', { kind, id }),
-    forest: (query: ForestQuery) => request<ForestPage>('queryObservationForest', { query }),
-    interactionSummary: (id: string, query?: ForestQuery) =>
-      request<InteractionSnapshot>('getObservationInteractionSummary', { id, query }),
-    interaction: (id: string, query?: ForestQuery) =>
-      request<InteractionDetail>('getObservationInteraction', { id, query }),
+      request<FailedRequestDetail>(
+        'GET',
+        `/observations/failed-requests/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
+      ),
+    forest: (query: ForestQuery) =>
+      request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
+    interactionSummary: (id: string, query: ForestQuery = {}) =>
+      request<InteractionSnapshot>(
+        'GET',
+        `/observations/interactions/${encodeURIComponent(id)}/summary${queryString(query)}`,
+      ),
+    interaction: (id: string, query: ForestQuery = {}) =>
+      request<InteractionDetail>(
+        'GET',
+        `/observations/interactions/${encodeURIComponent(id)}${queryString({
+          provider: query.provider,
+          model: query.model,
+          api_key: query.api_key,
+          status: query.status,
+          min_tokens: query.min_tokens,
+        })}`,
+      ),
     interactionEvents: (id: string, query: InteractionEventsQuery) =>
-      request<InteractionEventsPage>('getObservationInteractionEvents', { id, query }),
-    debug: () => request<DebugState>('getObservationDebug'),
-    setDebug: (enabled: boolean) => request<DebugState>('setObservationDebug', { enabled }),
-    clearDebug: () => request<DebugState>('clearObservationDebug'),
-    clearHistory: () => request<ClearHistoryResult>('clearObservationHistory'),
+      request<InteractionEventsPage>(
+        'GET',
+        `/observations/interactions/${encodeURIComponent(id)}/events${queryString(query) || '?'}`,
+      ),
+    debug: () => request<DebugState>('GET', '/observations/debug'),
+    setDebug: (enabled: boolean) =>
+      request<DebugState>('PUT', '/observations/debug', { enabled, confirmed: enabled }),
+    clearDebug: () => request<DebugState>('DELETE', '/observations/debug'),
+    clearHistory: () => request<ClearHistoryResult>('DELETE', '/observations/history'),
     issueBundleTicket: (kind: BundleResourceKind, id: string, throughSequence?: number) =>
-      request<DownloadTicket>('issueObservationBundleTicket', { kind, id, throughSequence }),
+      request<DownloadTicket>(
+        'POST',
+        `/observations/${kind === 'rejected_request' ? 'rejections' : 'interactions'}/${encodeURIComponent(id)}/debug-bundle-tickets`,
+        throughSequence == null ? {} : { through_sequence: throughSequence },
+      ),
   },
   stats: {
-    overview: (hours?: number) => request<StatsOverview>('getStatsOverview', { hours }),
-    series: (hours?: number, bucket?: number, tzOffset?: number) =>
-      request<StatsSeries[]>('getStatsSeries', { hours, bucket, tzOffset }),
-    models: (hours?: number) => request<ModelStats[]>('getStatsByModel', { hours }),
-    providers: (hours?: number) => request<ProviderStats[]>('getStatsByProvider', { hours }),
-    apiKeys: (hours?: number) => request<ApiKeyStats[]>('getStatsByApiKey', { hours }),
+    overview: (hours?: number) => request<StatsOverview>('GET', statsPath('/stats/overview', hours)),
+    series: (hours?: number, bucket?: number, tzOffset?: number) => {
+      const params = new URLSearchParams()
+      params.set('hours', String(hours ?? 24))
+      params.set('bucket', String(bucket ?? 3600))
+      params.set('tz_offset', String(tzOffset ?? 0))
+      return request<StatsSeries[]>('GET', `/stats/series?${params}`)
+    },
+    models: (hours?: number) => request<ModelStats[]>('GET', statsPath('/stats/models', hours)),
+    providers: (hours?: number) => request<ProviderStats[]>('GET', statsPath('/stats/providers', hours)),
+    apiKeys: (hours?: number) => request<ApiKeyStats[]>('GET', statsPath('/stats/api-keys', hours)),
   },
   allowances: {
-    list: () => request<ProviderAllowanceTarget[]>('listProviderAllowances'),
-    get: (providerId: string) => request<ProviderAllowanceSnapshot>('getProviderAllowance', { providerId }),
-    refresh: (providerId: string) => request<ProviderAllowanceSnapshot>('refreshProviderAllowance', { providerId }),
+    list: () => request<ProviderAllowanceTarget[]>('GET', '/provider-allowances'),
+    get: (providerId: string) =>
+      request<ProviderAllowanceSnapshot>('GET', `/provider-allowances/${encodeURIComponent(providerId)}`),
+    refresh: (providerId: string) =>
+      request<ProviderAllowanceSnapshot>('POST', `/provider-allowances/${providerId}/refresh`),
   },
   settings: {
     artifacts: async (): Promise<ArtifactSettings> => {
-      const value = await request<string | null>('getSetting', { key: 'artifact_settings' })
+      const value = await request<string | null>('GET', '/settings/artifact_settings')
       return value === null
         ? {
             client_base_url: '',
@@ -615,15 +347,15 @@ export const admin = {
         : (JSON.parse(value) as ArtifactSettings)
     },
     saveArtifacts: (settings: ArtifactSettings) =>
-      request<void>('setSetting', { key: 'artifact_settings', value: JSON.stringify(settings) }),
-    get: (key: string) => request<string | null>('getSetting', { key }),
-    set: (key: string, value: string) => request<void>('setSetting', { key, value }),
-    status: () => request<GatewayStatus>('getGatewayStatus'),
+      request<void>('PUT', '/settings/artifact_settings', { value: JSON.stringify(settings) }),
+    get: (key: string) => request<string | null>('GET', `/settings/${key}`),
+    set: (key: string, value: string) => request<void>('PUT', `/settings/${key}`, { value }),
+    status: () => request<GatewayStatus>('GET', '/status'),
   },
   updates: {
-    get: () => request<UpdateStatus>('getUpdateStatus'),
-    check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('checkForUpdates', { mode }),
-    skip: (version: string | null) => request<UpdateStatus>('setSkippedUpdateVersion', { version }),
+    get: () => request<UpdateStatus>('GET', '/updates'),
+    check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
+    skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
 }
 

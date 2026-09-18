@@ -1,3 +1,4 @@
+import { payloadRecord, payloadString } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 
 type LabelMessage = () => string
@@ -45,9 +46,17 @@ const TAIL_STATUS_LABELS: Record<string, LabelMessage> = {
   resource_limit: m.observation_tail_resource_limit,
 }
 
+/** 未知来源返回 undefined 而非 '—'，不虚构 origin；需要占位符的展示方自行 `?? '—'`。 */
+export function failureOriginLabel(source: unknown): string | undefined {
+  if (source === 'platform') return m.failed_request_platform()
+  if (source === 'upstream') return m.failed_request_upstream()
+  const raw = payloadString(source)
+  return raw?.trim() ? raw : undefined
+}
+
 export function observationContextStatusLabel(kind: string, payload: unknown): string {
   if (!payload || typeof payload !== 'object') return ''
-  const value = payload as Record<string, unknown>
+  const value = payloadRecord(payload)
   if (kind === 'compaction_operation') {
     const mode =
       value.mode === 'standalone'

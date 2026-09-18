@@ -154,5 +154,22 @@ pub trait TurnChainStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Rebuild derived prefix indexes for stored nodes whose namespace falls
+    /// outside `namespace_prefix`. `decode` maps one chain's nodes and its
+    /// completion time to fresh metadata; returning `None` clears the index.
+    /// Stores without derived prefix indexes keep the default no-op.
+    async fn rebuild_prefixes(
+        &self,
+        namespace_prefix: &str,
+        decode: &(
+             dyn Fn(Vec<TurnNode>, i64) -> Result<Option<ReusablePrefixMetadata>, String>
+                 + Send
+                 + Sync
+         ),
+    ) -> Result<(), TurnUnavailable> {
+        let _ = (namespace_prefix, decode);
+        Ok(())
+    }
+
     async fn sweep_expired(&self) -> Result<u64, TurnUnavailable>;
 }

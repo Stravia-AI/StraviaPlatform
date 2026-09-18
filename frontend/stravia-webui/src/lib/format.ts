@@ -134,7 +134,8 @@ export function formatBytes(bytes: number | null | undefined, locale = getLocale
   if (bytes == null || !Number.isFinite(bytes)) return '–'
   if (Math.abs(bytes) < 1024) return `${integerFormatters[locale].format(Math.round(bytes))} B`
   if (Math.abs(bytes) < 1024 * 1024) return `${formatDecimal(bytes / 1024, locale, 1)} KiB`
-  return `${formatDecimal(bytes / (1024 * 1024), locale, 1)} MiB`
+  if (Math.abs(bytes) < 1024 * 1024 * 1024) return `${formatDecimal(bytes / (1024 * 1024), locale, 1)} MiB`
+  return `${formatDecimal(bytes / (1024 * 1024 * 1024), locale, 1)} GiB`
 }
 
 export function formatPixels(value: number | null | undefined, locale = getLocale()): string {

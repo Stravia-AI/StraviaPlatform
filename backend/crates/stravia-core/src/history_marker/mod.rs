@@ -225,6 +225,21 @@ pub trait HistoryMarkerStore: Send + Sync {
         reference: &str,
     ) -> Result<Option<ResolvedHistoryMarker>, HistoryMarkerError>;
 
+    /// Resolve several markers in one pass; `resolved[i]` corresponds to
+    /// `references[i]`. The default resolves serially; stores with real batch
+    /// reads override it.
+    async fn resolve_many(
+        &self,
+        principal: &Principal,
+        references: &[String],
+    ) -> Result<Vec<Option<ResolvedHistoryMarker>>, HistoryMarkerError> {
+        let mut resolved = Vec::with_capacity(references.len());
+        for reference in references {
+            resolved.push(self.resolve(principal, reference).await?);
+        }
+        Ok(resolved)
+    }
+
     async fn claim_execution(
         &self,
         principal: &Principal,

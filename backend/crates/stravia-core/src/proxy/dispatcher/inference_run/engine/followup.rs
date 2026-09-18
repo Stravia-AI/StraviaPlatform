@@ -2,12 +2,122 @@ use super::*;
 
 pub(super) enum FollowupModelTurn {
     Turn(Box<crate::agent::ModelTurn>),
-    HookResponse {
-        response: Box<AiResponse>,
-        staged_delivery: ProjectedDeltaBatch,
-        pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
-    },
+    HookResponse(HookResponsePlan),
     StreamError(stravia_runtime_contract::protocol::ir::AiError),
+}
+
+/// Delivery plan for a Hook-produced response: prepared through
+/// `Phase::AwaitingDelivery`. The caller owns send and settle.
+pub(super) struct HookResponsePlan {
+    pub response: AiResponse,
+    pub staged_delivery: ProjectedDeltaBatch,
+    pub pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
+}
+
+/// Why Hook response preparation stopped. Each caller renders it on its own
+/// channel: the first leg produces a wire `Response`, a hidden leg surfaces an
+/// `AiError`.
+pub(super) enum HookRespondError {
+    /// Client-output hooks returned a control other than Continue/Respond.
+    Control(Box<stravia_runtime_contract::hook::HookControl>),
+    /// Hook runtime, projection, or phase failure.
+    Failure(String),
+}
+
+/// Run state borrowed while preparing a Hook-produced response.
+pub(super) struct HookRespondParts<'a> {
+    pub request: &'a AiRequest,
+    pub ingress: ProtocolId,
+    pub inference_run: &'a mut crate::hook::InferenceRun,
+    pub projection: &'a mut ClientProjectionSession,
+    pub generation: &'a mut GenerationChainRun,
+    pub ledger: &'a RunLedger,
+    pub phase: &'a mut PhaseTracker,
+    /// When set, emits the visible-leg response checkpoints around projection.
+    pub observer: Option<&'a crate::interaction_observation::RunObserver>,
+}
+
+/// Shared Hook response leg preparation: hook routing, client-output hooks,
+/// response-id stamping, Model Leg projection, and Generation Chain staging.
+pub(super) async fn prepare_hook_response(
+    mut response: AiResponse,
+    parts: HookRespondParts<'_>,
+) -> Result<HookResponsePlan, HookRespondError> {
+    let HookRespondParts {
+        request,
+        ingress,
+        inference_run,
+        projection,
+        generation,
+        ledger,
+        phase,
+        observer,
+    } = parts;
+    inference_run.set_route(stravia_runtime_contract::hook::RouteContext {
+        model_id: request.model.clone(),
+        provider_id: "hook".into(),
+        target_id: "hook".into(),
+        egress: ingress,
+    });
+    match inference_run.on_client_output(&mut response).await {
+        Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+        Ok(stravia_runtime_contract::hook::HookControl::Respond(replacement)) => {
+            response = *replacement;
+        }
+        Ok(control) => return Err(HookRespondError::Control(Box::new(control))),
+        Err(error) => return Err(HookRespondError::Failure(error.to_string())),
+    }
+    if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+        && let Some(write) = generation.write.as_ref()
+    {
+        response.id = write.id().to_owned();
+    }
+    projection.begin_model_leg(
+        thinking_carrier_facts(ingress, ingress),
+        inference_run.exposed_tool_names(),
+        None,
+    );
+    if let Some(observer) = observer {
+        observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "response_after_hook".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            payload: checkpoint_payload(observer, &response),
+        });
+    }
+    let staged_delivery = projection
+        .project_staged(&mut response, &[])
+        .await
+        .map_err(|error| HookRespondError::Failure(error.to_string()))?;
+    if let Some(observer) = observer {
+        observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "client_projection_event".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            payload: checkpoint_payload(observer, &response),
+        });
+    }
+    let pending_generation_chain = generation.write.take().and_then(|mut write| {
+        write.observe_effective(request.clone());
+        let mut staged_response = response.clone();
+        ledger.apply_hidden_rounds(&mut staged_response);
+        response.usage = staged_response.usage.clone();
+        let staged = write.stage(
+            &mut staged_response,
+            &crate::generation_chain::GenerationSource::Hook { protocol: ingress },
+            None,
+        );
+        response.vendor = staged_response.vendor;
+        staged.then_some(write).map(Box::new)
+    });
+    for next in [Phase::SemanticComplete, Phase::AwaitingDelivery] {
+        phase.transition(next).map_err(HookRespondError::Failure)?;
+    }
+    Ok(HookResponsePlan {
+        response,
+        staged_delivery,
+        pending_generation_chain,
+    })
 }
 
 pub(super) struct FollowupLeg<'a> {
@@ -20,7 +130,7 @@ pub(super) struct FollowupLeg<'a> {
     pub inference_run: &'a mut crate::hook::InferenceRun,
     pub projection: &'a mut ClientProjectionSession,
     pub phase: &'a mut PhaseTracker,
-    pub generation: &'a GenerationChainRun,
+    pub generation: &'a mut GenerationChainRun,
     pub fixed_media_plan:
         Option<&'a stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan>,
 }
@@ -75,84 +185,31 @@ pub(super) async fn acquire_followup_model_turn(
     match inference_run.on_request(request).await {
         Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
         Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
-            let mut response = *response;
-            inference_run.set_route(stravia_runtime_contract::hook::RouteContext {
-                model_id: request.model.clone(),
-                provider_id: "hook".into(),
-                target_id: "hook".into(),
-                egress: ingress,
-            });
-            match inference_run.on_client_output(&mut response).await {
-                Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
-                Ok(stravia_runtime_contract::hook::HookControl::Respond(replacement)) => {
-                    response = *replacement;
+            let plan = prepare_hook_response(
+                *response,
+                HookRespondParts {
+                    request,
+                    ingress,
+                    inference_run,
+                    projection,
+                    generation,
+                    ledger,
+                    phase,
+                    observer: None,
+                },
+            )
+            .await;
+            return Ok(match plan {
+                Ok(plan) => FollowupModelTurn::HookResponse(plan),
+                Err(HookRespondError::Control(control)) => {
+                    FollowupModelTurn::StreamError(hook_stream_error(*control))
                 }
-                Ok(control) => {
-                    return Ok(FollowupModelTurn::StreamError(hook_stream_error(control)));
-                }
-                Err(error) => {
-                    return Ok(FollowupModelTurn::StreamError(
-                        stravia_runtime_contract::protocol::ir::AiError::new(
-                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-                            error.to_string(),
-                        ),
-                    ));
-                }
-            }
-            if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
-                && let Some(write) = generation.write.as_ref()
-            {
-                response.id = write.id().to_owned();
-            }
-            projection.begin_model_leg(
-                super::thinking_carrier_facts(ingress, ingress),
-                inference_run.exposed_tool_names(),
-                None,
-            );
-            let staged_delivery = match projection.project_staged(&mut response, &[]).await {
-                Ok(batch) => batch,
-                Err(error) => {
-                    return Ok(FollowupModelTurn::StreamError(
-                        stravia_runtime_contract::protocol::ir::AiError::new(
-                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-                            error.to_string(),
-                        ),
-                    ));
-                }
-            };
-            let pending_generation_chain = generation.write.clone().and_then(|mut write| {
-                write.observe_effective(request.clone());
-                let mut staged_response = response.clone();
-                ledger.apply_hidden_rounds(&mut staged_response);
-                response.usage = staged_response.usage.clone();
-                let staged = write.stage(
-                    &mut staged_response,
-                    &crate::generation_chain::GenerationSource::Hook { protocol: ingress },
-                    None,
-                );
-                response.vendor = staged_response.vendor;
-                staged.then_some(write)
-            });
-            if let Err(error) = phase.transition(Phase::SemanticComplete) {
-                return Ok(FollowupModelTurn::StreamError(
+                Err(HookRespondError::Failure(message)) => FollowupModelTurn::StreamError(
                     stravia_runtime_contract::protocol::ir::AiError::new(
                         stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-                        error,
+                        message,
                     ),
-                ));
-            }
-            if let Err(error) = phase.transition(Phase::AwaitingDelivery) {
-                return Ok(FollowupModelTurn::StreamError(
-                    stravia_runtime_contract::protocol::ir::AiError::new(
-                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-                        error,
-                    ),
-                ));
-            }
-            return Ok(FollowupModelTurn::HookResponse {
-                response: Box::new(response),
-                staged_delivery,
-                pending_generation_chain: pending_generation_chain.map(Box::new),
+                ),
             });
         }
         Ok(control) => return Ok(FollowupModelTurn::StreamError(hook_stream_error(control))),

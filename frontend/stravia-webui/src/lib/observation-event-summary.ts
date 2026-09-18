@@ -1,9 +1,11 @@
 import { computeTps, formatDuration, formatNumber, formatTps } from '$lib/format'
 import {
+  failureOriginLabel,
   observationContextStatusLabel,
   observationDebugStatusLabel,
   observationStatusLabel,
 } from '$lib/observation-labels'
+import { payloadCount, payloadRecord } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 import type { ObservationEvent } from '$lib/types/observation'
 
@@ -46,16 +48,11 @@ const TITLES: Record<string, () => string> = {
   trace_manifest_updated: m.observation_event_trace_manifest_updated,
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
-}
+const record = payloadRecord
+const count = payloadCount
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-function count(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function statusLabel(status: string): string {
@@ -244,14 +241,7 @@ export function observationEventSummary(
       // 请求级终态失败：上游与平台诊断同源展示；来源或字段缺失不补造。
       const error = record(payload.error)
       summary.tone = 'error'
-      add(
-        m.failed_request_origin(),
-        error.source === 'platform'
-          ? m.failed_request_platform()
-          : error.source === 'upstream'
-            ? m.failed_request_upstream()
-            : error.source,
-      )
+      add(m.failed_request_origin(), failureOriginLabel(error.source))
       httpStatus(error)
       add(m.observation_error_code(), error.code)
       add(m.failed_request_error(), error.message)

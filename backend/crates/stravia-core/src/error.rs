@@ -235,7 +235,7 @@ impl GatewayError {
                 format!("internal error: {source}")
             }
         };
-        crate::interaction_observation::redaction::redact_text(&message)
+        crate::interaction_observation::redact_text(&message)
     }
 
     /// Whether the gateway may safely retry this request with another target.
@@ -329,10 +329,10 @@ impl GatewayError {
 fn redacted_payload(payload: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(payload) {
         Ok(mut value) => {
-            crate::interaction_observation::redaction::redact_value(&mut value);
+            crate::interaction_observation::redact_value(&mut value);
             value.to_string()
         }
-        Err(_) => crate::interaction_observation::redaction::redact_text(payload),
+        Err(_) => crate::interaction_observation::redact_text(payload),
     }
 }
 

@@ -1,3 +1,4 @@
+import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, RunDetail } from './types/observation'
 
 export interface ThinkingActivity {
@@ -39,11 +40,9 @@ interface ClientResult {
   index: number
 }
 
-function object(value: unknown): ObjectValue | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as ObjectValue) : undefined
-}
+const object = payloadRecord
 function string(value: unknown): string {
-  return typeof value === 'string' ? value : ''
+  return payloadString(value) ?? ''
 }
 function identity(...parts: (string | number)[]): string {
   return JSON.stringify(parts)
@@ -72,7 +71,6 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
     const finishedTurns = new Set<string>()
     for (const event of events) {
       const payload = object(event.payload)
-      if (!payload) continue
       if (event.kind === 'model_thinking_delta' && string(payload.text)) {
         finishedThoughts.delete(scopeOf(payload))
       }
@@ -85,7 +83,7 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
       !events.some(
         (event) =>
           event.kind === 'run_finished' ||
-          (event.kind === 'run_state_changed' && object(event.payload)?.status !== 'running'),
+          (event.kind === 'run_state_changed' && object(event.payload).status !== 'running'),
       )
     const call = (id: string, name: string, modelTurnId: string, at: number): Call | undefined => {
       if (!id || !name) return undefined
@@ -122,7 +120,6 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
 
     for (const event of events) {
       const payload = object(event.payload)
-      if (!payload) continue
       const id = string(payload.tool_id)
       const turn = string(payload.model_turn_id)
       if (event.kind === 'model_thinking_delta') {

@@ -4,17 +4,26 @@ import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
-import { formatDuration, formatList, formatLogTime, formatNumber, formatTime, formatTokenCount } from '$lib/format'
+import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
-import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
-import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import {
-  observationAttemptOutputTokens,
-  observationEventSummary,
-  observationStatusTone,
-} from '$lib/observation-event-summary'
+  failureOriginLabel,
+  observationDebugStatusLabel,
+  observationStatusLabel,
+} from '$lib/observation-labels'
+import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
+import { observationEventSummary, observationStatusTone } from '$lib/observation-event-summary'
+import {
+  deriveTimeline,
+  itemEvents,
+  itemKey,
+  processGroup,
+  usageRows,
+  usageText,
+  type StreamItem,
+} from '$lib/observation-timeline'
 import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -58,117 +67,8 @@ let {
   onbundle,
   onlatest,
 }: Props = $props()
-const orderedRuns = $derived([...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at))
-// Run 的父子关系表达续接与因果，不是包含：续接链按时间拍平展示，父 Run 仅以编号引用。
-const runIndex = $derived(new Map(orderedRuns.map((run, index) => [run.id, index + 1])))
 
-const title = $derived(
-  interaction
-    ? orderedRuns.at(-1)?.model_display_name?.trim() ||
-        orderedRuns.at(-1)?.route_id ||
-        interaction.interaction.first_model_display_name?.trim() ||
-        interaction.interaction.first_route_id
-    : failure
-      ? m.observation_request_failed()
-      : m.observation_details(),
-)
-function orderedEvents(events: ObservationEvent[]): ObservationEvent[] {
-  // 因果子树会把晚发生的完成事件提前；阅读时间线按时间排序，原始关联仍保留在 payload。
-  return events.toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
-}
-
-const timelines = $derived(new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)])))
-const attemptOutputs = $derived(new Map(orderedRuns.map((run) => [run.id, observationAttemptOutputTokens(run.events)])))
-
-function toolName(event: ObservationEvent): string | null {
-  const payload = event.payload
-  if (event.kind !== 'client_tool_handoff' || !payload || typeof payload !== 'object' || !('name' in payload))
-    return null
-  return typeof payload.name === 'string' && payload.name.trim() ? payload.name : null
-}
-
-// 过程层事件：诊断关联、捕获与增量记录不承载主流程叙事；带成败或警告语义时仍留在主干。
-const PROCESS_KINDS = new Set([
-  'generation_associated',
-  'retained_tail_associated',
-  'native_compaction_associated',
-  'input_preview_recorded',
-  'credential_mappings_created',
-  'checkpoint',
-  'wire',
-  'trace_manifest_updated',
-  'usage_confirmed',
-  'client_visible_content_delta',
-  'model_thinking_delta',
-])
-
-type StreamItem =
-  | { type: 'event'; event: ObservationEvent }
-  | { type: 'tools'; name: string | null; events: ObservationEvent[] }
-  | { type: 'process'; events: ObservationEvent[] }
-
-function streamItems(events: readonly ObservationEvent[], outputs?: ReadonlyMap<string, number | null>): StreamItem[] {
-  const items: StreamItem[] = []
-  for (const event of events) {
-    const process = PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
-    const name = toolName(event)
-    const previous = items.at(-1)
-    if (process) {
-      if (previous?.type === 'process') previous.events.push(event)
-      else items.push({ type: 'process', events: [event] })
-    } else if (name !== null) {
-      if (previous?.type === 'tools' && previous.name === name) previous.events.push(event)
-      else items.push({ type: 'tools', name, events: [event] })
-    } else {
-      items.push({ type: 'event', event })
-    }
-  }
-  return items
-}
-
-function itemEvents(item: StreamItem): ObservationEvent[] {
-  return item.type === 'event' ? [item.event] : item.events
-}
-
-const streams = $derived(
-  new Map(orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))])),
-)
-const failureItems = $derived(failure ? streamItems(orderedEvents(failure.events)) : [])
-
-const baseTime = $derived(interaction?.interaction.started_at ?? failure?.request.started_at ?? null)
-
-function offsetLabel(at: number): string {
-  if (baseTime == null) return formatTime(at)
-  const delta = at - baseTime
-  return delta >= 0 ? `+${formatDuration(delta)}` : `−${formatDuration(-delta)}`
-}
-
-// 相邻请求之间的等待是一等事实：小于后端 rapid_continuation 窗口（2s）的间隔属于流水线噪声。
-const GAP_MIN_MS = 2_000
-
-function runEndAt(run: RunDetail): number {
-  if (run.finished_at != null) return run.finished_at
-  return timelines.get(run.id)?.at(-1)?.occurred_at ?? run.started_at
-}
-
-function lastHandoffTool(run: RunDetail): string | null {
-  const events = timelines.get(run.id) ?? []
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].kind === 'client_tool_handoff') {
-      const name = toolName(events[i])
-      if (name) return name
-    }
-  }
-  return null
-}
-
-function gapLabel(prev: RunDetail, next: RunDetail): string | null {
-  const gap = next.started_at - runEndAt(prev)
-  if (gap < GAP_MIN_MS) return null
-  const tool = lastHandoffTool(prev)
-  const duration = formatDuration(gap)
-  return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
-}
+const timeline = $derived(deriveTimeline(interaction, failure))
 
 let flashRun = $state<string | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | undefined
@@ -180,35 +80,6 @@ function jumpToRun(runId: string | null) {
   flashTimer = setTimeout(() => {
     if (flashRun === runId) flashRun = null
   }, 1600)
-}
-
-function itemKey(item: StreamItem): number {
-  return item.type === 'event' ? item.event.sequence : item.events[0].sequence
-}
-
-// 同种过程事件合并为「标题 × N」，混合过程事件显示计数并附种类名帮助扫描。
-function processGroup(events: readonly ObservationEvent[]): { label: string; titles: string | null } {
-  const titles = [...new Set(events.map((event) => observationEventSummary(event).title))]
-  if (titles.length === 1) {
-    return { label: m.observation_event_group({ title: titles[0], count: events.length }), titles: null }
-  }
-  return {
-    label: m.observation_process_events({ count: events.length }),
-    titles: titles.length <= 3 ? formatList(titles) : `${formatList(titles.slice(0, 3))}…`,
-  }
-}
-
-function usageText(value: number | null): string {
-  return value == null ? m.observation_usage_unknown() : formatNumber(value)
-}
-
-function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | null]> {
-  return [
-    [m.observation_event_tokens_input(), run.usage.input_tokens],
-    [m.observation_event_tokens_output(), run.usage.output_tokens],
-    [m.observation_event_tokens_cache_read(), run.usage.cache_read_tokens],
-    [m.observation_event_tokens_cache_write(), run.usage.cache_write_tokens],
-  ]
 }
 </script>
 
@@ -224,7 +95,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
               ><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
           {/each}
         </span>
-        <time class="stream-time" title={formatLogTime(event.occurred_at)}>{offsetLabel(event.occurred_at)}</time>
+        <time class="stream-time" title={formatLogTime(event.occurred_at)}>{timeline.offsetLabel(event.occurred_at)}</time>
         <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
       </Collapsible.Trigger>
       {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
@@ -272,7 +143,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           <time
             class="stream-time"
             title="{formatLogTime(events[0].occurred_at)} – {formatLogTime(events[events.length - 1].occurred_at)}"
-            >{offsetLabel(events[0].occurred_at)}</time>
+            >{timeline.offsetLabel(events[0].occurred_at)}</time>
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         <Collapsible.Content>
@@ -288,9 +159,9 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
 {/snippet}
 
 {#snippet runBlock(run: RunDetail, ordinal: number)}
-  {@const items = streams.get(run.id) ?? []}
+  {@const items = timeline.streams.get(run.id) ?? []}
   {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
-  {@const parentIndex = run.parent_run_id ? (runIndex.get(run.parent_run_id) ?? null) : null}
+  {@const parentIndex = run.parent_run_id ? (timeline.runIndex.get(run.parent_run_id) ?? null) : null}
   <li class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
     <Collapsible.Root>
       <div class="run-band">
@@ -313,7 +184,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
               {formatTokenCount(run.usage.input_tokens)} · OUT
               {formatTokenCount(run.usage.output_tokens)}</span>
           </span>
-          <time class="stream-time" title={formatLogTime(run.started_at)}>{offsetLabel(run.started_at)}</time>
+          <time class="stream-time" title={formatLogTime(run.started_at)}>{timeline.offsetLabel(run.started_at)}</time>
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         {#if run.parent_run_id}
@@ -379,7 +250,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     {#if items.length}
       <ol class="branch">
         {#each items as item (itemKey(item))}
-          {@render streamItem(item, attemptOutputs.get(run.id))}
+          {@render streamItem(item, timeline.attemptOutputs.get(run.id))}
         {/each}
       </ol>
     {/if}
@@ -391,7 +262,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     <p class="font-structural text-xs font-semibold tracking-wider text-primary uppercase">
       {interaction ? m.observation_interaction_details() : m.observation_failed_request_details()}
     </p>
-    <h2 class="font-structural mt-1 truncate text-xl font-semibold">{title}</h2>
+    <h2 class="font-structural mt-1 truncate text-xl font-semibold">{timeline.title}</h2>
   </div>
   <Button variant="ghost" size="icon" aria-label={m.common_close()} onclick={onclose}><XIcon /></Button>
 </header>
@@ -435,13 +306,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
       </div>
       <div>
         <dt>{m.failed_request_origin()}</dt>
-        <dd>
-          {failure.request.error.source === 'platform'
-            ? m.failed_request_platform()
-            : failure.request.error.source === 'upstream'
-              ? m.failed_request_upstream()
-              : '—'}
-        </dd>
+        <dd>{failureOriginLabel(failure.request.error.source) ?? '—'}</dd>
       </div>
       <div>
         <dt>{m.failed_request_time()}</dt>
@@ -470,7 +335,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     </div>
     <h3 class="font-structural font-semibold">{m.observation_diagnostics()}</h3>
     <ol class="stream">
-      {#each failureItems as item (itemKey(item))}
+      {#each timeline.failureItems as item (itemKey(item))}
         {@render streamItem(item)}
       {/each}
     </ol>
@@ -520,9 +385,9 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           </div>
         </dl>
         <ol class="stream">
-          {#each orderedRuns as run, index (run.id)}
+          {#each timeline.orderedRuns as run, index (run.id)}
             {#if index > 0}
-              {@const gap = gapLabel(orderedRuns[index - 1], run)}
+              {@const gap = timeline.gapLabel(timeline.orderedRuns[index - 1], run)}
               {#if gap}<li class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></li>{/if}
             {/if}
             {@render runBlock(run, index + 1)}

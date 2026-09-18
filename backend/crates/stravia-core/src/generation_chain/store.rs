@@ -139,6 +139,15 @@ impl GenerationChainStore {
         }
     }
 
+    /// Rebuild derived Generation prefix indexes before accepting requests.
+    /// The TurnChainStore walks stale chains; `rebuilt_prefix` supplies the
+    /// Generation-history-specific decode.
+    pub(super) async fn rebuild_prefixes(&self) -> Result<(), TurnUnavailable> {
+        self.turn_chain
+            .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
+            .await
+    }
+
     pub fn allocate_id(&self) -> String {
         TurnNodeId::response().to_string()
     }
@@ -291,8 +300,8 @@ impl GenerationChainStore {
                     TurnNodeKind::Response,
                     &ReusablePrefixQuery {
                         namespace: format!(
-                            "stravia-generation-history-v2:{}",
-                            state.controls_fingerprint
+                            "{}{}",
+                            GENERATION_PREFIX_NAMESPACE, state.controls_fingerprint
                         ),
                         fingerprints: context_fingerprints,
                     },
