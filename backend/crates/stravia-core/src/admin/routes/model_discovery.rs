@@ -217,7 +217,7 @@ pub(super) async fn discover_devin_catalog(
     let response = client
         .post(url)
         .headers(headers)
-        .body(crate::protocol::codec::devin_connect::encode_client_metadata_request(token))
+        .body(crate::protocol::codec::devin_connect::encode_client_metadata_request(token, true))
         .timeout(Duration::from_secs(10))
         .send()
         .await?;

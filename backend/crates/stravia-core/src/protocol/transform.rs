@@ -171,10 +171,16 @@ impl ProtocolTransform {
 
 impl ProtocolPair {
     pub(crate) fn thinking_carrier_facts(self) -> ThinkingCarrierFacts {
-        let indexed = self.egress.protocol == Protocol::OpenResponses;
+        let indexed = matches!(
+            self.egress.protocol,
+            Protocol::OpenResponses | Protocol::DevinConnect
+        );
         let may_be_protected = matches!(
             self.egress.protocol,
-            Protocol::OpenResponses | Protocol::AnthropicMessages | Protocol::GoogleGemini
+            Protocol::OpenResponses
+                | Protocol::AnthropicMessages
+                | Protocol::GoogleGemini
+                | Protocol::DevinConnect
         );
         ThinkingCarrierFacts {
             indexed,
@@ -183,7 +189,7 @@ impl ProtocolPair {
             // Requesting `reasoning.encrypted_content` only asks for the
             // opaque replay blob; it must not delay those deltas until
             // item.done, where ciphertext may arrive.
-            stream_unprotected_summaries: indexed,
+            stream_unprotected_summaries: self.egress.protocol == Protocol::OpenResponses,
         }
     }
 
@@ -976,8 +982,8 @@ fn request_block_representable(
                     ..
                 }
         ),
-        // Thinking has no verified request-side field; images must be inline
-        // base64 (the encoder rejects Url/FileId).
+        // 来源约束由 thinking replay 处理；Devin 原生思考可携带签名回放。
+        // 图片仍必须是 inline base64。
         Protocol::DevinConnect => matches!(
             block,
             ContentBlock::Text { .. }
@@ -987,6 +993,9 @@ fn request_block_representable(
                 }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
+                | ContentBlock::Thinking { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::RedactedThinking { .. }
         ),
     }
 }

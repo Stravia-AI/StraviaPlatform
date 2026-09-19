@@ -10,6 +10,7 @@ const STATUS_LABELS: Record<string, LabelMessage> = {
   failed: m.observation_status_failed,
   interrupted: m.observation_status_interrupted,
   running: m.observation_status_running,
+  superseded: m.observation_status_superseded,
   user_interrupted: m.observation_status_interrupted,
   waiting_client: m.observation_status_waiting_client,
 }

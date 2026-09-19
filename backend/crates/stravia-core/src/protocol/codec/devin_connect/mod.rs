@@ -14,14 +14,53 @@ pub(crate) mod sanitize;
 pub(crate) mod stream;
 
 pub(crate) use connect::wrap_request;
+pub(crate) use request::ASSIGN_MODEL_PATH;
 pub(crate) use request::DevinModelConfig;
 pub(crate) use request::GET_CHAT_MESSAGE_PATH;
+pub(crate) use request::ModelAssignment;
+pub(crate) use request::decode_assign_model_response;
 pub(crate) use request::decode_cli_model_configs;
 pub(crate) use request::devin_upstream_provider_name;
+pub(crate) use request::encode_assign_model_request;
 pub(crate) use request::encode_client_metadata_request;
 pub(crate) use request::encode_get_chat_message_request;
 pub(crate) use request::session_shape;
 pub(crate) use stream::DevinConnectStreamParser;
+
+/// 签名类型与输出身份必须一起回放；使用现有 opaque signature carrier，
+/// 避免在跨协议历史中把 Devin 私有字段伪装成通用推理参数。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct ThinkingReplay {
+    pub signature: String,
+    pub signature_type: String,
+    pub output_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub redacted_text: String,
+}
+
+impl ThinkingReplay {
+    const PREFIX: &str = "devin-thinking-v1:";
+
+    fn encode(&self) -> String {
+        format!(
+            "{}{}",
+            Self::PREFIX,
+            serde_json::to_string(self).expect("string-only thinking state")
+        )
+    }
+
+    fn decode(value: &str) -> anyhow::Result<Self> {
+        match value.strip_prefix(Self::PREFIX) {
+            Some(json) => Ok(serde_json::from_str(json)?),
+            None => Ok(Self {
+                signature: value.to_owned(),
+                ..Self::default()
+            }),
+        }
+    }
+}
+
+const CUSTOM_TOOL_META: &str = "__devin_custom_tool";
 
 use anyhow::bail;
 use reqwest::header::HeaderMap;

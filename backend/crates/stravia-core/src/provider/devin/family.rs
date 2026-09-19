@@ -37,6 +37,10 @@ pub(crate) struct DevinFamily {
     pub default: String,
     /// Every upstream selector id belonging to the family.
     pub selectors: Vec<String>,
+    /// Members the catalog flags `is_model_router` — they need `AssignModel`
+    /// resolution before `GetChatMessage`. `None` when no member carries a
+    /// catalog entry (static/manual selectors): router status unknown.
+    pub routers: Option<Vec<String>>,
     /// Ordered effort levels the family exposes (selector suffixes plus the
     /// implicit level of bare members recovered from their labels).
     pub levels: Vec<String>,
@@ -198,6 +202,13 @@ fn build_family<'a>(members: Vec<Member<'a>>) -> DevinFamily {
         name,
         default,
         selectors: members.iter().map(|m| m.selector.to_string()).collect(),
+        routers: members.iter().any(|m| m.entry.is_some()).then(|| {
+            members
+                .iter()
+                .filter(|m| m.entry.is_some_and(|e| e.is_router))
+                .map(|m| m.selector.to_string())
+                .collect()
+        }),
         levels,
         thinking_toggle,
         entry: default_member.entry.cloned(),
@@ -310,6 +321,7 @@ pub(crate) fn family_metadata(
         selector::table_extension_value(&SelectorTable {
             default: family.default.clone(),
             selectors: family.selectors.clone(),
+            routers: family.routers.clone(),
         }),
     );
     metadata
@@ -345,6 +357,7 @@ mod tests {
             provider: None,
             context_window: None,
             supports_images: None,
+            is_router: false,
             cost: None,
         }
     }

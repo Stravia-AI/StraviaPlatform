@@ -286,6 +286,7 @@ impl GatewayError {
                 code: Some(self.stable_code().into()),
                 message: Some(self.message()),
                 status_code: Some(numeric_status),
+                upstream_code: None,
             });
         response
     }

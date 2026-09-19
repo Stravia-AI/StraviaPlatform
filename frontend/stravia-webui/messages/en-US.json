@@ -1490,6 +1490,7 @@
   "observation_enable_debug": "Enable Debug",
   "observation_enabling": "Enabling…",
   "observation_error_code": "Error code",
+  "observation_upstream_error_code": "Upstream error code",
 
   "observation_filters": "Filters",
   "observation_filters_description": "When a step matches, its whole chain is shown. Earlier steps that do not match stay dimmed for context.",
@@ -1562,6 +1563,7 @@
   "observation_status_interrupted": "Interrupted",
   "observation_status_disconnected": "Disconnected",
   "observation_status_running": "Running",
+  "observation_status_superseded": "Superseded",
   "observation_status_unknown": "Unknown",
   "observation_status_waiting_client": "Waiting for client",
   "observation_conversation": "Conversation",

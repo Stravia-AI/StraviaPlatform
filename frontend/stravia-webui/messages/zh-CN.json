@@ -1487,6 +1487,7 @@
   "observation_enable_debug": "开启 Debug",
   "observation_enabling": "正在开启…",
   "observation_error_code": "错误代码",
+  "observation_upstream_error_code": "上游错误码",
 
   "observation_filters": "筛选",
   "observation_filters_description": "任一环节命中即显示完整链路；未命中的前序环节将弱化显示。",
@@ -1558,6 +1559,7 @@
   "observation_status_interrupted": "已中断",
   "observation_status_disconnected": "已断开",
   "observation_status_running": "运行中",
+  "observation_status_superseded": "已被接替",
   "observation_status_unknown": "未知",
   "observation_status_waiting_client": "等待客户端",
   "observation_conversation": "对话",

@@ -51,6 +51,7 @@ impl FailedRow {
                 code: self.code,
                 message: None,
                 status_code: self.status_code.and_then(|code| u16::try_from(code).ok()),
+                upstream_code: None,
             },
         };
         Ok(FailedRequestSummary {

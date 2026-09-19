@@ -132,6 +132,9 @@ pub struct FailureDiagnostic {
     pub code: Option<String>,
     pub message: Option<String>,
     pub status_code: Option<u16>,
+    /// 上游错误体自带的错误码（Connect `error.code`、OpenAI `code`/`type`、
+    /// Anthropic `type`）。`code` 始终保持 Stravia 稳定失败词表。
+    pub upstream_code: Option<String>,
 }
 
 impl FailureDiagnostic {
@@ -145,8 +148,19 @@ impl FailureDiagnostic {
             code: Some(code.into()),
             message: Some(message.into()),
             status_code: Some(status),
+            upstream_code: None,
         }
     }
+}
+
+/// 上游错误体形态不一：`{"error":{"code"|"type":..}}`、裸顶层 `code`/`type`。
+/// 只取字符串码——数字码已由 `status_code` 表达，不再重复。
+pub(crate) fn upstream_body_code(body: &serde_json::Value) -> Option<String> {
+    let error = body.get("error").unwrap_or(body);
+    ["code", "type"]
+        .iter()
+        .find_map(|key| error.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

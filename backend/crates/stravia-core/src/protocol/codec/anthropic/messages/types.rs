@@ -99,6 +99,8 @@ pub enum AnthropicContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "image")]
     Image {
         source: AnthropicImageSource,
@@ -152,6 +154,7 @@ impl AnthropicContentBlock {
             | Self::ToolResult { cache_control, .. }
             | Self::Document { cache_control, .. }
             | Self::InputAudio { cache_control, .. } => cache_control.as_ref(),
+            Self::RedactedThinking { .. } => None,
         }
     }
 

@@ -37,7 +37,7 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
 3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
 4. 同一父响应的并发续接属于同一 Interaction，并在详情中形成 Run 子树。
-5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应的执行分支标记为 `user_interrupted`。
+5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应、且尚无续接 Run 的执行分支标记为 `user_interrupted`；已被续接的等待分支记为 `superseded`，不当作中断。
 6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
 7. 无 parent 的失败根 Run 只在以下条件全部满足时归并：
    - Principal 相同；
@@ -61,6 +61,8 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
 
 等待客户端不使用猜测超时。同一 Interaction 内，一个 Run 的全部公开工具交接都已收到其他 Run 中 sequence 严格更晚的同 ID `client_tool_result` 时，该分支不再参与活动等待聚合，即使结果来自 sibling、结构上仍是叶节点。错误工具结果同样证明客户端已回传，但不证明最终生成成功；没有最终生成响应时，不能因此把 Interaction 标为 `completed`。判定只读取工具 ID 与事件顺序，不读取参数、结果正文或 Debug 文件；缺失或空 ID、没有 handoff、先于 handoff 的结果、部分回传以及同 ID 多次 handoff 均保守保留等待，重复 result 幂等，不跨 Interaction 或 Principal 匹配。状态计算使用尚未物理清除的历史证据，不按事件各自的到期时间截断；Bundle 只使用导出快照内的事件，不能借未来结果解除过去的等待。原 RunOutcome、工具历史和 Generation Chain 父边不改写。
+
+Run 级别的等待分支在两条路径上终结，不无限滞留：续接 Run 准入同一 Interaction 时（`parent_run_id` 落在本 Interaction 内、非新交互打断），仍停在 `waiting_client` 的父 Run 在准入同一事务内转为终态 `superseded`、`terminal_reason='superseded'`，并发布 `run_state_changed`（payload 带 `superseded_by` 指向续接 Run）。`superseded` 是终态：不持有最终生成响应、不参与 `completed` 判定、不再被中断/断连/重启清扫改写，按既有规则过期清理。仅 sibling 证据解除、结构上仍是叶节点的等待分支保持 `waiting_client` 投影（不参与活动等待聚合），由断连、进程重启或新输入清扫终结；新输入清扫只把本 Interaction 内尚无续接 Run 的叶分支记为 `user_interrupted`，已有本 Interaction 续接的分支一律记 `superseded`（其他 Interaction 的新分支不算续接），不当作中断。
 
 WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run 且尚未由完整工具回传解除等待的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。结果先到时不追加虚假断线；关闭先到时保留真实断线历史。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，同一进程内仍等待合法续接或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填 `client_disconnected`。
 
@@ -284,7 +286,7 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 - `ingress_protocol`
 - `route_id` / `model_display_name`
 - `request_model`（请求的路由 model_id 快照，可空）
-- `failure_json`（最终失败诊断快照，可空）
+- `failure_json`（最终失败诊断快照，可空；`code` 为 Stravia 稳定失败词表，上游错误体自带的错误码单独保存在 `upstream_code`）
 - `status` / `terminal_reason`
 - `debug_enabled`
 - `client_output_committed`
@@ -685,7 +687,7 @@ Rust workspace 新增：
 2. **当前工具续接。** 用同 Principal 已交付调用的未完成工具 ID 与当前输入尾段精确匹配；旧结果回放、重复或冲突来源、缺失交付证据不能宣称唯一。确认后优先归入来源 Interaction，即使夹带 User 或超过尾部五分钟窗口。
 3. **尾部指纹索引。** 以最后 canonical 单元哈希筛选候选，再做完整语义核验。同 Principal 历史超过 128 个不再导致全部匹配失败。指纹不代替核验，也不按时间窗口排除潜在冲突来源。
 4. **按需物化。** 缺失窗口从仍保留的 Generation Chain `client_items` 重建；进程缓存可淘汰。过期或已清理来源不复活。核验超过资源预算时返回 `resource_limit` 或 `index_unavailable`，不把部分检查包装成唯一匹配。
-5. **准入时持久化。** `run_admitted` 同时保存 `grouping_reason` 与 `diagnostic_source_run_id`；尾部核验结果以 `retained_tail_associated` 同轮写入。诊断来源不是 `generation_parent_id`。只有新增 User 打断父交互时才 `interrupt_predecessors`。
+5. **准入时持久化。** `run_admitted` 同时保存 `grouping_reason` 与 `diagnostic_source_run_id`；尾部核验结果以 `retained_tail_associated` 同轮写入。诊断来源不是 `generation_parent_id`。只有新增 User 打断父交互时才 `interrupt_predecessors`；归入本 Interaction 的续接准入在同一事务内把仍等待的父 Run 终结为 `superseded`（见 3.2），不归入中断。
 6. **派生视图。** 合并后的 Interaction 共用状态与用量；诊断连接的新子交互分别汇总。失败、取消和交付事实不因后续成功改写。
 7. **契约。** README 两种语言、schema 文档与 `0047_observation_tail_sources` 迁移同步。页面继续区分确认边与诊断边。
 

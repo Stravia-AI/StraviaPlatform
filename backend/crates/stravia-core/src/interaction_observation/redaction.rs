@@ -141,7 +141,14 @@ impl ProtectedSecrets {
     pub(crate) fn event(&self, event: &mut RunEvent) {
         match event {
             RunEvent::RequestFailed { error } => {
-                for value in [&mut error.code, &mut error.message].into_iter().flatten() {
+                for value in [
+                    &mut error.code,
+                    &mut error.message,
+                    &mut error.upstream_code,
+                ]
+                .into_iter()
+                .flatten()
+                {
                     self.text(value);
                 }
             }
@@ -789,7 +796,14 @@ fn redact_string(value: &mut String, report: &mut RedactionReport) {
 }
 
 fn redact_failure(error: &mut FailureDiagnostic, report: &mut RedactionReport) {
-    for value in [&mut error.code, &mut error.message].into_iter().flatten() {
+    for value in [
+        &mut error.code,
+        &mut error.message,
+        &mut error.upstream_code,
+    ]
+    .into_iter()
+    .flatten()
+    {
         redact_structured_text(value, report);
     }
 }

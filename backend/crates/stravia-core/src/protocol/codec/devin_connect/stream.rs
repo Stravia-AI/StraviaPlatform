@@ -6,13 +6,17 @@
 //! ```text
 //! GetChatMessageResponse
 //!   #3  string  delta_text
-//!   #5  varint  finish signal (2 == stop; unknown values map to "stop")
+//!   #5  varint  finish signal (length / tool call / filter / error / stop)
 //!   #6  repeated ChatToolCall { #1 id, #2 name, #3 arguments_json,
 //!                               #4 invalid_json_str, #5 invalid_json_err,
 //!                               #6 is_custom_tool_call }
 //!   #7  metadata { #2 prompt_tokens, #3 completion_tokens,
 //!                  #9 actual_model_uid }
 //!   #9  string  delta_thinking
+//!   #10 string  delta_signature
+//!   #11 bool    thinking_redacted
+//!   #15 string  output_id
+//!   #21 string  signature_type
 //!   #28 UsageStats { #1 label, #2 repeated UsageEntry {
 //!          #4 dimension { #1 label, #2 fixed32 value, #3 unit },
 //!          #5 metric_id } }   — billed token breakdown, final frame only
@@ -37,11 +41,13 @@ use serde_json::Value;
 
 use super::connect::{ConnectFrame, ConnectFrameReader};
 use super::proto::{ProtoField, parse_fields};
+use super::{CUSTOM_TOOL_META, ThinkingReplay};
 use stravia_runtime_contract::protocol::ir::AiError;
 use stravia_runtime_contract::protocol::ir::AiErrorKind;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::ToolCall;
 use stravia_runtime_contract::protocol::ir::Usage;
+use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
 
 fn clamp_tokens(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
@@ -52,6 +58,14 @@ struct OpenToolCall {
     id: String,
     name: String,
     arguments: String,
+    custom: bool,
+}
+
+#[derive(Default)]
+struct OpenThinking {
+    text: String,
+    replay: ThinkingReplay,
+    redacted: bool,
 }
 
 /// UTF-8 accumulator for text that can split a multi-byte character across
@@ -123,7 +137,13 @@ pub struct DevinConnectStreamParser {
     reasoning: Utf8Pending,
     tools: BTreeMap<usize, OpenToolCall>,
     open_tool: Option<usize>,
-    next_tool_index: usize,
+    next_output_index: usize,
+    text_items: BTreeMap<usize, String>,
+    thinking_items: BTreeMap<usize, OpenThinking>,
+    current_text: Option<usize>,
+    current_thinking: Option<usize>,
+    last_thinking: Option<usize>,
+    output_id: String,
 }
 
 impl DevinConnectStreamParser {
@@ -142,19 +162,32 @@ impl DevinConnectStreamParser {
             reasoning: Utf8Pending::default(),
             tools: BTreeMap::new(),
             open_tool: None,
-            next_tool_index: 0,
+            next_output_index: 0,
+            text_items: BTreeMap::new(),
+            thinking_items: BTreeMap::new(),
+            current_text: None,
+            current_thinking: None,
+            last_thinking: None,
+            output_id: String::new(),
         }
     }
 
     pub(crate) fn parse_chunk(&mut self, raw: &[u8]) -> anyhow::Result<Vec<AiStreamDelta>> {
         let mut deltas = Vec::new();
+        if self.done || self.saw_end_stream {
+            return Ok(deltas);
+        }
         for frame in self.reader.push(raw)? {
             match frame {
                 ConnectFrame::Data(payload) => self.parse_data_frame(&payload, &mut deltas),
                 ConnectFrame::EndStream(payload) => {
                     self.saw_end_stream = true;
-                    self.finish_tools(&mut deltas);
                     self.parse_trailer(&payload, &mut deltas);
+                    if !self.done && !matches!(self.last_finish, Some(7 | 13)) {
+                        self.finish_items(&mut deltas);
+                        self.finish_tools(&mut deltas);
+                    }
+                    break;
                 }
             }
         }
@@ -166,15 +199,20 @@ impl DevinConnectStreamParser {
         if !self.reader.is_empty() {
             bail!("incomplete Connect frame at end of response");
         }
-        self.finish_tools(&mut deltas);
         if self.done {
             return Ok(deltas);
         }
         if self.saw_end_stream {
             self.done = true;
-            deltas.push(AiStreamDelta::Done {
-                stop_reason: map_finish_reason(self.last_finish).into(),
-            });
+            if matches!(self.last_finish, Some(7 | 13)) {
+                deltas.push(AiStreamDelta::StreamError {
+                    error: AiError::new(AiErrorKind::ServerError, "Devin stopped with an error"),
+                });
+            } else {
+                deltas.push(AiStreamDelta::Done {
+                    stop_reason: map_finish_reason(self.last_finish).into(),
+                });
+            }
         } else {
             deltas.push(AiStreamDelta::UnexpectedEof);
         }
@@ -204,13 +242,31 @@ impl DevinConnectStreamParser {
                 return;
             }
         };
+        self.parse_thinking(&fields, deltas);
         for field in &fields {
             match (field.number, field.wire_type) {
                 (3, 2) => {
                     self.ensure_started(deltas);
                     match self.content.push(field.bytes) {
                         Ok(text) if !text.is_empty() => {
-                            deltas.push(AiStreamDelta::TextDelta(text));
+                            self.current_thinking = None;
+                            let index = match self.current_text {
+                                Some(index) => index,
+                                None => {
+                                    let index = self.next_output_index;
+                                    self.next_output_index += 1;
+                                    self.current_text = Some(index);
+                                    index
+                                }
+                            };
+                            self.text_items.entry(index).or_default().push_str(&text);
+                            deltas.push(AiStreamDelta::TextDeltaWithMetadata {
+                                text,
+                                logprobs: Vec::new(),
+                                obfuscation: None,
+                                output_index: Some(index),
+                                content_index: Some(0),
+                            });
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -227,24 +283,118 @@ impl DevinConnectStreamParser {
                 (6, 2) => self.parse_tool_call(field, deltas),
                 (7, 2) => self.parse_metadata(field.bytes, deltas),
                 (28, 2) => self.parse_usage_stats(field.bytes, deltas),
-                (9, 2) => {
-                    self.ensure_started(deltas);
-                    match self.reasoning.push(field.bytes) {
-                        Ok(text) if !text.is_empty() => {
-                            deltas.push(AiStreamDelta::ThinkingDelta(text));
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                target: "stravia_core::protocol::devin_connect",
-                                "invalid UTF-8 in thinking delta: {error}"
-                            );
-                        }
-                    }
-                }
                 _ => {}
             }
         }
+    }
+
+    fn parse_thinking(&mut self, fields: &[ProtoField<'_>], deltas: &mut Vec<AiStreamDelta>) {
+        let bytes = |number| {
+            fields
+                .iter()
+                .find(|f| f.number == number && f.wire_type == 2)
+                .map(|f| f.bytes)
+        };
+        let redacted = fields
+            .iter()
+            .any(|f| f.number == 11 && f.wire_type == 0 && f.scalar != 0);
+        let text = bytes(9);
+        let signature = bytes(10);
+        let signature_type = bytes(21);
+        let output_id = bytes(15);
+        if let Some(bytes) = output_id {
+            self.output_id = String::from_utf8_lossy(bytes).into_owned();
+        }
+        if text.is_none()
+            && signature.is_none()
+            && !redacted
+            && signature_type.is_none()
+            && output_id.is_none()
+        {
+            return;
+        }
+        let index = if text.is_some() || redacted {
+            match self.current_thinking {
+                Some(index) => index,
+                None => {
+                    self.ensure_started(deltas);
+                    let index = self.next_output_index;
+                    self.next_output_index += 1;
+                    self.current_thinking = Some(index);
+                    self.current_text = None;
+                    self.last_thinking = Some(index);
+                    deltas.push(AiStreamDelta::ProtectedThinkingStart { index });
+                    index
+                }
+            }
+        } else if let Some(index) = self.last_thinking {
+            // 签名可在正文之后到达，归属仍是最后一个思考项，不能新建空思考块。
+            index
+        } else {
+            return;
+        };
+        let thinking = self.thinking_items.entry(index).or_default();
+        thinking.redacted |= redacted;
+        if let Some(bytes) = signature {
+            thinking
+                .replay
+                .signature
+                .push_str(&String::from_utf8_lossy(bytes));
+        }
+        if let Some(bytes) = signature_type {
+            thinking.replay.signature_type = String::from_utf8_lossy(bytes).into_owned();
+        }
+        if !self.output_id.is_empty() {
+            thinking.replay.output_id.clone_from(&self.output_id);
+        }
+        if let Some(bytes) = text {
+            let text = self
+                .reasoning
+                .push(bytes)
+                .expect("UTF-8 accumulator is loss tolerant");
+            thinking.text.push_str(&text);
+            if !thinking.redacted && !text.is_empty() {
+                deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
+                    text,
+                    obfuscation: None,
+                    output_index: Some(index),
+                    content_index: Some(0),
+                });
+            }
+        }
+    }
+
+    fn finish_items(&mut self, deltas: &mut Vec<AiStreamDelta>) {
+        // 签名可能晚于正文；公开增量立即发送，权威项在 trailer 后封口，
+        // 交由现有 indexed projection / accumulator 保持身份与回放状态。
+        let mut items: BTreeMap<usize, AiItem> = std::mem::take(&mut self.text_items)
+            .into_iter()
+            .map(|(index, text)| (index, AiItem::output_text(text)))
+            .collect();
+        for (index, mut thinking) in std::mem::take(&mut self.thinking_items) {
+            let item = if thinking.redacted {
+                thinking.replay.redacted_text = thinking.text;
+                AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                        data: thinking.replay.encode(),
+                    }]),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }
+            } else {
+                let signature =
+                    (!thinking.replay.signature.is_empty()).then(|| thinking.replay.encode());
+                AiItem::reasoning(Vec::new(), vec![thinking.text], signature)
+            };
+            items.insert(index, item);
+        }
+        deltas.extend(
+            items
+                .into_iter()
+                .map(|(index, item)| AiStreamDelta::ItemDone { index, item }),
+        );
     }
 
     fn parse_metadata(&mut self, payload: &[u8], deltas: &mut Vec<AiStreamDelta>) {
@@ -424,6 +574,8 @@ impl DevinConnectStreamParser {
 
     fn parse_tool_call(&mut self, field: &ProtoField<'_>, deltas: &mut Vec<AiStreamDelta>) {
         self.ensure_started(deltas);
+        self.current_text = None;
+        self.current_thinking = None;
         let sub = match parse_fields(field.bytes) {
             Ok(sub) => sub,
             Err(error) => {
@@ -442,16 +594,15 @@ impl DevinConnectStreamParser {
         };
         let id = string_of(1).unwrap_or_default();
         let name = string_of(2).unwrap_or_default();
-        let invalid_json = string_of(4).is_some() || string_of(5).is_some();
-        let raw_args = string_of(3);
-        // Upstream substitutes a {} placeholder for malformed arguments and
-        // flags them via #4/#5; mirror that so the tool-call chain doesn't
-        // carry corrupt JSON.
-        let args = match raw_args {
-            Some(_) if invalid_json => "{}".to_string(),
-            Some(raw) => raw,
-            None if invalid_json => "{}".to_string(),
-            None => String::new(),
+        let custom_args = string_of(4);
+        let custom = custom_args.is_some()
+            || sub
+                .iter()
+                .any(|f| f.number == 6 && f.wire_type == 0 && f.scalar != 0);
+        let args = if !custom && string_of(5).is_some() {
+            "{}".to_owned()
+        } else {
+            custom_args.or_else(|| string_of(3)).unwrap_or_default()
         };
 
         let index = match self.open_tool {
@@ -459,14 +610,15 @@ impl DevinConnectStreamParser {
             // fragment appends to the currently open one.
             Some(open) if id.is_empty() || id == self.tools[&open].id => open,
             _ => {
-                let index = self.next_tool_index;
-                self.next_tool_index += 1;
+                let index = self.next_output_index;
+                self.next_output_index += 1;
                 self.tools.insert(
                     index,
                     OpenToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: String::new(),
+                        custom: false,
                     },
                 );
                 self.open_tool = Some(index);
@@ -482,7 +634,33 @@ impl DevinConnectStreamParser {
         if call.name.is_empty() && !name.is_empty() {
             call.name = name;
         }
+        if custom && !call.custom {
+            if !call.arguments.is_empty() {
+                self.done = true;
+                deltas.push(AiStreamDelta::StreamError {
+                    error: AiError::new(
+                        AiErrorKind::ServerError,
+                        "Devin changed tool argument encoding mid-call",
+                    ),
+                });
+                return;
+            }
+            call.custom = true;
+            call.arguments.push_str("{\"input\":\"");
+            deltas.push(AiStreamDelta::ToolCallDelta {
+                index,
+                arguments: "{\"input\":\"".into(),
+            });
+        }
         if !args.is_empty() {
+            // canonical 工具参数是 JSON；custom 原文作为 input 字符串逐片转义，
+            // 保证 Anthropic/Chat 客户端也不会把非 JSON 参数替换成空对象。
+            let args = if call.custom {
+                let quoted = serde_json::to_string(&args).expect("string JSON encoding");
+                quoted[1..quoted.len() - 1].to_owned()
+            } else {
+                args
+            };
             call.arguments.push_str(&args);
             deltas.push(AiStreamDelta::ToolCallDelta {
                 index,
@@ -494,15 +672,25 @@ impl DevinConnectStreamParser {
     /// Close every open tool call. Emitted when the stream ends or an
     /// end-of-stream trailer arrives.
     fn finish_tools(&mut self, deltas: &mut Vec<AiStreamDelta>) {
-        for (index, call) in std::mem::take(&mut self.tools) {
-            deltas.push(AiStreamDelta::ToolCallComplete {
-                index,
-                tool_call: ToolCall {
-                    id: call.id,
-                    name: call.name,
-                    arguments: call.arguments,
-                },
-            });
+        for (index, mut call) in std::mem::take(&mut self.tools) {
+            if call.custom {
+                call.arguments.push_str("\"}");
+                deltas.push(AiStreamDelta::ToolCallDelta {
+                    index,
+                    arguments: "\"}".into(),
+                });
+            }
+            let tool_call = ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+            };
+            let mut item = AiItem::function_call(tool_call.clone());
+            if call.custom {
+                item.meta = Some(serde_json::json!({CUSTOM_TOOL_META: true}));
+            }
+            deltas.push(AiStreamDelta::ToolCallComplete { index, tool_call });
+            deltas.push(AiStreamDelta::ItemDone { index, item });
         }
         self.open_tool = None;
     }
@@ -519,13 +707,16 @@ impl DevinConnectStreamParser {
         let Ok(parsed) = serde_json::from_str::<Value>(text) else {
             return;
         };
-        let error = parsed.get("error").unwrap_or(&parsed);
+        let Some(error) = parsed.get("error").filter(|error| !error.is_null()) else {
+            return;
+        };
         let message = error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("Devin Connect stream error")
             .to_string();
         let kind = connect_error_kind(error.get("code").and_then(Value::as_str));
+        self.done = true;
         deltas.push(AiStreamDelta::StreamError {
             error: AiError::new(kind, message).with_raw(parsed),
         });
@@ -547,10 +738,13 @@ fn connect_error_kind(code: Option<&str>) -> AiErrorKind {
     }
 }
 
-/// Only 2 == stop is pinned by live captures; every other value resolves to
-/// "stop" so a completed stream never reads as truncated.
-fn map_finish_reason(_finish: Option<u64>) -> &'static str {
-    "stop"
+fn map_finish_reason(finish: Option<u64>) -> &'static str {
+    match finish {
+        Some(1 | 3 | 5 | 9) => "length",
+        Some(10) => "tool_calls",
+        Some(11) => "content_filter",
+        _ => "stop",
+    }
 }
 
 #[cfg(test)]
@@ -587,9 +781,15 @@ mod tests {
         wire.extend_from_slice(&data_frame(&text_payload("world")));
         wire.extend_from_slice(&trailer_frame("{}"));
         let deltas = parser.parse_chunk(&wire).unwrap();
-        assert!(matches!(deltas[0], AiStreamDelta::MessageStart { .. }));
-        assert!(matches!(&deltas[1], AiStreamDelta::TextDelta(t) if t == "hello "));
-        assert!(matches!(&deltas[2], AiStreamDelta::TextDelta(t) if t == "world"));
+        let text: String = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::TextDelta(text)
+                | AiStreamDelta::TextDeltaWithMetadata { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "hello world");
         let tail = parser.finish().unwrap();
         assert!(matches!(tail.last(), Some(AiStreamDelta::Done { .. })));
     }
@@ -608,7 +808,8 @@ mod tests {
         let texts: Vec<String> = deltas
             .iter()
             .filter_map(|d| match d {
-                AiStreamDelta::TextDelta(t) => Some(t.clone()),
+                AiStreamDelta::TextDelta(t)
+                | AiStreamDelta::TextDeltaWithMetadata { text: t, .. } => Some(t.clone()),
                 _ => None,
             })
             .collect();
@@ -823,5 +1024,264 @@ mod tests {
             d,
             AiStreamDelta::Done { stop_reason } if stop_reason == "stop"
         )));
+    }
+
+    #[test]
+    fn devin_semantics_preserves_terminal_reasons() {
+        for (code, expected) in [(3, "length"), (10, "tool_calls"), (11, "content_filter")] {
+            let mut parser = DevinConnectStreamParser::new();
+            let mut payload = Vec::new();
+            write_varint_field(&mut payload, 5, code);
+            let mut wire = data_frame(&payload);
+            wire.extend(trailer_frame("{}"));
+            let mut deltas = parser.parse_chunk(&wire).unwrap();
+            deltas.extend(parser.finish().unwrap());
+            assert!(
+                deltas.iter().any(|d| matches!(
+                    d, AiStreamDelta::Done { stop_reason } if stop_reason == expected
+                )),
+                "finish code {code}: {deltas:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devin_semantics_error_finish_never_completes_successfully() {
+        for code in [7, 13] {
+            let mut parser = DevinConnectStreamParser::new();
+            let mut payload = Vec::new();
+            write_varint_field(&mut payload, 5, code);
+            let mut wire = data_frame(&payload);
+            wire.extend(trailer_frame("{}"));
+            let mut deltas = parser.parse_chunk(&wire).unwrap();
+            deltas.extend(parser.finish().unwrap());
+            assert!(
+                deltas
+                    .iter()
+                    .any(|d| matches!(d, AiStreamDelta::StreamError { .. }))
+            );
+            assert!(
+                !deltas
+                    .iter()
+                    .any(|d| matches!(d, AiStreamDelta::Done { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn devin_semantics_metadata_trailer_is_success_but_error_is_terminal() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut deltas = parser
+            .parse_chunk(&trailer_frame(r#"{"metadata":{"trace":["id"]}}"#))
+            .unwrap();
+        deltas.extend(parser.finish().unwrap());
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, AiStreamDelta::StreamError { .. }))
+        );
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, AiStreamDelta::Done { .. }))
+        );
+
+        let mut parser = DevinConnectStreamParser::new();
+        let mut deltas = parser
+            .parse_chunk(&trailer_frame(
+                r#"{"error":{"code":"invalid_argument","message":"bad request"}}"#,
+            ))
+            .unwrap();
+        deltas.extend(parser.finish().unwrap());
+        assert!(deltas.iter().any(|d| matches!(
+            d, AiStreamDelta::StreamError { error } if error.message == "bad request"
+        )));
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, AiStreamDelta::Done { .. }))
+        );
+    }
+
+    fn replay_wire(deltas: &[AiStreamDelta]) -> Vec<Vec<u8>> {
+        use crate::model_turn::StreamResponseAccumulator;
+        use crate::protocol::codec::devin_connect::request::{
+            encode_get_chat_message_request, session_shape,
+        };
+        use stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1;
+        use stravia_runtime_contract::protocol::ir::AiRequest;
+
+        let mut accumulator = StreamResponseAccumulator::default();
+        accumulator.apply_all(deltas);
+        let response = accumulator.into_ai_response();
+        let mut request = AiRequest::new("swe-2-high", response.items);
+        crate::protocol::transform::prepare_thinking_replay(
+            &mut request,
+            DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            |_| true,
+        );
+        let body = encode_get_chat_message_request(
+            &request,
+            "test-token",
+            &session_shape(&request, "test-token"),
+            None,
+        )
+        .unwrap();
+        parse_fields(&body)
+            .unwrap()
+            .iter()
+            .filter(|f| f.number == 3)
+            .map(|f| f.bytes.to_vec())
+            .collect()
+    }
+
+    fn field_text(bytes: &[u8], number: u32) -> String {
+        parse_fields(bytes)
+            .unwrap()
+            .iter()
+            .find(|f| f.number == number && f.wire_type == 2)
+            .map(|f| String::from_utf8(f.bytes.to_vec()).unwrap())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn devin_semantics_signed_thinking_replays_late_signature_and_wire_identity() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut deltas = Vec::new();
+        let mut identity = Vec::new();
+        write_string_field(&mut identity, 15, "output-1");
+        deltas.extend(parser.parse_chunk(&data_frame(&identity)).unwrap());
+        let mut thought = Vec::new();
+        write_string_field(&mut thought, 9, "reason");
+        write_string_field(&mut thought, 10, "sig-");
+        write_string_field(&mut thought, 21, "sealed");
+        deltas.extend(parser.parse_chunk(&data_frame(&thought)).unwrap());
+        deltas.extend(
+            parser
+                .parse_chunk(&data_frame(&text_payload("answer")))
+                .unwrap(),
+        );
+        let mut late = Vec::new();
+        write_string_field(&mut late, 10, "tail");
+        deltas.extend(parser.parse_chunk(&data_frame(&late)).unwrap());
+        deltas.extend(parser.parse_chunk(&trailer_frame("{}")).unwrap());
+        deltas.extend(parser.finish().unwrap());
+        let prompts = replay_wire(&deltas);
+        let replay = prompts
+            .iter()
+            .find(|p| field_text(p, 11) == "reason")
+            .expect("thinking replay");
+        assert_eq!(field_text(replay, 12), "sig-tail");
+        assert_eq!(field_text(replay, 18), "sealed");
+        assert_eq!(field_text(replay, 15), "output-1");
+        assert!(prompts.iter().any(|p| field_text(p, 3) == "answer"));
+    }
+
+    #[test]
+    fn devin_semantics_redacted_thinking_replays_without_public_text() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut payload = Vec::new();
+        write_string_field(&mut payload, 9, "protected");
+        write_string_field(&mut payload, 10, "sealed-signature");
+        write_varint_field(&mut payload, 11, 1);
+        write_string_field(&mut payload, 21, "sealed");
+        let mut deltas = parser.parse_chunk(&data_frame(&payload)).unwrap();
+        deltas.extend(parser.parse_chunk(&trailer_frame("{}")).unwrap());
+        deltas.extend(parser.finish().unwrap());
+        assert!(!deltas.iter().any(|d| matches!(
+            d,
+            AiStreamDelta::ThinkingDelta(_) | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+        )));
+        let prompts = replay_wire(&deltas);
+        let replay = prompts
+            .iter()
+            .find(|p| field_text(p, 12) == "sealed-signature")
+            .expect("redacted replay");
+        assert_eq!(field_text(replay, 11), "protected");
+        assert!(
+            parse_fields(replay)
+                .unwrap()
+                .iter()
+                .any(|f| f.number == 13 && f.scalar == 1)
+        );
+        use crate::protocol::transform::ProtocolTransform;
+        use stravia_runtime_contract::protocol::ids::{
+            ANTHROPIC_MESSAGES_2023_06_01, DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+        };
+        let pair = ProtocolTransform::global()
+            .bind(
+                ANTHROPIC_MESSAGES_2023_06_01,
+                DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            )
+            .unwrap();
+        let (_, mut encoder) = pair.stream().unwrap().into_parts();
+        let events = encoder.encode_deltas(&deltas).unwrap();
+        let redacted = events
+            .iter()
+            .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+            .find_map(|event| {
+                let block = event.get("content_block")?;
+                (block["type"] == "redacted_thinking").then(|| block.clone())
+            })
+            .expect("Anthropic redacted block");
+        let mut request = pair
+            .decode_request(serde_json::json!({
+                "model": "swe-2-high", "max_tokens": 100,
+                "messages": [{"role": "assistant", "content": [redacted]}],
+            }))
+            .unwrap();
+        crate::protocol::transform::prepare_thinking_replay(
+            &mut request,
+            DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            |_| true,
+        );
+        assert!(
+            matches!(&request.items[0].content, MessageContent::Blocks(blocks)
+            if matches!(&blocks[0], ContentBlock::RedactedThinking { .. }))
+        );
+    }
+
+    #[test]
+    fn devin_semantics_custom_tool_fragments_preserve_raw_input() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut deltas = Vec::new();
+        for (id, text) in [("call-custom", "line \"one\"\n"), ("", "line two")] {
+            let mut call = Vec::new();
+            if !id.is_empty() {
+                write_string_field(&mut call, 1, id);
+                write_string_field(&mut call, 2, "edit");
+                write_varint_field(&mut call, 6, 1);
+            }
+            write_string_field(&mut call, 4, text);
+            let mut payload = Vec::new();
+            write_message_field(&mut payload, 6, &call);
+            deltas.extend(parser.parse_chunk(&data_frame(&payload)).unwrap());
+        }
+        deltas.extend(parser.parse_chunk(&trailer_frame("{}")).unwrap());
+        deltas.extend(parser.finish().unwrap());
+        let arguments: String = deltas
+            .iter()
+            .filter_map(|d| match d {
+                AiStreamDelta::ToolCallDelta { arguments, .. } => Some(arguments.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            serde_json::from_str::<Value>(&arguments).unwrap()["input"],
+            "line \"one\"\nline two"
+        );
+        let prompts = replay_wire(&deltas);
+        let call = prompts
+            .iter()
+            .flat_map(|p| parse_fields(p).unwrap())
+            .find(|f| f.number == 6)
+            .expect("tool replay");
+        assert_eq!(field_text(call.bytes, 4), "line \"one\"\nline two");
+        assert!(
+            parse_fields(call.bytes)
+                .unwrap()
+                .iter()
+                .any(|f| f.number == 6 && f.scalar == 1)
+        );
     }
 }

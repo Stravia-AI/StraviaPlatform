@@ -566,6 +566,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             code: Some("request_deadline_exceeded".into()),
                             message: Some("request deadline exceeded".into()),
                             status_code: None,
+                            upstream_code: None,
                         },
                     );
                     error_response(504, "request deadline exceeded")

@@ -91,7 +91,7 @@ function failureSummary(id: string): FailedRequestSummary {
     model: null,
     model_display_name: null,
     services: [],
-    error: { source: 'upstream', code: 'boom', message: 'boom', status_code: 502 },
+    error: { source: 'upstream', code: 'boom', message: 'boom', status_code: 502, upstream_code: null },
     interaction_id: null,
     root_id: null,
     run_id: null,

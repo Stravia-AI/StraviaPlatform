@@ -2256,6 +2256,122 @@ mod tests {
     use crate::history_marker::HistoryMarkerKind;
 
     #[tokio::test]
+    async fn devin_semantics_late_signatures_survive_live_history_markers() {
+        use crate::protocol::codec::devin_connect::{
+            DevinConnectStreamParser, encode_get_chat_message_request,
+            proto::{parse_fields, write_string_field},
+            session_shape, wrap_request,
+        };
+        use crate::protocol::transform::{ProtocolTransform, prepare_thinking_replay};
+        use stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1;
+        use stravia_runtime_contract::protocol::ir::AiRequest;
+
+        let (mut session, store, principal) =
+            projection_session_fixture("devin-late-signature").await;
+        let pair = ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            )
+            .unwrap();
+        session.begin_model_leg(pair.thinking_carrier_facts(), Vec::new(), None);
+        let mut parser = DevinConnectStreamParser::new();
+        let mut delivered = String::new();
+        let fields: &[&[(u32, &str)]] = &[
+            &[(9, "first"), (10, "sig-first"), (21, "sealed")],
+            &[(3, "answer")],
+            &[(9, "second"), (10, "sig-"), (21, "anthropic")],
+            &[(3, "tail")],
+            &[(10, "second")],
+        ];
+        for (step, fields) in fields.iter().enumerate() {
+            let mut payload = Vec::new();
+            for (number, value) in *fields {
+                write_string_field(&mut payload, *number, value);
+            }
+            let deltas = parser
+                .parse_chunk(&wrap_request(&payload).unwrap())
+                .unwrap();
+            for batch in session.project_live_deltas(deltas, false).await.unwrap() {
+                for delta in batch.deltas() {
+                    match delta {
+                        AiStreamDelta::TextDelta(text)
+                        | AiStreamDelta::TextDeltaWithMetadata { text, .. }
+                        | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. } => {
+                            delivered.push_str(text)
+                        }
+                        _ => {}
+                    }
+                }
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .unwrap();
+            }
+            if step == 1 {
+                assert!(delivered.contains("answer"), "正文不能等待尾随签名");
+            }
+        }
+        let mut deltas = parser.parse_chunk(&[2, 0, 0, 0, 2, b'{', b'}']).unwrap();
+        deltas.extend(parser.finish().unwrap());
+        for batch in session.project_live_deltas(deltas, true).await.unwrap() {
+            for delta in batch.deltas() {
+                match delta {
+                    AiStreamDelta::TextDelta(text)
+                    | AiStreamDelta::ThinkingDelta(text)
+                    | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. } => {
+                        delivered.push_str(text)
+                    }
+                    _ => {}
+                }
+            }
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .unwrap();
+        }
+        let mut request = AiRequest::new("swe-2-high", vec![AiItem::output_text(delivered)]);
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut request)
+            .await
+            .unwrap();
+        let original = request.clone();
+        prepare_thinking_replay(&mut request, DEVIN_CONNECT_GET_CHAT_MESSAGE_V1, |_| true);
+        let body = encode_get_chat_message_request(
+            &request,
+            "test",
+            &session_shape(&request, "test"),
+            None,
+        )
+        .unwrap();
+        let signatures: Vec<String> = parse_fields(&body)
+            .unwrap()
+            .iter()
+            .filter(|f| f.number == 3)
+            .flat_map(|f| parse_fields(f.bytes).unwrap())
+            .filter(|f| f.number == 12)
+            .map(|f| String::from_utf8(f.bytes.to_vec()).unwrap())
+            .collect();
+        assert_eq!(signatures, ["sig-first", "sig-second"]);
+        let mut foreign = original;
+        prepare_thinking_replay(&mut foreign, DEVIN_CONNECT_GET_CHAT_MESSAGE_V1, |_| false);
+        let body = encode_get_chat_message_request(
+            &foreign,
+            "other",
+            &session_shape(&foreign, "other"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !parse_fields(&body)
+                .unwrap()
+                .iter()
+                .filter(|f| f.number == 3)
+                .flat_map(|f| parse_fields(f.bytes).unwrap())
+                .any(|f| f.number == 12)
+        );
+    }
+
+    #[tokio::test]
     async fn same_batch_text_and_thinking_close_in_wire_order_and_restore_original() {
         let (mut session, store, principal) = projection_session_fixture("same-batch-owner").await;
         begin_openai_leg(&mut session);

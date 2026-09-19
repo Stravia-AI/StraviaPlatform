@@ -809,6 +809,9 @@ impl AttemptFailure {
             .and_then(|body| body.get("error").unwrap_or(body).get("message"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        self.diagnostic.upstream_code = body
+            .as_ref()
+            .and_then(crate::interaction_observation::upstream_body_code);
         self.protected_reasoning_rejected = matches!(status, None | Some(400 | 422))
             && body.as_ref().is_some_and(protected_reasoning_rejected);
         if !passthrough {
@@ -2213,5 +2216,41 @@ mod tests {
         }
 
         assert!(!health.is_healthy("provider:model"));
+    }
+
+    #[test]
+    fn upstream_body_error_codes_reach_the_diagnostic() {
+        // Connect trailer（包装形态）与裸 code 形态都应进入 upstream_code；
+        // Stravia 稳定码不受上游词表影响。
+        for (body, expected) in [
+            (
+                serde_json::json!({"error":{"code":"unavailable","message":"down"}}),
+                Some("unavailable"),
+            ),
+            (serde_json::json!({"code":"internal"}), Some("internal")),
+            (
+                serde_json::json!({"error":{"type":"rate_limit_error"}}),
+                Some("rate_limit_error"),
+            ),
+            (
+                serde_json::json!({"error":{"code":429,"message":"quota"}}),
+                None,
+            ),
+        ] {
+            let failure = super::AttemptFailure::upstream(
+                AiErrorKind::ServiceUnavailable,
+                None,
+                "upstream_stream_error",
+                "upstream stream error",
+                None,
+            )
+            .with_upstream_body(false, None, Some(body));
+            assert_eq!(
+                failure.diagnostic.upstream_code.as_deref(),
+                expected,
+                "body"
+            );
+            assert_eq!(failure.error.code, "upstream_stream_error");
+        }
     }
 }

@@ -63,6 +63,7 @@ function statusLabel(status: string): string {
     case 'running':
     case 'interrupted':
     case 'disconnected':
+    case 'superseded':
     case 'user_interrupted':
     case 'waiting_client':
       return observationStatusLabel(status)
@@ -170,10 +171,13 @@ export function observationEventSummary(
       }
       if (event.kind === 'run_finished') add(m.observation_event_reason(), payload.terminal_reason)
       if (event.kind === 'run_state_changed') {
-        add(
-          m.observation_event_reason(),
-          payload.reason === 'user_interrupted' ? m.observation_user_interrupted() : payload.reason,
-        )
+        const reason =
+          payload.reason === 'user_interrupted'
+            ? m.observation_user_interrupted()
+            : payload.reason === 'superseded'
+              ? m.observation_status_superseded()
+              : payload.reason
+        add(m.observation_event_reason(), reason)
       }
       if (event.kind === 'target_attempt_finished' || event.kind === 'platform_tool_finished') {
         duration('duration_ms', m.observation_duration())
@@ -244,6 +248,7 @@ export function observationEventSummary(
       add(m.failed_request_origin(), failureOriginLabel(error.source))
       httpStatus(error)
       add(m.observation_error_code(), error.code)
+      add(m.observation_upstream_error_code(), error.upstream_code)
       add(m.failed_request_error(), error.message)
       break
     }

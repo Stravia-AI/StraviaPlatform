@@ -107,6 +107,8 @@ Cross-protocol tool calls, reasoning, and usage reporting are preserved; request
 
 OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
 
+Devin preserves distinct completion reasons and signed or redacted thinking for compatible-source replay, including signatures received after the answer. Custom tool text is carried as a JSON `input` string rather than discarded. For Anthropic requests, an explicit `output_config.effort` takes precedence over `thinking.type` and its token budget.
+
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
 ![Editing a model — upstream targets in priority layers](docs/assets/model-routing.png)

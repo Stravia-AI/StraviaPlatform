@@ -340,10 +340,10 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 | `route_id` | TEXT NOT NULL | — | Effective Route ID |
 | `model_display_name` | TEXT | NULL | Display-name snapshot |
 | `request_model` | TEXT | NULL | Requested route model ID snapshot |
-| `status` | TEXT NOT NULL | — | Run lifecycle state |
+| `status` | TEXT NOT NULL | — | Run lifecycle state: `running`, `waiting_client`, `completed`, `failed`, `cancelled`, `interrupted`, `user_interrupted`, `disconnected`, `superseded` |
 | `terminal_reason` | TEXT | NULL | Stable terminal reason |
-| `failure_json` | TEXT | NULL | Final failure diagnostic snapshot (`source`, `code`, `message`, `status_code`); NULL when no diagnostic was recorded or for pre-0045 runs |
-| `user_interrupted` | BOOLEAN / INTEGER | `false` / `0` | Superseded by later User input |
+| `failure_json` | TEXT | NULL | Final failure diagnostic snapshot (`source`, `code`, `message`, `status_code`, `upstream_code`); NULL when no diagnostic was recorded or for pre-0045 runs |
+| `user_interrupted` | BOOLEAN / INTEGER | `false` / `0` | Interrupted by later User input; continued branches record `superseded` instead |
 | `background_active` | BIGINT / INTEGER | `0` | Active internal work count |
 | `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Process Debug state snapshotted at admission |
 | `client_output_committed` | BOOLEAN / INTEGER | `false` / `0` | Client Output Commit boundary |
@@ -408,7 +408,7 @@ Pre-admission decode, protocol, or authentication failures remain outside Princi
 | `status_code` | BIGINT / INTEGER NOT NULL | — | Client HTTP status |
 | `request_model` | TEXT | NULL | Requested route model ID snapshot |
 | `api_key_id`, `api_key_name` | TEXT | NULL | Authenticated caller snapshot; NULL for unauthenticated requests |
-| `failure_json` | TEXT | NULL | Failure diagnostic snapshot (`source`, `code`, `message`, `status_code`) |
+| `failure_json` | TEXT | NULL | Failure diagnostic snapshot (`source`, `code`, `message`, `status_code`, `upstream_code`) |
 | `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Debug state snapshotted at ingress |
 | `debug_status` | TEXT NOT NULL | — | Capture result |
 | `last_event_sequence` | BIGINT / INTEGER NOT NULL | — | Last applied persisted event |

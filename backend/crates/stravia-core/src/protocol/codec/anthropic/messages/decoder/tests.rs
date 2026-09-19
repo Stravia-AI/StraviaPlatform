@@ -45,3 +45,37 @@ fn output_effort_without_thinking_is_preserved() {
         Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
     );
 }
+
+#[test]
+fn explicit_effort_overrides_enabled_budget_and_disabled_thinking() {
+    for thinking in [
+        serde_json::json!({"type": "enabled", "budget_tokens": 1024, "display": "omitted"}),
+        serde_json::json!({"type": "disabled", "display": "omitted"}),
+    ] {
+        let request = AnthropicDecoder
+            .decode_request(request_with(serde_json::json!({
+                "thinking": thinking,
+                "output_config": {"effort": "max"}
+            })))
+            .unwrap();
+        assert_eq!(
+            request.reasoning.level,
+            Some(stravia_runtime_contract::thinking::ThinkingLevel::Max)
+        );
+        assert!(request.reasoning.enabled);
+        assert_eq!(request.reasoning.budget_tokens, None);
+        assert_eq!(request.reasoning.display.as_deref(), Some("omitted"));
+    }
+}
+
+#[test]
+fn explicit_effort_does_not_accept_unknown_thinking_type() {
+    assert!(
+        AnthropicDecoder
+            .decode_request(request_with(serde_json::json!({
+                "thinking": {"type": "unknown"},
+                "output_config": {"effort": "high"}
+            })))
+            .is_err()
+    );
+}

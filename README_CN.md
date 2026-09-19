@@ -107,6 +107,8 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
 
+Devin 保留不同的完成原因，以及可在来源兼容时回放的签名或隐藏思考，包括晚于正文到达的签名。Custom 工具的原始文本由 JSON `input` 字符串承载，不再丢弃。Anthropic 请求中显式的 `output_config.effort` 优先于 `thinking.type` 及其 token 预算。
+
 客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
 
 ![编辑模型 —— 上游目标按优先级分层](docs/assets/model-routing.png)

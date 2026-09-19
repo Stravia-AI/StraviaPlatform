@@ -90,7 +90,7 @@ describe('observation request failed event summary', () => {
       code: 'upstream_timeout',
       message: 'upstream connection reset while streaming',
       status_code: 504,
-    })
+      upstream_code: null,    })
     expect(summary.title).not.toBe(m.observation_event_unknown())
     expect(summary.title).toBeTruthy()
     expect(summary.note).toBeUndefined()
@@ -130,7 +130,7 @@ describe('observation request failed event summary', () => {
       code: 'upstream_timeout',
       message: 'upstream connection reset while streaming',
       status_code: 504,
-    }
+      upstream_code: null,    }
     const english = requestFailed(payload)
     const original = getLocale
     overwriteGetLocale(() => 'zh-CN')

@@ -129,6 +129,14 @@ impl AnthropicResponseFormatter {
         let mut content = Vec::new();
 
         for item in &resp.items {
+            if let MessageContent::Blocks(blocks) = &item.content {
+                for block in blocks {
+                    if let ContentBlock::RedactedThinking { data } = block {
+                        content
+                            .push(serde_json::json!({"type": "redacted_thinking", "data": data}));
+                    }
+                }
+            }
             if let Some((reasoning, signature)) = item.thinking_ref() {
                 if reasoning.trim().is_empty() {
                     continue;
@@ -502,6 +510,32 @@ impl AnthropicStreamFormatter {
                         && !signature.is_empty()
                     {
                         self.emit_thinking_signature(&mut events, signature);
+                    }
+                    if let MessageContent::Blocks(blocks) = &item.content {
+                        for block in blocks {
+                            if let ContentBlock::RedactedThinking { data } = block {
+                                self.ensure_message_start(&mut events);
+                                self.close_thinking_block_if_open(&mut events);
+                                self.close_text_block_if_open(&mut events);
+                                self.close_tool_block_if_open(&mut events);
+                                events.push(SseEvent::new(
+                                    Some("content_block_start"),
+                                    serde_json::json!({
+                                        "type": "content_block_start",
+                                        "index": self.block_index,
+                                        "content_block": {"type": "redacted_thinking", "data": data},
+                                    }).to_string(),
+                                ));
+                                events.push(SseEvent::new(
+                                    Some("content_block_stop"),
+                                    serde_json::json!({
+                                        "type": "content_block_stop", "index": self.block_index,
+                                    })
+                                    .to_string(),
+                                ));
+                                self.block_index += 1;
+                            }
+                        }
                     }
                 }
                 AiStreamDelta::TextDelta(text)

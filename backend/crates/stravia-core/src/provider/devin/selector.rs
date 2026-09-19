@@ -73,6 +73,13 @@ pub(crate) struct SelectorTraits {
 pub(crate) struct SelectorTable {
     pub default: String,
     pub selectors: Vec<String>,
+    /// Subset of `selectors` the catalog flags `is_model_router`. These must
+    /// be resolved through `AssignModel` before `GetChatMessage` — calling a
+    /// router uid directly is answered with the canned `unavailable:
+    /// third-party model provider` trailer. `None` means the table predates
+    /// router knowledge or was built without catalog entries — those uids are
+    /// "unknown" and still attempt assignment with fallback.
+    pub routers: Option<Vec<String>>,
 }
 
 /// Split a selector into family / level / trailing flags.
@@ -188,10 +195,14 @@ pub(crate) fn selector_from_alias(model_id: &str) -> String {
 
 /// Serialize a family's selector table into the metadata-extension value.
 pub(crate) fn table_extension_value(table: &SelectorTable) -> Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "default": table.default,
         "selectors": table.selectors,
-    })
+    });
+    if let Some(routers) = &table.routers {
+        value["routers"] = serde_json::json!(routers);
+    }
+    value
 }
 
 /// Read the selector table back out of a record's metadata extensions.
@@ -209,7 +220,20 @@ pub(crate) fn table_from_extensions(extensions: &BTreeMap<String, Value>) -> Opt
     if selectors.is_empty() || !selectors.iter().any(|s| s == &default) {
         return None;
     }
-    Some(SelectorTable { default, selectors })
+    // `routers` absent = written before the flag existed → `None` (unknown),
+    // NOT an empty known set — otherwise stale tables would skip AssignModel
+    // and replay into the canned router-uid failure.
+    let routers = table.get("routers").and_then(Value::as_array).map(|list| {
+        list.iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .filter(|s| selectors.contains(s))
+            .collect()
+    });
+    Some(SelectorTable {
+        default,
+        selectors,
+        routers,
+    })
 }
 
 /// Resolve a family's selector table + thinking control to the concrete
@@ -423,6 +447,7 @@ mod tests {
     #[test]
     fn resolve_prefers_1m_and_ordinary_lanes() {
         let table = SelectorTable {
+            routers: None,
             default: "glm-5-2-1m".into(),
             selectors: [
                 "glm-5-2",
@@ -463,6 +488,7 @@ mod tests {
         // `gpt-5-6-sol` carries 1M context with no `-1m` suffix: the whole set
         // is the pool, and `-priority` lanes lose to ordinary selectors.
         let table = SelectorTable {
+            routers: None,
             default: "gpt-5-6-sol-medium".into(),
             selectors: [
                 "gpt-5-6-sol-none",
@@ -492,6 +518,7 @@ mod tests {
     #[test]
     fn resolve_falls_to_speed_lane_only_when_no_ordinary_exists() {
         let table = SelectorTable {
+            routers: None,
             default: "swe-1-6-slow".into(),
             selectors: vec!["swe-1-6-slow".to_string()],
         };
@@ -506,6 +533,7 @@ mod tests {
     #[test]
     fn resolve_thinking_toggle_picks_flagged_members() {
         let table = SelectorTable {
+            routers: None,
             default: "claude-opus-4-6-1m".into(),
             selectors: [
                 "claude-opus-4-6",
@@ -531,6 +559,7 @@ mod tests {
     #[test]
     fn extension_table_round_trips_and_rejects_garbage() {
         let table = SelectorTable {
+            routers: None,
             default: "glm-5-2-1m".into(),
             selectors: vec!["glm-5-2-1m".into(), "glm-5-2".into()],
         };
@@ -552,6 +581,34 @@ mod tests {
             assert_eq!(table_from_extensions(&extensions), None);
         }
         assert_eq!(table_from_extensions(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn stale_table_without_routers_stays_unknown() {
+        let decode = |value: Value| {
+            let mut extensions = BTreeMap::new();
+            extensions.insert(SELECTOR_EXTENSION_KEY.to_string(), value);
+            table_from_extensions(&extensions).expect("table").routers
+        };
+        // Written before router knowledge existed: absence must NOT read as
+        // a known non-router set, or stale records skip AssignModel and the
+        // bare router uid replays into the canned `unavailable` trailer.
+        assert_eq!(
+            decode(serde_json::json!({"default": "swe-2", "selectors": ["swe-2"]})),
+            None
+        );
+        assert_eq!(
+            decode(serde_json::json!({
+                "default": "swe-2", "selectors": ["swe-2"], "routers": []
+            })),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            decode(serde_json::json!({
+                "default": "swe-2", "selectors": ["swe-2"], "routers": ["swe-2"]
+            })),
+            Some(vec!["swe-2".to_string()])
+        );
     }
 
     #[test]

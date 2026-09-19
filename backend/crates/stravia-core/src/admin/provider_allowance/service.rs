@@ -979,6 +979,7 @@ pub(super) fn monitor_requests(
             ],
             crate::protocol::codec::devin_connect::encode_client_metadata_request(
                 credential.trim(),
+                false,
             ),
         ),
         // 顺序即 fetch_commandcode 的调用顺序:whoami → credits → subscriptions → summary。

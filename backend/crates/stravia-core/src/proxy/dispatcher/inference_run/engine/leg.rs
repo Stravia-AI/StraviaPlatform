@@ -412,17 +412,13 @@ impl ModelLegConsume {
                         self.observer.record_failure(
                             crate::interaction_observation::FailureDiagnostic {
                                 source: Some("upstream".into()),
-                                code: Some(
-                                    error
-                                        .raw
-                                        .as_ref()
-                                        .and_then(|raw| raw.pointer("/error/code"))
-                                        .and_then(serde_json::Value::as_str)
-                                        .unwrap_or("upstream_stream_error")
-                                        .into(),
-                                ),
+                                code: Some("upstream_stream_error".into()),
                                 message: Some(error.message.clone()),
                                 status_code: error.status_code,
+                                upstream_code: error
+                                    .raw
+                                    .as_ref()
+                                    .and_then(crate::interaction_observation::upstream_body_code),
                             },
                         );
                     }
@@ -795,6 +791,7 @@ pub(super) fn record_marker_failure(
         code: Some("marker_publish_failed".into()),
         message: Some(error.to_string()),
         status_code: None,
+        upstream_code: None,
     });
 }
 

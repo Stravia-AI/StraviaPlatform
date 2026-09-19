@@ -12,7 +12,8 @@ pub(crate) mod selector;
 
 use crate::error::GatewayError;
 use crate::protocol::codec::devin_connect::{
-    GET_CHAT_MESSAGE_PATH, encode_get_chat_message_request, session_shape, wrap_request,
+    ASSIGN_MODEL_PATH, GET_CHAT_MESSAGE_PATH, ModelAssignment, decode_assign_model_response,
+    encode_assign_model_request, encode_get_chat_message_request, session_shape, wrap_request,
 };
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -24,6 +25,9 @@ use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::{
     ConstructedRequest, RequestContext, RequestPurpose, ResolvedTargetCapabilities,
 };
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
@@ -111,25 +115,32 @@ const METADATA: VendorMetadata = VendorMetadata {
 
 pub struct DevinVendor;
 
-/// Connect-RPC client headers mirrored from the reference transport
-/// (`connect-es` is what upstream sees from the official clients).
-fn connect_headers(session_token: &str) -> Result<HeaderMap, GatewayError> {
+/// Connect-RPC client headers mirrored from current devin CLI captures
+/// (3000.10.x): no User-Agent at all, a `sentry-trace` id per request, and
+/// no accept-encoding (response frames self-describe gzip). `streaming`
+/// switches Content-Type between the envelope codec and raw protobuf.
+fn connect_headers(session_token: &str, streaming: bool) -> Result<HeaderMap, GatewayError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_static("application/connect+proto"),
+        HeaderValue::from_static(if streaming {
+            "application/connect+proto"
+        } else {
+            "application/proto"
+        }),
     );
     headers.insert(
         HeaderName::from_static("connect-protocol-version"),
         HeaderValue::from_static("1"),
     );
     headers.insert(
-        HeaderName::from_static("connect-accept-encoding"),
-        HeaderValue::from_static("gzip"),
-    );
-    headers.insert(
-        reqwest::header::USER_AGENT,
-        HeaderValue::from_static("connect-es/2.0.0"),
+        HeaderName::from_static("sentry-trace"),
+        HeaderValue::from_str(&format!(
+            "{}-{}-1",
+            uuid::Uuid::new_v4().simple(),
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
+        ))
+        .map_err(|error| GatewayError::internal(error.into()))?,
     );
     headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
     // The upstream contract doubles the session token in the Authorization
@@ -149,6 +160,161 @@ fn session_token(api_key: &str) -> Result<&str, GatewayError> {
         ));
     }
     Ok(token)
+}
+
+/// AssignModel 解析缓存：jwt 绑 cascade_id，同 (uid, cascade) 会话内复用。
+/// 有界——键随会话数累积，触顶整体清空让会话重新解析。
+static ASSIGNMENTS: LazyLock<Mutex<HashMap<String, ModelAssignment>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// AssignModel resolves a router uid into the real model uid plus a
+/// cascade-bound assignment jwt carried at request field #26. Hitting a
+/// router uid directly is answered with the canned `unavailable:
+/// third-party model provider` trailer — a permanent failure disguised as
+/// transient. `Err` carries the real upstream failure so a known router can
+/// fail fast with the true cause instead of replaying the canned error.
+async fn assign_model(
+    ctx: &ProviderCtx<'_>,
+    session_token: &str,
+    router_uid: &str,
+    cascade_id: &str,
+) -> Result<Option<ModelAssignment>, String> {
+    let key = format!("{router_uid}|{cascade_id}");
+    if let Some(hit) = ASSIGNMENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+    {
+        return Ok(Some(hit.clone()));
+    }
+    let resolved = assign_model_uncached(ctx, session_token, router_uid, cascade_id).await;
+    if let Ok(Some(assignment)) = &resolved {
+        let mut cache = ASSIGNMENTS.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(key, assignment.clone());
+    }
+    resolved
+}
+
+#[cfg(test)]
+static ASSIGN_MODEL_TEST: Mutex<Option<ModelAssignment>> = Mutex::new(None);
+#[cfg(test)]
+static ASSIGN_MODEL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Reset the assignment cache + hook between tests — both are process-global
+/// and would otherwise leak state across cases. The returned guard
+/// serializes assign-sensitive tests: parallel cases would otherwise observe
+/// each other's hook values and call counts.
+#[cfg(test)]
+fn reset_assign_state() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ASSIGNMENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    *ASSIGN_MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    ASSIGN_MODEL_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    guard
+}
+
+async fn assign_model_uncached(
+    ctx: &ProviderCtx<'_>,
+    session_token: &str,
+    router_uid: &str,
+    cascade_id: &str,
+) -> Result<Option<ModelAssignment>, String> {
+    // Tests never reach upstream: the hook substitutes the whole call.
+    #[cfg(test)]
+    {
+        let _ = (ctx, session_token, router_uid, cascade_id);
+        ASSIGN_MODEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(ASSIGN_MODEL_TEST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone());
+    }
+    #[cfg(not(test))]
+    assign_model_http(ctx, session_token, router_uid, cascade_id).await
+}
+
+/// The real unary call — kept outside the test hook so the ignored live
+/// tests can exercise it against the actual endpoint. `Ok(None)` is an
+/// upstream-side empty/invalid assignment; `Err` is a transport or HTTP
+/// rejection carrying the Connect `code: message` when available.
+async fn assign_model_http(
+    ctx: &ProviderCtx<'_>,
+    session_token: &str,
+    router_uid: &str,
+    cascade_id: &str,
+) -> Result<Option<ModelAssignment>, String> {
+    let client = ctx
+        .gw
+        .http_client_for_provider(ctx.provider.use_proxy)
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, "devin AssignModel: no http client");
+            format!("http client: {error}")
+        })?;
+    let url = format!(
+        "{}{}",
+        ctx.egress_base_url.trim_end_matches('/'),
+        ASSIGN_MODEL_PATH
+    );
+    let response = client
+        .post(&url)
+        .headers(
+            connect_headers(session_token, false).map_err(|error| format!("headers: {error}"))?,
+        )
+        .body(encode_assign_model_request(
+            session_token,
+            router_uid,
+            cascade_id,
+        ))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, "devin AssignModel request failed");
+            error.to_string()
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response
+            .text()
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .map(|body| {
+                let pick = |key: &str| {
+                    body.pointer(&format!("/error/{key}"))
+                        .or_else(|| body.get(key))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                };
+                match (pick("code"), pick("message")) {
+                    (Some(code), Some(message)) => format!("{code}: {message}"),
+                    (None, Some(message)) => message,
+                    (Some(code), None) => code,
+                    (None, None) => String::new(),
+                }
+            })
+            .unwrap_or_default();
+        let detail = if detail.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status} {detail}")
+        };
+        tracing::debug!(%detail, "devin AssignModel rejected");
+        return Err(format!("AssignModel({router_uid}) rejected: {detail}"));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("AssignModel body: {error}"))?;
+    Ok(decode_assign_model_response(&body))
 }
 
 #[async_trait]
@@ -189,7 +355,7 @@ impl Vendor for DevinVendor {
             }
             RequestPurpose::Inference { .. } | RequestPurpose::Models { .. } => purpose.endpoint(),
         };
-        let headers = connect_headers(session_token(ctx.api_key)?)?;
+        let headers = connect_headers(session_token(ctx.api_key)?, true)?;
         Ok(ConstructedRequest { url, headers })
     }
 
@@ -233,8 +399,8 @@ impl Vendor for DevinVendor {
                 None
             }
         };
-        if let Some(table) = table {
-            req.model = selector::resolve_selector(&table, req.reasoning.target_control.as_ref());
+        if let Some(table) = &table {
+            req.model = selector::resolve_selector(table, req.reasoning.target_control.as_ref());
         } else if let Some(TargetThinkingControl::Effort { value }) = &req.reasoning.target_control
         {
             req.model = selector::selector_with_level(&req.model, value);
@@ -242,13 +408,52 @@ impl Vendor for DevinVendor {
         crate::protocol::codec::tool_correlation::normalize_request_tool_results(req);
 
         let token = session_token(ctx.api_key)?;
-        // Session shape is derived statelessly from the request: turn-1 stays
-        // on the verified fresh-uuid wire, while a conversation that already
-        // has assistant output pins #15/#16 like the real CLI does.
+        // Session shape is derived deterministically from the request so the
+        // cascade id is computable before AssignModel binds a jwt to it.
         let shape = session_shape(req, token);
-        let proto = encode_get_chat_message_request(req, token, &shape).map_err(|error| {
-            GatewayError::bad_request("devin_unrepresentable", error.to_string())
-        })?;
+        // Catalog-flagged routers MUST resolve through AssignModel — the
+        // upstream answers a bare router uid with the canned `unavailable:
+        // third-party model provider` trailer, so a failed assignment is
+        // propagated rather than replayed into a guaranteed failure.
+        // Catalog-flagged non-routers skip the call; uids the catalog does
+        // not know (manual adds, stale tables) still attempt it but tolerate
+        // failure, falling back to the bare uid.
+        let router_known = table
+            .as_ref()
+            .and_then(|t| t.routers.as_ref())
+            .map(|routers| routers.iter().any(|r| r == &req.model));
+        let assignment = if router_known == Some(false) {
+            None
+        } else {
+            match assign_model(ctx, token, &req.model, &shape.cascade_id).await {
+                Ok(assignment) => {
+                    if router_known == Some(true) && assignment.is_none() {
+                        return Err(GatewayError::provider_unavailable(
+                            "devin",
+                            format!("AssignModel({}) returned an empty assignment", req.model),
+                        ));
+                    }
+                    assignment
+                }
+                Err(error) if router_known == Some(true) => {
+                    return Err(GatewayError::provider_unavailable("devin", error));
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "devin AssignModel failed; falling back to bare uid");
+                    None
+                }
+            }
+        };
+        if let Some(assignment) = &assignment {
+            req.model = assignment.model_uid.clone();
+        }
+        let proto = encode_get_chat_message_request(
+            req,
+            token,
+            &shape,
+            assignment.as_ref().map(|a| a.jwt.as_str()),
+        )
+        .map_err(|error| GatewayError::bad_request("devin_unrepresentable", error.to_string()))?;
         let framed = wrap_request(&proto).map_err(GatewayError::internal)?;
         let url = format!(
             "{}{}",
@@ -257,7 +462,7 @@ impl Vendor for DevinVendor {
         );
         Ok(OutboundRequest {
             url,
-            headers: connect_headers(token)?,
+            headers: connect_headers(token, true)?,
             body: Value::Null,
             body_bytes: Some(framed),
         })
@@ -342,7 +547,7 @@ mod tests {
 
     #[test]
     fn connect_headers_double_the_session_token() {
-        let headers = connect_headers("tok").unwrap();
+        let headers = connect_headers("tok", true).unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Basic tok-tok"
@@ -359,13 +564,16 @@ mod tests {
                 .unwrap(),
             "1"
         );
+        // Current CLI captures carry a sentry-trace and no User-Agent or
+        // accept-encoding.
+        assert!(headers.get("sentry-trace").is_some());
+        assert!(headers.get("user-agent").is_none());
+        assert!(headers.get("connect-accept-encoding").is_none());
+        // Unary calls ride raw protobuf.
+        let unary = connect_headers("tok", false).unwrap();
         assert_eq!(
-            headers
-                .get("connect-accept-encoding")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "gzip"
+            unary.get(CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "application/proto"
         );
     }
 
@@ -398,15 +606,15 @@ mod tests {
             ],
         );
         let shape = session_shape(&req, "session-token");
-        assert_eq!(shape.turn, 2);
         assert_eq!(
-            shape.session_id,
-            session_shape(&req, "session-token").session_id
+            shape.cascade_id,
+            session_shape(&req, "session-token").cascade_id
         );
     }
 
     #[tokio::test]
     async fn build_request_emits_connect_envelope_bytes() {
+        let _guard = reset_assign_state();
         let provider = test_provider();
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
@@ -450,6 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_rewrites_selector_to_requested_effort() {
+        let _guard = reset_assign_state();
         let provider = test_provider();
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
@@ -493,6 +702,7 @@ mod tests {
     /// to the family default.
     #[tokio::test]
     async fn build_request_resolves_family_selector_table() {
+        let _guard = reset_assign_state();
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
             ..Default::default()
@@ -532,6 +742,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+                routers: Some(Vec::new()),
             }),
         );
         gw.storage
@@ -601,6 +812,274 @@ mod tests {
         assert!(proto.contains("gpt-5-6-sol-medium"));
     }
 
+    /// Selector-table-driven router gating: catalog-flagged routers resolve
+    /// through AssignModel and carry the jwt at #26; known non-routers skip
+    /// the call; a failed router assignment fails fast instead of replaying
+    /// into the guaranteed canned upstream error.
+    #[tokio::test]
+    async fn build_request_assigns_router_and_carries_jwt() {
+        let _guard = reset_assign_state();
+        let gw = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let provider = gw
+            .storage
+            .providers()
+            .create(crate::db::models::CreateProviderRecord {
+                name: "devin".into(),
+                vendor: Some("devin".into()),
+                protocol: "devin-connect".into(),
+                base_url: DEFAULT_BASE_URL.into(),
+                preset_key: Some("devin".into()),
+                channel: Some("devin".into()),
+                models_source: None,
+                static_models: None,
+                api_key: "session-token".into(),
+                adapter_credentials: r#"{"apiKey":"session-token"}"#.into(),
+                vendor_options: "{}".into(),
+                auth_mode: "oauth".into(),
+                use_proxy: false,
+            })
+            .await
+            .unwrap();
+        let mut metadata = crate::provider_models::ProviderModelMetadata::bare("swe-2");
+        metadata.extensions.insert(
+            selector::SELECTOR_EXTENSION_KEY.to_string(),
+            selector::table_extension_value(&selector::SelectorTable {
+                default: "swe-2-max".into(),
+                selectors: vec!["swe-2-max".into()],
+                routers: Some(vec!["swe-2-max".into()]),
+            }),
+        );
+        gw.storage
+            .provider_models()
+            .create(crate::provider_models::NewProviderModelRecord {
+                provider_id: provider.id.clone(),
+                model_id: "swe-2".into(),
+                source_kind: crate::provider_models::ProviderModelSourceKind::Discovered,
+                metadata_source_provider_id: None,
+                presence: crate::provider_models::ProviderModelPresence::Present,
+                selection_policy: crate::provider_models::ProviderModelSelectionPolicy::Auto,
+                metadata,
+            })
+            .await
+            .unwrap();
+
+        // Router + injected assignment → #21 resolved uid + #26 jwt.
+        *ASSIGN_MODEL_TEST.lock().unwrap() = Some(ModelAssignment {
+            jwt: "jwt-xyz".into(),
+            model_uid: "swe-2-max-resolved".into(),
+        });
+        let mut req = AiRequest::new(
+            "swe-2",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            egress_base_url: DEFAULT_BASE_URL,
+            api_key: &provider.api_key,
+            actual_model: "swe-2",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: true,
+        };
+        let outbound = DevinVendor.build_request(&mut req, &ctx).await.unwrap();
+        let body = outbound.body_bytes.expect("binary body");
+        let proto = String::from_utf8_lossy(&body[5..]);
+        assert!(proto.contains("swe-2-max-resolved"));
+        assert!(proto.contains("jwt-xyz"));
+        assert!(!proto.contains("swe-2-max\""));
+
+        // A second request on the same (uid, cascade) reuses the cache —
+        // the hook is not consulted again.
+        let calls = ASSIGN_MODEL_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let mut req2 = AiRequest::new(
+            "swe-2",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        DevinVendor.build_request(&mut req2, &ctx).await.unwrap();
+        assert_eq!(
+            ASSIGN_MODEL_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            calls
+        );
+    }
+
+    /// Known non-router: the catalog says this uid needs no assignment, so
+    /// AssignModel is not called at all.
+    #[tokio::test]
+    async fn build_request_skips_assign_for_known_non_router() {
+        let _guard = reset_assign_state();
+        let gw = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let provider = gw
+            .storage
+            .providers()
+            .create(crate::db::models::CreateProviderRecord {
+                name: "devin".into(),
+                vendor: Some("devin".into()),
+                protocol: "devin-connect".into(),
+                base_url: DEFAULT_BASE_URL.into(),
+                preset_key: Some("devin".into()),
+                channel: Some("devin".into()),
+                models_source: None,
+                static_models: None,
+                api_key: "session-token".into(),
+                adapter_credentials: r#"{"apiKey":"session-token"}"#.into(),
+                vendor_options: "{}".into(),
+                auth_mode: "oauth".into(),
+                use_proxy: false,
+            })
+            .await
+            .unwrap();
+        let mut metadata = crate::provider_models::ProviderModelMetadata::bare("swe-1-7");
+        metadata.extensions.insert(
+            selector::SELECTOR_EXTENSION_KEY.to_string(),
+            selector::table_extension_value(&selector::SelectorTable {
+                default: "swe-1-7".into(),
+                selectors: vec!["swe-1-7".into()],
+                routers: Some(Vec::new()),
+            }),
+        );
+        gw.storage
+            .provider_models()
+            .create(crate::provider_models::NewProviderModelRecord {
+                provider_id: provider.id.clone(),
+                model_id: "swe-1-7".into(),
+                source_kind: crate::provider_models::ProviderModelSourceKind::Discovered,
+                metadata_source_provider_id: None,
+                presence: crate::provider_models::ProviderModelPresence::Present,
+                selection_policy: crate::provider_models::ProviderModelSelectionPolicy::Auto,
+                metadata,
+            })
+            .await
+            .unwrap();
+        let mut req = AiRequest::new(
+            "swe-1-7",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            egress_base_url: DEFAULT_BASE_URL,
+            api_key: &provider.api_key,
+            actual_model: "swe-1-7",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: true,
+        };
+        DevinVendor.build_request(&mut req, &ctx).await.unwrap();
+        assert_eq!(
+            ASSIGN_MODEL_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(req.model, "swe-1-7");
+    }
+
+    /// Known router + failed/empty assignment → the build fails with the
+    /// real cause rather than emitting a bare-uid request guaranteed to hit
+    /// the canned `unavailable` trailer.
+    #[tokio::test]
+    async fn build_request_fails_fast_when_router_assignment_fails() {
+        let _guard = reset_assign_state();
+        let gw = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let provider = gw
+            .storage
+            .providers()
+            .create(crate::db::models::CreateProviderRecord {
+                name: "devin".into(),
+                vendor: Some("devin".into()),
+                protocol: "devin-connect".into(),
+                base_url: DEFAULT_BASE_URL.into(),
+                preset_key: Some("devin".into()),
+                channel: Some("devin".into()),
+                models_source: None,
+                static_models: None,
+                api_key: "session-token".into(),
+                adapter_credentials: r#"{"apiKey":"session-token"}"#.into(),
+                vendor_options: "{}".into(),
+                auth_mode: "oauth".into(),
+                use_proxy: false,
+            })
+            .await
+            .unwrap();
+        let mut metadata = crate::provider_models::ProviderModelMetadata::bare("swe-2");
+        metadata.extensions.insert(
+            selector::SELECTOR_EXTENSION_KEY.to_string(),
+            selector::table_extension_value(&selector::SelectorTable {
+                default: "swe-2-max".into(),
+                selectors: vec!["swe-2-max".into()],
+                routers: Some(vec!["swe-2-max".into()]),
+            }),
+        );
+        gw.storage
+            .provider_models()
+            .create(crate::provider_models::NewProviderModelRecord {
+                provider_id: provider.id.clone(),
+                model_id: "swe-2".into(),
+                source_kind: crate::provider_models::ProviderModelSourceKind::Discovered,
+                metadata_source_provider_id: None,
+                presence: crate::provider_models::ProviderModelPresence::Present,
+                selection_policy: crate::provider_models::ProviderModelSelectionPolicy::Auto,
+                metadata,
+            })
+            .await
+            .unwrap();
+        // Hook returns None → assignment resolution failed upstream.
+        let mut req = AiRequest::new(
+            "swe-2",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            egress_base_url: DEFAULT_BASE_URL,
+            api_key: &provider.api_key,
+            actual_model: "swe-2",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: true,
+        };
+        let error = DevinVendor.build_request(&mut req, &ctx).await.unwrap_err();
+        assert!(error.message().contains("AssignModel"));
+    }
+
     #[test]
     fn family_metadata_exports_levels_as_effort_options() {
         let entry = |selector: &str| crate::protocol::codec::devin_connect::DevinModelConfig {
@@ -611,6 +1090,7 @@ mod tests {
             context_window: Some(400_000),
             alias: Some("claude-sonnet-5".into()),
             short_alias: None,
+            is_router: false,
             cost: None,
         };
         let entries = vec![
@@ -694,20 +1174,8 @@ mod tests {
         assert_eq!(error.http_status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     }
 
-    /// Live upstream verification — ignored by default. Provide the session
-    /// token via `STRAVIA_DEVIN_LIVE_TOKEN` or `<repo>/.scratch/devin-token.txt`
-    /// (gitignored); the model selector can be overridden with
-    /// `STRAVIA_DEVIN_LIVE_MODEL` (defaults to `swe-1-7`, which does not
-    /// consume the weekly quota bucket on Pro per the reference probes).
-    ///
-    /// Run: `cargo test -p stravia-core devin::tests::live -- --ignored --nocapture`
-    #[tokio::test]
-    #[ignore = "calls the production Devin Connect endpoint"]
-    async fn live_get_chat_message_round_trip() {
-        use futures::StreamExt;
-        use stravia_runtime_contract::protocol::ir::AiStreamDelta;
-
-        let token = std::env::var("STRAVIA_DEVIN_LIVE_TOKEN")
+    fn live_token() -> String {
+        std::env::var("STRAVIA_DEVIN_LIVE_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -723,7 +1191,68 @@ mod tests {
             .expect(
                 "set STRAVIA_DEVIN_LIVE_TOKEN or write .scratch/devin-token.txt \
                  (the `devin-session-token` cookie value from app.devin.ai)",
-            );
+            )
+    }
+
+    /// Live upstream verification — ignored by default. Provide the session
+    /// token via `STRAVIA_DEVIN_LIVE_TOKEN` or `<repo>/.scratch/devin-token.txt`
+    /// (gitignored); the model selector can be overridden with
+    /// `STRAVIA_DEVIN_LIVE_MODEL` (defaults to `swe-1-7`, which does not
+    /// consume the weekly quota bucket on Pro per the reference probes).
+    ///
+    /// Run: `cargo test -p stravia-core devin::tests::live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "calls the production Devin Connect endpoint"]
+    async fn live_assign_model() {
+        let token = live_token();
+        let provider = Provider {
+            api_key: token.clone(),
+            auth_mode: "api_key".into(),
+            ..test_provider()
+        };
+        let gw = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            egress_base_url: DEFAULT_BASE_URL,
+            api_key: &provider.api_key,
+            actual_model: "swe-2-max",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: true,
+        };
+        let assignment = assign_model_http(&ctx, &token, "swe-2-max", &Uuid::new_v4().to_string())
+            .await
+            .expect("AssignModel should succeed")
+            .expect("AssignModel should resolve swe-2-max");
+        assert!(!assignment.jwt.is_empty());
+        assert!(!assignment.model_uid.is_empty());
+        eprintln!(
+            "AssignModel swe-2-max -> model_uid={} jwt_len={}",
+            assignment.model_uid,
+            assignment.jwt.len()
+        );
+    }
+
+    /// Live upstream verification — ignored by default. Provide the session
+    /// token via `STRAVIA_DEVIN_LIVE_TOKEN` or `<repo>/.scratch/devin-token.txt`
+    /// (gitignored); the model selector can be overridden with
+    /// `STRAVIA_DEVIN_LIVE_MODEL` (defaults to `swe-1-7`, which does not
+    /// consume the weekly quota bucket on Pro per the reference probes).
+    ///
+    /// Run: `cargo test -p stravia-core devin::tests::live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "calls the production Devin Connect endpoint"]
+    async fn live_get_chat_message_round_trip() {
+        use futures::StreamExt;
+        use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+        let token = live_token();
         let model = std::env::var("STRAVIA_DEVIN_LIVE_MODEL")
             .ok()
             .map(|value| value.trim().to_string())
@@ -845,7 +1374,9 @@ mod tests {
             .header("content-type", "application/proto")
             .header("connect-protocol-version", "1")
             .header("authorization", format!("Basic {token}-{token}"))
-            .body(crate::protocol::codec::devin_connect::encode_client_metadata_request(&token))
+            .body(
+                crate::protocol::codec::devin_connect::encode_client_metadata_request(&token, true),
+            )
             .send()
             .await
             .expect("connect to server.codeium.com");

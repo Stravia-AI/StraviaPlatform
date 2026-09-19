@@ -163,6 +163,16 @@ impl AnthropicDecoder {
         // ── Reasoning config ──────────────────────────────────────────────────
         let output_effort = parse_output_effort(req.output_config.as_ref())?;
         let reasoning = match req.thinking.as_ref() {
+            Some(thinking) if output_effort.is_some() => {
+                if !matches!(thinking.kind.as_str(), "enabled" | "disabled" | "adaptive") {
+                    anyhow::bail!("unsupported Anthropic thinking type: {}", thinking.kind);
+                }
+                // 显式档位优先于开关和预算，不能把冲突预算带到 Target 选择阶段。
+                reasoning_from_effort(
+                    output_effort.as_deref().expect("explicit effort"),
+                    thinking.display.clone(),
+                )?
+            }
             Some(thinking) if thinking.kind == "adaptive" => reasoning_from_effort(
                 output_effort.as_deref().unwrap_or("high"),
                 thinking.display.clone(),
@@ -328,6 +338,9 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                             thinking,
                             signature,
                         });
+                    }
+                    AnthropicContentBlock::RedactedThinking { data } => {
+                        content_blocks.push(ContentBlock::RedactedThinking { data });
                     }
                     AnthropicContentBlock::Image {
                         source,
@@ -505,6 +518,9 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                     thinking,
                     signature,
                 });
+            }
+            AnthropicContentBlock::RedactedThinking { data } => {
+                user_blocks.push(ContentBlock::RedactedThinking { data });
             }
             AnthropicContentBlock::Image {
                 source,

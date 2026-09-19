@@ -3,6 +3,7 @@ export interface FailureDiagnostic {
   code: string | null
   message: string | null
   status_code: number | null
+  upstream_code: string | null
 }
 
 export type FailedRequestQuery = Omit<ForestQuery, 'status'>

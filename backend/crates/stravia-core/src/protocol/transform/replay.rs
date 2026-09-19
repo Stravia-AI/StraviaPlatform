@@ -163,7 +163,8 @@ fn needs_replay(block: &ContentBlock, role: Role, target: Protocol, preserve: bo
             match target {
                 Protocol::AnthropicMessages
                 | Protocol::BedrockConverse
-                | Protocol::OpenResponses => {
+                | Protocol::OpenResponses
+                | Protocol::DevinConnect => {
                     !(preserve
                         && signature
                             .as_ref()
@@ -174,15 +175,18 @@ fn needs_replay(block: &ContentBlock, role: Role, target: Protocol, preserve: bo
                 | Protocol::WatsonxTextChat
                 | Protocol::CohereChat
                 | Protocol::GatewayLanguageModel
-                | Protocol::CommandCode
-                | Protocol::DevinConnect => !preserve || signature.is_some(),
+                | Protocol::CommandCode => !preserve || signature.is_some(),
             }
         }
         ContentBlock::Reasoning { .. } => {
-            !(preserve && role == Role::Assistant && target == Protocol::OpenResponses)
+            !(preserve
+                && role == Role::Assistant
+                && matches!(target, Protocol::OpenResponses | Protocol::DevinConnect))
         }
         ContentBlock::RedactedThinking { .. } => {
-            !(preserve && role == Role::Assistant && target == Protocol::AnthropicMessages)
+            !(preserve
+                && role == Role::Assistant
+                && matches!(target, Protocol::AnthropicMessages | Protocol::DevinConnect))
         }
         _ => false,
     }

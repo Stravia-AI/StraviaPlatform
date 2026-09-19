@@ -94,7 +94,7 @@ function failureDetail(events: ObservationEvent[]): FailedRequestDetail {
       model: null,
       model_display_name: null,
       services: [],
-      error: { source: 'upstream', code: 'upstream_timeout', message: 'boom', status_code: 504 },
+      error: { source: 'upstream', code: 'upstream_timeout', message: 'boom', status_code: 504, upstream_code: null },
       interaction_id: null,
       root_id: null,
       run_id: null,

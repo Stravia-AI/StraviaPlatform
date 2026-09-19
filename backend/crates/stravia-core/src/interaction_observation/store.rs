@@ -277,6 +277,18 @@ impl ObservationStore {
                 {
                     interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
                 }
+                if admission.parent_interaction_id.is_none()
+                    && let Some(parent_run) = admission.parent_run_id
+                {
+                    supersede_waiting_parent_sqlite(
+                        &mut tx,
+                        admission.interaction_id,
+                        parent_run,
+                        &admission.start.id,
+                        admission.now,
+                    )
+                    .await?;
+                }
                 let sequence = next_sqlite(&mut tx).await?;
                 sqlx::query("INSERT OR IGNORE INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
@@ -321,6 +333,18 @@ impl ObservationStore {
                     && let Some(parent) = admission.parent_interaction_id
                 {
                     interrupt_predecessors_postgres(&mut tx, parent, admission.now).await?;
+                }
+                if admission.parent_interaction_id.is_none()
+                    && let Some(parent_run) = admission.parent_run_id
+                {
+                    supersede_waiting_parent_postgres(
+                        &mut tx,
+                        admission.interaction_id,
+                        parent_run,
+                        &admission.start.id,
+                        admission.now,
+                    )
+                    .await?;
                 }
                 let sequence: i64 =
                     sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
@@ -943,7 +967,7 @@ impl ObservationStore {
         match self {
             Self::Sqlite(pool) => {
                 let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-                let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id)")
+                let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id)")
                     .bind(run_id).fetch_optional(&mut *tx).await?;
                 let Some(interaction) = interaction else {
                     return Ok(None);
@@ -953,7 +977,7 @@ impl ObservationStore {
                     return Ok(None);
                 }
                 let row: Option<(String, i64)> = sqlx::query_as(
-                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=? WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id) RETURNING interaction_id,expires_at",
+                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=? WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) RETURNING interaction_id,expires_at",
                 ).bind(now).bind(run_id).fetch_optional(&mut *tx).await?;
                 let Some((interaction, expiry)) = row else {
                     return Ok(None);
@@ -994,7 +1018,7 @@ impl ObservationStore {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=$1 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id)")
+                let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=$1 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id)")
                     .bind(run_id).fetch_optional(&mut *tx).await?;
                 let Some(interaction) = interaction else {
                     return Ok(None);
@@ -1004,7 +1028,7 @@ impl ObservationStore {
                     return Ok(None);
                 }
                 let row: Option<(String, i64)> = sqlx::query_as(
-                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=$1 WHERE id=$2 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id) RETURNING interaction_id,expires_at",
+                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=$1 WHERE id=$2 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) RETURNING interaction_id,expires_at",
                 ).bind(now).bind(run_id).fetch_optional(&mut *tx).await?;
                 let Some((interaction, expiry)) = row else {
                     return Ok(None);
@@ -1246,7 +1270,7 @@ impl ObservationStore {
                     .into_iter()
                     .map(|(id, at, seq)| (id, (at, seq)))
                     .collect();
-                let waiting: Vec<(String, String, String, i64)> = sqlx::query_as("SELECT r.interaction_id,r.id,r.status,r.expires_at FROM inference_run_observations r WHERE r.status='waiting_client' AND EXISTS(SELECT 1 FROM interaction_observations i WHERE i.id=r.interaction_id AND i.status IN ('running','waiting_client')) AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) ORDER BY r.interaction_id,r.id").fetch_all(&mut *tx).await?;
+                let waiting: Vec<(String, String, String, i64)> = sqlx::query_as("SELECT r.interaction_id,r.id,r.status,r.expires_at FROM inference_run_observations r WHERE r.status='waiting_client' AND EXISTS(SELECT 1 FROM interaction_observations i WHERE i.id=r.interaction_id AND i.status IN ('running','waiting_client')) AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id) ORDER BY r.interaction_id,r.id").fetch_all(&mut *tx).await?;
                 let existing: std::collections::HashSet<_> =
                     runs.iter().map(|run| run.1.as_str()).collect();
                 let mut pending = Vec::new();
@@ -1309,7 +1333,7 @@ impl ObservationStore {
                     .into_iter()
                     .map(|(id, at, seq)| (id, (at, seq)))
                     .collect();
-                let waiting: Vec<(String, String, String, i64)> = sqlx::query_as("SELECT r.interaction_id,r.id,r.status,r.expires_at FROM inference_run_observations r WHERE r.status='waiting_client' AND EXISTS(SELECT 1 FROM interaction_observations i WHERE i.id=r.interaction_id AND i.status IN ('running','waiting_client')) AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) ORDER BY r.interaction_id,r.id").fetch_all(&mut *tx).await?;
+                let waiting: Vec<(String, String, String, i64)> = sqlx::query_as("SELECT r.interaction_id,r.id,r.status,r.expires_at FROM inference_run_observations r WHERE r.status='waiting_client' AND EXISTS(SELECT 1 FROM interaction_observations i WHERE i.id=r.interaction_id AND i.status IN ('running','waiting_client')) AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id) ORDER BY r.interaction_id,r.id").fetch_all(&mut *tx).await?;
                 let existing: std::collections::HashSet<_> =
                     runs.iter().map(|run| run.1.as_str()).collect();
                 let mut pending = Vec::new();
@@ -1405,22 +1429,27 @@ fn finish_payload(outcome: &RunOutcome, interrupted: bool) -> anyhow::Result<Val
     Ok(payload)
 }
 
+/// 新增 User 输入打断父 Interaction 时的前驱清扫：仍在执行的 Run 仅打标记、终态
+/// 由 finish 写入；叶子等待分支真正被输入中断记 user_interrupted；已有续接 Run 的
+/// 等待分支其实早被接替，记 superseded 而非误标中断。
 async fn interrupt_predecessors_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     interaction_id: &str,
     now: i64,
 ) -> anyhow::Result<()> {
-    let runs:Vec<(String,String,i64)>=sqlx::query_as("SELECT id,status,expires_at FROM inference_run_observations WHERE interaction_id=? AND status IN ('running','waiting_client')").bind(interaction_id).fetch_all(&mut **tx).await?;
+    let runs:Vec<(String,String,i64,bool)>=sqlx::query_as("SELECT id,status,expires_at,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) FROM inference_run_observations WHERE interaction_id=? AND status IN ('running','waiting_client')").bind(interaction_id).fetch_all(&mut **tx).await?;
     let mut last = None;
-    for (rid, old_status, expires_at) in runs {
+    for (rid, old_status, expires_at, leaf) in runs {
         let seq = next_sqlite(tx).await?;
-        let status = if old_status == "waiting_client" {
-            "user_interrupted"
-        } else {
-            "running"
+        let (status, reason) = match (old_status.as_str(), leaf) {
+            ("waiting_client", true) => ("user_interrupted", "user_interrupted"),
+            ("waiting_client", false) => ("superseded", "superseded"),
+            _ => (old_status.as_str(), "user_interrupted"),
         };
-        sqlx::query("UPDATE inference_run_observations SET user_interrupted=1,status=?,terminal_reason='user_interrupted',finished_at=CASE WHEN ?='user_interrupted' THEN COALESCE(finished_at,?) ELSE finished_at END,last_active_at=?,last_event_sequence=? WHERE id=?").bind(status).bind(status).bind(now).bind(now).bind(seq).bind(&rid).execute(&mut **tx).await?;
-        let payload = serde_json::json!({"status":status,"user_interrupted":true,"reason":"user_interrupted"});
+        let interrupted = reason == "user_interrupted";
+        sqlx::query("UPDATE inference_run_observations SET user_interrupted=?,status=?,terminal_reason=?,finished_at=CASE WHEN ?='user_interrupted' THEN COALESCE(finished_at,?) ELSE finished_at END,last_active_at=?,last_event_sequence=? WHERE id=?").bind(interrupted).bind(status).bind(reason).bind(status).bind(now).bind(now).bind(seq).bind(&rid).execute(&mut **tx).await?;
+        let payload =
+            serde_json::json!({"status":status,"user_interrupted":interrupted,"reason":reason});
         insert_event_sqlite(
             tx,
             EventInsert {
@@ -1447,19 +1476,21 @@ async fn interrupt_predecessors_postgres(
     interaction_id: &str,
     now: i64,
 ) -> anyhow::Result<()> {
-    let runs:Vec<(String,String,i64)>=sqlx::query_as("SELECT id,status,expires_at FROM inference_run_observations WHERE interaction_id=$1 AND status IN ('running','waiting_client')").bind(interaction_id).fetch_all(&mut **tx).await?;
+    let runs:Vec<(String,String,i64,bool)>=sqlx::query_as("SELECT id,status,expires_at,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) FROM inference_run_observations WHERE interaction_id=$1 AND status IN ('running','waiting_client')").bind(interaction_id).fetch_all(&mut **tx).await?;
     let mut last = None;
-    for (rid, old_status, expires_at) in runs {
+    for (rid, old_status, expires_at, leaf) in runs {
         let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
             .fetch_one(&mut **tx)
             .await?;
-        let status = if old_status == "waiting_client" {
-            "user_interrupted"
-        } else {
-            "running"
+        let (status, reason) = match (old_status.as_str(), leaf) {
+            ("waiting_client", true) => ("user_interrupted", "user_interrupted"),
+            ("waiting_client", false) => ("superseded", "superseded"),
+            _ => (old_status.as_str(), "user_interrupted"),
         };
-        sqlx::query("UPDATE inference_run_observations SET user_interrupted=TRUE,status=$1,terminal_reason='user_interrupted',finished_at=CASE WHEN $1='user_interrupted' THEN COALESCE(finished_at,$2) ELSE finished_at END,last_active_at=$2,last_event_sequence=$3 WHERE id=$4").bind(status).bind(now).bind(seq).bind(&rid).execute(&mut **tx).await?;
-        let payload = serde_json::json!({"status":status,"user_interrupted":true,"reason":"user_interrupted"});
+        let interrupted = reason == "user_interrupted";
+        sqlx::query("UPDATE inference_run_observations SET user_interrupted=$1,status=$2,terminal_reason=$3,finished_at=CASE WHEN $2='user_interrupted' THEN COALESCE(finished_at,$4) ELSE finished_at END,last_active_at=$4,last_event_sequence=$5 WHERE id=$6").bind(interrupted).bind(status).bind(reason).bind(now).bind(seq).bind(&rid).execute(&mut **tx).await?;
+        let payload =
+            serde_json::json!({"status":status,"user_interrupted":interrupted,"reason":reason});
         insert_event_postgres(
             tx,
             EventInsert {
@@ -1479,6 +1510,97 @@ async fn interrupt_predecessors_postgres(
     if let Some(seq) = last {
         recompute_status_postgres(tx, interaction_id, now, seq).await?;
     }
+    Ok(())
+}
+
+/// 续接准入证明客户端已经回来：仍停在 waiting_client 的父 Run 直接终结为
+/// superseded，不再滞留到被后续新输入清扫或断连清扫误标。
+async fn supersede_waiting_parent_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    interaction_id: &str,
+    parent_run_id: &str,
+    superseded_by: &str,
+    now: i64,
+) -> anyhow::Result<()> {
+    let parent: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status,expires_at FROM inference_run_observations WHERE id=? AND interaction_id=?",
+    )
+    .bind(parent_run_id)
+    .bind(interaction_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((status, expires_at)) = parent else {
+        return Ok(());
+    };
+    if status != "waiting_client" {
+        return Ok(());
+    }
+    let seq = next_sqlite(tx).await?;
+    let changed = sqlx::query("UPDATE inference_run_observations SET status='superseded',terminal_reason='superseded',last_active_at=?,last_event_sequence=? WHERE id=? AND status='waiting_client'")
+        .bind(now).bind(seq).bind(parent_run_id).execute(&mut **tx).await?.rows_affected();
+    if changed == 0 {
+        return Ok(());
+    }
+    let payload = serde_json::json!({"status":"superseded","reason":"superseded","superseded_by":superseded_by});
+    insert_event_sqlite(
+        tx,
+        EventInsert {
+            sequence: seq,
+            occurred_at: now,
+            interaction_id: Some(interaction_id),
+            run_id: Some(parent_run_id),
+            rejection_id: None,
+            kind: "run_state_changed",
+            payload: &payload,
+            expires_at,
+        },
+    )
+    .await?;
+    Ok(())
+}
+async fn supersede_waiting_parent_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    interaction_id: &str,
+    parent_run_id: &str,
+    superseded_by: &str,
+    now: i64,
+) -> anyhow::Result<()> {
+    let parent: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status,expires_at FROM inference_run_observations WHERE id=$1 AND interaction_id=$2",
+    )
+    .bind(parent_run_id)
+    .bind(interaction_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((status, expires_at)) = parent else {
+        return Ok(());
+    };
+    if status != "waiting_client" {
+        return Ok(());
+    }
+    let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+        .fetch_one(&mut **tx)
+        .await?;
+    let changed = sqlx::query("UPDATE inference_run_observations SET status='superseded',terminal_reason='superseded',last_active_at=$1,last_event_sequence=$2 WHERE id=$3 AND status='waiting_client'")
+        .bind(now).bind(seq).bind(parent_run_id).execute(&mut **tx).await?.rows_affected();
+    if changed == 0 {
+        return Ok(());
+    }
+    let payload = serde_json::json!({"status":"superseded","reason":"superseded","superseded_by":superseded_by});
+    insert_event_postgres(
+        tx,
+        EventInsert {
+            sequence: seq,
+            occurred_at: now,
+            interaction_id: Some(interaction_id),
+            run_id: Some(parent_run_id),
+            rejection_id: None,
+            kind: "run_state_changed",
+            payload: &payload,
+            expires_at,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -1802,7 +1924,7 @@ async fn recompute_status_sqlite(
     now: i64,
     seq: i64,
 ) -> anyhow::Result<()> {
-    let runs: Vec<(String, String, bool, bool)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) FROM inference_run_observations r WHERE r.interaction_id=?")
+    let runs: Vec<(String, String, bool, bool)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id) FROM inference_run_observations r WHERE r.interaction_id=?")
         .bind(iid).fetch_all(&mut **tx).await?;
     let evidence = if runs
         .iter()
@@ -1843,7 +1965,7 @@ async fn recompute_status_postgres(
     now: i64,
     seq: i64,
 ) -> anyhow::Result<()> {
-    let runs: Vec<(String, String, bool, bool)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) FROM inference_run_observations r WHERE r.interaction_id=$1")
+    let runs: Vec<(String, String, bool, bool)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id) FROM inference_run_observations r WHERE r.interaction_id=$1")
         .bind(iid).fetch_all(&mut **tx).await?;
     let evidence = if runs
         .iter()
@@ -3251,6 +3373,87 @@ mod tests {
             .await?
             .expect("persisted parent Interaction");
         assert!(parent.runs[0].user_interrupted);
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn continuation_admission_supersedes_waiting_parent_run() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        admit_waiting_scenario_run(&store, "chain", "parent", None).await?;
+        finish_scenario_run(&store, "chain", "parent", "waiting_client").await?;
+        admit_waiting_scenario_run(&store, "chain", "child", Some("parent")).await?;
+        let detail = store
+            .get_interaction("chain", ForestQuery::default())
+            .await?
+            .unwrap();
+        let parent = detail.runs.iter().find(|run| run.id == "parent").unwrap();
+        assert_eq!(parent.status, "superseded");
+        assert_eq!(parent.terminal_reason.as_deref(), Some("superseded"));
+        assert!(!parent.user_interrupted);
+        assert!(parent.events.iter().any(|event| {
+            event.kind == "run_state_changed"
+                && event.payload["status"] == "superseded"
+                && event.payload["superseded_by"] == "child"
+        }));
+        assert_eq!(
+            detail
+                .runs
+                .iter()
+                .find(|run| run.id == "child")
+                .unwrap()
+                .status,
+            "running"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupt_sweep_marks_only_leaf_waits_interrupted() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        admit_waiting_scenario_run(&store, "swept", "leafwait", None).await?;
+        finish_scenario_run(&store, "swept", "leafwait", "waiting_client").await?;
+        admit_waiting_scenario_run(&store, "swept", "supwait", None).await?;
+        finish_scenario_run(&store, "swept", "supwait", "waiting_client").await?;
+        // 修复前的遗留形态：等待 Run 已有续接子节点但状态仍停在 waiting_client。
+        sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('supchild','swept','supwait','responses','route','running',0,1,1,?)")
+            .bind(i64::MAX).execute(&pool).await?;
+        admit_waiting_scenario_run(&store, "swept", "crosswait", None).await?;
+        finish_scenario_run(&store, "swept", "crosswait", "waiting_client").await?;
+        // 其他 Interaction 的新分支不算续接，不解除本交互内的等待叶。
+        admit_waiting_scenario_run(&store, "other", "xchild", Some("crosswait")).await?;
+        let mut tx = pool.begin().await?;
+        interrupt_predecessors_sqlite(&mut tx, "swept", 9).await?;
+        tx.commit().await?;
+        let detail = store
+            .get_interaction("swept", ForestQuery::default())
+            .await?
+            .unwrap();
+        let leaf = detail.runs.iter().find(|run| run.id == "leafwait").unwrap();
+        assert_eq!(leaf.status, "user_interrupted");
+        assert!(leaf.user_interrupted);
+        let superseded = detail.runs.iter().find(|run| run.id == "supwait").unwrap();
+        assert_eq!(superseded.status, "superseded");
+        assert_eq!(superseded.terminal_reason.as_deref(), Some("superseded"));
+        assert!(!superseded.user_interrupted);
+        let cross = detail
+            .runs
+            .iter()
+            .find(|run| run.id == "crosswait")
+            .unwrap();
+        assert_eq!(cross.status, "user_interrupted");
+        assert!(cross.user_interrupted);
         pool.close().await;
         Ok(())
     }
