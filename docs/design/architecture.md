@@ -814,6 +814,8 @@ Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的�
 
 客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；Route 以所有已启用 Target 非 Hidden Thinking Level Map 的交集派生支持等级并据此钳制，每次 Target 尝试再用该 Target 的 Thinking Level Map 生成 protocol-native control。`GET /v1/models` 仅在派生交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control。
 
+按 Catalog `reasoning_options` 生成 Thinking Level Map 时，Provider 协议无法表达的行一律降级为 Hidden（不提供该等级，而不猜测 wire 形状）；用户显式提交的不可写 Control 仍按 `THINKING_CONTROL_UNREPRESENTABLE` 拒绝。
+
 ### 8.2 API Token 模型
 
 Route 与 API Token 是**独立管理、多对多绑定**的关系（经 `api_key_models` 表）：

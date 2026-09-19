@@ -46,6 +46,7 @@ export function thinkingControlKindWritable(kind: ThinkingControlKind, context: 
       if (kind === 'enabled' || kind === 'disabled') return openaiCompatibleSupportsToggle(context)
       return false
     case 'command-code':
+    case 'devin-connect':
       return kind === 'effort'
     default:
       return false

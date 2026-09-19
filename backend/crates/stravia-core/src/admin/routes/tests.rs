@@ -1009,10 +1009,93 @@ async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn unknown_compatible_provider_does_not_guess_toggle_wire_shape() {
-    let error = create_openai_compatible_toggle_route("openai-compatible", "custom-toggle-model")
+async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow::Result<()> {
+    let route =
+        create_openai_compatible_toggle_route("openai-compatible", "custom-toggle-model").await?;
+
+    assert!(route.supported_thinking_levels.0.is_empty());
+    for row in route.targets[0].thinking_level_map.iter() {
+        assert_eq!(
+            row.control,
+            stravia_runtime_contract::thinking::TargetThinkingControl::Hidden
+        );
+        assert_eq!(row.source, ThinkingMappingSource::Generated);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..GatewayConfig::default()
+    })
+    .await
+    .expect("gateway");
+    let admin = gateway.admin();
+    let provider = admin
+        .create_provider(CreateProvider {
+            name: Some("Unknown Compatible Route Test Provider".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("openai-compatible".into()),
+                protocol: "openai-compatible".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::None,
+            use_proxy: false,
+        })
         .await
-        .unwrap_err();
+        .expect("provider");
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "custom-toggle-model",
+            CreateManualProviderModel {
+                metadata: json!({
+                    "id": "custom-toggle-model",
+                    "reasoning_options": [{"type": "toggle"}]
+                }),
+            },
+        )
+        .await
+        .expect("provider model");
+
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+    let error = admin
+        .create_model(CreateRoute {
+            model_id: "submitted-toggle-route".into(),
+            display_name: None,
+            balance: None,
+            target_provider: String::new(),
+            target_model: String::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: "custom-toggle-model".into(),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: vec![
+                    crate::thinking::ThinkingLevelMapping {
+                        level: ThinkingLevel::Off,
+                        control: TargetThinkingControl::Disabled,
+                        source: ThinkingMappingSource::Generated,
+                    },
+                    crate::thinking::ThinkingLevelMapping {
+                        level: ThinkingLevel::Medium,
+                        control: TargetThinkingControl::Enabled,
+                        source: ThinkingMappingSource::Generated,
+                    },
+                ],
+            }],
+            default_thinking_level: None,
+        })
+        .await
+        .expect_err("explicitly submitted toggle controls must fail closed");
     let payload: serde_json::Value =
         serde_json::from_str(&error.to_string()).expect("coded thinking-control error");
 

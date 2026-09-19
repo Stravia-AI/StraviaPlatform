@@ -50,4 +50,12 @@ describe('thinking control representability', () => {
     expect(thinkingControlWritable({ type: 'effort', value: 'high' }, context)).toBe(true)
     expect(thinkingControlWritable({ type: 'enabled' }, context)).toBe(false)
   })
+
+  test('devin-connect writes effort through the selector suffix', () => {
+    const context = { protocol: 'devin-connect', vendor: 'devin', model: 'swe-2' }
+
+    expect(writableThinkingControlKinds(context)).toEqual(['effort', 'hidden'])
+    expect(thinkingControlWritable({ type: 'effort', value: 'high' }, context)).toBe(true)
+    expect(thinkingControlWritable({ type: 'enabled' }, context)).toBe(false)
+  })
 })
