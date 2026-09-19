@@ -8997,7 +8997,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stravia-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -9053,7 +9053,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-credential-protection"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -9072,7 +9072,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-desktop"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9107,7 +9107,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-devtools"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9131,7 +9131,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-media"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -9155,7 +9155,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-runtime-contract"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9173,7 +9173,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-server"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9206,7 +9206,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-access"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -9251,7 +9251,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-access-contract"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -9262,7 +9262,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-search"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
