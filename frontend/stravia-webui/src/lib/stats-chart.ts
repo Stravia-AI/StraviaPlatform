@@ -70,6 +70,22 @@ function alignBucketStart(timeMs: number, bucketMs: number, tzOffsetMs: number):
   return Math.floor((timeMs + tzOffsetMs) / bucketMs) * bucketMs - tzOffsetMs
 }
 
+/** 每列父周期的长度上限：日格=本地周；6h 格=本地日；小时格=本地 6h 段；亚小时格=本地小时。 */
+export function activityColumnMs(bucketMs: number): number {
+  if (bucketMs >= DAY_MS) return 7 * DAY_MS
+  if (bucketMs >= 6 * HOUR_MS) return DAY_MS
+  if (bucketMs >= HOUR_MS) return 6 * HOUR_MS
+  return HOUR_MS
+}
+
+/** 每列的子序号行数，与 columnOf 的行分配一致。 */
+export function activityRowCount(bucketMs: number): number {
+  if (bucketMs >= DAY_MS) return 7
+  if (bucketMs >= 6 * HOUR_MS) return 4
+  if (bucketMs >= HOUR_MS) return 6
+  return Math.max(1, Math.round(HOUR_MS / bucketMs))
+}
+
 /**
  * 方格归属：列 = 父周期，行 = 父周期内的子序号。
  * 日格列=本地周（周一起）；6h 格列=本地日；小时格列=本地 6h 段；亚小时格列=本地小时。
@@ -107,25 +123,32 @@ function tokenTotal(row: TokenStats): number | null {
 /**
  * 把序列行展开为覆盖整个窗口的方格矩阵：无数据的 bucket 也占位，
  * 行 = 父周期内子序号、列 = 父周期，时间自上而下再向右流动。
+ * minCols 以最新列（含 endMs）为右端向前补足整列，让网格填满容器宽度。
  */
 export function buildActivityGrid(
   rows: readonly TokenStats[],
-  opts: { endMs: number; spanMs: number; bucketMs: number; tzOffsetMs: number },
+  opts: { endMs: number; spanMs: number; bucketMs: number; tzOffsetMs: number; minCols?: number },
 ): ActivityGridModel {
-  const { endMs, spanMs, bucketMs, tzOffsetMs } = opts
+  const { endMs, spanMs, bucketMs, tzOffsetMs, minCols = 0 } = opts
   const totals = new Map<number, number | null>()
   for (const row of rows) totals.set(row.bucket_start, tokenTotal(row))
+
+  const endStart = alignBucketStart(endMs, bucketMs, tzOffsetMs)
+  let windowStart = alignBucketStart(endMs - spanMs, bucketMs, tzOffsetMs)
+  if (minCols > 0) {
+    let firstKey = columnOf(endStart, bucketMs).key
+    for (let i = 1; i < minCols; i++) firstKey = columnOf(firstKey - 1, bucketMs).key
+    let extended = alignBucketStart(firstKey, bucketMs, tzOffsetMs)
+    while (columnOf(extended, bucketMs).key !== firstKey) extended += bucketMs
+    windowStart = Math.min(windowStart, extended)
+  }
 
   const colIndex = new Map<number, number>()
   const colStarts: number[] = []
   const rawCells: Omit<ActivityCell, 'level'>[] = []
   let rowCount = 0
   let max = 0
-  for (
-    let start = alignBucketStart(endMs - spanMs, bucketMs, tzOffsetMs);
-    start <= alignBucketStart(endMs, bucketMs, tzOffsetMs);
-    start += bucketMs
-  ) {
+  for (let start = windowStart; start <= endStart; start += bucketMs) {
     const { key, row } = columnOf(start, bucketMs)
     let col = colIndex.get(key)
     if (col == null) {
@@ -139,13 +162,14 @@ export function buildActivityGrid(
     rawCells.push({ start, tokens, col, row })
   }
 
-  // 窗口边缘列未覆盖的位置也补 0 值方格，保证矩阵是完整矩形；
-  // 列内 bucket 连续，起点 = 列起点 + 行号 × 粒度。
+  // 窗口边缘列未覆盖的位置也补齐方格，保证矩阵是完整矩形；
+  // 列内 bucket 连续，起点 = 列起点 + 行号 × 粒度；有序列数据时取真实值。
   const occupied = new Set(rawCells.map((cell) => cell.col * rowCount + cell.row))
   for (let col = 0; col < colStarts.length; col++) {
     for (let row = 0; row < rowCount; row++) {
       if (occupied.has(col * rowCount + row)) continue
-      rawCells.push({ start: colStarts[col] + row * bucketMs, tokens: 0, col, row })
+      const start = colStarts[col] + row * bucketMs
+      rawCells.push({ start, tokens: totals.has(start) ? totals.get(start)! : 0, col, row })
     }
   }
 

@@ -67,6 +67,32 @@ describe('activity grid', () => {
     expect(grid.colCount).toBe(grid.colStarts.length)
   })
 
+  test('minCols extends the window left by whole parent columns, newest stays rightmost', () => {
+    const end = Date.UTC(2026, 8, 17, 12)
+    const history = Date.UTC(2026, 7, 25)
+    const grid = buildActivityGrid(
+      [
+        {
+          bucket_start: history,
+          total_input_tokens: 5,
+          total_output_tokens: null,
+          total_cache_read_tokens: null,
+          total_cache_write_tokens: null,
+        },
+      ],
+      { endMs: end, spanMs: DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0, minCols: 4 },
+    )
+
+    // spanMs 只有 1 天，minCols=4 把窗口向前延伸为 4 个完整周列；
+    // 延伸范围内的真实数据被取回，矩阵仍是完整矩形，最新列保持在右端。
+    expect(grid.colCount).toBe(4)
+    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
+    const byStart = new Map(grid.cells.map((cell) => [cell.start, cell]))
+    expect(byStart.get(history)?.tokens).toBe(5)
+    expect(byStart.get(history)?.col).toBe(0)
+    expect(byStart.get(Date.UTC(2026, 8, 17))?.col).toBe(3)
+  })
+
   test('sub-day buckets group into parent-period columns', () => {
     const end = Date.UTC(2026, 8, 17, 12)
     const grid = buildActivityGrid([], { endMs: end, spanMs: 6 * HOUR_MS, bucketMs: 900_000, tzOffsetMs: 0 })
