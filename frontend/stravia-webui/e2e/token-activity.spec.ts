@@ -47,17 +47,17 @@ async function stubStats(page: Page): Promise<void> {
 }
 
 // 粒度跟随范围选择器：6h→15 分钟，24h→1 小时，3 天→6 小时，7 天→1 天。
-// 期望格数为补齐后的完整矩形（父周期列 × 子序号行）：7×4、5×6、4×4、2×7。
-test('token activity grid granularity follows the range selector', async ({ page }) => {
+// 列数由容器宽度决定：网格向前延伸整列填满区域宽度但不溢出，行数仍由粒度决定。
+test('token activity grid fills the section width at each granularity', async ({ page }) => {
   await prepareApp(page)
   await stubStats(page)
   await page.setViewportSize({ width: 1280, height: 900 })
 
   const ranges = [
-    { value: '6', label: 'Last 6h', expectedCells: 28 },
-    { value: '24', label: 'Last 24h', expectedCells: 30 },
-    { value: '72', label: 'Last 3d', expectedCells: 16 },
-    { value: '168', label: 'Last 7d', expectedCells: 14 },
+    { value: '6', label: 'Last 6h', rows: 4 },
+    { value: '24', label: 'Last 24h', rows: 6 },
+    { value: '72', label: 'Last 3d', rows: 4 },
+    { value: '168', label: 'Last 7d', rows: 7 },
   ]
   for (const range of ranges) {
     await page.goto('/stats')
@@ -65,7 +65,25 @@ test('token activity grid granularity follows the range selector', async ({ page
     await page.getByRole('option', { name: range.label }).click()
     const grid = page.getByRole('group', { name: 'Token activity' })
     await expect(grid).toBeVisible()
-    await expect(grid.locator('.token-activity-cell')).toHaveCount(range.expectedCells)
+    // 方格尺寸由容器高度推导，等待测量后的重排稳定再断言。
+    await expect(async () => {
+      const metrics = await grid.evaluate((el) => {
+        const wrapper = el.parentElement!.parentElement!
+        const cell = el.querySelector('.token-activity-cell')!.getBoundingClientRect().width
+        const gridWidth = el.getBoundingClientRect().width
+        return {
+          cols: Math.floor((wrapper.clientWidth + 4) / (cell + 4)),
+          cells: el.querySelectorAll('.token-activity-cell').length,
+          leftover: wrapper.clientWidth - gridWidth,
+          pitch: cell + 4,
+          scrolls: wrapper.scrollWidth > wrapper.clientWidth + 1 || wrapper.scrollHeight > wrapper.clientHeight + 1,
+        }
+      })
+      expect(metrics.scrolls).toBe(false)
+      expect(metrics.leftover).toBeGreaterThanOrEqual(0)
+      expect(metrics.leftover).toBeLessThan(metrics.pitch)
+      expect(metrics.cells).toBe(metrics.cols * range.rows)
+    }).toPass()
   }
 })
 

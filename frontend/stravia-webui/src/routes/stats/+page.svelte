@@ -17,7 +17,13 @@ import {
   formatTime,
   formatTps,
 } from '$lib/format'
-import { buildActivityGrid, buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
+import {
+  activityColumnMs,
+  activityRowCount,
+  buildActivityGrid,
+  buildLatencyChart,
+  localTzOffsetMs,
+} from '$lib/stats-chart'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
 import MetricStrip from '$lib/components/metric-strip.svelte'
 import TokenActivityGrid from '$lib/components/token-activity-grid.svelte'
@@ -41,14 +47,28 @@ const HOUR_MS = 3_600_000
 const activityBucketSeconds = $derived(
   hoursNumber <= 6 ? 900 : hoursNumber <= 24 ? 3_600 : hoursNumber <= 72 ? 21_600 : 86_400,
 )
+// 方格尺寸由容器可用高度决定：扣除上下边距、列标签行与图例行后按行数均分；
+// 列数不设上限，按该尺寸在宽度上能容纳多少列就向前延伸多少整列历史。
+let activityWidth = $state(0)
+let activityHeight = $state(0)
+const activityCellPx = $derived.by(() => {
+  const rows = activityRowCount(activityBucketSeconds * 1_000)
+  const freeH = activityHeight - 32 - 18 - 20 - (rows - 1) * 4
+  if (freeH <= 0) return 14
+  return Math.max(10, Math.floor(freeH / rows))
+})
+const activityCols = $derived(Math.floor((activityWidth + 4) / (activityCellPx + 4)))
+const activityQueryHours = $derived(
+  Math.max(hoursNumber, Math.ceil((activityCols * activityColumnMs(activityBucketSeconds * 1_000)) / HOUR_MS)),
+)
 const seriesQuery = createQuery(() => ({
   queryKey: ['stats-series', hoursNumber, 3_600],
   queryFn: () => admin.stats.series(hoursNumber, 3_600, localTzOffsetMs() / 1000),
   refetchInterval: 30_000,
 }))
 const activityQuery = createQuery(() => ({
-  queryKey: ['stats-series', hoursNumber, activityBucketSeconds],
-  queryFn: () => admin.stats.series(hoursNumber, activityBucketSeconds, localTzOffsetMs() / 1000),
+  queryKey: ['stats-series', activityQueryHours, activityBucketSeconds],
+  queryFn: () => admin.stats.series(activityQueryHours, activityBucketSeconds, localTzOffsetMs() / 1000),
   refetchInterval: 30_000,
 }))
 const providersQuery = createQuery(() => ({
@@ -152,8 +172,11 @@ const activityGrid = $derived(
     spanMs: hoursNumber * HOUR_MS,
     bucketMs: activityBucketSeconds * 1_000,
     tzOffsetMs: localTzOffsetMs(),
+    minCols: activityCols,
   }),
 )
+// 延伸窗口里可能存在所选范围外的历史活动，不能只看 overview 的当前范围计数。
+const hasActivity = $derived(hasTraffic || activityGrid.cells.some((cell) => cell.tokens !== 0))
 const latencyChart = $derived(buildLatencyChart(seriesStats, formatBucket, HOUR_MS))
 const errorChart = $derived(
   seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
@@ -179,21 +202,31 @@ const modelPie = $derived.by((): PieSlice[] => {
   if (rest > 0) slices.push({ key: '__other__', label: m.stats_other(), value: rest, color: 'var(--muted)' })
   return slices
 })
-const cacheHit = $derived.by((): { hit: number; miss: number; rate: number } | null => {
-  if (overview?.total_cache_read_tokens == null || overview.total_input_tokens == null) return null
-  const hit = overview.total_cache_read_tokens
-  const miss = overview.total_input_tokens
-  if (hit + miss <= 0) return null
-  return { hit, miss, rate: hit / (hit + miss) }
+const TOKEN_PIE_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)']
+// 未上报的类别不计入占比，避免把"未报告"显示成 0%。
+const tokenPie = $derived.by((): { slices: PieSlice[]; total: number } | null => {
+  if (overview == null) return null
+  const categories = [
+    { key: 'input', label: m.stats_input_tokens(), value: overview.total_input_tokens },
+    { key: 'output', label: m.stats_output_tokens(), value: overview.total_output_tokens },
+    { key: 'cache_read', label: m.stats_cache_read_tokens(), value: overview.total_cache_read_tokens },
+    { key: 'cache_write', label: m.stats_cache_write_tokens(), value: overview.total_cache_write_tokens },
+  ]
+  const slices = categories.flatMap((category, index) =>
+    category.value == null
+      ? []
+      : [
+          {
+            key: category.key,
+            label: category.label,
+            value: category.value,
+            color: TOKEN_PIE_COLORS[index],
+          },
+        ],
+  )
+  const total = slices.reduce((sum, slice) => sum + slice.value, 0)
+  return total > 0 ? { slices, total } : null
 })
-const cachePie = $derived.by((): PieSlice[] =>
-  cacheHit == null
-    ? []
-    : [
-        { key: 'hit', label: m.stats_cache_hit(), value: cacheHit.hit, color: 'var(--chart-1)' },
-        { key: 'miss', label: m.stats_cache_miss(), value: cacheHit.miss, color: 'var(--muted)' },
-      ],
-)
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests ?? 0) },
   { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens) },
@@ -357,8 +390,11 @@ function retryAll(): void {
         </div>
         {#if activityQuery.error && activityQuery.data === undefined}
           {@render queryFailure(activityQuery.error, activityQuery.refetch, activityQuery.isFetching)}
-        {:else if hasTraffic}<div class="min-w-0 flex-1 content-center overflow-x-auto py-2">
-            <TokenActivityGrid model={activityGrid} />
+        {:else if hasActivity}<div
+            class="min-w-0 flex-1 flex flex-col justify-center overflow-x-auto py-4"
+            bind:clientWidth={activityWidth}
+            bind:clientHeight={activityHeight}>
+            <TokenActivityGrid model={activityGrid} cellPx={activityCellPx} />
           </div>{:else}<Empty.Root class="min-h-40 flex-1 border-y"
             ><Empty.Header><Empty.Description>{m.stats_send_first_request()}</Empty.Description></Empty.Header
             ></Empty.Root
@@ -429,46 +465,47 @@ function retryAll(): void {
           >{/if}
       </section>
 
-      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="cache-hit-rate-title">
+      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="token-breakdown-title">
         <div class="route-section-header">
           <div>
-            <h2 id="cache-hit-rate-title" class="route-section-title">{m.stats_cache_hit_rate()}</h2>
-            <p class="route-section-description">{m.stats_cache_hit_share_input_tokens()}</p>
+            <h2 id="token-breakdown-title" class="route-section-title">{m.stats_token_breakdown()}</h2>
+            <p class="route-section-description">{m.stats_token_breakdown_share()}</p>
           </div>
         </div>
         {#if overviewQuery.error && overview === undefined}
           {@render queryFailure(overviewQuery.error, overviewQuery.refetch, overviewQuery.isFetching)}
-        {:else if cacheHit}<div class="flex flex-col items-center gap-4">
-            <div class="relative size-40 min-w-0" aria-label={m.stats_cache_hit_rate()}>
+        {:else if tokenPie}<div class="flex flex-col items-center gap-4">
+            <div class="relative size-40 min-w-0" aria-label={m.stats_token_breakdown()}>
               <PieChart
-                data={cachePie}
+                data={tokenPie.slices}
                 key="key"
                 label="label"
                 value="value"
                 c="key"
-                cDomain={cachePie.map((slice) => slice.key)}
-                cRange={cachePie.map((slice) => slice.color)}
+                cDomain={tokenPie.slices.map((slice) => slice.key)}
+                cRange={tokenPie.slices.map((slice) => slice.color)}
                 innerRadius={0.68}
                 cornerRadius={2}
                 padAngle={0.01} />
               <div class="pointer-events-none absolute inset-0 grid place-items-center">
-                <span class="font-technical text-2xl font-medium tabular-nums">{formatPercent(cacheHit.rate)}</span>
+                <span class="font-technical text-2xl font-medium tabular-nums"
+                  >{formatCompactCount(tokenPie.total)}</span>
               </div>
             </div>
             <ul class="w-full space-y-2 text-sm">
-              {#each cachePie as slice (slice.key)}
+              {#each tokenPie.slices as slice (slice.key)}
                 <li class="flex items-center gap-2">
                   <span class="size-2.5 shrink-0 rounded-[2px]" style:background={slice.color}></span>
                   <span class="truncate">{slice.label}</span>
                   <span class="font-technical ml-auto text-muted-foreground tabular-nums"
-                    >{formatCompactCount(slice.value)}</span>
+                    >{formatPercent(slice.value / tokenPie.total)}</span>
                 </li>
               {/each}
             </ul>
           </div>{:else}<Empty.Root class="border-y py-6"
             ><Empty.Header
               ><Empty.Description
-                >{hasTraffic ? m.stats_cache_usage_unavailable() : m.stats_send_first_request()}</Empty.Description
+                >{hasTraffic ? m.stats_token_usage_unavailable() : m.stats_send_first_request()}</Empty.Description
               ></Empty.Header
             ></Empty.Root
           >{/if}
