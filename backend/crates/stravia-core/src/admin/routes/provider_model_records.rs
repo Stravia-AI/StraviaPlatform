@@ -51,15 +51,22 @@ impl AdminService {
         provider_id: &str,
         model_id: &str,
     ) -> anyhow::Result<ProviderModelDetail> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
-        self.gw
+        let mut detail = self
+            .gw
             .storage
             .provider_models()
             .get(provider_id, &model_id)
             .await?
             .map(ProviderModelDetail::from)
-            .ok_or_else(|| provider_model_not_found(provider_id, &model_id))
+            .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
+        super::thinking_map::hide_unwritable_generated_controls(
+            &provider,
+            &detail.id,
+            &mut detail.thinking_level_map,
+        );
+        Ok(detail)
     }
 
     pub async fn prepare_provider_model(
@@ -146,7 +153,7 @@ impl AdminService {
         model_id: &str,
         input: CreateManualProviderModel,
     ) -> anyhow::Result<ProviderModelDetail> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
         apply_provider_model_mutation(
@@ -163,7 +170,7 @@ impl AdminService {
                     metadata,
                 })
                 .await?,
-            provider_id,
+            &provider,
             &model_id,
         )
     }
@@ -174,7 +181,7 @@ impl AdminService {
         model_id: &str,
         input: UpdateProviderModel,
     ) -> anyhow::Result<ProviderModelDetail> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -194,7 +201,7 @@ impl AdminService {
                 .provider_models()
                 .update_metadata(provider_id, &model_id, metadata, input.revision)
                 .await?,
-            provider_id,
+            &provider,
             &model_id,
         )
     }
@@ -205,7 +212,7 @@ impl AdminService {
         model_id: &str,
         input: UpdateProviderModelSelection,
     ) -> anyhow::Result<ProviderModelDetail> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         apply_provider_model_mutation(
             self.gw
@@ -213,7 +220,7 @@ impl AdminService {
                 .provider_models()
                 .update_selection_policy(provider_id, &model_id, input.policy, input.revision)
                 .await?,
-            provider_id,
+            &provider,
             &model_id,
         )
     }
@@ -224,7 +231,7 @@ impl AdminService {
         model_id: &str,
         revision: i64,
     ) -> anyhow::Result<ProviderModelDetail> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -252,7 +259,7 @@ impl AdminService {
                 .provider_models()
                 .update_metadata(provider_id, &model_id, metadata.clone(), revision)
                 .await?,
-            provider_id,
+            &provider,
             &model_id,
         )?;
         super::RouteModule::new(self)
@@ -567,13 +574,21 @@ fn metadata_from_canonical_template(
 
 fn apply_provider_model_mutation(
     mutation: ProviderModelMutation,
-    provider_id: &str,
+    provider: &Provider,
     model_id: &str,
 ) -> anyhow::Result<ProviderModelDetail> {
     match mutation {
-        ProviderModelMutation::Applied(model) => Ok(ProviderModelDetail::from(*model)),
-        ProviderModelMutation::NotFound => Err(provider_model_not_found(provider_id, model_id)),
-        ProviderModelMutation::Conflict => Err(provider_model_conflict(provider_id, model_id)),
+        ProviderModelMutation::Applied(model) => {
+            let mut detail = ProviderModelDetail::from(*model);
+            super::thinking_map::hide_unwritable_generated_controls(
+                provider,
+                &detail.id,
+                &mut detail.thinking_level_map,
+            );
+            Ok(detail)
+        }
+        ProviderModelMutation::NotFound => Err(provider_model_not_found(&provider.id, model_id)),
+        ProviderModelMutation::Conflict => Err(provider_model_conflict(&provider.id, model_id)),
     }
 }
 

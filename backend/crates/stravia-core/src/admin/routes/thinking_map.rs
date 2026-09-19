@@ -24,6 +24,12 @@ impl RouteModule<'_> {
                             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
                         target.thinking_level_map =
                             generate_thinking_level_map(&provider_model.metadata);
+                        let provider = self.admin.get_provider(target.provider_id.trim()).await?;
+                        hide_unwritable_generated_controls(
+                            &provider,
+                            target.model.trim(),
+                            &mut target.thinking_level_map,
+                        );
                     } else {
                         target.thinking_level_map = current.thinking_level_map.0.clone();
                     }
@@ -77,7 +83,9 @@ impl RouteModule<'_> {
                 .find(target.provider_id.trim(), target.model.trim())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-            let generated = generate_thinking_level_map(&provider_model.metadata);
+            let provider = self.admin.get_provider(target.provider_id.trim()).await?;
+            let mut generated = generate_thinking_level_map(&provider_model.metadata);
+            hide_unwritable_generated_controls(&provider, target.model.trim(), &mut generated);
             let submitted = std::mem::take(&mut target.thinking_level_map);
             target.thinking_level_map = ThinkingLevel::ALL
                 .into_iter()
@@ -181,7 +189,9 @@ impl RouteModule<'_> {
             .find(&target.provider_id, &target.model)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-        let generated = generate_thinking_level_map(&provider_model.metadata);
+        let provider = self.admin.get_provider(&target.provider_id).await?;
+        let mut generated = generate_thinking_level_map(&provider_model.metadata);
+        hide_unwritable_generated_controls(&provider, &target.model, &mut generated);
         let mut targets = route_targets_for_update(&route);
         let edited = targets
             .iter_mut()
@@ -219,7 +229,9 @@ impl RouteModule<'_> {
         metadata: &crate::provider_models::ProviderModelMetadata,
         apply: bool,
     ) -> anyhow::Result<()> {
-        let generated = generate_thinking_level_map(metadata);
+        let provider = self.admin.get_provider(provider_id).await?;
+        let mut generated = generate_thinking_level_map(metadata);
+        hide_unwritable_generated_controls(&provider, provider_model_id, &mut generated);
         let mut changes = Vec::new();
         for route in self.admin.list_models().await? {
             if !route.targets.iter().any(|target| {
@@ -262,6 +274,25 @@ impl RouteModule<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Generated rows never block a Route: when the catalog declares a Thinking
+/// Control the Provider cannot write, the level falls back to Hidden instead of
+/// guessing a wire shape. Rows the user explicitly submits stay fail-closed in
+/// `ensure_thinking_controls_representable`.
+pub(super) fn hide_unwritable_generated_controls(
+    provider: &crate::db::models::Provider,
+    model: &str,
+    map: &mut [crate::thinking::ThinkingLevelMapping],
+) {
+    let registry = crate::protocol::registry::ProtocolRegistry::global();
+    for row in map.iter_mut() {
+        if row.source == ThinkingMappingSource::Generated
+            && !thinking_control_writable(registry, provider, model, &row.control)
+        {
+            row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
+        }
     }
 }
 
