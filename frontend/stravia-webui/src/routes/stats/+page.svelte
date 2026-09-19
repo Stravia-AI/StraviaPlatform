@@ -215,14 +215,7 @@ const tokenPie = $derived.by((): { slices: PieSlice[]; total: number } | null =>
   const slices = categories.flatMap((category, index) =>
     category.value == null
       ? []
-      : [
-          {
-            key: category.key,
-            label: category.label,
-            value: category.value,
-            color: TOKEN_PIE_COLORS[index],
-          },
-        ],
+      : [{ key: category.key, label: category.label, value: category.value, color: TOKEN_PIE_COLORS[index] }],
   )
   const total = slices.reduce((sum, slice) => sum + slice.value, 0)
   return total > 0 ? { slices, total } : null
