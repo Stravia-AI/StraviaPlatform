@@ -103,7 +103,7 @@ pub(super) enum LegAdvance {
     /// A follow-up Model Turn begins the next Model Leg.
     NextLeg(Box<ModelTurn>),
     /// A Hook produced the run's response during follow-up acquisition.
-    HookResponse(HookResponsePlan),
+    HookResponse(Box<HookResponsePlan>),
     /// Follow-up acquisition resolved to a mid-stream error.
     StreamError(AiError),
     /// Follow-up acquisition already rendered a terminal outcome.
@@ -124,6 +124,15 @@ pub(super) struct LegParts<'a> {
     pub phase: &'a mut PhaseTracker,
     pub projection: &'a mut ClientProjectionSession,
     pub ledger: &'a RunLedger,
+}
+
+/// The leg's run-scoped environment: everything `begin` needs that stays
+/// constant while Model Legs iterate inside one Inference Run.
+pub(super) struct LegEnv<'a> {
+    pub gateway: &'a crate::Gateway,
+    pub generation: &'a GenerationChainRun,
+    pub ingress: ProtocolId,
+    pub observer: &'a crate::interaction_observation::RunObserver,
 }
 
 /// Follow-up acquisition environment: everything `advance` needs beyond the
@@ -304,15 +313,18 @@ impl ModelLegConsume {
     /// Begin a Model Leg: reset the projection's leg boundary and assemble the
     /// completion context this leg's merge will need.
     pub(super) fn begin(
-        gateway: &crate::Gateway,
-        generation: &GenerationChainRun,
-        ingress: ProtocolId,
+        env: LegEnv<'_>,
         turn: &ModelTurn,
         run: &InferenceRun,
         projection: &mut ClientProjectionSession,
-        observer: &crate::interaction_observation::RunObserver,
         policy: LegPolicy,
     ) -> Self {
+        let LegEnv {
+            gateway,
+            generation,
+            ingress,
+            observer,
+        } = env;
         projection.begin_model_leg(
             super::thinking_carrier_facts(ingress, turn.route.egress),
             run.exposed_tool_names(),
@@ -1072,13 +1084,15 @@ mod tests {
 
     fn begin_leg(fx: &mut LegFixture, turn: &ModelTurn) -> ModelLegConsume {
         ModelLegConsume::begin(
-            &fx.gateway,
-            &fx.generation,
-            INGRESS,
+            LegEnv {
+                gateway: &fx.gateway,
+                generation: &fx.generation,
+                ingress: INGRESS,
+                observer: &fx.observer,
+            },
             turn,
             &fx.run,
             &mut fx.projection,
-            &fx.observer,
             LegPolicy {
                 emit_live: false,
                 early_platform: true,

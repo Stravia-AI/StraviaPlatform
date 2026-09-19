@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) enum FollowupModelTurn {
     Turn(Box<crate::agent::ModelTurn>),
-    HookResponse(HookResponsePlan),
+    HookResponse(Box<HookResponsePlan>),
     StreamError(stravia_runtime_contract::protocol::ir::AiError),
 }
 
@@ -200,7 +200,7 @@ pub(super) async fn acquire_followup_model_turn(
             )
             .await;
             return Ok(match plan {
-                Ok(plan) => FollowupModelTurn::HookResponse(plan),
+                Ok(plan) => FollowupModelTurn::HookResponse(Box::new(plan)),
                 Err(HookRespondError::Control(control)) => {
                     FollowupModelTurn::StreamError(hook_stream_error(*control))
                 }

@@ -8,11 +8,7 @@ import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
-import {
-  failureOriginLabel,
-  observationDebugStatusLabel,
-  observationStatusLabel,
-} from '$lib/observation-labels'
+import { failureOriginLabel, observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationEventSummary, observationStatusTone } from '$lib/observation-event-summary'
 import {
@@ -95,7 +91,8 @@ function jumpToRun(runId: string | null) {
               ><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
           {/each}
         </span>
-        <time class="stream-time" title={formatLogTime(event.occurred_at)}>{timeline.offsetLabel(event.occurred_at)}</time>
+        <time class="stream-time" title={formatLogTime(event.occurred_at)}
+          >{timeline.offsetLabel(event.occurred_at)}</time>
         <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
       </Collapsible.Trigger>
       {#if summary.note}<p class="event-note">{summary.note}</p>{/if}

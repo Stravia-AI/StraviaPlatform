@@ -429,9 +429,8 @@ function retryConfiguration(): void {
                   <div class="min-w-0">
                     <p class="font-technical truncate font-medium">{model.model}</p>
                     <p class="mt-1 text-xs text-muted-foreground">
-                      {m.observation_usage_input()} {formatCompactCount(
-                        model.total_input_tokens,
-                      )} · {m.observation_usage_output()}
+                      {m.observation_usage_input()}
+                      {formatCompactCount(model.total_input_tokens)} · {m.observation_usage_output()}
                       {formatCompactCount(model.total_output_tokens)} ·
                       {formatDuration(model.avg_duration_ms)}
                     </p>

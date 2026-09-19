@@ -145,8 +145,7 @@ export const admin = {
     testModels: (id: string) => request<string[]>('GET', `/providers/${id}/test-models`),
     capabilityDrifts: () => request<ImageCapabilityDrift[]>('GET', '/providers/image-capability-drifts'),
     models: (id: string) => request<ProviderModelList>('GET', `/providers/${id}/models`),
-    syncModels: (id: string) =>
-      request<ProviderModelSyncSummary>('POST', `/providers/${id}/models/sync`),
+    syncModels: (id: string) => request<ProviderModelSyncSummary>('POST', `/providers/${id}/models/sync`),
     prepareModel: (id: string, modelId: string, templateId?: string) =>
       request<PreparedProviderModel>('POST', `/providers/${id}/model/prepare`, {
         model_id: modelId,
@@ -167,16 +166,9 @@ export const admin = {
         `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson},"revision":${revision}}`,
       ),
     updateModelSelection: (id: string, modelId: string, policy: ProviderModelSelectionPolicy, revision: number) =>
-      request<ProviderModelDetail>('PUT', `/providers/${id}/model/selection`, {
-        model_id: modelId,
-        policy,
-        revision,
-      }),
+      request<ProviderModelDetail>('PUT', `/providers/${id}/model/selection`, { model_id: modelId, policy, revision }),
     reimportModel: (id: string, modelId: string, revision: number) =>
-      request<ProviderModelDetail>('POST', `/providers/${id}/model/reimport`, {
-        model_id: modelId,
-        revision,
-      }),
+      request<ProviderModelDetail>('POST', `/providers/${id}/model/reimport`, { model_id: modelId, revision }),
     deleteManualModel: (id: string, modelId: string) =>
       request<void>('DELETE', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
     capabilities: (providerId: string, model: string) =>
@@ -193,8 +185,7 @@ export const admin = {
       request<Provider>('POST', '/providers/oauth', { session_id: sessionId, input }),
   },
   catalog: {
-    providers: async () =>
-      (await request<CatalogProviderList>('GET', '/catalog/providers')).providers,
+    providers: async () => (await request<CatalogProviderList>('GET', '/catalog/providers')).providers,
     canonicalModels: () => request<CanonicalModelList>('GET', '/catalog/models'),
     refresh: () => request<CatalogRefreshSummary>('POST', '/catalog/refresh'),
   },
@@ -202,8 +193,7 @@ export const admin = {
     providers: {
       list: () => request<WebProvider[]>('GET', '/web-providers'),
       create: (input: CreateWebProvider) => request<WebProvider>('POST', '/web-providers', input),
-      update: (id: string, input: UpdateWebProvider) =>
-        request<WebProvider>('PUT', `/web-providers/${id}`, input),
+      update: (id: string, input: UpdateWebProvider) => request<WebProvider>('PUT', `/web-providers/${id}`, input),
       delete: (id: string) => request<void>('DELETE', `/web-providers/${id}`),
       test: (id: string) => request<TestResult>('POST', `/web-providers/${id}/test`),
     },
@@ -218,8 +208,7 @@ export const admin = {
       update: (input: UpdateWebSearchConfig) => request<WebSearchConfigView>('PUT', '/web-search/config', input),
     },
     eligibleModels: () => request<EligibleSearchModel[]>('GET', '/web-search/eligible-models'),
-    compatibleCodexProviders: () =>
-      request<CompatibleCodexProvider[]>('GET', '/web-search/codex-providers'),
+    compatibleCodexProviders: () => request<CompatibleCodexProvider[]>('GET', '/web-search/codex-providers'),
   },
   mediaUnderstanding: {
     get: () => request<MediaUnderstandingConfigView>('GET', '/media-understanding'),
@@ -234,8 +223,7 @@ export const admin = {
         callback_mode: callbackMode,
         locale,
       }),
-    status: (sessionId: string) =>
-      request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
+    status: (sessionId: string) => request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
     cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${sessionId}/cancel`),
     updateProxy: (sessionId: string, useProxy: boolean) =>
       request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${sessionId}/proxy`, { use_proxy: useProxy }),
@@ -259,10 +247,7 @@ export const admin = {
         level,
       }),
     regenerateThinkingMap: (routeId: string, targetId: string) =>
-      request<Route>(
-        'POST',
-        `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/regenerate`,
-      ),
+      request<Route>('POST', `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/regenerate`),
   },
   apiKeys: {
     list: () => request<ApiKey[]>('GET', '/api-keys'),
@@ -278,8 +263,7 @@ export const admin = {
         'GET',
         `/observations/failed-requests/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
       ),
-    forest: (query: ForestQuery) =>
-      request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
+    forest: (query: ForestQuery) => request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
     interactionSummary: (id: string, query: ForestQuery = {}) =>
       request<InteractionSnapshot>(
         'GET',
@@ -302,8 +286,7 @@ export const admin = {
         `/observations/interactions/${encodeURIComponent(id)}/events${queryString(query) || '?'}`,
       ),
     debug: () => request<DebugState>('GET', '/observations/debug'),
-    setDebug: (enabled: boolean) =>
-      request<DebugState>('PUT', '/observations/debug', { enabled, confirmed: enabled }),
+    setDebug: (enabled: boolean) => request<DebugState>('PUT', '/observations/debug', { enabled, confirmed: enabled }),
     clearDebug: () => request<DebugState>('DELETE', '/observations/debug'),
     clearHistory: () => request<ClearHistoryResult>('DELETE', '/observations/history'),
     issueBundleTicket: (kind: BundleResourceKind, id: string, throughSequence?: number) =>

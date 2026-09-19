@@ -773,6 +773,10 @@ fn encode_tool_call(id: &str, name: &str, args_json: &str) -> Vec<u8> {
     call
 }
 
+/// Wire-encoded ToolDef bodies plus `(name, sanitized description)` pairs for
+/// system-prompt relocation.
+type EncodedToolDefs = (Vec<Vec<u8>>, Vec<(String, String)>);
+
 /// Returns the wire-encoded ToolDefs plus `(name, sanitized description)`
 /// pairs for system-prompt relocation. Tool names are validated locally:
 /// upstream only accepts `[A-Za-z0-9_-]` and answers anything else with a
@@ -781,7 +785,7 @@ fn encode_tool_call(id: &str, name: &str, args_json: &str) -> Vec<u8> {
 fn encode_tool_defs(
     req: &AiRequest,
     hits: &mut sanitize::SanitizeHits,
-) -> anyhow::Result<(Vec<Vec<u8>>, Vec<(String, String)>)> {
+) -> anyhow::Result<EncodedToolDefs> {
     let mut defs = Vec::new();
     let mut descriptions = Vec::new();
     for tool in req.tools.as_deref().unwrap_or_default() {

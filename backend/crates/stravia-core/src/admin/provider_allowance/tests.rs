@@ -1868,19 +1868,18 @@ async fn live_devin_get_user_status() {
         };
         if let Ok(top) = parse_fields(&body) {
             dump("top", &top);
-            if let Some(us) = top.iter().find(|f| f.number == 1 && f.wire_type == 2) {
-                if let Ok(us) = parse_fields(us.bytes) {
-                    dump("user_status(#1)", &us);
-                    if let Some(ps) = us.iter().find(|f| f.number == 13 && f.wire_type == 2) {
-                        if let Ok(ps) = parse_fields(ps.bytes) {
-                            dump("plan_status(#1.13)", &ps);
-                            if let Some(pi) = ps.iter().find(|f| f.number == 1 && f.wire_type == 2)
-                            {
-                                if let Ok(pi) = parse_fields(pi.bytes) {
-                                    dump("plan_info(#1.13.1)", &pi);
-                                }
-                            }
-                        }
+            if let Some(us) = top.iter().find(|f| f.number == 1 && f.wire_type == 2)
+                && let Ok(us) = parse_fields(us.bytes)
+            {
+                dump("user_status(#1)", &us);
+                if let Some(ps) = us.iter().find(|f| f.number == 13 && f.wire_type == 2)
+                    && let Ok(ps) = parse_fields(ps.bytes)
+                {
+                    dump("plan_status(#1.13)", &ps);
+                    if let Some(pi) = ps.iter().find(|f| f.number == 1 && f.wire_type == 2)
+                        && let Ok(pi) = parse_fields(pi.bytes)
+                    {
+                        dump("plan_info(#1.13.1)", &pi);
                     }
                 }
             }

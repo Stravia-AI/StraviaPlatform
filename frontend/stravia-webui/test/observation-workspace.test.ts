@@ -164,18 +164,12 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
   let snap: ObservationWorkspaceSnapshot | undefined
 
   const impl: ObservationWorkspaceApi = {
-    forest: () =>
-      Promise.resolve(forestPage([root('root1', [summary('i1', { last_event_sequence: 5 })])])),
+    forest: () => Promise.resolve(forestPage([root('root1', [summary('i1', { last_event_sequence: 5 })])])),
     failures: () => Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 0 }),
     interaction: (id) => Promise.resolve(detailFor(id)),
-    interactionEvents: () =>
-      Promise.resolve({ runs: [], snapshot_sequence: 10, next_cursor: null }),
+    interactionEvents: () => Promise.resolve({ runs: [], snapshot_sequence: 10, next_cursor: null }),
     interactionSummary: (id) =>
-      Promise.resolve({
-        interaction: summary(id),
-        root: root('root1', [summary(id)]),
-        snapshot_sequence: 10,
-      }),
+      Promise.resolve({ interaction: summary(id), root: root('root1', [summary(id)]), snapshot_sequence: 10 }),
     failure: (_kind, id) => Promise.resolve(failureDetail(id)),
     ...apiOverrides,
   }
@@ -360,9 +354,7 @@ describe('selection races', () => {
   test('a stale selection response cannot overwrite the newer selection', async () => {
     const first = deferred<InteractionDetail>()
     const second = deferred<InteractionDetail>()
-    const h = harness({
-      interaction: (id) => (id === 'i1' ? first.promise : second.promise),
-    })
+    const h = harness({ interaction: (id) => (id === 'i1' ? first.promise : second.promise) })
     await h.controller.start()
     const p1 = h.controller.selectInteraction(summary('i1'))
     const p2 = h.controller.selectInteraction(summary('i2'))
@@ -388,9 +380,7 @@ describe('selection races', () => {
 
 describe('live window clock', () => {
   test('advanceClock reloads the forest when loaded roots aged out of the window', async () => {
-    const h = harness({
-      forest: () => Promise.resolve(forestPage([root('old', [summary('i1')], 500_000)])),
-    })
+    const h = harness({ forest: () => Promise.resolve(forestPage([root('old', [summary('i1')], 500_000)])) })
     await h.controller.start()
     expect(h.calls.filter((c) => c.method === 'forest')).toHaveLength(1)
     h.setNow(1_200_000)
@@ -425,22 +415,17 @@ describe('failures paging', () => {
     await h.controller.loadFailures(false)
     expect(h.snap().failures.map((f) => f.id)).toEqual(['f1', 'f2'])
     expect(h.snap().failureCursor).toBeNull()
-    const queries = h.calls
-      .filter((c) => c.method === 'failures')
-      .map((c) => c.args[0] as { cursor?: string })
+    const queries = h.calls.filter((c) => c.method === 'failures').map((c) => c.args[0] as { cursor?: string })
     expect(queries[0].cursor).toBeUndefined()
     expect(queries[1].cursor).toBe('c2')
   })
 })
 
 describe('hidden failure reveal', () => {
-  const hidden = () =>
-    summary('hidden', { failed_request: true, client_output_delivered: false, status: 'completed' })
+  const hidden = () => summary('hidden', { failed_request: true, client_output_delivered: false, status: 'completed' })
 
   test('a failed-and-undelivered interaction stays off the canvas until revealed', async () => {
-    const h = harness({
-      forest: () => Promise.resolve(forestPage([root('root1', [hidden()])])),
-    })
+    const h = harness({ forest: () => Promise.resolve(forestPage([root('root1', [hidden()])])) })
     await h.controller.start()
     expect(h.snap().canvasRoots).toEqual([])
   })
@@ -449,16 +434,17 @@ describe('hidden failure reveal', () => {
     const h = harness({
       forest: () => Promise.resolve(forestPage([root('root1', [hidden()])])),
       interaction: (id) =>
-        Promise.resolve({
-          ...detailFor(id),
-          interaction: hidden(),
-          root: root('root1', [hidden()]),
-        }),
+        Promise.resolve({ ...detailFor(id), interaction: hidden(), root: root('root1', [hidden()]) }),
     })
     await h.controller.start()
     await h.controller.deepLinkInteraction('hidden')
     expect(h.snap().selectedInteraction?.id).toBe('hidden')
-    expect(h.snap().canvasRoots.flatMap((r) => r.interactions).map((i) => i.id)).toEqual(['hidden'])
+    expect(
+      h
+        .snap()
+        .canvasRoots.flatMap((r) => r.interactions)
+        .map((i) => i.id),
+    ).toEqual(['hidden'])
     expect(h.snap().followPaused).toBe(true)
   })
 })

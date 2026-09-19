@@ -330,8 +330,11 @@ async function downloadBundle(): Promise<void> {
             {formatLogTime(ws.windowStart)} — {ws.liveWindow ? m.observation_live() : formatLogTime(ws.windowEnd)}
           </span>
         </Button>
-        <Button variant="ghost" size="sm" disabled={ws.liveWindow || ws.loading} onclick={() => void ws.changeWindow(-1)}
-          >{m.observation_newer_window()}</Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={ws.liveWindow || ws.loading}
+          onclick={() => void ws.changeWindow(-1)}>{m.observation_newer_window()}</Button>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -453,7 +456,9 @@ async function downloadBundle(): Promise<void> {
             failure={ws.failureDetail}
             error={ws.failureDetailError ? localizeBackendErrorMessage(ws.failureDetailError) : undefined}
             onretry={() => ws.selectedFailure && void ws.selectFailure(ws.selectedFailure)}
-            oninteraction={ws.failureDetail?.request.interaction_id ? () => void ws.openFailureInteraction() : undefined}
+            oninteraction={ws.failureDetail?.request.interaction_id
+              ? () => void ws.openFailureInteraction()
+              : undefined}
             loading={ws.detailLoading}
             width={inspectorWidth}
             onwidthchange={(value: number) => (inspectorWidth = value)}
@@ -558,7 +563,8 @@ async function downloadBundle(): Promise<void> {
             type="single"
             bind:value={() => ws.apiKeyFilter, (value: string) => ws.setApiKeyFilter(value)}
             ><Select.Trigger id="observation-key" class="w-full"
-              >{keysQuery.data?.find((item) => item.id === ws.apiKeyFilter)?.name ?? m.observation_all()}</Select.Trigger
+              >{keysQuery.data?.find((item) => item.id === ws.apiKeyFilter)?.name ??
+                m.observation_all()}</Select.Trigger
             ><Select.Content
               ><Select.Group
                 ><Select.Item value="all">{m.observation_all()}</Select.Item
@@ -573,7 +579,9 @@ async function downloadBundle(): Promise<void> {
               type="single"
               bind:value={() => ws.statusFilter, (value: string) => ws.setStatusFilter(value)}
               ><Select.Trigger id="observation-status" class="w-full"
-                >{ws.statusFilter === 'all' ? m.observation_all() : observationStatusLabel(ws.statusFilter)}</Select.Trigger
+                >{ws.statusFilter === 'all'
+                  ? m.observation_all()
+                  : observationStatusLabel(ws.statusFilter)}</Select.Trigger
               ><Select.Content
                 ><Select.Group
                   >{#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item

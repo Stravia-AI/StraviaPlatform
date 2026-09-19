@@ -1145,13 +1145,15 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             .expect("buffered Client Projection session");
         let run = inference_run.as_mut().expect("buffered Inference Run");
         let mut leg = ModelLegConsume::begin(
-            gateway,
-            &generation,
-            ingress,
+            LegEnv {
+                gateway,
+                generation: &generation,
+                ingress,
+                observer: &observer,
+            },
             &turn,
             run,
             projection_session,
-            &observer,
             LegPolicy {
                 emit_live: false,
                 early_platform: true,
@@ -1234,11 +1236,12 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             LegAdvance::NextLeg(next) => {
                 turn = *next;
             }
-            LegAdvance::HookResponse(HookResponsePlan {
-                response,
-                staged_delivery,
-                pending_generation_chain,
-            }) => {
+            LegAdvance::HookResponse(plan) => {
+                let HookResponsePlan {
+                    response,
+                    staged_delivery,
+                    pending_generation_chain,
+                } = *plan;
                 ledger.stage_visible_response(ingress, &response);
                 let response = match projection_session.prepare_upload_delivery(&response).await {
                     Ok(std::borrow::Cow::Borrowed(_)) => response,

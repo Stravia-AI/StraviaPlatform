@@ -20,8 +20,7 @@ function contextSources(
   for (const event of interaction.context_events ?? []) {
     const nativeEvent = event.kind === 'native_compaction_associated'
     const inferredEvent =
-      event.kind === 'retained_tail_associated' &&
-      payloadRecord(event.payload).status === 'inferred'
+      event.kind === 'retained_tail_associated' && payloadRecord(event.payload).status === 'inferred'
     if (!nativeEvent && !inferredEvent) continue
     const source = payloadRecord(event.payload).source_interaction_id
     if (typeof source !== 'string' || source === interaction.id || !visible.has(source) || seen.has(source)) continue

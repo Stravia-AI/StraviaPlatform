@@ -22,7 +22,12 @@ function event(sequence: number, kind: string, payload: unknown = {}, occurred_a
   return { sequence, occurred_at, interaction_id: 'i1', run_id: 'r1', rejection_id: null, kind, payload }
 }
 
-function run(id: string, started_at: number, events: ObservationEvent[] = [], extra: Partial<RunDetail> = {}): RunDetail {
+function run(
+  id: string,
+  started_at: number,
+  events: ObservationEvent[] = [],
+  extra: Partial<RunDetail> = {},
+): RunDetail {
   return {
     id,
     parent_run_id: null,
@@ -139,19 +144,13 @@ describe('stream item grouping', () => {
   })
 
   test('process-kind events with a non-neutral tone stay on the main stream', () => {
-    const r = run('a', 0, [
-      event(1, 'trace_manifest_updated', { status: 'missing' }),
-      event(2, 'checkpoint', {}),
-    ])
+    const r = run('a', 0, [event(1, 'trace_manifest_updated', { status: 'missing' }), event(2, 'checkpoint', {})])
     const items = deriveTimeline(detail([r]), undefined).streams.get('a')!
     expect(items.map((i) => i.type)).toEqual(['event', 'process'])
   })
 
   test('handoff without a usable name stays an event', () => {
-    const r = run('a', 0, [
-      event(1, 'client_tool_handoff', {}),
-      event(2, 'client_tool_handoff', { name: '  ' }),
-    ])
+    const r = run('a', 0, [event(1, 'client_tool_handoff', {}), event(2, 'client_tool_handoff', { name: '  ' })])
     const items = deriveTimeline(detail([r]), undefined).streams.get('a')!
     expect(items.map((i) => i.type)).toEqual(['event', 'event'])
   })
@@ -239,10 +238,7 @@ describe('failure items', () => {
 
 describe('processGroup', () => {
   test('a single kind collapses into title times count', () => {
-    const group = processGroup([
-      event(1, 'checkpoint', { stage: 'a' }),
-      event(2, 'checkpoint', { stage: 'b' }),
-    ])
+    const group = processGroup([event(1, 'checkpoint', { stage: 'a' }), event(2, 'checkpoint', { stage: 'b' })])
     expect(group.label).toBe(m.observation_event_group({ title: m.observation_event_checkpoint(), count: 2 }))
     expect(group.titles).toBeNull()
   })

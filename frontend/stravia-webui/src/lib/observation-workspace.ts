@@ -1,11 +1,6 @@
 import { visualParent } from '$lib/interaction-canvas-links'
 import { hiddenFailureNode } from '$lib/observation-chain-visibility'
-import {
-  eventBlockId,
-  mergeObservationRuns,
-  retainLiveBlocks,
-  withoutCommittedBlocks,
-} from '$lib/observation-state'
+import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import type { ObservationSubscription } from '$lib/observation-stream'
 import type {
   BundleResourceKind,
@@ -839,11 +834,12 @@ export class ObservationWorkspaceController {
     if (interactionId) {
       const known = this.#interactions().find((item) => item.id === interactionId)
       const selected = this.#selectedInteraction?.id === interactionId
-      const inspectorNeedsEvent =
-        selected && (this.#interactionDetail?.snapshot_sequence ?? 0) < streamEvent.sequence
+      const inspectorNeedsEvent = selected && (this.#interactionDetail?.snapshot_sequence ?? 0) < streamEvent.sequence
       const eventInWindow = streamEvent.occurred_at >= this.#windowStart && streamEvent.occurred_at < this.#windowEnd
-      if ((!(known && known.last_event_sequence >= streamEvent.sequence) || inspectorNeedsEvent) &&
-          (known || selected || this.#liveWindow || eventInWindow)) {
+      if (
+        (!(known && known.last_event_sequence >= streamEvent.sequence) || inspectorNeedsEvent) &&
+        (known || selected || this.#liveWindow || eventInWindow)
+      ) {
         const selection = this.#selectionVersion
         try {
           const [snapshot] = await Promise.all([
@@ -913,8 +909,7 @@ export class ObservationWorkspaceController {
           this.#modelFilter,
           this.#apiKeyFilter,
           ...(this.#activeTab === 'interactions' ? [this.#statusFilter] : []),
-        ].filter((value) => value !== 'all').length +
-        Number(this.#activeTab === 'interactions' && minTokensFilter > 0),
+        ].filter((value) => value !== 'all').length + Number(this.#activeTab === 'interactions' && minTokensFilter > 0),
       canvasRoots,
       latestInteraction: [...canvasInteractions].sort(
         (a, b) =>
@@ -922,9 +917,7 @@ export class ObservationWorkspaceController {
       )[0],
       selectedPath: this.#selectedPath(),
       selectedMigrated: this.#selectedInteraction
-        ? this.#roots.find((root) =>
-            root.interactions.some((item) => item.id === this.#selectedInteraction?.id),
-          )?.id
+        ? this.#roots.find((root) => root.interactions.some((item) => item.id === this.#selectedInteraction?.id))?.id
         : undefined,
       migratedRoots: this.#migratedRoots,
       selectedInteraction: this.#selectedInteraction,
@@ -934,9 +927,7 @@ export class ObservationWorkspaceController {
       failureDetailError: this.#failureDetailError,
       detailLoading: this.#detailLoading,
       olderLoading: this.#olderLoading,
-      selectedLiveBlocks: this.#liveBlocks.filter(
-        (block) => block.interaction_id === this.#selectedInteraction?.id,
-      ),
+      selectedLiveBlocks: this.#liveBlocks.filter((block) => block.interaction_id === this.#selectedInteraction?.id),
       liveGaps: this.#liveGaps,
       liveCapacityGaps: this.#liveCapacityGaps,
       streamConnected: this.#streamConnected,

@@ -2,12 +2,7 @@ import { formatDuration, formatList, formatNumber, formatTime } from '$lib/forma
 import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
 import { payloadRecord, payloadString } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
-import type {
-  FailedRequestDetail,
-  InteractionDetail,
-  ObservationEvent,
-  RunDetail,
-} from '$lib/types/observation'
+import type { FailedRequestDetail, InteractionDetail, ObservationEvent, RunDetail } from '$lib/types/observation'
 
 export type StreamItem =
   | { type: 'event'; event: ObservationEvent }
@@ -52,10 +47,7 @@ const PROCESS_KINDS = new Set([
   'model_thinking_delta',
 ])
 
-function streamItems(
-  events: readonly ObservationEvent[],
-  outputs?: ReadonlyMap<string, number | null>,
-): StreamItem[] {
+function streamItems(events: readonly ObservationEvent[], outputs?: ReadonlyMap<string, number | null>): StreamItem[] {
   const items: StreamItem[] = []
   for (const event of events) {
     const process = PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
@@ -128,9 +120,7 @@ export function deriveTimeline(
       : m.observation_details()
 
   const timelines = new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)]))
-  const attemptOutputs = new Map(
-    orderedRuns.map((run) => [run.id, observationAttemptOutputTokens(run.events)]),
-  )
+  const attemptOutputs = new Map(orderedRuns.map((run) => [run.id, observationAttemptOutputTokens(run.events)]))
   const streams = new Map(
     orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))]),
   )
@@ -168,15 +158,5 @@ export function deriveTimeline(
     return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
   }
 
-  return {
-    title,
-    orderedRuns,
-    runIndex,
-    timelines,
-    attemptOutputs,
-    streams,
-    failureItems,
-    offsetLabel,
-    gapLabel,
-  }
+  return { title, orderedRuns, runIndex, timelines, attemptOutputs, streams, failureItems, offsetLabel, gapLabel }
 }

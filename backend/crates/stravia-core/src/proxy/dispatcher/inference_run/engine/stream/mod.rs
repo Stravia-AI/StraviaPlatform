@@ -22,8 +22,8 @@ use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use super::delivery::LiveStreamRequest;
 use super::{
     ClientOutputCommit, ClientProjectionSession, CompletionFailure, DeliveryAdapter,
-    DeliveryProgress, FollowupEnv, HookLegGuard, HookResponsePlan, LegAdvance, LegFailure, LegFlow,
-    LegOps, LegParts, LegPolicy, LegReaction, LiveLegOps, ModelLegConsume, PhaseTracker,
+    DeliveryProgress, FollowupEnv, HookLegGuard, HookResponsePlan, LegAdvance, LegEnv, LegFailure,
+    LegFlow, LegOps, LegParts, LegPolicy, LegReaction, LiveLegOps, ModelLegConsume, PhaseTracker,
     PreparedDelivery, ProjectedDeliveryFailure, ProjectionDelivery, RoundOutcome, RunLedger,
     SealOutcome, Settlement, ai_response_to_deltas, buffered_response, deliver_projected,
     error_response, live_response, record_marker_failure, render_completion_failure,
@@ -119,13 +119,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         'model_legs: loop {
             let buffer_terminal_hooks = inference_run.requires_terminal_buffering();
             let mut leg = ModelLegConsume::begin(
-                &gateway,
-                &generation,
-                ingress,
+                LegEnv {
+                    gateway: &gateway,
+                    generation: &generation,
+                    ingress,
+                    observer: &observer,
+                },
                 &turn,
                 &inference_run,
                 &mut projection,
-                &observer,
                 LegPolicy {
                     emit_live: !buffer_terminal_hooks,
                     early_platform: !buffer_terminal_hooks,
@@ -280,11 +282,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         turn = *next;
                         continue 'model_legs;
                     }
-                    LegAdvance::HookResponse(HookResponsePlan {
-                        response: hook_response,
-                        staged_delivery: hook_marker_delivery,
-                        pending_generation_chain: hook_generation_chain,
-                    }) => {
+                    LegAdvance::HookResponse(plan) => {
+                        let HookResponsePlan {
+                            response: hook_response,
+                            staged_delivery: hook_marker_delivery,
+                            pending_generation_chain: hook_generation_chain,
+                        } = *plan;
                         response = hook_response;
                         pending_generation_chain = hook_generation_chain.map(|chain| *chain);
                         if !buffer_terminal_hooks {

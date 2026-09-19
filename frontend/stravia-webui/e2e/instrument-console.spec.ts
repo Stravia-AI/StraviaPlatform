@@ -85,7 +85,7 @@ test('Overview with traffic shows request and second-based latency charts', asyn
   await expect(modelTable).toContainText('86')
 
   await page.setViewportSize({ width: 390, height: 800 })
-  await expect(modelSection.locator('.route-mobile-list')).toContainText('IN 920 · OUT 86 · 120 ms')
+  await expect(modelSection.locator('.route-mobile-list')).toContainText('Input 920 · Output 86 · 120 ms')
 })
 
 test('Usage analytics uses backend input and output without re-counting cache or reasoning', async ({ page }) => {
@@ -116,7 +116,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
 
   await page.setViewportSize({ width: 390, height: 800 })
   const mobileApiKeyUsage = apiKeyUsage.locator('.route-mobile-list')
-  await expect(mobileApiKeyUsage).toContainText('IN 920 · OUT 86 · C·R 320 · C·W 12')
+  await expect(mobileApiKeyUsage).toContainText('Input 920 · Output 86 · Cache read 320 · Cache write 12')
   await expect(mobileApiKeyUsage).not.toContainText('RSN')
 
   const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })

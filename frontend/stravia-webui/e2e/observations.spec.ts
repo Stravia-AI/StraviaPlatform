@@ -1883,10 +1883,10 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     const atlas = node(page, 'Atlas', 'completed')
     const cardUsage = atlas.getByLabel('Reported usage')
-    await expect(cardUsage.getByTitle('IN')).toContainText('920')
-    await expect(cardUsage.getByTitle('OUT')).toContainText('86')
-    await expect(cardUsage.getByTitle('C·R')).toContainText('320')
-    await expect(cardUsage.getByTitle('C·W')).toContainText('–')
+    await expect(cardUsage.getByTitle('Input')).toContainText('920')
+    await expect(cardUsage.getByTitle('Output')).toContainText('86')
+    await expect(cardUsage.getByTitle('Cache read')).toContainText('320')
+    await expect(cardUsage.getByTitle('Cache write')).toContainText('–')
     await expect(cardUsage).not.toContainText('RSN')
 
     await atlas.getByRole('heading', { name: 'Atlas', exact: true }).click()
@@ -1903,8 +1903,8 @@ test.describe('Interaction Observation canvas', () => {
     // 交互 ID 在概览中常驻可复制；行内展示用量摘要。
     await expect(diagnostics.getByText('interaction-atlas', { exact: true })).toBeVisible()
     const runRow = diagnostics.locator('button[data-run="run-interaction-atlas"]')
-    await expect(runRow).toContainText('IN 920')
-    await expect(runRow).toContainText('OUT 86')
+    await expect(runRow).toContainText('Input 920')
+    await expect(runRow).toContainText('Output 86')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     await runRow.click()
     await expect(runRow).toHaveAttribute('aria-expanded', 'true')
@@ -2904,7 +2904,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.getByRole('button', { name: 'Time range', exact: true }).click()
     await page.getByRole('option', { name: '5 minutes', exact: true }).click()
     await expect(node(page, 'Atlas', 'completed')).toBeVisible()
-    await page.evaluate((now) => (Date.now = () => now), startedAt + 900_000)
+    await page.clock.setSystemTime(startedAt + 900_000)
     await expect(node(page, 'Atlas', 'completed')).toHaveCount(0)
     await expect
       .poll(() => {
@@ -2918,7 +2918,7 @@ test.describe('Interaction Observation canvas', () => {
     await dialog.getByRole('button', { name: 'Apply', exact: true }).click()
     await expect(dialog).toBeHidden()
     const fixed = fixture.forestRequests.at(-1)!.searchParams
-    await page.evaluate((now) => (Date.now = () => now), startedAt + DAY * 2)
+    await page.clock.setSystemTime(startedAt + DAY * 2)
     await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     await expect
       .poll(() => {
@@ -2982,7 +2982,7 @@ test.describe('Interaction Observation canvas', () => {
       .getByRole('button', { name: 'Clear history', exact: true })
       .click()
     await page.getByRole('switch', { name: 'Debug' }).click()
-    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently saved: 0 MiB.')
+    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently saved: 0 B.')
   })
 
   test('clears retained Debug data while Debug stays enabled', async ({ page }) => {
