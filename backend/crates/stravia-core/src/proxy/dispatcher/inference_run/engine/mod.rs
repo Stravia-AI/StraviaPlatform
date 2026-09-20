@@ -385,12 +385,31 @@ pub(super) async fn orchestrate(
             stravia_runtime_contract::hook::RequestKind::Generation
         ) {
         let controls = crate::compaction::NativeCompactionControls::classify(&request);
-        let begin = if controls.requested() {
-            gw.generation_chains
-                .begin_native_compaction(principal.clone(), request)
-                .await
-        } else {
-            gw.generation_chains.begin(principal.clone(), request).await
+        let begin = tokio::select! {
+            begin = async {
+                if controls.requested() {
+                    gw.generation_chains
+                        .begin_native_compaction(principal.clone(), request)
+                        .await
+                } else {
+                    gw.generation_chains.begin(principal.clone(), request).await
+                }
+            } => begin,
+            _ = ctx.cancellation.cancelled() => {
+                let deadline = ctx.deadline.is_exceeded();
+                let code = if deadline { "deadline_exceeded" } else { "cancelled" };
+                let response = if deadline {
+                    error_response(504, "request deadline exceeded")
+                } else {
+                    error_response(499, "request cancelled")
+                };
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "generation_chain",
+                    code,
+                    response,
+                );
+            }
         };
         match begin {
             Ok(mut write) => {
@@ -422,11 +441,27 @@ pub(super) async fn orchestrate(
     };
     let (compact_parent_id, compact_root_id, compact_has_new_user, compact_pending_tool_result) =
         if compact {
-            let prepared = match gw
-                .generation_chains
-                .prepare_compaction(principal.clone(), request)
-                .await
-            {
+            let prepare = tokio::select! {
+                prepare = gw
+                    .generation_chains
+                    .prepare_compaction(principal.clone(), request) => prepare,
+                _ = ctx.cancellation.cancelled() => {
+                    let deadline = ctx.deadline.is_exceeded();
+                    let code = if deadline { "deadline_exceeded" } else { "cancelled" };
+                    let response = if deadline {
+                        error_response(504, "request deadline exceeded")
+                    } else {
+                        error_response(499, "request cancelled")
+                    };
+                    return reject_before_admission(
+                        &mut Some(ingress_observer),
+                        "generation_chain",
+                        code,
+                        response,
+                    );
+                }
+            };
+            let prepared = match prepare {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let code = error.to_string();

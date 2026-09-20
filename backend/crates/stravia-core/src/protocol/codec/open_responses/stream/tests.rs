@@ -3,30 +3,84 @@ use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 
 #[test]
-fn stream_formatter_closes_failures_with_standard_terminal_sequence() {
-    let mut formatter = ResponsesStreamFormatter::new();
-    let mut events = formatter.format_deltas(&[AiStreamDelta::StreamError {
-        error: stravia_runtime_contract::protocol::ir::AiError::new(
-            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-            "stream aborted",
-        ),
-    }]);
-    events.extend(formatter.format_done());
+fn stream_formatter_classifies_failures_without_leaking_diagnostics() {
+    use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
 
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0].event.as_deref(), Some("error"));
-    assert_eq!(events[1].event.as_deref(), Some("response.failed"));
-    assert_eq!(events[2].event, None);
-    assert_eq!(events[2].data, "[DONE]");
-    let error: serde_json::Value = serde_json::from_str(&events[0].data).expect("error JSON");
-    let failed: serde_json::Value = serde_json::from_str(&events[1].data).expect("failed JSON");
-    assert_eq!(error["type"], "error");
-    assert_eq!(error["error"]["code"], "response_stream_failed");
-    assert_eq!(error["error"]["message"], "The response stream failed.");
-    assert!(!error.to_string().contains("stream aborted"));
-    assert_eq!(error["sequence_number"], 0);
-    assert_eq!(failed["type"], "response.failed");
-    assert_eq!(failed["sequence_number"], 1);
+    let sensitive_diagnostic = "transport to wss://internal.example reset with secret=token";
+    for (error, expected_code) in [
+        (
+            AiError::new(AiErrorKind::ServerError, sensitive_diagnostic),
+            "server_error",
+        ),
+        (
+            AiError::new(AiErrorKind::StreamMidError, sensitive_diagnostic).with_raw(
+                serde_json::json!({
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_request",
+                        "message": sensitive_diagnostic,
+                        "param": null
+                    }
+                }),
+            ),
+            "invalid_request",
+        ),
+        (
+            AiError::new(AiErrorKind::AuthenticationError, sensitive_diagnostic),
+            "authentication_error",
+        ),
+        (
+            AiError::new(AiErrorKind::QuotaExceeded, sensitive_diagnostic).with_raw(
+                serde_json::json!({
+                    "error": {
+                        "type": "rate_limit_error",
+                        "code": "insufficient_quota",
+                        "message": sensitive_diagnostic,
+                        "param": null
+                    }
+                }),
+            ),
+            "quota_exceeded",
+        ),
+        (
+            AiError::new(AiErrorKind::StreamMidError, sensitive_diagnostic).with_raw(
+                serde_json::json!({
+                    "error": {
+                        "type": "rate_limit_error",
+                        "code": "insufficient_quota",
+                        "message": sensitive_diagnostic,
+                        "param": null
+                    }
+                }),
+            ),
+            "quota_exceeded",
+        ),
+    ] {
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut events = formatter.format_deltas(&[AiStreamDelta::StreamError { error }]);
+        events.extend(formatter.format_done());
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].event.as_deref(), Some("error"));
+        assert_eq!(events[1].event.as_deref(), Some("response.failed"));
+        assert_eq!(events[2].event, None);
+        assert_eq!(events[2].data, "[DONE]");
+        let error: serde_json::Value = serde_json::from_str(&events[0].data).expect("error JSON");
+        let failed: serde_json::Value = serde_json::from_str(&events[1].data).expect("failed JSON");
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["type"], expected_code);
+        assert_eq!(error["error"]["code"], expected_code);
+        assert!(
+            error.get("code").is_none(),
+            "error payload must remain nested"
+        );
+        assert!(!error.to_string().contains(sensitive_diagnostic));
+        assert_eq!(error["sequence_number"], 0);
+        assert_eq!(failed["type"], "response.failed");
+        assert_eq!(failed["response"]["status"], "failed");
+        assert_eq!(failed["response"]["error"], error["error"]);
+        assert_eq!(failed["sequence_number"], 1);
+    }
 }
 
 #[test]

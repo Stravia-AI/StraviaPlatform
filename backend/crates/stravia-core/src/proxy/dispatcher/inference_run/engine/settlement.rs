@@ -154,11 +154,16 @@ pub(super) async fn settle(
     }
 
     if let Some(mut write) = pending_generation_chain {
-        match write.persist().await {
-            Ok(()) => ledger
-                .terminal
-                .generation_committed
-                .store(true, std::sync::atomic::Ordering::Release),
+        match write.persist_holding_fence().await {
+            Ok(()) => {
+                if let Some(fence) = write.take_commit_fence() {
+                    observer.hold_generation_commit_fence(fence);
+                }
+                ledger
+                    .terminal
+                    .generation_committed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             Err(error) => {
                 tracing::error!("failed to commit delivered Generation Chain node: {error}");
                 let failure = SettlementFailure::GenerationCommit(error);

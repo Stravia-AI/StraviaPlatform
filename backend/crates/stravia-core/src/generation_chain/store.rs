@@ -741,10 +741,9 @@ impl GenerationChainStore {
         } = commit;
         let mut response = response;
         let mut effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
+        let projected_client = project_client_commit(&parent, &request_delta, &response)?;
         let fresh_states = &parent.fresh_inline_states;
         let inline_boundary = crate::protocol::codec::open_responses::inline_compaction_boundary;
-        let client_response =
-            inline_boundary(&response.items, fresh_states).map(|_| response.clone());
         let mut effective_inline = false;
         // Hidden rounds also appear in the projected response. Prefer their real
         // position in the effective request so completed platform work survives.
@@ -783,39 +782,13 @@ impl GenerationChainStore {
             effective_state.context_messages = proof.context_messages;
             effective_state.canonical_controls_fingerprint = proof.controls_fingerprint;
         }
-        let mut client_request_delta = canonical_client_history_request(&request_delta);
-        let mut client_items = parent
-            .replacement_client_items
-            .clone()
-            .unwrap_or_else(|| parent.parent_client_items.clone());
-        let parent_items = client_items.len();
-        if parent.replacement_client_items.is_none() {
-            client_items.extend(client_request_delta.items.clone());
-        }
-        let mut client_output = project_client_output(
-            ProtocolTransform::inferred_ingress(&request_delta),
-            client_response.as_ref().unwrap_or(&response),
-            &mut client_items,
-        )?;
-        let client_inline = if let Some(start) = inline_boundary(&client_output, fresh_states) {
-            client_items.clear();
-            client_output.drain(..start);
-            true
-        } else if let Some(start) = inline_boundary(&client_items, fresh_states) {
-            client_items.drain(..start);
-            true
-        } else {
-            false
-        };
-        let client_history_mutation = (client_inline || parent.replacement_client_items.is_some())
-            .then(|| EffectiveHistoryMutation::Replace {
-                items: client_items.clone(),
-            });
-        if client_history_mutation.is_none() {
-            client_request_delta.items = client_items[parent_items..].to_vec();
-        }
-        client_items.extend(client_output.clone());
-        let client_history = ClientHistoryState::from_request(&client_request_delta, &client_items);
+        let ProjectedClientCommit {
+            client_request_delta,
+            client_items,
+            client_output,
+            client_history_mutation,
+            client_history,
+        } = projected_client;
         let effective_history_mutation = if effective_inline || parent.replace_effective_history {
             EffectiveHistoryMutation::Replace {
                 items: effective_request.items.clone(),

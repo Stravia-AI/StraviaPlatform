@@ -144,6 +144,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut output = turn.output;
             let mut aborted = false;
             let mut committed_failure_delivered = false;
+            let mut terminal_failure = None;
             let mut transport = LiveTransportFlags::default();
             let mut preflight_failure = None;
             let mut response = leg.empty_response();
@@ -182,6 +183,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             LegFlow::Faulted => aborted = true,
                             LegFlow::Failed(failure) => {
                                 aborted = true;
+                                terminal_failure
+                                    .get_or_insert_with(|| failure.public_stream_error());
                                 preflight_failure.get_or_insert_with(|| {
                                     render_leg_failure(
                                         failure,
@@ -197,6 +200,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     LegReaction::Ended => break,
                     LegReaction::Failed(failure) => {
                         aborted = true;
+                        terminal_failure.get_or_insert_with(|| failure.public_stream_error());
                         preflight_failure.get_or_insert_with(|| {
                             render_leg_failure(
                                 failure,
@@ -225,6 +229,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 SealOutcome::Ready => {}
                 SealOutcome::Failed(failure) => {
                     aborted = true;
+                    terminal_failure.get_or_insert_with(|| failure.public_stream_error());
                     preflight_failure.get_or_insert_with(|| {
                         render_leg_failure(
                             failure,
@@ -372,6 +377,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                     LegAdvance::Failed(failure) => {
                         aborted = true;
+                        terminal_failure.get_or_insert_with(|| failure.public_stream_error());
                         // A commit already reached the wire, so there is no
                         // preflight channel left to render the failure through.
                         if !matches!(
@@ -593,10 +599,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     .flatten()
                     .cloned();
                     let error = [native_error.unwrap_or_else(|| AiStreamDelta::StreamError {
-                        error: stravia_runtime_contract::protocol::ir::AiError::new(
-                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
-                            "stream aborted",
-                        ),
+                        error: terminal_failure.take().unwrap_or_else(|| {
+                            stravia_runtime_contract::protocol::ir::AiError::new(
+                                stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
+                                "stream aborted",
+                            )
+                        }),
                     })];
                     if delivery.send_deltas(&error).await == DeliveryProgress::Sent {
                         let _ = delivery.finish_stream("failed".into()).await;

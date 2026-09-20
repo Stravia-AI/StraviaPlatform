@@ -901,6 +901,7 @@ impl IngressObserver {
             finalization: Mutex::new(self.finalization.take()),
             pending_finish: Mutex::new(None),
             failure: Mutex::new(None),
+            generation_commit_fences: Mutex::new(Vec::new()),
             pending_input: Mutex::new(None),
             pending_tool_results: Mutex::new(Vec::new()),
             thinking_redaction: Mutex::new(HashMap::new()),
@@ -997,6 +998,7 @@ struct RunObserverInner {
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
     pending_finish: Mutex<Option<(RunOutcome, i64)>>,
     failure: Mutex<Option<FailureDiagnostic>>,
+    generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
     // Canonical user text remains memory-only until Model Turn protection succeeds.
     pending_input: Mutex<Option<String>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
@@ -1005,6 +1007,18 @@ struct RunObserverInner {
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    pub(crate) fn hold_generation_commit_fence(
+        &self,
+        fence: crate::generation_chain::GenerationCommitFence,
+    ) {
+        let mut fences = self.inner.generation_commit_fences.lock();
+        if self.inner.terminal.load(Ordering::Acquire) {
+            fence.resolve();
+            return;
+        }
+        fences.push(fence);
+    }
+
     /// Admission only: use the received canonical window, never effective model history.
     pub(crate) fn capture_input_preview(
         &self,
@@ -1341,8 +1355,9 @@ impl RunObserver {
             self.inner.protected.text(reason);
         }
         redaction::redact_run_outcome(&mut outcome);
-        if !self.inner.terminal.swap(true, Ordering::AcqRel)
-            && let Err(error) =
+        let mut generation_commit_fences = self.inner.generation_commit_fences.lock();
+        if !self.inner.terminal.swap(true, Ordering::AcqRel) {
+            if let Err(error) =
                 self.inner
                     .observation
                     .inner
@@ -1352,20 +1367,28 @@ impl RunObserver {
                         outcome,
                         finished_at,
                     })
-            && let WriterCommand::Finish {
-                outcome,
-                finished_at,
-                ..
-            } = error.into_inner()
-        {
-            *self.inner.pending_finish.lock() = Some((outcome, finished_at));
-            self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
+            {
+                if let WriterCommand::Finish {
+                    outcome,
+                    finished_at,
+                    ..
+                } = error.into_inner()
+                {
+                    *self.inner.pending_finish.lock() = Some((outcome, finished_at));
+                }
+                self.inner.gap.store(true, Ordering::Release);
+                self.inner
+                    .observation
+                    .inner
+                    .unpersisted_gaps
+                    .lock()
+                    .record(&self.inner.run_id, writer::now());
+            }
+            // Preserve Finish/Admit FIFO ordering without waiting for observation
+            // persistence. A full or closed writer only records a diagnostic gap.
+            for fence in generation_commit_fences.drain(..) {
+                fence.resolve();
+            }
         }
     }
 }

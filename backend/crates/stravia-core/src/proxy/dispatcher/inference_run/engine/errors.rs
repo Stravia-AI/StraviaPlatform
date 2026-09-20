@@ -167,31 +167,22 @@ pub(super) fn compaction_stream_error_outcome(
     Some(model_turn_error_outcome(failure))
 }
 
-pub(super) fn model_turn_error_response(
-    error: stravia_runtime_contract::model_turn::ModelTurnError,
-) -> Response {
-    if let Some(body) = error.upstream_body {
-        let status = error
+pub(super) fn model_turn_error_status(
+    error: &stravia_runtime_contract::model_turn::ModelTurnError,
+) -> StatusCode {
+    if error.upstream_body.is_some() {
+        return error
             .upstream_status
             .and_then(|status| StatusCode::from_u16(status).ok())
             .unwrap_or(StatusCode::BAD_GATEWAY);
-        let mut response = (status, axum::Json(body)).into_response();
-        response
-            .extensions_mut()
-            .insert(crate::model_turn::UpstreamErrorResponse);
-        return response;
     }
     if let Some(status) = error
         .upstream_status
         .and_then(|status| StatusCode::from_u16(status).ok())
     {
-        let mut response = coded_error_response(status, &error.code, &error.message);
-        response
-            .extensions_mut()
-            .insert(crate::model_turn::UpstreamErrorResponse);
-        return response;
+        return status;
     }
-    let status = match error.code.as_str() {
+    match error.code.as_str() {
         "cancelled" => StatusCode::from_u16(499).expect("valid cancellation status"),
         "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
         "model_not_found" | "STRAVIA_NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -212,8 +203,30 @@ pub(super) fn model_turn_error_response(
         }
         "STRAVIA_AUTH_ERROR" => StatusCode::UNAUTHORIZED,
         _ => StatusCode::BAD_GATEWAY,
-    };
+    }
+}
 
+pub(super) fn model_turn_error_response(
+    error: stravia_runtime_contract::model_turn::ModelTurnError,
+) -> Response {
+    let status = model_turn_error_status(&error);
+    if let Some(body) = error.upstream_body {
+        let mut response = (status, axum::Json(body)).into_response();
+        response
+            .extensions_mut()
+            .insert(crate::model_turn::UpstreamErrorResponse);
+        return response;
+    }
+    if let Some(status) = error
+        .upstream_status
+        .and_then(|status| StatusCode::from_u16(status).ok())
+    {
+        let mut response = coded_error_response(status, &error.code, &error.message);
+        response
+            .extensions_mut()
+            .insert(crate::model_turn::UpstreamErrorResponse);
+        return response;
+    }
     if error.code.starts_with("STRAVIA_") {
         let message = match error.code.as_str() {
             "STRAVIA_FORBIDDEN" if error.message == "access to this model is not permitted" => {

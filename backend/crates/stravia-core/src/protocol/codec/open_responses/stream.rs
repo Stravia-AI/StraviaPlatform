@@ -3,8 +3,28 @@ use std::collections::{BTreeMap, HashMap};
 use super::formatter::{gateway_item_id, response_resource_snapshot};
 use crate::protocol::SseEvent;
 use stravia_runtime_contract::protocol::ir::AiItemStatus;
-use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::usage::Usage;
+use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind, AiStreamDelta};
+
+fn public_stream_error(error: &AiError) -> serde_json::Value {
+    let kind = super::stream_error_kind(error);
+    let code = match &kind {
+        AiErrorKind::ServerError
+        | AiErrorKind::ServiceUnavailable
+        | AiErrorKind::Timeout
+        | AiErrorKind::ModelNotAvailable
+        | AiErrorKind::StreamMidError
+        | AiErrorKind::UnexpectedEof => "server_error".to_owned(),
+        AiErrorKind::RateLimitError => "rate_limit_error".to_owned(),
+        _ => kind.to_string(),
+    };
+    serde_json::json!({
+        "type": code.clone(),
+        "code": code,
+        "message": "The response stream failed.",
+        "param": null,
+    })
+}
 
 struct PendingFunctionCall {
     output_index: usize,
@@ -1825,14 +1845,7 @@ impl ResponsesStreamFormatter {
                         .filter(|_| self.compaction_requested)
                         .and_then(|raw| raw.pointer("/response/error").or_else(|| raw.get("error")))
                         .cloned()
-                        .unwrap_or_else(|| {
-                            serde_json::json!({
-                                "type": "server_error",
-                                "code": "response_stream_failed",
-                                "message": "The response stream failed.",
-                                "param": null,
-                            })
-                        });
+                        .unwrap_or_else(|| public_stream_error(error));
                     events.push(SseEvent::new(
                         Some("error"),
                         serde_json::json!({

@@ -251,6 +251,10 @@ Usage 仅在 input/output totals、cached tokens 和 reasoning tokens 全部可�
 
 Provider event 的原始 sequence、indices 和 response ID 不直接透传。目标 stream session 基于最终输出重新分配 sequence 和 indices，保证 Hook、tool loop 或协议转换插入/删除事件后仍满足 wire ordering。
 
+普通生成在 Client Output Commit 后失败时保留 dated schema 的嵌套 `error` 对象，按 `error` → `response.failed` → `[DONE]` 结束，不伪造 `response.completed`。传输中断、超时和临时上游不可用使用兼容的 `server_error` code；永久请求错误、鉴权拒绝、配额耗尽以及未分类的本地 Hook/投影失败不统一标成瞬态错误。公开 message 保持安全通用文案，不泄漏上游诊断。解码与格式化共用错误分类，已知永久上游错误在进入重试策略前就获得其 canonical 类别；`insufficient_quota` 优先于上游笼统的 `rate_limit_error` type。客户端显式远程压缩仍沿用既有原生错误透传例外。
+
+公开错误类别只是客户端恢复判断的输入，不承诺一定可安全重放；Stravia 不因此增加重试预算、重放已提交输出或改变工具执行边界。
+
 ### 7.2 WebSocket
 
 WebSocket 复用 `/v1/responses` resource。客户端每轮发送标准 `response.create` event；一条连接内顺序执行多个 response，但同一时刻最多一个 in-flight response。
@@ -302,6 +306,8 @@ Response Chain 是协议无关 Generation Chain 的 Responses 投影。Stravia �
 `store` 是 Upstream Store Hint，不是 Stravia 数据保留开关。`metadata` 和 `safety_identifier` 始终由 Stravia 本地拥有，不发送远端 Provider。它们只在 dated schema 允许的位置存储和回显。
 
 只有完整交付给客户端的 `completed` 和 `incomplete` terminal response 才提交 Response Chain。`failed`、客户端断线、delivery failure 或取消不提交，避免 durable history 指向客户端从未完整观察到的节点。
+
+同一进程内，匹配待提交响应的即时续接、显式 `previous_response_id` 和 item reference 会等待相关提交结束后再物化，而不是把尚未落库误判为旧父或不存在。等待遵守请求取消与 deadline，不串行化无关分支或其他 Principal；写入失败、取消或未完成交付不会被内存中的屏障提升为 durable history。
 
 ### 8.3 Continuation merge
 

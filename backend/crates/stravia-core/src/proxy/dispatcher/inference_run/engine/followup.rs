@@ -147,14 +147,14 @@ fn hook_stream_error(
                 401 => AiErrorKind::AuthenticationError,
                 403 => AiErrorKind::AuthorizationError,
                 400..=499 => AiErrorKind::InvalidRequest,
-                _ => AiErrorKind::ServerError,
+                _ => AiErrorKind::Unknown,
             };
             AiError::new(kind, rejection.message)
                 .with_status(rejection.status)
                 .with_raw(serde_json::json!({"code": rejection.code}))
         }
         stravia_runtime_contract::hook::HookControl::StreamAbort { message } => {
-            AiError::new(AiErrorKind::StreamMidError, message)
+            AiError::new(AiErrorKind::Unknown, message)
         }
         stravia_runtime_contract::hook::HookControl::Continue
         | stravia_runtime_contract::hook::HookControl::Respond(_) => {
@@ -206,7 +206,7 @@ pub(super) async fn acquire_followup_model_turn(
                 }
                 Err(HookRespondError::Failure(message)) => FollowupModelTurn::StreamError(
                     stravia_runtime_contract::protocol::ir::AiError::new(
-                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
                         message,
                     ),
                 ),
@@ -216,7 +216,7 @@ pub(super) async fn acquire_followup_model_turn(
         Err(error) => {
             return Ok(FollowupModelTurn::StreamError(
                 stravia_runtime_contract::protocol::ir::AiError::new(
-                    stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                    stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
                     error.to_string(),
                 ),
             ));
@@ -228,7 +228,7 @@ pub(super) async fn acquire_followup_model_turn(
     if !stabilize_media_generation_chain(generation, request) {
         return Ok(FollowupModelTurn::StreamError(
             stravia_runtime_contract::protocol::ir::AiError::new(
-                stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
                 "Media bridge could not prepare the hidden request",
             ),
         ));
