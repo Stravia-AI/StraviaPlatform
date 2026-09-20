@@ -68,6 +68,22 @@ async function expectProtectedStatus(port: number, accessToken: string): Promise
   expect((await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })).status).toBe(200)
 }
 
+async function expectPortSwitch(previousTimeOrigin: number, port: number): Promise<void> {
+  // 端口切换会重载 WebView；旧文档中的异步 IPC 回调会随文档销毁，不能用它轮询切换。
+  await browser.waitUntil(
+    () =>
+      browser.execute(
+        (previous) => performance.timeOrigin !== previous && document.readyState === 'complete',
+        previousTimeOrigin,
+      ),
+    { timeout: 10_000, timeoutMsg: 'desktop page did not reload after switching the listener' },
+  )
+  const state = (await browser.tauri.execute(({ core }) => core.invoke('get_desktop_port_state'))) as DesktopPortState
+  expect(state.mode).toBe('fixed')
+  expect(state.currentPort).toBe(port)
+  expect(state.fixedPort).toBe(port)
+}
+
 async function unusedPort(): Promise<number> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -210,20 +226,9 @@ describe('Stravia desktop smoke', () => {
     if (portState.mode !== 'fixed') {
       const nextPort = await unusedPort()
       await $('#desktop-fixed-port').setValue(String(nextPort))
+      const previousTimeOrigin = await browser.execute(() => performance.timeOrigin)
       await $('button=Save Port').click()
-      await browser.waitUntil(
-        async () => {
-          try {
-            const state = (await browser.tauri.execute(({ core }) =>
-              core.invoke('get_desktop_port_state'),
-            )) as DesktopPortState
-            return state.mode === 'fixed' && state.currentPort === nextPort
-          } catch {
-            return false
-          }
-        },
-        { timeout: 10_000, timeoutMsg: 'desktop listener did not hot-switch to the saved port' },
-      )
+      await expectPortSwitch(previousTimeOrigin, nextPort)
       activePort = nextPort
       await expect($('[aria-label="Stravia 观策行"]')).toBeDisplayed()
       await expectProtectedStatus(nextPort, nativeSession.access_token)
@@ -236,20 +241,9 @@ describe('Stravia desktop smoke', () => {
     const confirmation = await $('[data-slot="alert-dialog-title"]')
     await expect(confirmation).toHaveText('Change the port?')
     await expect($('[role="alertdialog"]')).toHaveText(expect.stringContaining(`127.0.0.1:${activePort}`))
+    const previousTimeOrigin = await browser.execute(() => performance.timeOrigin)
     await $('button=Change Port').click()
-    await browser.waitUntil(
-      async () => {
-        try {
-          const state = (await browser.tauri.execute(({ core }) =>
-            core.invoke('get_desktop_port_state'),
-          )) as DesktopPortState
-          return state.mode === 'fixed' && state.currentPort === replacementPort
-        } catch {
-          return false
-        }
-      },
-      { timeout: 10_000, timeoutMsg: 'confirmed desktop listener switch did not complete' },
-    )
+    await expectPortSwitch(previousTimeOrigin, replacementPort)
     await expectProtectedStatus(replacementPort, nativeSession.access_token)
 
     await expect($('//h2[normalize-space()="Updates"]')).toBeDisplayed()

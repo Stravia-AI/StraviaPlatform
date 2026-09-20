@@ -208,9 +208,9 @@ static ASSIGN_MODEL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 /// serializes assign-sensitive tests: parallel cases would otherwise observe
 /// each other's hook values and call counts.
 #[cfg(test)]
-fn reset_assign_state() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+async fn reset_assign_state() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
     ASSIGNMENTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -614,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_emits_connect_envelope_bytes() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let provider = test_provider();
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
@@ -658,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_request_rewrites_selector_to_requested_effort() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let provider = test_provider();
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
@@ -702,7 +702,7 @@ mod tests {
     /// to the family default.
     #[tokio::test]
     async fn build_request_resolves_family_selector_table() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
             ..Default::default()
@@ -818,7 +818,7 @@ mod tests {
     /// into the guaranteed canned upstream error.
     #[tokio::test]
     async fn build_request_assigns_router_and_carries_jwt() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
             ..Default::default()
@@ -924,7 +924,7 @@ mod tests {
     /// AssignModel is not called at all.
     #[tokio::test]
     async fn build_request_skips_assign_for_known_non_router() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
             ..Default::default()
@@ -1006,7 +1006,7 @@ mod tests {
     /// the canned `unavailable` trailer.
     #[tokio::test]
     async fn build_request_fails_fast_when_router_assignment_fails() {
-        let _guard = reset_assign_state();
+        let _guard = reset_assign_state().await;
         let gw = crate::Gateway::new(crate::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
             ..Default::default()
