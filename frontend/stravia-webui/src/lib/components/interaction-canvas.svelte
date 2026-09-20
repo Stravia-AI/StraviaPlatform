@@ -90,7 +90,6 @@ let minimapOpen = $state(false)
 let requestId = 0
 let requestedTopology = ''
 let initialized = false
-let internalMove = false
 let worker: Worker | undefined
 let pendingLayout = Promise.resolve()
 let resolveLayout: (() => void) | undefined
@@ -225,13 +224,8 @@ async function fitLoaded(): Promise<void> {
     1,
     0.16,
   )
-  internalMove = true
-  try {
-    // fitView 会等待全图完成 DOM 测量；虚拟画布直接用已知几何定位，不等待屏外节点。
-    await setViewport(viewport, { duration: cameraDuration(240) })
-  } finally {
-    internalMove = false
-  }
+  // fitView 会等待全图完成 DOM 测量；虚拟画布直接用已知几何定位，不等待屏外节点。
+  await setViewport(viewport, { duration: cameraDuration(240) })
 }
 
 export async function focusNode(id: string): Promise<void> {
@@ -242,32 +236,25 @@ export async function focusNode(id: string): Promise<void> {
   const target = positions.get(id)
   if (!target || !canvasElement) return
 
-  const rootPositions = [...positions.values()].filter((position) => position.rootId === target.rootId)
   const centerX = target.x + interactionNodeWidth / 2
   const centerY = target.y + interactionNodeHeight / 2
-  const minX = Math.min(...rootPositions.map((position) => position.x))
-  const maxX = Math.max(...rootPositions.map((position) => position.x + interactionNodeWidth))
-  const minY = Math.min(...rootPositions.map((position) => position.y))
-  const maxY = Math.max(...rootPositions.map((position) => position.y + interactionNodeHeight))
-  const horizontalReach = Math.max(centerX - minX, maxX - centerX)
-  const verticalReach = Math.max(centerY - minY, maxY - centerY)
-  const fittingZoom = Math.min(
-    1,
-    horizontalReach ? (canvasElement.clientWidth * 0.42) / horizontalReach : 1,
-    verticalReach ? (canvasElement.clientHeight * 0.42) / verticalReach : 1,
+  // 定位用于阅读目标节点；整条链的总览由“适配全部”负责。
+  const zoom = Math.max(
+    0.18,
+    Math.min(
+      1,
+      (canvasElement.clientWidth - 32) / interactionNodeWidth,
+      (canvasElement.clientHeight - 32) / interactionNodeHeight,
+    ),
   )
-  const zoom = Math.max(0.18, Math.min(getViewport().zoom, fittingZoom))
 
-  internalMove = true
-  try {
-    await setCenter(centerX, centerY, { zoom, duration: cameraDuration(260) })
-  } finally {
-    internalMove = false
-  }
+  await setCenter(centerX, centerY, { zoom, duration: cameraDuration(260) })
 }
 
-function handleMoveEnd(): void {
-  if (!internalMove) onmanualmove()
+function handleMoveEnd(event: MouseEvent | TouchEvent | null): void {
+  // 程序定位没有源事件；结束回调可能晚于定位 Promise，不能依赖临时布尔标记。
+  if (!event) return
+  onmanualmove()
   if (!nextCursor || loadingMore || nodes.length === 0) return
   const viewport = getViewport()
   const rightmost = Math.max(...nodes.map((node) => node.position.x + interactionNodeWidth))

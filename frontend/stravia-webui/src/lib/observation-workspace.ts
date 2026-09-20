@@ -1,4 +1,4 @@
-import { visualParent } from '$lib/interaction-canvas-links'
+import { CanvasLinkIndex } from '$lib/interaction-canvas-links'
 import { hiddenFailureNode } from '$lib/observation-chain-visibility'
 import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import type { ObservationSubscription } from '$lib/observation-stream'
@@ -596,13 +596,15 @@ export class ObservationWorkspaceController {
   }
 
   #selectedPath(): Set<string> {
-    const interactions = this.#canvasInteractions()
     const path = new Set<string>()
     let current = this.#selectedInteraction
+    if (!current) return path
+    // 一次构建视觉父边索引，整条选中路径共用快照内的祖先查询。
+    const index = new CanvasLinkIndex(this.#canvasInteractions())
     while (current && !path.has(current.id)) {
       path.add(current.id)
-      const parentId = visualParent(current, interactions)?.id
-      current = parentId ? interactions.find((candidate) => candidate.id === parentId) : undefined
+      const parentId: string | undefined = index.visualParent(current)?.id
+      current = parentId ? index.byId.get(parentId) : undefined
     }
     return path
   }

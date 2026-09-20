@@ -102,7 +102,7 @@ export function layoutForest(request: LayoutRequest, layouts: Map<string, Cached
       const minX = Math.min(...laidOut.map((position) => position.x))
       const maxX = Math.max(...laidOut.map((position) => position.x + nodeWidth))
       const relativePositions = laidOut.map((position) => ({ ...position, x: position.x - minX }))
-      layout = { topology, positions: relativePositions, width: Math.max(layout?.width ?? 0, maxX - minX) }
+      layout = { topology, positions: relativePositions, width: maxX - minX }
       layouts.set(root.id, layout)
     }
     for (const position of layout.positions) positions.push({ ...position, x: columnX + position.x })
