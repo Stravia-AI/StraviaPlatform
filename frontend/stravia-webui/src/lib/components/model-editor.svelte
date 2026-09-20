@@ -29,6 +29,7 @@ import type {
   ProviderModelSummary,
   Route,
   RouteSelectionStrategy,
+  TargetRuntimeStatus,
   TargetThinkingControl,
   ThinkingLevel,
   ThinkingLevelMapping,
@@ -53,6 +54,7 @@ import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
 import ModelSpecification from '$lib/components/model-specification.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
+import StatusIndicator from '$lib/components/status-indicator.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -148,6 +150,48 @@ const canonicalModelsQuery = createQuery(() => ({
   queryFn: () => admin.catalog.canonicalModels(),
 }))
 const canonicalModels = $derived(canonicalModelsQuery.data?.models ?? [])
+
+// Destination runtime status is a read-only projection of the saved route's circuit state;
+// it refreshes on its own cadence and never writes back into the form draft.
+const TARGET_STATUS_REFRESH_MS = 2_000
+const savedRouteId = $derived(model?.model_id ?? '')
+const targetStatusesQuery = createQuery(() => ({
+  queryKey: ['model-target-statuses', savedRouteId],
+  queryFn: () => admin.models.targetStatuses(savedRouteId),
+  enabled: Boolean(savedRouteId),
+  refetchInterval: (query) => (query.state.status === 'error' ? false : TARGET_STATUS_REFRESH_MS),
+  retry: false,
+}))
+const targetStatusesFailed = $derived(Boolean(savedRouteId) && targetStatusesQuery.isError)
+const targetStatusMap = $derived.by(() => {
+  // A failed refresh must not keep showing stale status as if it were current.
+  const statuses = Object.create(null) as Record<string, TargetRuntimeStatus>
+  if (targetStatusesFailed) return statuses
+  for (const status of targetStatusesQuery.data ?? []) {
+    if (status.target_id) statuses[status.target_id] = status
+  }
+  return statuses
+})
+
+function targetRuntimeStatus(target: RouteTargetForm): TargetRuntimeStatus | undefined {
+  if (!target.persisted || !target.id) return undefined
+  const status = targetStatusMap[target.id]
+  if (!status || status.provider_id !== target.providerId || status.model !== target.model.trim()) return undefined
+  return status
+}
+
+function targetStateLabel(state: TargetRuntimeStatus['state'], cooldownMs: number | null): string {
+  const label = {
+    available: m.model_editor_target_status_available(),
+    cooling_down: m.model_editor_target_status_cooling_down(),
+    half_open: m.model_editor_target_status_half_open(),
+    probing: m.model_editor_target_status_probing(),
+  }[state]
+  const seconds = cooldownMs === null ? 0 : Math.ceil(cooldownMs / 1000)
+  return state === 'cooling_down' && seconds > 0
+    ? m.model_editor_target_status_cooldown_remaining({ label, seconds })
+    : label
+}
 
 function strategyLabel(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
@@ -770,6 +814,31 @@ async function saveModel(): Promise<void> {
           ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
       </div>
 
+      {#if savedRouteId}
+        <p class="mb-2 mt-3 text-xs text-muted-foreground">
+          {m.model_editor_target_status_refresh_note()}
+        </p>
+        {#if targetStatusesFailed}
+          <div class="mb-2 mt-3 flex items-center gap-3">
+            <StatusIndicator
+              class="min-w-0 flex-1"
+              tone="error"
+              label={m.model_editor_target_status_unavailable({
+                error: localizeBackendErrorMessage(targetStatusesQuery.error),
+              })} />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={targetStatusesQuery.isFetching}
+              onclick={() => void targetStatusesQuery.refetch()}>
+              {#if targetStatusesQuery.isFetching}<Spinner data-icon="inline-start" />{/if}
+              {m.common_retry()}
+            </Button>
+          </div>
+        {/if}
+      {/if}
+
       <div class="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(16rem,1fr)]">
         <div
           data-slot="target-lane-stack"
@@ -842,6 +911,7 @@ async function saveModel(): Promise<void> {
                   <div class="flex min-w-0 flex-wrap content-start items-stretch gap-2 p-2">
                     {#each lane.targets as target (target.key)}
                       {@const summary = selectedSummary(target)}
+                      {@const status = targetRuntimeStatus(target)}
                       <div
                         role="button"
                         tabindex="0"
@@ -851,7 +921,7 @@ async function saveModel(): Promise<void> {
                         data-key={target.key}
                         draggable="true"
                         class={[
-                          'group flex min-h-20 min-w-60 flex-1 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+                          'group @container/target flex min-h-20 min-w-0 flex-[1_1_15rem] cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
                           draggedTargetKey === target.key && 'opacity-50',
                         ]}
                         onclick={() => editTarget(target)}
@@ -866,7 +936,8 @@ async function saveModel(): Promise<void> {
                         ondragenter={allowTargetDrop}
                         ondragover={allowTargetDrop}
                         ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
-                        <div class="flex w-full min-w-0 items-center gap-2 text-left">
+                        <div
+                          class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 text-left @max-md/target:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)]">
                           <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
                           <span class="truncate font-medium">
                             {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
@@ -874,7 +945,13 @@ async function saveModel(): Promise<void> {
                           <span class="min-w-0 flex-1 truncate font-technical text-sm text-muted-foreground">
                             {target.model}
                           </span>
-                          <span class="size-2 shrink-0 rounded-full bg-emerald-500" aria-hidden="true"></span>
+                          {#if status}
+                            <StatusIndicator
+                              compact
+                              class="@max-md/target:col-span-2 @max-md/target:col-start-2"
+                              label={targetStateLabel(status.state, status.cooldown_remaining_ms)}
+                              tone={status.state === 'available' ? 'healthy' : 'warning'} />
+                          {/if}
                         </div>
                         <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                           {#if target.persisted && summary && !summary.available}

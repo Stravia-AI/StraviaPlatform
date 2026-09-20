@@ -191,6 +191,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/models/bind", post(bind_route_handler))
         .route("/models/unbind", post(unbind_route_handler))
         .route(
+            "/models/{route_id}/target-statuses",
+            get(get_model_target_statuses_handler),
+        )
+        .route(
             "/models/{route_id}/targets/{target_id}/thinking-map/reset",
             post(reset_target_thinking_mapping_handler),
         )

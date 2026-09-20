@@ -1055,18 +1055,31 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         .find(|route| route.id == route_id)
         .expect("cache-affinity Route")
         .targets;
-    let first_target = crate::router::selected_target_key(&crate::router::SelectedTarget {
-        provider_id: backends[0].provider_id.clone(),
-        model: backends[0].model.clone(),
-        priority: backends[0].priority,
-        first_token_timeout_ms: backends[0].first_token_timeout_ms,
-        target_retry_budget: backends[0].target_retry_budget,
-        target_cooldown_ms: backends[0].target_cooldown_ms,
-        thinking_level_map: backends[0].thinking_level_map.0.clone(),
-    });
-    for _ in 0..3 {
-        gateway.health_registry.record_failure(&first_target);
-    }
+    let configure_primary = |enabled| crate::db::models::UpdateRoute {
+        targets: Some(
+            backends
+                .iter()
+                .enumerate()
+                .map(|(index, target)| crate::db::models::UpsertTarget {
+                    id: Some(target.id.clone()),
+                    provider_id: target.provider_id.clone(),
+                    model: target.model.clone(),
+                    enabled: index != 0 || enabled,
+                    priority: Some(target.priority),
+                    first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                    target_retry_budget: Some(target.target_retry_budget),
+                    target_cooldown_ms: Some(target.target_cooldown_ms),
+                    thinking_level_map: target.thinking_level_map.0.clone(),
+                })
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    gateway
+        .admin()
+        .update_model(model, configure_primary(false))
+        .await
+        .expect("disable primary");
     let headers = authorized_headers(&gateway).await;
     let principal = crate::proxy::security::Security::new(gateway.storage.auth())
         .required_principal(
@@ -1088,7 +1101,13 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     assert_eq!(first_turn.route.provider_id, backends[1].provider_id);
     let _ = first_turn.output.collect::<Vec<_>>().await;
 
-    gateway.health_registry.record_success(&first_target);
+    // Both targets are eligible again: only the recorded cache prefix should
+    // keep this request on the lower-priority target.
+    gateway
+        .admin()
+        .update_model(model, configure_primary(true))
+        .await
+        .expect("re-enable primary");
     let mut follow_up = stravia_runtime_contract::protocol::ir::AiItem::output_text("follow up");
     follow_up.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second_turn = gateway

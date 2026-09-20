@@ -839,3 +839,98 @@ test('Model ID remains editable while the Canonical Model catalog fails to load'
   await modelId.fill('custom/after-failure')
   await expect(modelId).toHaveValue('custom/after-failure')
 })
+
+test('Destination status reflects runtime state without overwriting the editor draft', async ({ page }) => {
+  const model = {
+    id: 'status-route',
+    model_id: 'status-route',
+    display_name: null,
+    balance: 'traffic_equalization',
+    target_provider: 'provider',
+    target_model: 'upstream-model',
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    supported_thinking_levels: [],
+    targets: [
+      {
+        id: 'target-one',
+        model_id: 'status-route',
+        provider_id: 'provider',
+        model: 'upstream-model',
+        enabled: true,
+        priority: 1,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
+        created_at: '2026-08-17T00:00:00Z',
+        thinking_level_map: [],
+      },
+    ],
+  }
+  let statusMode: 'cooling' | 'available' | 'error' = 'cooling'
+
+  await page.route('**/api/v1/providers', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            id: 'provider',
+            name: 'Provider',
+            protocol: 'openai-compatible',
+            base_url: 'https://provider.example/v1',
+            use_proxy: false,
+            is_enabled: true,
+            created_at: '2026-08-17T00:00:00Z',
+            updated_at: '2026-08-17T00:00:00Z',
+          },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/models/status-route', async (route) => {
+    await route.fulfill({ json: { data: model } })
+  })
+  await page.route('**/api/v1/models/status-route/target-statuses', async (route) => {
+    if (statusMode === 'error') {
+      await route.fulfill({ status: 503, json: { error: 'Status store unavailable' } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            target_id: 'target-one',
+            provider_id: 'provider',
+            model: 'upstream-model',
+            state: statusMode === 'cooling' ? 'cooling_down' : 'available',
+            cooldown_remaining_ms: statusMode === 'cooling' ? 42_000 : null,
+          },
+        ],
+      },
+    })
+  })
+
+  await page.goto('/models/status-route')
+
+  const card = page.locator('[data-slot="target-card"][data-key="target-1"]')
+  await expect(card).toContainText('Cooling down')
+  await expect(card.getByRole('status')).toContainText('left')
+
+  await page.locator('#route-display-name').fill('My unsaved label')
+  statusMode = 'available'
+  await expect(card.getByRole('status')).toHaveText('Available')
+  await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')
+
+  statusMode = 'error'
+  await expect(card.getByRole('status')).toHaveCount(0)
+  const failure = page.getByRole('status').filter({ hasText: 'Destination status unavailable' })
+  await expect(failure).toContainText('Status store unavailable')
+  const retryButton = page.getByRole('button', { name: 'Retry' })
+  await expect(retryButton).toBeEnabled()
+
+  statusMode = 'available'
+  await retryButton.click()
+  await expect(card.getByRole('status')).toHaveText('Available')
+  await expect(page.getByRole('status').filter({ hasText: 'Destination status unavailable' })).toHaveCount(0)
+  await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')
+})

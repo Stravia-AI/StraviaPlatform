@@ -481,12 +481,12 @@ _避免使用_：总超时、Connect Timeout
 
 ## Target Cooldown
 
-Target Cooldown 是 Target 在被本次请求放弃后，一段时间内不再承接新请求的状态；缺省 120 秒。它不阻止当前请求的同 Target 重试。
-_避免使用_：HealthRegistry、熔断（当指这个冷却）
+Target Cooldown 是 Target 在重试预算用尽或无法继续尝试后，暂时不承接新尝试的恢复等待期；缺省 120 秒，0 表示关闭。等待期结束后，仅允许符合调度条件的一个请求进行半开探测，完整成功才恢复正常，探测失败重新等待；已经开始执行的请求不会因此取消。
+_避免使用_：固定失败次数熔断
 
 ## Target Retry Budget
 
-Target Retry Budget 是瞬时失败时在更换 Target 前对同一 Target 的额外尝试次数；缺省 5 次（含首次共 6 次），间隔指数退避并 full jitter。
+Target Retry Budget 是瞬时失败时在更换 Target 前对同一 Target 的额外尝试次数；缺省 5 次（含首次共 6 次），间隔指数退避并 full jitter。半开探测不使用此预算。
 _避免使用_：Route 重试、循环重试
 
 

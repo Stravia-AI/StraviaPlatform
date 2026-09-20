@@ -50,6 +50,7 @@ import type {
   ProviderStats,
   StatsOverview,
   StatsSeries,
+  TargetRuntimeStatus,
   TestResult,
   UpdateApiKey,
   UnbindRouteInput,
@@ -248,6 +249,8 @@ export const admin = {
       }),
     regenerateThinkingMap: (routeId: string, targetId: string) =>
       request<Route>('POST', `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/regenerate`),
+    targetStatuses: (routeId: string) =>
+      request<TargetRuntimeStatus[]>('GET', `/models/${encodeURIComponent(routeId)}/target-statuses`),
   },
   apiKeys: {
     list: () => request<ApiKey[]>('GET', '/api-keys'),

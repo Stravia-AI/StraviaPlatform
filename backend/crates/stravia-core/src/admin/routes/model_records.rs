@@ -1,10 +1,23 @@
 use super::*;
+use crate::router::TargetRuntimeState;
 use std::collections::BTreeMap;
 
 struct ClientModelCapabilities {
     context_window: Option<u64>,
     output_max_tokens: Option<u64>,
     supports_image_input: bool,
+}
+
+/// Runtime cooldown/probe projection for one persisted Target of a Route.
+/// Read-only view of `RoutePolicyState`; never stored and never part of the
+/// configured Route/Target DTOs.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteTargetStatus {
+    pub target_id: String,
+    pub provider_id: String,
+    pub model: String,
+    pub state: TargetRuntimeState,
+    pub cooldown_remaining_ms: Option<u64>,
 }
 
 impl AdminService {
@@ -14,6 +27,37 @@ impl AdminService {
 
     pub async fn get_model(&self, route_id: &str) -> anyhow::Result<Route> {
         RouteModule::new(self).get(route_id).await
+    }
+
+    pub async fn get_model_target_statuses(
+        &self,
+        route_id: &str,
+    ) -> anyhow::Result<Vec<RouteTargetStatus>> {
+        let route_id = normalize_name(route_id, "model ID sent by clients")?;
+        let route = self
+            .gw
+            .storage
+            .routes()
+            .get(&route_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
+        Ok(route
+            .targets
+            .into_iter()
+            .map(|target| {
+                let status = self
+                    .gw
+                    .route_policy_state
+                    .target_status(&format!("{}:{}", target.provider_id, target.model));
+                RouteTargetStatus {
+                    target_id: target.id,
+                    provider_id: target.provider_id,
+                    model: target.model,
+                    state: status.state,
+                    cooldown_remaining_ms: status.cooldown_remaining_ms,
+                }
+            })
+            .collect())
     }
 
     pub async fn create_model(&self, input: CreateRoute) -> anyhow::Result<Route> {

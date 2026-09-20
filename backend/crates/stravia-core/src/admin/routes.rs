@@ -15,6 +15,7 @@ mod thinking_map;
 use model_discovery::{
     HttpProviderModelDiscovery, ProviderModelDiscovery, RouteModelDiscoveryError,
 };
+pub use model_records::RouteTargetStatus;
 use provider_model_records::PreparedProviderModel;
 
 static HTTP_PROVIDER_MODEL_DISCOVERY: HttpProviderModelDiscovery = HttpProviderModelDiscovery;

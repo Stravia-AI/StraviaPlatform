@@ -109,6 +109,8 @@ OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemi
 
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
+Retryable failures exhaust a configurable per-target budget before cooldown (defaults: 6 total attempts, then 120 seconds). After cooldown, one eligible request probes the target; a complete success restores normal routing, while a failed probe starts another cooldown without extra retries. Set cooldown to `0` to disable this cycle. The model editor refreshes destination status every 2 seconds while visible, showing cooling, waiting-to-retry, and retrying targets in amber.
+
 ![Editing a model — upstream targets in priority layers](docs/assets/model-routing.png)
 
 ### Platform tools and built-in agent runtime

@@ -46,7 +46,7 @@ pub use crate::interaction_observation::{
     ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
     RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
 };
-pub use routes::{BindRouteInput, UnbindRouteInput};
+pub use routes::{BindRouteInput, RouteTargetStatus, UnbindRouteInput};
 
 use auth_data::*;
 use model_catalog::*;

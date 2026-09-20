@@ -80,22 +80,62 @@ pub struct RouteAttemptContext {
     pub(super) now_ms: u64,
 }
 
+/// Observable runtime state of one Route Target, owned by `RoutePolicyState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetRuntimeState {
+    /// No cooldown record: the target takes part in scheduling. This is a
+    /// scheduling default, not a measured-health verdict.
+    Available,
+    /// Inside the cooldown window; not eligible for selection.
+    CoolingDown,
+    /// Cooldown expired; the next selected request may probe the target.
+    HalfOpen,
+    /// A half-open probe is in flight; concurrent policies must fall back.
+    Probing,
+}
+
+/// Point-in-time runtime status for one target key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetRuntimeStatus {
+    pub state: TargetRuntimeState,
+    pub cooldown_remaining_ms: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct RoutePolicyState {
     origin: Instant,
     inner: Arc<Mutex<RoutePolicyStateInner>>,
 }
 
+/// Cooldown bookkeeping for one target. Entries are never removed, so the
+/// globally monotonically increasing `epoch` survives recovery: a success or
+/// failure recorded against an older epoch can never clear or rewrite a newer
+/// cooldown generation (no ABA on delete/recreate).
+#[derive(Debug, Clone)]
+struct TargetRuntime {
+    /// Cooldown expiry in `RoutePolicyState::now_ms` terms; `0` = not cooling.
+    cooldown_until: u64,
+    /// Generation of the latest cooldown write.
+    epoch: u64,
+    /// Epoch claimed by the in-flight half-open probe, if any. Only ever
+    /// equals the entry's own `epoch`, so it doubles as probe identity.
+    probe_epoch: Option<u64>,
+}
+
 pub struct RouteAttemptReservation {
     state: RoutePolicyState,
     context: RouteAttemptContext,
     target_key: String,
+    epoch: u64,
+    probe: bool,
     active: bool,
 }
 
 #[derive(Default)]
 struct RoutePolicyStateInner {
-    cooldown_until: HashMap<String, u64>,
+    targets: HashMap<String, TargetRuntime>,
+    next_epoch: u64,
     in_flight_input: HashMap<String, u64>,
     conversation_targets: HashMap<ConversationAffinityKey, String>,
 }
@@ -105,6 +145,48 @@ struct ConversationAffinityKey {
     principal: String,
     route_id: String,
     identity: ConversationIdentity,
+}
+
+impl RoutePolicyStateInner {
+    fn next_epoch(&mut self) -> u64 {
+        self.next_epoch += 1;
+        self.next_epoch
+    }
+
+    // Late outcomes cannot overwrite a newer cooldown or probe generation.
+    fn cool_target(&mut self, target_key: &str, epoch: u64, cooldown_ms: i64, now_ms: u64) {
+        let current = self.targets.get(target_key);
+        if current.map_or(0, |runtime| runtime.epoch) != epoch
+            || (cooldown_ms <= 0 && current.is_none())
+        {
+            return;
+        }
+        let next = TargetRuntime {
+            cooldown_until: if cooldown_ms > 0 {
+                now_ms.saturating_add(cooldown_ms as u64)
+            } else {
+                0
+            },
+            epoch: self.next_epoch(),
+            probe_epoch: None,
+        };
+        if let Some(runtime) = self.targets.get_mut(target_key) {
+            *runtime = next;
+        } else {
+            self.targets.insert(target_key.to_owned(), next);
+        }
+    }
+
+    /// Releases a half-open probe slot so the target returns to `HalfOpen`
+    /// instead of staying `Probing` forever. Only clears when the slot is
+    /// still held by this exact probe generation.
+    fn release_probe(&mut self, target_key: &str, epoch: u64) {
+        if let Some(runtime) = self.targets.get_mut(target_key)
+            && runtime.probe_epoch == Some(epoch)
+        {
+            runtime.probe_epoch = None;
+        }
+    }
 }
 
 impl Default for RoutePolicyState {
@@ -121,16 +203,55 @@ impl RoutePolicyState {
         self.origin.elapsed().as_millis().min(u64::MAX as u128) as u64
     }
 
-    /// The single success path: clears the target's health failures, releases
-    /// the in-flight input reservation, and stores conversation affinity.
-    pub fn record_success(
-        &self,
-        health: &crate::router::health::HealthRegistry,
-        context: &RouteAttemptContext,
-        target_key: &str,
-    ) {
-        health.record_success(target_key);
+    /// Observable runtime status of one target key. A key with no runtime
+    /// record reports `Available` — eligible for scheduling, not a measured
+    /// health verdict.
+    pub fn target_status(&self, target_key: &str) -> TargetRuntimeStatus {
+        self.target_status_at(target_key, self.now_ms())
+    }
+
+    fn target_status_at(&self, target_key: &str, now_ms: u64) -> TargetRuntimeStatus {
+        let inner = self.inner.lock();
+        let Some(runtime) = inner.targets.get(target_key) else {
+            return TargetRuntimeStatus {
+                state: TargetRuntimeState::Available,
+                cooldown_remaining_ms: None,
+            };
+        };
+        if runtime.cooldown_until == 0 {
+            return TargetRuntimeStatus {
+                state: TargetRuntimeState::Available,
+                cooldown_remaining_ms: None,
+            };
+        }
+        if runtime.cooldown_until > now_ms {
+            return TargetRuntimeStatus {
+                state: TargetRuntimeState::CoolingDown,
+                cooldown_remaining_ms: Some(runtime.cooldown_until - now_ms),
+            };
+        }
+        TargetRuntimeStatus {
+            state: if runtime.probe_epoch.is_some() {
+                TargetRuntimeState::Probing
+            } else {
+                TargetRuntimeState::HalfOpen
+            },
+            cooldown_remaining_ms: None,
+        }
+    }
+
+    /// The single success path: clears the target's cooldown when the
+    /// recorded generation still owns it, releases the in-flight input
+    /// reservation, and stores conversation affinity. A success carrying a
+    /// stale `epoch` can never clear a newer cooldown or an in-flight probe.
+    pub fn record_success(&self, context: &RouteAttemptContext, target_key: &str, epoch: u64) {
         let mut inner = self.inner.lock();
+        if let Some(runtime) = inner.targets.get_mut(target_key)
+            && runtime.epoch == epoch
+        {
+            runtime.cooldown_until = 0;
+            runtime.probe_epoch = None;
+        }
         release_reservation(
             &mut inner.in_flight_input,
             target_key,
@@ -148,26 +269,41 @@ impl RoutePolicyState {
         }
     }
 
+    /// Records a failed upstream outcome only if its attempt generation is current.
+    /// A zero cooldown disables the cooldown/probe cycle.
+    pub fn record_failure(&self, target_key: &str, epoch: u64, cooldown_ms: i64) {
+        let now_ms = self.now_ms();
+        let mut inner = self.inner.lock();
+        inner.cool_target(target_key, epoch, cooldown_ms, now_ms);
+    }
+
     pub fn reservation(
         &self,
         context: RouteAttemptContext,
         target_key: String,
+        epoch: u64,
+        probe: bool,
     ) -> RouteAttemptReservation {
         RouteAttemptReservation {
             state: self.clone(),
             context,
             target_key,
+            epoch,
+            probe,
             active: true,
         }
     }
 
-    fn release(&self, context: &RouteAttemptContext, target_key: &str) {
+    fn release(&self, context: &RouteAttemptContext, target_key: &str, epoch: u64, probe: bool) {
         let mut inner = self.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             target_key,
             context.estimated_uncached_input_tokens,
         );
+        if probe {
+            inner.release_probe(target_key, epoch);
+        }
     }
 }
 
@@ -180,7 +316,8 @@ impl RouteAttemptReservation {
 impl Drop for RouteAttemptReservation {
     fn drop(&mut self) {
         if self.active {
-            self.state.release(&self.context, &self.target_key);
+            self.state
+                .release(&self.context, &self.target_key, self.epoch, self.probe);
         }
     }
 }
@@ -190,6 +327,11 @@ pub struct RouteAttemptPolicy {
     state: RoutePolicyState,
     ordered: std::vec::IntoIter<SelectedTarget>,
     current_target_key: Option<String>,
+    /// Runtime generation of the selected target; `0` when no record existed
+    /// at selection time.
+    current_epoch: u64,
+    /// `true` while this policy holds the target's half-open probe slot.
+    current_probe: bool,
     retries_used: i32,
 }
 
@@ -203,11 +345,12 @@ impl RouteAttemptPolicy {
         snapshot: &RouteSchedulingSnapshot,
         state: RoutePolicyState,
     ) -> Self {
-        let (cooldowns, in_flight, preferred) = {
-            let mut inner = state.inner.lock();
-            inner
-                .cooldown_until
-                .retain(|_, expires_at| *expires_at > context.now_ms);
+        // `context.now_ms` is the authoritative evidence clock — tests inject a
+        // virtual clock through it — while `state.now_ms()` floors it so a
+        // stale signal can never rewind the cooldown window in production.
+        let now_ms = context.now_ms.max(state.now_ms());
+        let (in_flight, preferred) = {
+            let inner = state.inner.lock();
             let preferred = context
                 .conversation
                 .as_ref()
@@ -229,11 +372,7 @@ impl RouteAttemptPolicy {
                         .then(|| context.cache_affinity_target.clone())
                         .flatten()
                 });
-            (
-                inner.cooldown_until.clone(),
-                inner.in_flight_input.clone(),
-                preferred,
-            )
+            (inner.in_flight_input.clone(), preferred)
         };
         let snapshots = snapshot
             .targets
@@ -241,14 +380,19 @@ impl RouteAttemptPolicy {
             .map(|item| (item.target_key.as_str(), item))
             .collect::<HashMap<_, _>>();
         let mut priority_groups = BTreeMap::<Reverse<i32>, Vec<&Target>>::new();
+        let inner = state.inner.lock();
         for target in targets {
             if !target.enabled {
                 continue;
             }
             let key = target_key(target);
-            if cooldowns
+            // Actively-cooling targets are ineligible. Half-open and probing
+            // targets stay candidates: `next_healthy` is the single authority
+            // that claims the one probe slot while actually selecting.
+            if inner
+                .targets
                 .get(&key)
-                .is_some_and(|expires_at| *expires_at > context.now_ms)
+                .is_some_and(|runtime| runtime.cooldown_until > now_ms)
             {
                 continue;
             }
@@ -257,6 +401,7 @@ impl RouteAttemptPolicy {
                 .or_default()
                 .push(target);
         }
+        drop(inner);
         let strategy = strategy
             .parse::<RouteSelectionStrategy>()
             .unwrap_or_default();
@@ -278,6 +423,8 @@ impl RouteAttemptPolicy {
             state,
             ordered: ordered.into_iter(),
             current_target_key: None,
+            current_epoch: 0,
+            current_probe: false,
             retries_used: 0,
         }
     }
@@ -305,29 +452,49 @@ impl RouteAttemptPolicy {
         self.ordered.as_slice().is_empty()
     }
 
-    pub fn next_healthy(
-        &mut self,
-        health: &crate::router::health::HealthRegistry,
-    ) -> Option<SelectedTarget> {
-        while let Some(target) = self.ordered.next() {
+    pub fn next_healthy(&mut self) -> Option<SelectedTarget> {
+        self.skip_current();
+        for target in self.ordered.by_ref() {
             let key = selected_target_key(&target);
-            let cooling_down = self
-                .state
-                .inner
-                .lock()
-                .cooldown_until
-                .get(&key)
-                .is_some_and(|expires_at| *expires_at > self.context.now_ms);
-            if cooling_down || !health.is_healthy(&key) {
-                continue;
-            }
+            // Same floored clock as construction: the request's evidence clock
+            // may be a virtual test clock; `state.now_ms()` floors it.
+            let now_ms = self.context.now_ms.max(self.state.now_ms());
             let mut inner = self.state.inner.lock();
+            let mut probe_epoch = None;
+            match inner.targets.get(&key) {
+                Some(runtime) if runtime.cooldown_until > 0 => {
+                    if runtime.cooldown_until > now_ms {
+                        // Actively cooling: never eligible.
+                        continue;
+                    }
+                    if runtime.probe_epoch.is_some() {
+                        // Another request already holds the single probe.
+                        continue;
+                    }
+                    // Claim and fence the probe atomically. A cancelled probe's
+                    // late result must not affect its replacement.
+                    let epoch = inner.next_epoch();
+                    let runtime = inner.targets.get_mut(&key).expect("target entry");
+                    runtime.epoch = epoch;
+                    runtime.probe_epoch = Some(epoch);
+                    probe_epoch = Some(epoch);
+                }
+                _ => {}
+            }
             *inner.in_flight_input.entry(key.clone()).or_default() = inner
                 .in_flight_input
                 .get(&key)
                 .copied()
                 .unwrap_or_default()
                 .saturating_add(self.context.estimated_uncached_input_tokens);
+            self.current_epoch = probe_epoch.unwrap_or_else(|| {
+                inner
+                    .targets
+                    .get(&key)
+                    .map(|runtime| runtime.epoch)
+                    .unwrap_or(0)
+            });
+            self.current_probe = probe_epoch.is_some();
             self.current_target_key = Some(key);
             self.retries_used = 0;
             return Some(target);
@@ -335,19 +502,57 @@ impl RouteAttemptPolicy {
         None
     }
 
+    /// Rechecks the selected attempt after asynchronous preparation/backoff.
+    /// Another request may have cooled the target since it was selected.
+    pub fn retry_current(&mut self) -> bool {
+        let Some(key) = self.current_target_key.as_deref() else {
+            return false;
+        };
+        let allowed = {
+            let inner = self.state.inner.lock();
+            match inner.targets.get(key) {
+                None => self.current_epoch == 0 && !self.current_probe,
+                Some(runtime) => {
+                    runtime.epoch == self.current_epoch
+                        && (runtime.cooldown_until == 0
+                            || (self.current_probe
+                                && runtime.probe_epoch == Some(self.current_epoch)))
+                }
+            }
+        };
+        if !allowed {
+            self.skip_current();
+        }
+        allowed
+    }
+
     pub fn skip_current(&mut self) {
         if let Some(key) = self.current_target_key.take() {
-            self.release_reservation(&key);
+            self.release_current(&key);
         }
+        self.current_probe = false;
     }
 
     pub fn accept_current(&mut self) {
         self.current_target_key = None;
+        self.current_probe = false;
+    }
+
+    /// Epoch of the target generation currently selected by this policy.
+    /// Callers pass it to `RoutePolicyState::record_success` and
+    /// `RouteAttemptReservation` so stale in-flight attempts cannot rewrite
+    /// newer state.
+    pub fn current_epoch(&self) -> u64 {
+        self.current_epoch
+    }
+
+    /// `true` when the currently selected attempt is the half-open probe.
+    pub fn current_is_probe(&self) -> bool {
+        self.current_probe
     }
 
     pub fn record_failure(
         &mut self,
-        health: &crate::router::health::HealthRegistry,
         target: &SelectedTarget,
         failure: AttemptFailureSignal,
     ) -> AttemptFailureDisposition {
@@ -359,13 +564,32 @@ impl RouteAttemptPolicy {
             jitter_sample,
         } = failure;
         let key = selected_target_key(target);
-        health.record_failure(&key);
+        // Never trust a stale signal timestamp over the evidence clock or the
+        // state's own clock — the floor keeps cooldown writes monotonic.
+        let now_ms = now_ms.max(self.context.now_ms).max(self.state.now_ms());
+        let can_fail_over = transient_failure(&kind) || kind == AiErrorKind::QuotaExceeded;
+        if self.current_probe {
+            // Every failed probe waits a complete cooldown, without retrying.
+            // Error classification still controls whether this request may fail over.
+            self.abandon_target(&key, target.target_cooldown_ms, now_ms);
+            return if can_fail_over && !client_output_committed {
+                AttemptFailureDisposition::TryNextTarget
+            } else {
+                AttemptFailureDisposition::Stop
+            };
+        }
         if client_output_committed {
-            self.release_reservation(&key);
-            self.current_target_key = None;
+            if can_fail_over {
+                self.abandon_target(&key, target.target_cooldown_ms, now_ms);
+            } else {
+                self.skip_current();
+            }
             return AttemptFailureDisposition::Stop;
         }
         if transient_failure(&kind) {
+            if !self.retry_current() {
+                return AttemptFailureDisposition::TryNextTarget;
+            }
             if self.retries_used < target.target_retry_budget {
                 let cap_ms = 500_u64
                     .saturating_mul(1_u64 << self.retries_used.min(4) as u32)
@@ -385,7 +609,7 @@ impl RouteAttemptPolicy {
             self.abandon_target(&key, target.target_cooldown_ms, now_ms);
             return AttemptFailureDisposition::TryNextTarget;
         }
-        self.release_reservation(&key);
+        self.release_current(&key);
         self.current_target_key = None;
         AttemptFailureDisposition::Stop
     }
@@ -397,28 +621,31 @@ impl RouteAttemptPolicy {
             key,
             self.context.estimated_uncached_input_tokens,
         );
-        if cooldown_ms > 0 {
-            inner
-                .cooldown_until
-                .insert(key.to_owned(), now_ms.saturating_add(cooldown_ms as u64));
-        }
+        inner.cool_target(key, self.current_epoch, cooldown_ms, now_ms);
         self.current_target_key = None;
+        self.current_probe = false;
     }
 
-    fn release_reservation(&self, key: &str) {
+    /// Releases the input reservation and returns a held probe slot to
+    /// `HalfOpen`, so cancellation or a semantic `Stop` never leaves the
+    /// target stuck in `Probing` nor marks it `Available`.
+    fn release_current(&self, key: &str) {
         let mut inner = self.state.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             key,
             self.context.estimated_uncached_input_tokens,
         );
+        if self.current_probe {
+            inner.release_probe(key, self.current_epoch);
+        }
     }
 }
 
 impl Drop for RouteAttemptPolicy {
     fn drop(&mut self) {
         if let Some(key) = self.current_target_key.take() {
-            self.release_reservation(&key);
+            self.release_current(&key);
         }
     }
 }
@@ -620,7 +847,6 @@ mod tests {
     use crate::db::models::{
         DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_RETRY_BUDGET,
     };
-    use crate::router::health::HealthRegistry;
 
     fn target(provider_id: &str, priority: i32) -> Target {
         Target {
@@ -650,14 +876,13 @@ mod tests {
         }
     }
 
-    fn next_provider(policy: &mut RouteAttemptPolicy, health: &HealthRegistry) -> Option<String> {
-        policy.next_healthy(health).map(|target| target.provider_id)
+    fn next_provider(policy: &mut RouteAttemptPolicy) -> Option<String> {
+        policy.next_healthy().map(|target| target.provider_id)
     }
 
     #[test]
     fn higher_priority_groups_are_exhausted_before_lower_groups() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![
             target("low", 0),
             target("high-a", 100_000),
@@ -671,21 +896,14 @@ mod tests {
             state,
         );
 
-        assert_eq!(
-            next_provider(&mut policy, &health).as_deref(),
-            Some("high-a")
-        );
-        assert_eq!(
-            next_provider(&mut policy, &health).as_deref(),
-            Some("high-b")
-        );
-        assert_eq!(next_provider(&mut policy, &health).as_deref(), Some("low"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("high-a"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("high-b"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("low"));
     }
 
     #[test]
     fn disabled_targets_never_enter_attempt_or_affinity_order() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let mut disabled = target("disabled", i32::MAX);
         disabled.enabled = false;
         let targets = vec![target("enabled", -1), disabled];
@@ -700,17 +918,13 @@ mod tests {
             state,
         );
 
-        assert_eq!(
-            next_provider(&mut policy, &health).as_deref(),
-            Some("enabled")
-        );
-        assert_eq!(next_provider(&mut policy, &health), None);
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("enabled"));
+        assert_eq!(next_provider(&mut policy), None);
     }
 
     #[test]
     fn signed_priority_groups_remain_descending() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![
             target("minimum", i32::MIN),
             target("negative", -1),
@@ -726,9 +940,9 @@ mod tests {
 
         assert_eq!(
             [
-                next_provider(&mut policy, &health),
-                next_provider(&mut policy, &health),
-                next_provider(&mut policy, &health),
+                next_provider(&mut policy),
+                next_provider(&mut policy),
+                next_provider(&mut policy),
             ],
             [
                 Some("maximum".into()),
@@ -741,7 +955,6 @@ mod tests {
     #[test]
     fn conversation_affinity_precedes_priority_and_suppresses_cache_affinity() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![
             target("primary", 10),
             target("conversation", 0),
@@ -750,7 +963,7 @@ mod tests {
         let identity = ConversationIdentity::PromptCacheKey("chat-a".into());
         let mut first_context = context(0);
         first_context.conversation = Some(identity.clone());
-        state.record_success(&health, &first_context, "conversation:model");
+        state.record_success(&first_context, "conversation:model", 0);
 
         let mut next_context = context(1);
         next_context.conversation = Some(identity);
@@ -763,10 +976,7 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        assert_eq!(
-            next_provider(&mut next, &health).as_deref(),
-            Some("conversation")
-        );
+        assert_eq!(next_provider(&mut next).as_deref(), Some("conversation"));
     }
 
     #[test]
@@ -792,12 +1002,11 @@ mod tests {
     #[test]
     fn affinity_isolated_by_identity_principal_and_route_and_cache_only_fills_identity_gap() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("primary", 10), target("affinity", 0)];
         let mut recorded_context = context(0);
         recorded_context.conversation =
             Some(ConversationIdentity::GenerationParent("parent-a".into()));
-        state.record_success(&health, &recorded_context, "affinity:model");
+        state.record_success(&recorded_context, "affinity:model", 0);
 
         for (principal, route_id, identity) in [
             (
@@ -827,10 +1036,7 @@ mod tests {
                 &RouteSchedulingSnapshot::default(),
                 state.clone(),
             );
-            assert_eq!(
-                next_provider(&mut policy, &health).as_deref(),
-                Some("primary")
-            );
+            assert_eq!(next_provider(&mut policy).as_deref(), Some("primary"));
         }
 
         let mut cache_context = context(1);
@@ -842,16 +1048,12 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        assert_eq!(
-            next_provider(&mut cache, &health).as_deref(),
-            Some("affinity")
-        );
+        assert_eq!(next_provider(&mut cache).as_deref(), Some("affinity"));
     }
 
     #[test]
     fn traffic_equalization_counts_uncached_input_once_and_in_flight_reservations() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("busy", 0), target("idle", 0)];
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
@@ -870,7 +1072,7 @@ mod tests {
             &snapshot,
             state.clone(),
         );
-        assert_eq!(next_provider(&mut first, &health).as_deref(), Some("idle"));
+        assert_eq!(next_provider(&mut first).as_deref(), Some("idle"));
 
         let mut second = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -879,13 +1081,12 @@ mod tests {
             &snapshot,
             state,
         );
-        assert_eq!(next_provider(&mut second, &health).as_deref(), Some("busy"));
+        assert_eq!(next_provider(&mut second).as_deref(), Some("busy"));
     }
 
     #[test]
     fn detached_stream_reservation_is_released_when_completion_is_dropped() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("busy", 0), target("idle", 0)];
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
@@ -903,10 +1104,10 @@ mod tests {
             &snapshot,
             state.clone(),
         );
-        assert_eq!(next_provider(&mut first, &health).as_deref(), Some("idle"));
+        assert_eq!(next_provider(&mut first).as_deref(), Some("idle"));
         first.accept_current();
 
-        let reservation = state.reservation(attempt_context, "idle:model".into());
+        let reservation = state.reservation(attempt_context, "idle:model".into(), 0, false);
         drop(reservation);
 
         let mut next = RouteAttemptPolicy::new(
@@ -916,13 +1117,12 @@ mod tests {
             &snapshot,
             state,
         );
-        assert_eq!(next_provider(&mut next, &health).as_deref(), Some("idle"));
+        assert_eq!(next_provider(&mut next).as_deref(), Some("idle"));
     }
 
     #[test]
     fn traffic_equalization_averages_available_price_ratios_and_falls_back_per_dimension() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("cached", 0), target("output", 0)];
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![
@@ -953,10 +1153,7 @@ mod tests {
             &snapshot,
             state,
         );
-        assert_eq!(
-            next_provider(&mut policy, &health).as_deref(),
-            Some("output")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("output"));
 
         let fallback_snapshot = RouteSchedulingSnapshot {
             targets: vec![
@@ -983,16 +1180,12 @@ mod tests {
             &fallback_snapshot,
             RoutePolicyState::default(),
         );
-        assert_eq!(
-            next_provider(&mut fallback, &health).as_deref(),
-            Some("output")
-        );
+        assert_eq!(next_provider(&mut fallback).as_deref(), Some("output"));
     }
 
     #[test]
     fn latency_preference_requires_two_targets_with_twenty_successes() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("slow", 0), target("fast", 0)];
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![
@@ -1016,13 +1209,12 @@ mod tests {
         };
         let mut policy =
             RouteAttemptPolicy::new("latency_preference", &targets, context(0), &snapshot, state);
-        assert_eq!(next_provider(&mut policy, &health).as_deref(), Some("fast"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("fast"));
     }
 
     #[test]
     fn latency_preference_falls_back_to_traffic_when_fewer_than_two_targets_have_data() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("sampled", 0), target("cold", 0)];
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![
@@ -1047,13 +1239,12 @@ mod tests {
         };
         let mut policy =
             RouteAttemptPolicy::new("latency_preference", &targets, context(0), &snapshot, state);
-        assert_eq!(next_provider(&mut policy, &health).as_deref(), Some("cold"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("cold"));
     }
 
     #[test]
     fn transient_failures_retry_same_target_then_cool_it_down() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let mut configured = target("flaky", 0);
         configured.target_retry_budget = 1;
         configured.target_cooldown_ms = 120_000;
@@ -1065,11 +1256,10 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state.clone(),
         );
-        let flaky = policy.next_healthy(&health).expect("first Target");
+        let flaky = policy.next_healthy().expect("first Target");
         assert_eq!(flaky.provider_id, "flaky");
         assert_eq!(
             policy.record_failure(
-                &health,
                 &flaky,
                 AttemptFailureSignal {
                     kind: AiErrorKind::Timeout,
@@ -1085,7 +1275,6 @@ mod tests {
         );
         assert_eq!(
             policy.record_failure(
-                &health,
                 &flaky,
                 AttemptFailureSignal {
                     kind: AiErrorKind::Timeout,
@@ -1097,10 +1286,7 @@ mod tests {
             ),
             AttemptFailureDisposition::TryNextTarget
         );
-        assert_eq!(
-            next_provider(&mut policy, &health).as_deref(),
-            Some("fallback")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("fallback"));
 
         let mut new_request = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1109,10 +1295,7 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state.clone(),
         );
-        assert_eq!(
-            next_provider(&mut new_request, &health).as_deref(),
-            Some("fallback")
-        );
+        assert_eq!(next_provider(&mut new_request).as_deref(), Some("fallback"));
 
         let mut after_cooldown = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1121,16 +1304,12 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        assert_eq!(
-            next_provider(&mut after_cooldown, &health).as_deref(),
-            Some("flaky")
-        );
+        assert_eq!(next_provider(&mut after_cooldown).as_deref(), Some("flaky"));
     }
 
     #[test]
     fn default_retry_budget_uses_capped_exponential_full_jitter() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("flaky", 0), target("fallback", 0)];
         let mut policy = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1139,11 +1318,10 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        let flaky = policy.next_healthy(&health).expect("first Target");
+        let flaky = policy.next_healthy().expect("first Target");
         for cap_ms in [500, 1_000, 2_000, 4_000, 8_000] {
             assert_eq!(
                 policy.record_failure(
-                    &health,
                     &flaky,
                     AttemptFailureSignal {
                         kind: AiErrorKind::ServerError,
@@ -1160,7 +1338,6 @@ mod tests {
         }
         assert_eq!(
             policy.record_failure(
-                &health,
                 &flaky,
                 AttemptFailureSignal {
                     kind: AiErrorKind::ServerError,
@@ -1177,7 +1354,6 @@ mod tests {
     #[test]
     fn retry_after_overrides_jitter_and_quota_moves_without_retry() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("first", 0), target("second", 0)];
         let mut policy = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1186,10 +1362,9 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        let first = policy.next_healthy(&health).expect("first Target");
+        let first = policy.next_healthy().expect("first Target");
         assert_eq!(
             policy.record_failure(
-                &health,
                 &first,
                 AttemptFailureSignal {
                     kind: AiErrorKind::RateLimitError,
@@ -1205,7 +1380,6 @@ mod tests {
         );
         assert_eq!(
             policy.record_failure(
-                &health,
                 &first,
                 AttemptFailureSignal {
                     kind: AiErrorKind::QuotaExceeded,
@@ -1222,7 +1396,6 @@ mod tests {
     #[test]
     fn committed_or_semantic_failures_stop_the_request() {
         let state = RoutePolicyState::default();
-        let health = HealthRegistry::new();
         let targets = vec![target("first", 0), target("second", 0)];
         let mut policy = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1231,10 +1404,9 @@ mod tests {
             &RouteSchedulingSnapshot::default(),
             state,
         );
-        let first = policy.next_healthy(&health).expect("first Target");
+        let first = policy.next_healthy().expect("first Target");
         assert_eq!(
             policy.record_failure(
-                &health,
                 &first,
                 AttemptFailureSignal {
                     kind: AiErrorKind::ServerError,
@@ -1248,7 +1420,6 @@ mod tests {
         );
         assert_eq!(
             policy.record_failure(
-                &health,
                 &first,
                 AttemptFailureSignal {
                     kind: AiErrorKind::InvalidRequest,
@@ -1260,5 +1431,306 @@ mod tests {
             ),
             AttemptFailureDisposition::Stop
         );
+    }
+
+    fn policy_at(state: &RoutePolicyState, targets: &[Target], now_ms: u64) -> RouteAttemptPolicy {
+        RouteAttemptPolicy::new(
+            "traffic_equalization",
+            targets,
+            context(now_ms),
+            &RouteSchedulingSnapshot::default(),
+            state.clone(),
+        )
+    }
+
+    fn failure_at(kind: AiErrorKind, now_ms: u64) -> AttemptFailureSignal {
+        AttemptFailureSignal {
+            kind,
+            client_output_committed: false,
+            retry_after: None,
+            now_ms,
+            jitter_sample: 0.0,
+        }
+    }
+
+    fn cooled_targets() -> (RoutePolicyState, Vec<Target>) {
+        let state = RoutePolicyState::default();
+        let mut recovering = target("recovering", 1);
+        recovering.target_cooldown_ms = 1_000;
+        let targets = vec![recovering, target("fallback", 0)];
+        let mut opener = policy_at(&state, &targets, 10_000);
+        let selected = opener.next_healthy().expect("initial target");
+        assert_eq!(
+            opener.record_failure(&selected, failure_at(AiErrorKind::QuotaExceeded, 10_000)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        (state, targets)
+    }
+
+    #[test]
+    fn half_open_probe_failure_restarts_full_cooldown_without_retries() {
+        let (state, targets) = cooled_targets();
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::HalfOpen
+        );
+        let mut probe = policy_at(&state, &targets, 11_000);
+        let selected = probe.next_healthy().expect("probe");
+        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(
+            probe.record_failure(&selected, failure_at(AiErrorKind::Timeout, 11_000)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000),
+            TargetRuntimeStatus {
+                state: TargetRuntimeState::CoolingDown,
+                cooldown_remaining_ms: Some(1_000)
+            }
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 11_999)).as_deref(),
+            Some("fallback")
+        );
+        let mut second_probe = policy_at(&state, &targets, 12_000);
+        let selected = second_probe.next_healthy().expect("next probe");
+        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(
+            second_probe.record_failure(&selected, failure_at(AiErrorKind::InvalidRequest, 12_000)),
+            AttemptFailureDisposition::Stop
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 12_999)).as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn simultaneous_requests_share_one_half_open_probe() {
+        let (state, targets) = cooled_targets();
+        let barrier = std::sync::Barrier::new(8);
+        let selected = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut policy = policy_at(&state, &targets, 11_000);
+                        barrier.wait();
+                        let selected = next_provider(&mut policy);
+                        // Keep every selection alive until all requests have competed.
+                        barrier.wait();
+                        selected
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("selection worker"))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|provider| provider.as_deref() == Some("recovering"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|provider| provider.as_deref() == Some("fallback"))
+                .count(),
+            7
+        );
+    }
+
+    #[test]
+    fn half_open_success_restores_normal_concurrent_scheduling() {
+        let (state, targets) = cooled_targets();
+        let mut probe = policy_at(&state, &targets, 11_000);
+        assert_eq!(next_provider(&mut probe).as_deref(), Some("recovering"));
+        state.record_success(probe.context(), "recovering:model", probe.current_epoch());
+        probe.accept_current();
+        assert_eq!(
+            state.target_status("recovering:model").state,
+            TargetRuntimeState::Available
+        );
+        let mut first = policy_at(&state, &targets, 11_001);
+        let mut second = policy_at(&state, &targets, 11_001);
+        assert_eq!(next_provider(&mut first).as_deref(), Some("recovering"));
+        assert_eq!(next_provider(&mut second).as_deref(), Some("recovering"));
+    }
+
+    #[test]
+    fn cancelled_probes_release_the_slot_and_late_outcomes_cannot_replace_the_next_probe() {
+        let (state, targets) = cooled_targets();
+        let mut first = policy_at(&state, &targets, 11_000);
+        assert_eq!(next_provider(&mut first).as_deref(), Some("recovering"));
+        let old_context = first.context().clone();
+        let old_epoch = first.current_epoch();
+        let reservation = state.reservation(
+            old_context.clone(),
+            "recovering:model".into(),
+            old_epoch,
+            true,
+        );
+        first.accept_current();
+        drop(reservation);
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::HalfOpen
+        );
+        let mut replacement = policy_at(&state, &targets, 11_000);
+        assert_eq!(
+            next_provider(&mut replacement).as_deref(),
+            Some("recovering")
+        );
+        state.record_success(&old_context, "recovering:model", old_epoch);
+        state.record_failure("recovering:model", old_epoch, 1_000);
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::Probing
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 11_000)).as_deref(),
+            Some("fallback")
+        );
+        drop(replacement);
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::HalfOpen
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 11_000)).as_deref(),
+            Some("recovering")
+        );
+    }
+
+    #[test]
+    fn newer_cooldown_blocks_old_retries_and_ignores_late_success() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("recovering", 1), target("fallback", 0)];
+        let mut old = policy_at(&state, &targets, 10_000);
+        let mut opener = policy_at(&state, &targets, 10_000);
+        let old_target = old.next_healthy().expect("old request");
+        let selected = opener.next_healthy().expect("concurrent request");
+        assert_eq!(
+            old.record_failure(&old_target, failure_at(AiErrorKind::Timeout, 10_000)),
+            AttemptFailureDisposition::RetrySame {
+                delay: Duration::ZERO
+            }
+        );
+        assert_eq!(
+            opener.record_failure(&selected, failure_at(AiErrorKind::QuotaExceeded, 10_000)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert!(!old.retry_current());
+        state.record_success(old.context(), "recovering:model", old.current_epoch());
+        assert_eq!(
+            state.target_status_at("recovering:model", 10_001).state,
+            TargetRuntimeState::CoolingDown
+        );
+        assert_eq!(next_provider(&mut old).as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn disabled_cooldown_never_creates_a_probe_gate() {
+        let state = RoutePolicyState::default();
+        let mut configured = target("recovering", 1);
+        configured.target_cooldown_ms = 0;
+        configured.target_retry_budget = 0;
+        let targets = vec![configured];
+        let mut opener = policy_at(&state, &targets, 10_000);
+        let selected = opener.next_healthy().expect("target");
+        assert_eq!(
+            opener.record_failure(&selected, failure_at(AiErrorKind::Timeout, 10_000)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert_eq!(
+            state.target_status("recovering:model").state,
+            TargetRuntimeState::Available
+        );
+        let mut first = policy_at(&state, &targets, 10_001);
+        let mut second = policy_at(&state, &targets, 10_001);
+        assert_eq!(next_provider(&mut first).as_deref(), Some("recovering"));
+        assert_eq!(next_provider(&mut second).as_deref(), Some("recovering"));
+    }
+
+    #[test]
+    fn half_open_targets_only_probe_when_eligible_and_actually_selected() {
+        let (state, mut targets) = cooled_targets();
+        targets[0].enabled = false;
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 11_000)).as_deref(),
+            Some("fallback")
+        );
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::HalfOpen
+        );
+        targets[0].enabled = true;
+        let mut filtered = policy_at(&state, &targets, 11_000);
+        filtered.retain(|target| target.provider_id != "recovering");
+        assert_eq!(next_provider(&mut filtered).as_deref(), Some("fallback"));
+        assert_eq!(
+            state.target_status_at("recovering:model", 11_000).state,
+            TargetRuntimeState::HalfOpen
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 11_000)).as_deref(),
+            Some("recovering")
+        );
+    }
+
+    #[test]
+    fn expired_cooldown_allows_a_single_probe_while_concurrent_policies_fall_back() {
+        let state = RoutePolicyState::default();
+        let mut cooling = target("recovering", 0);
+        cooling.target_retry_budget = 0;
+        cooling.target_cooldown_ms = 120_000;
+        let targets = vec![cooling, target("fallback", 0)];
+
+        let mut opener = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            context(0),
+            &RouteSchedulingSnapshot::default(),
+            state.clone(),
+        );
+        let recovering = opener.next_healthy().expect("first Target");
+        assert_eq!(recovering.provider_id, "recovering");
+        assert_eq!(
+            opener.record_failure(
+                &recovering,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::ServiceUnavailable,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 0,
+                    jitter_sample: 0.0,
+                },
+            ),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        drop(opener);
+
+        // Cooldown elapsed: exactly one policy may probe the recovering target;
+        // a concurrent policy over the same shared state must fall back.
+        let mut probe = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            context(121_000),
+            &RouteSchedulingSnapshot::default(),
+            state.clone(),
+        );
+        let mut rival = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            context(121_000),
+            &RouteSchedulingSnapshot::default(),
+            state.clone(),
+        );
+        assert_eq!(next_provider(&mut probe).as_deref(), Some("recovering"));
+        assert_eq!(next_provider(&mut rival).as_deref(), Some("fallback"));
+        assert_eq!(next_provider(&mut rival), None);
     }
 }

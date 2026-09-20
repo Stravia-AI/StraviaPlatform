@@ -12,6 +12,8 @@ Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；�
 
 瞬时失败（含 First Token Timeout）可在同一 Target 上额外重试 5 次（共 6 次），间隔 0.5s 起、×2、封顶 8s、full jitter；429 `Retry-After` 优先。用尽后换 Target 并进入 120s Target Cooldown。QuotaExceeded 不在同 Target 空转，只换 Target 并冷却，偏离「quota 不换 Provider」的旧文档。Auth、InvalidRequest、ContextLength、ContentFiltered 立刻失败整次请求。First Token 是上游第一个 canonical 输出，包含 Thinking，缺省 60s。Client Output Commit 之后仍禁止换 Target。Affinity 让位冷却；Continuation 目标在冷却中则放弃续接、完整重放。删除 Target.weight。旧 `weighted` / `priority` / `cooldown` 映射为 Traffic Equalization，`latency` 映射为 Latency Preference。
 
+Target Cooldown 到期后进入半开，而不是全量恢复；下一个实际符合选路条件的请求独占一次探测机会。探测关闭同 Target 预算重试和 ProviderCall 内部回退，完整成功恢复正常，上游失败或已开始探测的 deadline 超时重新等待完整冷却；用户取消、本地准备失败和消费者断开仅释放名额。半开失败后的请求是否切换 Target，仍遵守错误分类与 Client Output Commit。0 冷却关闭此流程。恢复状态与进行中占位统一由 `RoutePolicyState` 拥有，以世代隔离迟到结果，不再叠加独立的固定失败次数健康过滤。已经开始执行的请求不因其他请求触发冷却而被取消。
+
 ## Considered options
 
 - 新建客户端 Session 并硬粘 Target：与 glossary 冲突，且 ADR-0023 已拒绝按连接或 Session 固定 Target。
