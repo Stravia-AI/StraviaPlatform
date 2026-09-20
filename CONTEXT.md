@@ -481,18 +481,18 @@ _避免使用_：总超时、Connect Timeout
 
 ## Target Cooldown
 
-Target Cooldown 是 Target 在重试预算用尽或无法继续尝试后，暂时不承接新尝试的恢复等待期；缺省 120 秒，0 表示关闭。等待期结束后，仅允许符合调度条件的一个请求进行半开探测，完整成功才恢复正常，探测失败重新等待；已经开始执行的请求不会因此取消。
-_避免使用_：固定失败次数熔断
+Target Cooldown 是 Target 的共享连续上游失败数超过 Target Retry Budget 后，暂时不承接新尝试的恢复等待期；缺省 120 秒，0 仅关闭冷却调度门禁；失败仍计数，完整成功仍清零，达到阈值后仍按错误分类更换或停止 Target。等待期结束后，仅允许符合调度条件的一个请求进行一次半开探测；完整成功清零失败数并恢复正常，探测的上游失败立即重新等待，用户取消或本地准备失败只释放探测名额。已经开始执行的请求不会因其他请求触发冷却而取消。
+_避免使用_：固定失败次数熔断、单次请求失败即冷却
 
 ## Target Retry Budget
 
-Target Retry Budget 是瞬时失败时在更换 Target 前对同一 Target 的额外尝试次数；缺省 5 次（含首次共 6 次），间隔指数退避并 full jitter。半开探测不使用此预算。
-_避免使用_：Route 重试、循环重试
+Target Retry Budget 是 Target 进入冷却前可容纳的连续上游失败数；配置为 N 表示第 N+1 次连续失败触发冷却，缺省 5 即第 6 次。同一 Target 的内部重试与跨请求终态上游失败共享计数，完整成功清零；错误分类仍独立决定同 Target 重试、切换 Target 或终止请求。取消、本地准备、Hook 与存储错误不计入；半开探测不使用此预算。
+_避免使用_：单请求重试次数、Route 重试、循环重试
 
 
 ## Client Output Commit
 
-Client Output Commit 是一次 Run 的输出首次不可逆地对客户端可见的时点。此前，当前 Target 的明确可重试上游失败可以触发 Target 切换；此后禁止切换 Target。它不表示响应正文已完整交付，完整交付只在正文成功结束时成立。
+Client Output Commit 是一次 Run 的输出首次不可逆地对客户端可见的时点。此前，当前 Target 的明确可重试上游失败可以触发 Target 切换；此后禁止切换 Target，只终止当前请求。Commit 本身不计作上游失败，也不单独触发冷却；其后的真实上游失败仍按 Target 的共享连续失败规则计数。它不表示响应正文已完整交付，完整交付只在正文成功结束时成立。
 _避免使用_：Output Started、Response Committed、Delivery Commit
 
 

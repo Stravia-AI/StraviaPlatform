@@ -812,7 +812,7 @@ Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的�
 
 > `ingress_protocol` 不属于 Route 配置；它由 `RequestContext` 携带，并写入 `inference_run_observations.ingress_protocol`。Rejected Request 则写入 `rejected_request_observations.ingress_protocol`。
 
-**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
+**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 的共享连续失败计数、冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
 
 运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。`UsageStatsStore` 从 `target_attempt_observations` 读取 Confirmed Upstream Usage：Traffic Equalization 比较过去 24 小时的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。查询失败时返回最后一次成功的进程内 snapshot 并标记 `stale`；尚无 snapshot 或 Observation gap 造成历史不完整时按无历史样本执行原有确定性 fallback，观测故障不能阻断选路。
 
@@ -1094,7 +1094,7 @@ Migration 34 在 SQLite/PostgreSQL 都先删除旧 `request_logs` 及其行，�
 
 Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 7 天）；大 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；Trace 先 tombstone、幂等删除目录，再删除 owner rows，启动 reconciliation 继续处理 tombstone 与 orphan directory。
 
-> Target 冷却、半开探测与进行中输入占位由 `RoutePolicyState`（`router/selector.rs`）在当前 Gateway 进程内管理，**不持久化到数据库，也不跨进程同步**；成功率调度证据仍从持久化的 Target attempt observations 派生。
+> Target 的共享连续失败计数、冷却、半开探测与进行中输入占位由 `RoutePolicyState`（`router/selector.rs`）在当前 Gateway 进程内管理，**不持久化到数据库，也不跨进程同步**；成功率调度证据仍从持久化的 Target attempt observations 派生。
 
 ### 10.3 安全
 
@@ -1175,9 +1175,11 @@ tests/stream/
 
 ### 12.8 Router 故障策略
 
-`RouteAttemptPolicy` 统一 Target 分层选择、同 Target full-jitter 重试、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。默认首次加 5 次额外重试；可重试失败耗尽预算、QuotaExceeded 或无法继续重试的上游流式失败触发冷却，默认 120 秒，0 表示关闭。冷却结束进入半开，只在满足现有路由条件并实际选中时原子领取一个探测名额；探测期间其他请求跳过该 Target。探测同时关闭 ProviderCall 内部重试和回退，完整成功才恢复正常，任何上游探测失败或已开始探测的 deadline 超时重新冷却。用户取消、消费者断开和本地准备失败只释放探测名额，不伪造成功。Client Output Commit 后仍禁止换 Target。
+`RouteAttemptPolicy` 统一 Target 分层选择、同 Target full-jitter 重试、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。普通状态下，每个 `provider_id:model` 只有一份共享连续失败计数：同 Target 内部重试与跨请求终态上游失败都递增，完整成功清零。Target Retry Budget 为 N 表示第 N+1 次连续失败才触发冷却；缺省 5，即第 6 次失败后冷却 120 秒。瞬时失败是否在同 Target 重试仍由错误分类决定；QuotaExceeded 与 Auth、InvalidRequest、ContextLength、ContentFiltered 等终态上游错误计数，但前者仍直接换 Target，后者仍终止请求，不因计数改成同 Target 重试。用户取消、消费者断开以及本地准备、Hook、存储错误不计数。Client Output Commit 后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的真实上游失败仍计数。冷却为 0 时仅关闭冷却调度门禁；共享失败仍计数，达到阈值后仍按错误分类更换或停止 Target，完整成功仍清零。
 
-状态由共享 `RoutePolicyState` 按 `provider_id:model` 管理；世代标识防止旧请求结果覆盖新的冷却或探测。冷却不取消已经开始执行的请求，但后续选择、重试以及异步准备后的准入会重新检查资格。不存在独立的固定 3 次失败 / 30 秒健康恢复规则，也不执行后台主动探测。
+冷却结束进入半开，只在满足现有路由条件并实际选中时原子领取一个探测名额；探测期间其他请求跳过该 Target。半开只有一次上游尝试，同时关闭同 Target 预算重试与 ProviderCall 内部重试和回退；完整成功清零并恢复正常，任何上游探测失败（含已发出上游请求后的超时）立即重新冷却。用户取消、消费者断开和本地准备失败只释放探测名额，不伪造成功或失败。
+
+计数与恢复状态由共享 `RoutePolicyState` 按 `provider_id:model` 管理；世代标识防止旧请求结果覆盖新的冷却或探测。冷却不取消已经开始执行的请求，但后续选择、重试以及异步准备后的准入会重新检查资格。不存在独立的固定 3 次失败 / 30 秒健康恢复规则，也不执行后台主动探测。
 
 管理面通过已鉴权的 `GET /api/v1/models/{route_id}/target-statuses` 读取 `{data: [...]}`；`route_id` 是客户端 Model ID。每项包含 `target_id`、`provider_id`、`model`、`state`（`available` / `cooling_down` / `half_open` / `probing`）和 `cooldown_remaining_ms`（仅冷却期间为剩余毫秒，其余为 `null`）。没有失败记录的 `available` 仅表示允许调度，不代表主动健康检测成功。WebUI 使用独立查询在页面可见时每 2 秒刷新，不覆盖编辑草稿；读取失败停止周期刷新并提供重试，未知状态不显示为健康。
 

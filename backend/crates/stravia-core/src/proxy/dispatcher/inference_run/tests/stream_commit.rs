@@ -1369,7 +1369,17 @@ async fn run_deadline_cancels_forced_stream_collection() {
     .await
     .expect("run deadline must interrupt forced-stream collection");
 
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("deadline response body");
+    assert_eq!(
+        status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "provider calls: {}; response: {}",
+        provider_calls.load(Ordering::SeqCst),
+        String::from_utf8_lossy(&body)
+    );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 }
 

@@ -30,10 +30,31 @@ use crate::proxy::client::{
     ResponsesWebSocketLease, ResponsesWebSocketRegistry, ResponsesWebSocketRequest,
     ResponsesWebSocketTrace,
 };
+use crate::router::RoutePolicyState;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+#[derive(Clone)]
+struct ProviderRecoveryPolicy {
+    state: RoutePolicyState,
+    target_key: String,
+    epoch: u64,
+    retry_budget: i32,
+    cooldown_ms: i64,
+}
+
+impl ProviderRecoveryPolicy {
+    fn try_record_failure(&self) -> bool {
+        self.state.try_record_recovery_failure(
+            &self.target_key,
+            self.epoch,
+            self.retry_budget,
+            self.cooldown_ms,
+        )
+    }
+}
 
 pub(crate) struct ProviderCall {
     adapter: ProviderAdapter,
@@ -115,6 +136,30 @@ impl ArtifactTransfers {
 }
 
 impl ProviderCall {
+    pub(crate) fn set_recovery_policy(
+        &mut self,
+        state: RoutePolicyState,
+        target_key: String,
+        epoch: u64,
+        retry_budget: i32,
+        cooldown_ms: i64,
+    ) {
+        self.adapter.recovery_policy = Some(ProviderRecoveryPolicy {
+            state,
+            target_key,
+            epoch,
+            retry_budget,
+            cooldown_ms,
+        });
+    }
+
+    pub(crate) fn upstream_started_signal(&mut self) -> Arc<AtomicBool> {
+        self.adapter
+            .upstream_started
+            .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
     pub(crate) fn first_token_timeout_signal(&mut self) -> Option<Arc<AtomicBool>> {
         let signal = self
             .adapter
@@ -151,12 +196,20 @@ impl ProviderCall {
     /// Resolves the wire body: raw bytes take precedence over the JSON body.
     /// Artifact transfer only applies to JSON bodies — raw-byte formats
     /// (Connect-RPC protobuf) carry no JSON artifact placeholders.
-    async fn request_body_bytes(&self, outbound: &OutboundRequest) -> anyhow::Result<bytes::Bytes> {
+    async fn request_body_bytes(
+        &self,
+        outbound: &OutboundRequest,
+    ) -> Result<bytes::Bytes, ProviderRequestPreparationError> {
         if let Some(raw) = &outbound.body_bytes {
             return Ok(bytes::Bytes::copy_from_slice(raw));
         }
-        let body = self.transfer_body(&outbound.body).await?;
-        Ok(bytes::Bytes::from(serde_json::to_vec(body.as_ref())?))
+        let body = self
+            .transfer_body(&outbound.body)
+            .await
+            .map_err(ProviderRequestPreparationError)?;
+        serde_json::to_vec(body.as_ref())
+            .map(bytes::Bytes::from)
+            .map_err(|error| ProviderRequestPreparationError(error.into()))
     }
     pub(crate) fn disable_retries(&mut self) {
         self.allow_retries = false;
@@ -197,6 +250,10 @@ pub(crate) struct ProviderStream {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error("provider request preparation failed: {0}")]
+pub(crate) struct ProviderRequestPreparationError(#[source] anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum ProviderStreamError {
     #[error("upstream stream error: {0}")]
     Transport(String),
@@ -204,8 +261,10 @@ pub(crate) enum ProviderStreamError {
     Uncertain(String),
     #[error("upstream stream decode error: {0}")]
     Decode(#[from] crate::protocol::transform::TransformError),
-    #[error("upstream stream normalization error: {0}")]
+    #[error("local stream normalization error: {0}")]
     Normalize(#[source] GatewayError),
+    #[error("local stream preparation error: {0}")]
+    Local(String),
 }
 
 enum ProviderStreamSource {
@@ -228,6 +287,8 @@ pub(crate) struct ProviderAdapter {
     binding: ProviderBinding,
     normalizes_raw_stream_chunks: bool,
     first_token_timed_out: Option<Arc<AtomicBool>>,
+    upstream_started: Option<Arc<AtomicBool>>,
+    recovery_policy: Option<ProviderRecoveryPolicy>,
 }
 
 #[derive(Clone)]
@@ -624,6 +685,8 @@ impl ProviderAdapter {
             binding,
             normalizes_raw_stream_chunks: false,
             first_token_timed_out: None,
+            upstream_started: None,
+            recovery_policy: None,
         };
         adapter.normalizes_raw_stream_chunks =
             crate::provider::common::pipeline::normalizes_stream_raw_chunks(
@@ -634,6 +697,24 @@ impl ProviderAdapter {
     }
     pub(crate) fn binding(&self) -> &ProviderBinding {
         &self.binding
+    }
+
+    fn try_record_recovery_failure(&self) -> bool {
+        self.recovery_policy
+            .as_ref()
+            .is_none_or(ProviderRecoveryPolicy::try_record_failure)
+    }
+
+    fn mark_upstream_started(&self) {
+        if let Some(signal) = &self.upstream_started {
+            signal.store(true, Ordering::Release);
+        }
+    }
+
+    fn mark_upstream_idle(&self) {
+        if let Some(signal) = &self.upstream_started {
+            signal.store(false, Ordering::Release);
+        }
     }
 
     fn begin_attempt(
@@ -654,6 +735,7 @@ impl ProviderAdapter {
         headers: &HeaderMap,
         body: impl FnOnce() -> Value,
     ) -> AttemptObservation {
+        self.mark_upstream_started();
         let attempt = AttemptObservation::new(self, transport, url);
         attempt.wire_lazy("upstream_request", message_type, None, Some(headers), body);
         attempt
@@ -797,9 +879,11 @@ impl ProviderStream {
         &mut self,
     ) -> Result<Option<ProviderStreamChunk>, ProviderStreamError> {
         let adapter = &self.adapter;
+        adapter.mark_upstream_started();
         let raw = match &mut self.source {
             ProviderStreamSource::Http(bytes) => {
                 let Some(raw) = bytes.next().await else {
+                    adapter.mark_upstream_idle();
                     return Ok(None);
                 };
                 match raw {
@@ -823,11 +907,13 @@ impl ProviderStream {
                         .store(false, Ordering::Release);
                 }
                 let Some(raw) = raw else {
+                    adapter.mark_upstream_idle();
                     return Ok(None);
                 };
                 raw
             }
         };
+        adapter.mark_upstream_idle();
         self.response_event_seen = true;
         if matches!(&self.source, ProviderStreamSource::Http(_)) {
             self.attempt.wire_lazy(
@@ -1471,7 +1557,9 @@ mod tests {
         );
         assert_eq!(outbound.headers.get("x-gitlab-old").unwrap(), "stale");
 
+        let state = RoutePolicyState::default();
         let mut call = adapter.bind(ProxyClient::new(reqwest::Client::new()), outbound);
+        call.set_recovery_policy(state.clone(), "provider:model".into(), 0, 2, 120_000);
         let response = call.call_non_stream().await.expect("retry GitLab request");
         assert_eq!(response.status, 200);
         assert_eq!(response.canonical.unwrap().output_text(), "retried");
@@ -1507,6 +1595,7 @@ mod tests {
         );
         let mut stream_call =
             stream_adapter.bind(ProxyClient::new(reqwest::Client::new()), stream_outbound);
+        stream_call.set_recovery_policy(state.clone(), "provider:model".into(), 0, 2, 120_000);
         assert!(matches!(
             stream_call
                 .call_stream()
@@ -1514,6 +1603,18 @@ mod tests {
                 .expect("retry GitLab stream"),
             ProviderStreamResponse::Stream(_)
         ));
+        assert_eq!(
+            state.target_status("provider:model").state,
+            crate::router::TargetRuntimeState::Available
+        );
+        assert_eq!(
+            state.record_failure("provider:model", 0, 2, 120_000),
+            Some(3)
+        );
+        assert_eq!(
+            state.target_status("provider:model").state,
+            crate::router::TargetRuntimeState::CoolingDown
+        );
 
         let requests = tokio::time::timeout(Duration::from_secs(5), server)
             .await

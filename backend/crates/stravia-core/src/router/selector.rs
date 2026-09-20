@@ -108,12 +108,13 @@ pub struct RoutePolicyState {
     inner: Arc<Mutex<RoutePolicyStateInner>>,
 }
 
-/// Cooldown bookkeeping for one target. Entries are never removed, so the
+/// Failure and cooldown bookkeeping for one target. Entries are never removed, so the
 /// globally monotonically increasing `epoch` survives recovery: a success or
 /// failure recorded against an older epoch can never clear or rewrite a newer
 /// cooldown generation (no ABA on delete/recreate).
 #[derive(Debug, Clone)]
 struct TargetRuntime {
+    consecutive_failures: u32,
     /// Cooldown expiry in `RoutePolicyState::now_ms` terms; `0` = not cooling.
     cooldown_until: u64,
     /// Generation of the latest cooldown write.
@@ -153,21 +154,37 @@ impl RoutePolicyStateInner {
         self.next_epoch
     }
 
-    // Late outcomes cannot overwrite a newer cooldown or probe generation.
-    fn cool_target(&mut self, target_key: &str, epoch: u64, cooldown_ms: i64, now_ms: u64) {
+    // 重试与跨请求失败只在这里累计；迟到结果不能改写新的冷却或探测世代。
+    fn record_failure(
+        &mut self,
+        target_key: &str,
+        epoch: u64,
+        retry_budget: i32,
+        cooldown_ms: i64,
+        now_ms: u64,
+    ) -> Option<u32> {
         let current = self.targets.get(target_key);
-        if current.map_or(0, |runtime| runtime.epoch) != epoch
-            || (cooldown_ms <= 0 && current.is_none())
-        {
-            return;
+        if current.map_or(0, |runtime| runtime.epoch) != epoch {
+            return None;
         }
+        let consecutive_failures = current
+            .map_or(0, |runtime| runtime.consecutive_failures)
+            .saturating_add(1);
+        let should_cool = cooldown_ms > 0
+            && (consecutive_failures > retry_budget.max(0) as u32
+                || current.is_some_and(|runtime| runtime.probe_epoch == Some(epoch)));
         let next = TargetRuntime {
-            cooldown_until: if cooldown_ms > 0 {
+            consecutive_failures,
+            cooldown_until: if should_cool {
                 now_ms.saturating_add(cooldown_ms as u64)
             } else {
                 0
             },
-            epoch: self.next_epoch(),
+            epoch: if should_cool {
+                self.next_epoch()
+            } else {
+                epoch
+            },
             probe_epoch: None,
         };
         if let Some(runtime) = self.targets.get_mut(target_key) {
@@ -175,6 +192,7 @@ impl RoutePolicyStateInner {
         } else {
             self.targets.insert(target_key.to_owned(), next);
         }
+        Some(consecutive_failures)
     }
 
     /// Releases a half-open probe slot so the target returns to `HalfOpen`
@@ -249,6 +267,7 @@ impl RoutePolicyState {
         if let Some(runtime) = inner.targets.get_mut(target_key)
             && runtime.epoch == epoch
         {
+            runtime.consecutive_failures = 0;
             runtime.cooldown_until = 0;
             runtime.probe_epoch = None;
         }
@@ -269,12 +288,40 @@ impl RoutePolicyState {
         }
     }
 
-    /// Records a failed upstream outcome only if its attempt generation is current.
-    /// A zero cooldown disables the cooldown/probe cycle.
-    pub fn record_failure(&self, target_key: &str, epoch: u64, cooldown_ms: i64) {
+    /// 累计当前世代的一次上游失败，返回连续失败数；迟到结果返回 None。
+    /// 超过重试预算才冷却，半开探测失败立即重新冷却；0 冷却仅关闭调度门禁。
+    pub fn record_failure(
+        &self,
+        target_key: &str,
+        epoch: u64,
+        retry_budget: i32,
+        cooldown_ms: i64,
+    ) -> Option<u32> {
         let now_ms = self.now_ms();
         let mut inner = self.inner.lock();
-        inner.cool_target(target_key, epoch, cooldown_ms, now_ms);
+        inner.record_failure(target_key, epoch, retry_budget, cooldown_ms, now_ms)
+    }
+
+    /// Provider 内部恢复会吞掉原失败，只有仍可继续时在这里计数。
+    /// 达到阈值或失去资格时不计数，由执行器接收原错误并统一收口。
+    pub(crate) fn try_record_recovery_failure(
+        &self,
+        target_key: &str,
+        epoch: u64,
+        retry_budget: i32,
+        cooldown_ms: i64,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        let current = inner.targets.get(target_key);
+        if current.map_or(0, |runtime| runtime.epoch) != epoch
+            || current.is_some_and(|runtime| runtime.cooldown_until != 0)
+            || current.map_or(0, |runtime| runtime.consecutive_failures)
+                >= retry_budget.max(0) as u32
+        {
+            return false;
+        }
+        inner.record_failure(target_key, epoch, retry_budget, cooldown_ms, self.now_ms());
+        true
     }
 
     pub fn reservation(
@@ -332,7 +379,6 @@ pub struct RouteAttemptPolicy {
     current_epoch: u64,
     /// `true` while this policy holds the target's half-open probe slot.
     current_probe: bool,
-    retries_used: i32,
 }
 
 impl RouteAttemptPolicy {
@@ -425,7 +471,6 @@ impl RouteAttemptPolicy {
             current_target_key: None,
             current_epoch: 0,
             current_probe: false,
-            retries_used: 0,
         }
     }
 
@@ -496,7 +541,6 @@ impl RouteAttemptPolicy {
             });
             self.current_probe = probe_epoch.is_some();
             self.current_target_key = Some(key);
-            self.retries_used = 0;
             return Some(target);
         }
         None
@@ -568,62 +612,35 @@ impl RouteAttemptPolicy {
         // state's own clock — the floor keeps cooldown writes monotonic.
         let now_ms = now_ms.max(self.context.now_ms).max(self.state.now_ms());
         let can_fail_over = transient_failure(&kind) || kind == AiErrorKind::QuotaExceeded;
-        if self.current_probe {
-            // Every failed probe waits a complete cooldown, without retrying.
-            // Error classification still controls whether this request may fail over.
-            self.abandon_target(&key, target.target_cooldown_ms, now_ms);
-            return if can_fail_over && !client_output_committed {
-                AttemptFailureDisposition::TryNextTarget
-            } else {
-                AttemptFailureDisposition::Stop
-            };
-        }
-        if client_output_committed {
-            if can_fail_over {
-                self.abandon_target(&key, target.target_cooldown_ms, now_ms);
-            } else {
-                self.skip_current();
-            }
+        let failures = self.state.inner.lock().record_failure(
+            &key,
+            self.current_epoch,
+            target.target_retry_budget,
+            target.target_cooldown_ms,
+            now_ms,
+        );
+        if client_output_committed || !can_fail_over {
+            self.skip_current();
             return AttemptFailureDisposition::Stop;
         }
-        if transient_failure(&kind) {
-            if !self.retry_current() {
-                return AttemptFailureDisposition::TryNextTarget;
-            }
-            if self.retries_used < target.target_retry_budget {
-                let cap_ms = 500_u64
-                    .saturating_mul(1_u64 << self.retries_used.min(4) as u32)
-                    .min(8_000);
-                self.retries_used += 1;
-                let delay = if kind == AiErrorKind::RateLimitError {
-                    retry_after.unwrap_or_else(|| jitter(cap_ms, jitter_sample))
-                } else {
-                    jitter(cap_ms, jitter_sample)
-                };
-                return AttemptFailureDisposition::RetrySame { delay };
-            }
-            self.abandon_target(&key, target.target_cooldown_ms, now_ms);
-            return AttemptFailureDisposition::TryNextTarget;
+        if !self.current_probe
+            && transient_failure(&kind)
+            && let Some(failures) = failures
+            && failures <= target.target_retry_budget.max(0) as u32
+            && self.retry_current()
+        {
+            let cap_ms = 500_u64
+                .saturating_mul(1_u64 << (failures - 1).min(4))
+                .min(8_000);
+            let delay = if kind == AiErrorKind::RateLimitError {
+                retry_after.unwrap_or_else(|| jitter(cap_ms, jitter_sample))
+            } else {
+                jitter(cap_ms, jitter_sample)
+            };
+            return AttemptFailureDisposition::RetrySame { delay };
         }
-        if kind == AiErrorKind::QuotaExceeded {
-            self.abandon_target(&key, target.target_cooldown_ms, now_ms);
-            return AttemptFailureDisposition::TryNextTarget;
-        }
-        self.release_current(&key);
-        self.current_target_key = None;
-        AttemptFailureDisposition::Stop
-    }
-
-    fn abandon_target(&mut self, key: &str, cooldown_ms: i64, now_ms: u64) {
-        let mut inner = self.state.inner.lock();
-        release_reservation(
-            &mut inner.in_flight_input,
-            key,
-            self.context.estimated_uncached_input_tokens,
-        );
-        inner.cool_target(key, self.current_epoch, cooldown_ms, now_ms);
-        self.current_target_key = None;
-        self.current_probe = false;
+        self.skip_current();
+        AttemptFailureDisposition::TryNextTarget
     }
 
     /// Releases the input reservation and returns a held probe slot to
@@ -1453,9 +1470,150 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stream_and_internal_failures_share_the_target_threshold() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("recovering", 1), target("fallback", 0)];
+        for _ in 0..3 {
+            let mut request = policy_at(&state, &targets, 0);
+            let selected = request.next_healthy().expect("target");
+            assert_eq!(selected.provider_id, "recovering");
+            state.record_failure("recovering:model", request.current_epoch(), 5, 120_000);
+            assert_eq!(
+                state.target_status("recovering:model").state,
+                TargetRuntimeState::Available
+            );
+        }
+        let mut request = policy_at(&state, &targets, 0);
+        let selected = request.next_healthy().expect("target");
+        assert_eq!(selected.provider_id, "recovering");
+        for _ in 0..2 {
+            assert_eq!(
+                request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+                AttemptFailureDisposition::RetrySame {
+                    delay: Duration::ZERO
+                }
+            );
+        }
+        assert_eq!(
+            request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 0)).as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn completed_request_resets_shared_failures_but_cancellation_does_not() {
+        let state = RoutePolicyState::default();
+        let mut configured = target("recovering", 1);
+        configured.target_retry_budget = 1;
+        let targets = vec![configured, target("fallback", 0)];
+        let mut first = policy_at(&state, &targets, 0);
+        let selected = first.next_healthy().expect("target");
+        assert!(matches!(
+            first.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::RetrySame { .. }
+        ));
+        drop(first);
+
+        let mut successful = policy_at(&state, &targets, 0);
+        assert_eq!(
+            next_provider(&mut successful).as_deref(),
+            Some("recovering")
+        );
+        state.record_success(
+            successful.context(),
+            "recovering:model",
+            successful.current_epoch(),
+        );
+        successful.accept_current();
+
+        let mut request = policy_at(&state, &targets, 0);
+        let selected = request.next_healthy().expect("target after success");
+        assert_eq!(selected.provider_id, "recovering");
+        assert!(matches!(
+            request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::RetrySame { .. }
+        ));
+        drop(request);
+        // 取消另一个已选中但尚未完成的请求，不应抹去上一次失败。
+        let mut cancelled = policy_at(&state, &targets, 0);
+        assert_eq!(next_provider(&mut cancelled).as_deref(), Some("recovering"));
+        drop(cancelled);
+        let mut last = policy_at(&state, &targets, 0);
+        let selected = last.next_healthy().expect("last available attempt");
+        assert_eq!(
+            last.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 0)).as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn concurrent_request_failures_reach_one_shared_threshold() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("recovering", 1), target("fallback", 0)];
+        let barrier = std::sync::Barrier::new(6);
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                let state = &state;
+                let targets = &targets;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let mut request = policy_at(state, targets, 0);
+                    assert_eq!(next_provider(&mut request).as_deref(), Some("recovering"));
+                    barrier.wait();
+                    state.record_failure("recovering:model", request.current_epoch(), 5, 120_000);
+                });
+            }
+        });
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 0)).as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn provider_recovery_and_outer_failures_do_not_double_count_the_threshold() {
+        let state = RoutePolicyState::default();
+        let mut configured = target("recovering", 1);
+        configured.target_retry_budget = 2;
+        let targets = vec![configured, target("fallback", 0)];
+        let mut request = policy_at(&state, &targets, 0);
+        let selected = request.next_healthy().expect("target");
+        assert!(state.try_record_recovery_failure("recovering:model", 0, 2, 120_000));
+        drop(request);
+        let mut request = policy_at(&state, &targets, 0);
+        assert_eq!(next_provider(&mut request).as_deref(), Some("recovering"));
+        assert!(matches!(
+            request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::RetrySame { .. }
+        ));
+        assert!(!state.try_record_recovery_failure("recovering:model", 0, 2, 120_000));
+        assert_eq!(
+            state.target_status("recovering:model").state,
+            TargetRuntimeState::Available
+        );
+        assert_eq!(
+            request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        assert_eq!(
+            next_provider(&mut policy_at(&state, &targets, 0)).as_deref(),
+            Some("fallback")
+        );
+    }
+
     fn cooled_targets() -> (RoutePolicyState, Vec<Target>) {
         let state = RoutePolicyState::default();
         let mut recovering = target("recovering", 1);
+        recovering.target_retry_budget = 0;
         recovering.target_cooldown_ms = 1_000;
         let targets = vec![recovering, target("fallback", 0)];
         let mut opener = policy_at(&state, &targets, 10_000);
@@ -1585,7 +1743,7 @@ mod tests {
             Some("recovering")
         );
         state.record_success(&old_context, "recovering:model", old_epoch);
-        state.record_failure("recovering:model", old_epoch, 1_000);
+        state.record_failure("recovering:model", old_epoch, 0, 1_000);
         assert_eq!(
             state.target_status_at("recovering:model", 11_000).state,
             TargetRuntimeState::Probing
@@ -1608,7 +1766,9 @@ mod tests {
     #[test]
     fn newer_cooldown_blocks_old_retries_and_ignores_late_success() {
         let state = RoutePolicyState::default();
-        let targets = vec![target("recovering", 1), target("fallback", 0)];
+        let mut recovering = target("recovering", 1);
+        recovering.target_retry_budget = 1;
+        let targets = vec![recovering, target("fallback", 0)];
         let mut old = policy_at(&state, &targets, 10_000);
         let mut opener = policy_at(&state, &targets, 10_000);
         let old_target = old.next_healthy().expect("old request");

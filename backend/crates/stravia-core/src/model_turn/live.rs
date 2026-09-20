@@ -663,12 +663,16 @@ async fn execute_inner(
                         .then(|| prepared.provider_call.first_token_timeout_signal())
                         .flatten();
                     // If the outer deadline/cancellation select drops this
-                    // in-flight probe before first token, a real deadline
-                    // expiry must re-cool the target; a user cancel only
-                    // releases the probe via the policy Drop.
-                    let mut probe_guard = attempts
-                        .current_is_probe()
-                        .then(|| ProbeDeadlineGuard::armed(&attempts, &target, input.deadline));
+                    // attempt before first token, count a real deadline only
+                    // after Provider transport has started. Local preparation
+                    // and user cancellation do not consume the failure budget.
+                    let upstream_started = prepared.provider_call.upstream_started_signal();
+                    let mut deadline_guard = AttemptDeadlineGuard::armed(
+                        &attempts,
+                        &target,
+                        input.deadline,
+                        upstream_started.clone(),
+                    );
                     let attempt = begin_attempt(
                         gateway,
                         &route,
@@ -700,19 +704,24 @@ async fn execute_inner(
                                 if let Some(signal) = timeout_signal {
                                     signal.store(true, std::sync::atomic::Ordering::Release);
                                 }
-                                Err(AttemptFailure::upstream(
-                                    stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
-                                    None,
-                                    "first_token_timeout",
-                                    "Target did not produce a First Token before its timeout",
-                                    None,
-                                ))
+                                if upstream_started.load(std::sync::atomic::Ordering::Acquire) {
+                                    Err(AttemptFailure::upstream(
+                                        stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
+                                        None,
+                                        "first_token_timeout",
+                                        "Target did not produce a First Token before its timeout",
+                                        None,
+                                    ))
+                                } else {
+                                    Err(AttemptFailure::terminal(
+                                        "first_token_timeout",
+                                        "Local Provider preparation exceeded the First Token timeout",
+                                    ))
+                                }
                             }
                         }
                     };
-                    if let Some(guard) = &mut probe_guard {
-                        guard.disarm();
-                    }
+                    deadline_guard.disarm();
                     result
                 }
                 Err(failure) => Err(failure),
@@ -725,7 +734,7 @@ async fn execute_inner(
                 Err(failure) => failure,
             };
             if native_compaction_requested {
-                recool_failed_probe(&attempts, &target, &failure);
+                record_upstream_failure(&attempts, &target, &failure);
                 return Err(failure.finish(input.observer.as_ref()));
             }
             // A half-open probe gets exactly one upstream request: never spend
@@ -734,25 +743,37 @@ async fn execute_inner(
                 && protected_thinking_sent
                 && failure.protected_reasoning_rejected
                 && !attempts.current_is_probe()
+                && attempts.state().try_record_recovery_failure(
+                    &selected_target_key(&target),
+                    attempts.current_epoch(),
+                    target.target_retry_budget,
+                    target.target_cooldown_ms,
+                )
             {
                 // 只在上游明确拒绝密文/签名、且尚未产出 canonical 输出时修正一次请求。
                 omit_protected_thinking = true;
                 continue;
             }
             let Some(kind) = failure.kind.clone() else {
-                recool_failed_probe(&attempts, &target, &failure);
+                record_upstream_failure(&attempts, &target, &failure);
                 return Err(failure.finish(input.observer.as_ref()));
             };
-            if !failure.record_health {
-                recool_failed_probe(&attempts, &target, &failure);
+            // Local preparation/credential/storage failures may move this request
+            // to another Target, but they are not evidence that the upstream
+            // Target failed and must not consume its shared failure budget.
+            if !failure.is_upstream() {
                 attempts.skip_current();
                 last_error = Some(failure);
                 break;
             }
-            // A local platform failure on a probe (credential, adapter, storage
-            // — no upstream request ever left) must only release the probe
-            // slot, never re-cool the target as if upstream had answered.
-            if attempts.current_is_probe() && !failure.is_upstream() {
+            // 错误类别可能合并不同 HTTP 状态；共享计数不能扩大原有同目标重试范围。
+            if kind.is_retryable()
+                && failure
+                    .diagnostic
+                    .status_code
+                    .is_some_and(|status| !matches!(status, 408 | 429 | 500 | 502 | 503 | 529))
+            {
+                record_upstream_failure(&attempts, &target, &failure);
                 attempts.skip_current();
                 last_error = Some(failure);
                 break;
@@ -802,7 +823,6 @@ struct AttemptFailure {
     error: Box<ModelTurnError>,
     diagnostic: Box<crate::interaction_observation::FailureDiagnostic>,
     kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
-    record_health: bool,
     retry_after: Option<Duration>,
     protected_reasoning_rejected: bool,
 }
@@ -826,7 +846,6 @@ impl AttemptFailure {
                 ..Default::default()
             }),
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable),
-            record_health: true,
             retry_after: None,
             protected_reasoning_rejected: false,
         }
@@ -839,10 +858,6 @@ impl AttemptFailure {
         message: impl Into<String>,
         retry_after: Option<Duration>,
     ) -> Self {
-        let record_health = status.map_or_else(
-            || kind.is_retryable(),
-            |status| matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
-        );
         Self {
             error: Box::new(ModelTurnError::new(code, message)),
             diagnostic: Box::new(crate::interaction_observation::FailureDiagnostic {
@@ -851,7 +866,6 @@ impl AttemptFailure {
                 ..Default::default()
             }),
             kind: Some(kind),
-            record_health,
             retry_after,
             protected_reasoning_rejected: false,
         }
@@ -896,7 +910,6 @@ impl AttemptFailure {
                 ..Default::default()
             }),
             kind: None,
-            record_health: false,
             retry_after: None,
             protected_reasoning_rejected: false,
         }
@@ -910,7 +923,6 @@ impl AttemptFailure {
                 ..Default::default()
             }),
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable),
-            record_health: false,
             retry_after: None,
             protected_reasoning_rejected: false,
         }
@@ -1467,30 +1479,37 @@ impl AttemptRoutePolicy {
     }
 }
 
-/// Drop guard for an in-flight half-open probe. `begin_attempt` futures can be
-/// dropped wholesale by the outer deadline/cancellation select before first
-/// token; when that drop is a real deadline expiry the sent request timed out
-/// upstream, so the probe re-cools the target. A user cancellation disarms
-/// nothing — the guard checks the deadline at drop time — and the policy Drop
-/// simply releases the probe slot back to `HalfOpen`.
-struct ProbeDeadlineGuard {
+/// Drop guard for an in-flight Provider attempt. `begin_attempt` futures can
+/// be dropped wholesale by the outer deadline/cancellation select before first
+/// token. A real deadline after transport starts is an upstream failure; local
+/// preparation and user cancellation are not.
+struct AttemptDeadlineGuard {
     state: RoutePolicyState,
     target_key: String,
     epoch: u64,
+    retry_budget: i32,
     cooldown_ms: i64,
     deadline: Instant,
+    upstream_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     armed: bool,
 }
 
-impl ProbeDeadlineGuard {
-    fn armed(attempts: &RouteAttemptPolicy, target: &SelectedTarget, deadline: Instant) -> Self {
+impl AttemptDeadlineGuard {
+    fn armed(
+        attempts: &RouteAttemptPolicy,
+        target: &SelectedTarget,
+        deadline: Instant,
+        upstream_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         Self {
             state: attempts.state().clone(),
             target_key: selected_target_key(target),
             epoch: attempts.current_epoch(),
+            retry_budget: target.target_retry_budget,
             cooldown_ms: target.target_cooldown_ms,
             deadline,
-            armed: attempts.current_is_probe(),
+            upstream_started,
+            armed: true,
         }
     }
 
@@ -1499,11 +1518,20 @@ impl ProbeDeadlineGuard {
     }
 }
 
-impl Drop for ProbeDeadlineGuard {
+impl Drop for AttemptDeadlineGuard {
     fn drop(&mut self) {
-        if self.armed && Instant::now() >= self.deadline {
-            self.state
-                .record_failure(&self.target_key, self.epoch, self.cooldown_ms);
+        if self.armed
+            && Instant::now() >= self.deadline
+            && self
+                .upstream_started
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.state.record_failure(
+                &self.target_key,
+                self.epoch,
+                self.retry_budget,
+                self.cooldown_ms,
+            );
         }
     }
 }
@@ -1517,8 +1545,16 @@ async fn begin_attempt(
     attempt_started: Instant,
     policy: AttemptRoutePolicy,
 ) -> Result<ModelTurn, AttemptFailure> {
+    let upstream_started = prepared.provider_call.upstream_started_signal();
     let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
+    prepared.provider_call.set_recovery_policy(
+        policy.state.clone(),
+        selected_target_key(target),
+        policy.epoch,
+        target.target_retry_budget,
+        target.target_cooldown_ms,
+    );
     let mut target_identity = TargetIdentity {
         actual_model: prepared.actual_model.clone(),
         provider_id: prepared.route.provider_id.clone(),
@@ -1535,7 +1571,15 @@ async fn begin_attempt(
             .call_compact()
             .await
             .map_err(|error| {
-                if let Some(decode) =
+                if error
+                    .downcast_ref::<super::provider::ProviderRequestPreparationError>()
+                    .is_some()
+                {
+                    AttemptFailure::terminal(
+                        "provider_request_preparation_failed",
+                        error.to_string(),
+                    )
+                } else if let Some(decode) =
                     error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
                 {
                     AttemptFailure::terminal(
@@ -1591,7 +1635,15 @@ async fn begin_attempt(
             .call_non_stream()
             .await
             .map_err(|error| {
-                if let Some(decode) =
+                if error
+                    .downcast_ref::<super::provider::ProviderRequestPreparationError>()
+                    .is_some()
+                {
+                    AttemptFailure::terminal(
+                        "provider_request_preparation_failed",
+                        error.to_string(),
+                    )
+                } else if let Some(decode) =
                     error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
                 {
                     AttemptFailure::upstream(
@@ -1705,7 +1757,14 @@ async fn begin_attempt(
         .call_stream()
         .await
         .map_err(|error| {
-            AttemptFailure::retryable("upstream_error", error.to_string()).upstream_origin()
+            if error
+                .downcast_ref::<super::provider::ProviderRequestPreparationError>()
+                .is_some()
+            {
+                AttemptFailure::terminal("provider_request_preparation_failed", error.to_string())
+            } else {
+                AttemptFailure::retryable("upstream_error", error.to_string()).upstream_origin()
+            }
         })?;
     let mut provider_stream = match response {
         ProviderStreamResponse::Stream(stream) => stream,
@@ -1827,6 +1886,7 @@ async fn begin_attempt(
     let attempt_context = policy.context.clone();
     let attempt_epoch = policy.epoch;
     let attempt_probe = policy.probe;
+    let target_retry_budget = target.target_retry_budget;
     let target_cooldown_ms = target.target_cooldown_ms;
     let target_key = prepared.route.target_id.clone();
     let health_target_key = selected_target_key(target);
@@ -1846,8 +1906,8 @@ async fn begin_attempt(
             &route_policy_state,
             &health_target_key,
             attempt_epoch,
+            target_retry_budget,
             target_cooldown_ms,
-            attempt_probe,
             &first_deltas,
         );
         if send_deltas(
@@ -1882,12 +1942,15 @@ async fn begin_attempt(
                 _ = cancellation.cancelled() => {
                     let error = interruption_error(deadline);
                     // A cancellation that is really the deadline expiring means
-                    // the sent probe request timed out upstream: re-cool. A
-                    // user cancel only releases the probe slot.
-                    if error.code == "deadline_exceeded" && attempt_probe {
+                    // the sent request timed out upstream. A user cancel only
+                    // releases the reservation/probe slot.
+                    if error.code == "deadline_exceeded"
+                        && upstream_started.load(std::sync::atomic::Ordering::Acquire)
+                    {
                         route_policy_state.record_failure(
                             &health_target_key,
                             attempt_epoch,
+                            target_retry_budget,
                             target_cooldown_ms,
                         );
                     }
@@ -1897,10 +1960,11 @@ async fn begin_attempt(
                     return;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                    if attempt_probe {
+                    if upstream_started.load(std::sync::atomic::Ordering::Acquire) {
                         route_policy_state.record_failure(
                             &health_target_key,
                             attempt_epoch,
+                            target_retry_budget,
                             target_cooldown_ms,
                         );
                     }
@@ -1928,8 +1992,8 @@ async fn begin_attempt(
                         &route_policy_state,
                         &health_target_key,
                         attempt_epoch,
+                        target_retry_budget,
                         target_cooldown_ms,
-                        attempt_probe,
                         &chunk.deltas,
                     );
                     if send_deltas(
@@ -1961,12 +2025,15 @@ async fn begin_attempt(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    route_policy_state.record_failure(
-                        &health_target_key,
-                        attempt_epoch,
-                        target_cooldown_ms,
-                    );
                     let failure = stream_failure(error);
+                    if failure.is_upstream() {
+                        route_policy_state.record_failure(
+                            &health_target_key,
+                            attempt_epoch,
+                            target_retry_budget,
+                            target_cooldown_ms,
+                        );
+                    }
                     provider_stream.attempt().finish(
                         "failed",
                         None,
@@ -1986,8 +2053,8 @@ async fn begin_attempt(
                     &route_policy_state,
                     &health_target_key,
                     attempt_epoch,
+                    target_retry_budget,
                     target_cooldown_ms,
-                    attempt_probe,
                     &deltas,
                 );
                 if send_deltas(&tx, &mut accumulator, provider_stream.attempt(), deltas)
@@ -2013,12 +2080,15 @@ async fn begin_attempt(
                 }
             }
             Err(error) => {
-                route_policy_state.record_failure(
-                    &health_target_key,
-                    attempt_epoch,
-                    target_cooldown_ms,
-                );
                 let failure = stream_failure(error);
+                if failure.is_upstream() {
+                    route_policy_state.record_failure(
+                        &health_target_key,
+                        attempt_epoch,
+                        target_retry_budget,
+                        target_cooldown_ms,
+                    );
+                }
                 provider_stream.attempt().finish(
                     "failed",
                     None,
@@ -2107,19 +2177,19 @@ async fn send_deltas(
     Ok(())
 }
 
-/// Re-cools the target when a half-open probe met an upstream failure on a
-/// path that never reaches `RouteAttemptPolicy::record_failure` (early
-/// returns and `record_health == false`). Local preparation/validation
-/// failures only release the probe slot via `skip_current`/Drop instead.
-fn recool_failed_probe(
+/// Records an upstream failure on an early-return path that never reaches
+/// `RouteAttemptPolicy::record_failure`. Local preparation/validation failures
+/// are excluded; dropping/skipping the policy only releases their reservation.
+fn record_upstream_failure(
     attempts: &RouteAttemptPolicy,
     target: &SelectedTarget,
     failure: &AttemptFailure,
 ) {
-    if attempts.current_is_probe() && failure.is_upstream() {
+    if failure.is_upstream() {
         attempts.state().record_failure(
             &selected_target_key(target),
             attempts.current_epoch(),
+            target.target_retry_budget,
             target.target_cooldown_ms,
         );
     }
@@ -2156,45 +2226,23 @@ fn handle_terminal_stream_error(
     state: &RoutePolicyState,
     target_key: &str,
     epoch: u64,
+    retry_budget: i32,
     cooldown_ms: i64,
-    probe: bool,
     deltas: &[AiStreamDelta],
 ) -> bool {
-    // UnexpectedEof is a terminal upstream failure: it must re-cool the target
-    // (and never let a probe turn green), like a degrading StreamError.
-    if deltas
-        .iter()
-        .any(|delta| matches!(delta, AiStreamDelta::UnexpectedEof))
-    {
-        state.record_failure(target_key, epoch, cooldown_ms);
-        return true;
+    let failed = deltas.iter().any(|delta| {
+        matches!(
+            delta,
+            AiStreamDelta::UnexpectedEof | AiStreamDelta::StreamError { .. }
+        )
+    });
+    if failed {
+        // The shared state owns the threshold and half-open behavior. Every
+        // terminal upstream outcome counts, while this committed stream still
+        // stops regardless of the error's retry classification.
+        state.record_failure(target_key, epoch, retry_budget, cooldown_ms);
     }
-    let Some(error) = deltas.iter().find_map(|delta| match delta {
-        AiStreamDelta::StreamError { error } => Some(error),
-        _ => None,
-    }) else {
-        return false;
-    };
-    let degrades = error.status_code.map_or_else(
-        || error.is_retryable(),
-        |status| {
-            matches!(
-                AiError::kind_from_status(status, None),
-                stravia_runtime_contract::protocol::ir::AiErrorKind::RateLimitError
-                    | stravia_runtime_contract::protocol::ir::AiErrorKind::QuotaExceeded
-                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ServerError
-                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable
-                    | stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout
-                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable
-            )
-        },
-    );
-    // A half-open probe's single shot fails on any terminal stream error, not
-    // only degrading ones: re-cool the full window.
-    if degrades || probe {
-        state.record_failure(target_key, epoch, cooldown_ms);
-    }
-    true
+    failed
 }
 
 fn stream_failure(error: ProviderStreamError) -> AttemptFailure {
@@ -2209,7 +2257,10 @@ fn stream_failure(error: ProviderStreamError) -> AttemptFailure {
             AttemptFailure::terminal("protocol_lossy_rejected", error.to_string()).upstream_origin()
         }
         ProviderStreamError::Normalize(error) => {
-            AttemptFailure::terminal(error.stable_code(), error.to_string()).upstream_origin()
+            AttemptFailure::terminal(error.stable_code(), error.to_string())
+        }
+        ProviderStreamError::Local(message) => {
+            AttemptFailure::terminal("provider_request_preparation_failed", message)
         }
     }
 }
@@ -2360,7 +2411,7 @@ fn normalize_provider_effective_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeDeadlineGuard, handle_terminal_stream_error, insert_default_prompt_cache_key,
+        AttemptDeadlineGuard, handle_terminal_stream_error, insert_default_prompt_cache_key,
     };
     use crate::router::{RoutePolicyState, TargetRuntimeState};
     use std::time::{Duration, Instant};
@@ -2380,45 +2431,36 @@ mod tests {
     }
 
     #[test]
-    fn request_scoped_stream_errors_do_not_cool_the_target() {
+    fn committed_stream_failures_share_the_target_threshold() {
         let state = RoutePolicyState::default();
         let deltas = vec![AiStreamDelta::StreamError {
             error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
         }];
 
-        for _ in 0..3 {
+        for failure_count in 1..=5 {
             assert!(handle_terminal_stream_error(
                 &state,
                 "provider:model",
                 0,
+                5,
                 120_000,
-                false,
                 &deltas
             ));
+            assert_eq!(
+                state.target_status("provider:model").state,
+                TargetRuntimeState::Available,
+                "failure {failure_count}"
+            );
         }
-
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-
-    #[test]
-    fn retryable_stream_errors_cool_the_target() {
-        let state = RoutePolicyState::default();
-        let deltas = vec![AiStreamDelta::StreamError {
-            error: AiError::new(AiErrorKind::StreamMidError, "unavailable").with_status(503),
-        }];
 
         assert!(handle_terminal_stream_error(
             &state,
             "provider:model",
             0,
+            5,
             120_000,
-            false,
             &deltas
         ));
-
         assert_eq!(
             state.target_status("provider:model").state,
             TargetRuntimeState::CoolingDown
@@ -2426,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_eof_is_a_terminal_stream_error_that_cools_the_target() {
+    fn unexpected_eof_uses_the_same_target_threshold() {
         let state = RoutePolicyState::default();
         let deltas = vec![AiStreamDelta::UnexpectedEof];
 
@@ -2434,35 +2476,25 @@ mod tests {
             &state,
             "provider:model",
             0,
+            5,
             120_000,
-            false,
             &deltas
         ));
-
         assert_eq!(
             state.target_status("provider:model").state,
-            TargetRuntimeState::CoolingDown
+            TargetRuntimeState::Available
         );
-    }
 
-    #[test]
-    fn half_open_probe_recools_on_request_scoped_stream_error() {
-        let state = RoutePolicyState::default();
-        let deltas = vec![AiStreamDelta::StreamError {
-            error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
-        }];
-
-        assert!(handle_terminal_stream_error(
-            &state,
-            "provider:model",
-            0,
-            120_000,
-            true,
-            &deltas
-        ));
-
-        // The same error leaves a normal attempt untouched but must re-cool a
-        // probe: the single half-open shot failed.
+        for _ in 1..=5 {
+            assert!(handle_terminal_stream_error(
+                &state,
+                "provider:model",
+                0,
+                5,
+                120_000,
+                &deltas
+            ));
+        }
         assert_eq!(
             state.target_status("provider:model").state,
             TargetRuntimeState::CoolingDown
@@ -2479,7 +2511,7 @@ mod tests {
         // A newer generation already cooled the target; a late stream error
         // from the superseded attempt is terminal for its consumer but must
         // not rewrite the newer cooldown window.
-        state.record_failure("provider:model", 0, 60_000);
+        state.record_failure("provider:model", 0, 0, 60_000);
         let before = state
             .target_status("provider:model")
             .cooldown_remaining_ms
@@ -2489,8 +2521,8 @@ mod tests {
             &state,
             "provider:model",
             0,
+            5,
             120_000,
-            false,
             &deltas
         ));
 
@@ -2499,30 +2531,38 @@ mod tests {
         assert!(status.cooldown_remaining_ms.unwrap() <= before);
     }
 
-    fn probe_guard(state: &RoutePolicyState, deadline: Instant) -> ProbeDeadlineGuard {
-        ProbeDeadlineGuard {
+    fn armed_deadline_guard(
+        state: &RoutePolicyState,
+        deadline: Instant,
+        upstream_started: bool,
+    ) -> AttemptDeadlineGuard {
+        AttemptDeadlineGuard {
             state: state.clone(),
             target_key: "provider:model".into(),
             epoch: 0,
+            retry_budget: 0,
             cooldown_ms: 120_000,
             deadline,
+            upstream_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                upstream_started,
+            )),
             armed: true,
         }
     }
 
     #[tokio::test]
-    async fn dropped_in_flight_probe_recools_when_deadline_expired() {
+    async fn expired_armed_guard_records_an_upstream_failure() {
         let state = RoutePolicyState::default();
         let deadline = Instant::now() + Duration::from_millis(20);
         let pending = {
             let state = state.clone();
             async move {
-                let _guard = probe_guard(&state, deadline);
+                let _guard = armed_deadline_guard(&state, deadline, true);
                 std::future::pending::<()>().await
             }
         };
 
-        // The outer select drops the in-flight probe once the deadline fires.
+        // The outer select drops the sent in-flight attempt once the deadline fires.
         while Instant::now() < deadline {
             tokio::task::yield_now().await;
         }
@@ -2535,13 +2575,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_in_flight_probe_releases_without_cooling_on_user_cancel() {
+    async fn dropped_armed_guard_does_not_record_user_cancel() {
         let state = RoutePolicyState::default();
         let pending = {
             let state = state.clone();
             async move {
                 // Deadline far in the future: a drop here models user cancellation.
-                let _guard = probe_guard(&state, Instant::now() + Duration::from_secs(3600));
+                let _guard =
+                    armed_deadline_guard(&state, Instant::now() + Duration::from_secs(3600), true);
                 std::future::pending::<()>().await
             }
         };
@@ -2555,9 +2596,24 @@ mod tests {
     }
 
     #[test]
-    fn disarmed_probe_guard_does_not_cool_on_drop() {
+    fn expired_guard_before_provider_send_does_not_record_failure() {
         let state = RoutePolicyState::default();
-        let mut guard = probe_guard(&state, Instant::now() - Duration::from_secs(1));
+        drop(armed_deadline_guard(
+            &state,
+            Instant::now() - Duration::from_secs(1),
+            false,
+        ));
+
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::Available
+        );
+    }
+
+    #[test]
+    fn disarmed_deadline_guard_does_not_record_failure() {
+        let state = RoutePolicyState::default();
+        let mut guard = armed_deadline_guard(&state, Instant::now() - Duration::from_secs(1), true);
         guard.disarm();
         drop(guard);
 

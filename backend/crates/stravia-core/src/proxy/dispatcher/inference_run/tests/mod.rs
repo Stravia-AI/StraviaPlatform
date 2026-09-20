@@ -1409,6 +1409,45 @@ async fn configure_route_with_id(gateway: &Gateway, model: &str, base_urls: &[St
     configure_route_with_protocol(gateway, model, base_urls, "custom", "openai-compatible").await
 }
 
+async fn set_target_retry_budget(gateway: &Gateway, model: &str, budget: i32) {
+    let route = gateway
+        .storage
+        .routes()
+        .list()
+        .await
+        .expect("Routes")
+        .into_iter()
+        .find(|route| route.model_id == model)
+        .expect("configured Route");
+    gateway
+        .admin()
+        .update_model(
+            model,
+            crate::db::models::UpdateRoute {
+                targets: Some(
+                    route
+                        .targets
+                        .into_iter()
+                        .map(|target| crate::db::models::UpsertTarget {
+                            id: Some(target.id),
+                            provider_id: target.provider_id,
+                            model: target.model,
+                            enabled: target.enabled,
+                            priority: Some(target.priority),
+                            first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                            target_retry_budget: Some(budget),
+                            target_cooldown_ms: Some(target.target_cooldown_ms),
+                            thinking_level_map: target.thinking_level_map.0,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set Target retry budget");
+}
+
 fn openai_response(content: &str) -> serde_json::Value {
     serde_json::json!({
         "id": "chatcmpl-provider",

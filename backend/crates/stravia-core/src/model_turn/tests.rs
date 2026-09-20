@@ -79,7 +79,7 @@ async fn serve_openai_response(body: serde_json::Value) -> (String, Arc<AtomicUs
     serve_openai_status(200, body).await
 }
 
-async fn serve_incomplete_openai_stream() -> (String, Arc<AtomicUsize>) {
+async fn serve_incomplete_openai_stream(request_count: usize) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind streaming provider");
@@ -87,32 +87,34 @@ async fn serve_incomplete_openai_stream() -> (String, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("accept provider request");
-        let mut request = vec![0_u8; 16 * 1024];
-        let _ = socket.read(&mut request).await.expect("read request");
-        observed.fetch_add(1, Ordering::SeqCst);
-        let frame = format!(
-            "data: {}\n\n",
-            serde_json::json!({
-                    "id": "chatcmpl-partial",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "upstream-model",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": "partial"},
-                        "finish_reason": null
-                    }]
-            })
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{frame}",
-            frame.len() + 1024
-        );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("write partial response");
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await.expect("accept provider request");
+            let mut request = vec![0_u8; 16 * 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+            observed.fetch_add(1, Ordering::SeqCst);
+            let frame = format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                        "id": "chatcmpl-partial",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "upstream-model",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "partial"},
+                            "finish_reason": null
+                        }]
+                })
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{frame}",
+                frame.len() + 1024
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write partial response");
+        }
     });
     (format!("http://{address}/v1"), calls)
 }
@@ -749,11 +751,11 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
 }
 
 #[tokio::test]
-async fn request_scoped_http_errors_do_not_quarantine_the_target() {
+async fn request_scoped_http_errors_count_without_same_target_retries() {
     let (base_url, calls) = serve_openai_status_repeated(
         404,
         serde_json::json!({"error": {"message": "request-specific resource is missing"}}),
-        4,
+        6,
     )
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -810,7 +812,7 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
         .await
         .expect("API key");
 
-    for _ in 0..4 {
+    for failure_count in 1..=6 {
         let result = gateway
             .model_turn
             .execute(TurnInput::new(
@@ -822,8 +824,17 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
             panic!("request-scoped 404 must fail the request");
         };
         assert_eq!(error.code, "upstream_error");
+        assert_eq!(calls.load(Ordering::SeqCst), failure_count);
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    let result = gateway
+        .model_turn
+        .execute(TurnInput::new(
+            Principal::new(key.id),
+            AiRequest::new("request-error-model", Vec::new()),
+        ))
+        .await;
+    assert!(matches!(result, Err(ModelTurnError { code, .. }) if code == "model_unavailable"));
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
 }
 
 #[tokio::test]
@@ -918,7 +929,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
 
 #[tokio::test]
 async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
-    let (partial_url, partial_calls) = serve_incomplete_openai_stream().await;
+    let (partial_url, partial_calls) = serve_incomplete_openai_stream(6).await;
     let (fallback_url, fallback_calls) = serve_openai_response(serde_json::json!({
         "id": "chatcmpl-fallback",
         "object": "chat.completion",
@@ -980,7 +991,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                     model: "upstream-model".into(),
                     priority: Some((providers.len() - index) as i32),
                     first_token_timeout_ms: None,
-                    target_retry_budget: Some(0),
+                    target_retry_budget: Some(5),
                     target_cooldown_ms: None,
                     thinking_level_map: Vec::new(),
                 })
@@ -1007,47 +1018,68 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
     let mut request = AiRequest::new("stream-lock-model", Vec::new());
     request.stream.enabled = true;
 
-    let turn = gateway
-        .model_turn
-        .execute(TurnInput::new(Principal::new(key.id), request))
-        .await
-        .expect("streaming Model Turn locks the first Target");
-    assert_eq!(turn.route.provider_id, providers[0].id);
-    let mut output = turn.output;
-    let events = output.by_ref().collect::<Vec<_>>().await;
+    for failure_count in 1..=6 {
+        let turn = gateway
+            .model_turn
+            .execute(TurnInput::new(
+                Principal::new(key.id.clone()),
+                request.clone(),
+            ))
+            .await
+            .expect("streaming Model Turn locks the first Target");
+        assert_eq!(turn.route.provider_id, providers[0].id);
+        let mut output = turn.output;
+        let events = output.by_ref().collect::<Vec<_>>().await;
 
-    assert!(events.iter().any(
+        assert!(events.iter().any(
             |event| matches!(event, Ok(CanonicalEvent::Delta(AiStreamDelta::TextDelta(text))) if text == "partial")
         ));
+        assert!(matches!(
+            events.last(),
+            Some(Err(ModelTurnError { code, .. })) if code == "upstream_stream_error"
+        ));
+        let Some(Err(error)) = events.last() else {
+            panic!("truncated upstream stream must expose a diagnostic");
+        };
+        assert!(error.message.contains("stage=receive"), "{}", error.message);
+        assert!(
+            error.message.contains("has_received_response_event=true"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("http_status=200"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("caused by:"), "{}", error.message);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(CanonicalEvent::Completed(_))))
+        );
+        for _ in 0..3 {
+            assert!(output.next().await.is_none());
+        }
+        assert_eq!(partial_calls.load(Ordering::SeqCst), failure_count);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+    }
+    let recovered = gateway
+        .model_turn
+        .execute(TurnInput::new(
+            Principal::new(key.id),
+            AiRequest::new("stream-lock-model", Vec::new()),
+        ))
+        .await
+        .expect("sixth failure makes the next request choose fallback");
+    assert_eq!(recovered.route.provider_id, providers[1].id);
+    let events = recovered.output.collect::<Vec<_>>().await;
     assert!(matches!(
         events.last(),
-        Some(Err(ModelTurnError { code, .. })) if code == "upstream_stream_error"
+        Some(Ok(CanonicalEvent::Completed(_)))
     ));
-    let Some(Err(error)) = events.last() else {
-        panic!("truncated upstream stream must expose a diagnostic");
-    };
-    assert!(error.message.contains("stage=receive"), "{}", error.message);
-    assert!(
-        error.message.contains("has_received_response_event=true"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error.message.contains("http_status=200"),
-        "{}",
-        error.message
-    );
-    assert!(error.message.contains("caused by:"), "{}", error.message);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, Ok(CanonicalEvent::Completed(_))))
-    );
-    for _ in 0..3 {
-        assert!(output.next().await.is_none());
-    }
-    assert_eq!(partial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(partial_calls.load(Ordering::SeqCst), 6);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

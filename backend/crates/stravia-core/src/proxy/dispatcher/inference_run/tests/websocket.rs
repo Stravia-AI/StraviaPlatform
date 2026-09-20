@@ -2,43 +2,63 @@ use super::*;
 
 #[tokio::test]
 async fn precommit_connection_limit_falls_back_to_http_on_the_same_target() {
-    let (base_url, websocket_requests, http_requests) = serve_connection_limit_fallback().await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let gateway = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await
-    .expect("Gateway");
-    configure_route_with_protocol(
-        &gateway,
-        "connection-limit-fallback",
-        &[base_url],
-        "openai",
-        "open-responses",
-    )
-    .await;
-
-    let response = execute_protocol_request(
-        gateway,
-        "connection-limit-fallback",
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        "/v1/chat/completions",
-        false,
-    )
-    .await;
-    let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
+    for budget in [0, 1] {
+        let (base_url, websocket_requests, http_requests) = serve_connection_limit_fallback().await;
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let gateway = Gateway::new(crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
         .await
-        .expect("fallback response body");
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(
-        String::from_utf8_lossy(&body).contains("http fallback"),
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    assert_eq!(websocket_requests.load(Ordering::SeqCst), 1);
-    assert_eq!(http_requests.load(Ordering::SeqCst), 1);
+        .expect("Gateway");
+        configure_route_with_protocol(
+            &gateway,
+            "connection-limit-fallback",
+            &[base_url],
+            "openai",
+            "open-responses",
+        )
+        .await;
+        set_target_retry_budget(&gateway, "connection-limit-fallback", budget).await;
+
+        let response = execute_protocol_request(
+            gateway.clone(),
+            "connection-limit-fallback",
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            "/v1/chat/completions",
+            false,
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("fallback response body");
+        if budget == 0 {
+            assert_ne!(status, StatusCode::OK);
+            assert_eq!(websocket_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(http_requests.load(Ordering::SeqCst), 0);
+            let blocked = execute_protocol_request(
+                gateway,
+                "connection-limit-fallback",
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                "/v1/chat/completions",
+                false,
+            )
+            .await;
+            assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(websocket_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(http_requests.load(Ordering::SeqCst), 0);
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert!(
+            String::from_utf8_lossy(&body).contains("http fallback"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(websocket_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(http_requests.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -53,6 +73,7 @@ async fn stale_reused_websocket_falls_back_then_retries_websocket() {
     .expect("Gateway");
     let model = "stale-websocket-fallback";
     configure_route_with_protocol(&gateway, model, &[base_url], "openai", "open-responses").await;
+    set_target_retry_budget(&gateway, model, 1).await;
 
     let first = execute_protocol_request_with_session(
         gateway.clone(),
@@ -154,6 +175,7 @@ async fn unsupported_websocket_handshake_falls_back_before_sending_a_request() {
         "open-responses",
     )
     .await;
+    set_target_retry_budget(&gateway, "unsupported-websocket-fallback", 1).await;
 
     let response = execute_protocol_request(
         gateway,

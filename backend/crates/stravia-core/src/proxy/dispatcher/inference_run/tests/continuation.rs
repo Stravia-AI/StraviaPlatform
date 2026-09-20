@@ -901,6 +901,7 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
     let model = "responses-websocket-missing-prefix";
     configure_route_with_protocol(&gateway, model, &[base_url], "openai", "openai-compatible")
         .await;
+    set_target_retry_budget(&gateway, model, 1).await;
     let headers = authorized_headers(&gateway).await;
 
     let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");

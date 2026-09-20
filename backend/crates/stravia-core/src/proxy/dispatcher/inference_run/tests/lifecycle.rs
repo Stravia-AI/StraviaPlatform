@@ -390,12 +390,20 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         .into_response()
     }
 
-    for (stream, error_code, stream_rejection, output_before_rejection, expected_calls) in [
-        (false, "invalid_encrypted_content", false, false, 2),
-        (true, "invalid_encrypted_content", false, false, 2),
-        (true, "invalid_encrypted_content", true, false, 2),
-        (true, "invalid_encrypted_content", true, true, 1),
-        (false, "invalid_request_error", false, false, 1),
+    for (
+        stream,
+        error_code,
+        stream_rejection,
+        output_before_rejection,
+        retry_budget,
+        expected_calls,
+    ) in [
+        (false, "invalid_encrypted_content", false, false, 1, 2),
+        (true, "invalid_encrypted_content", false, false, 1, 2),
+        (true, "invalid_encrypted_content", true, false, 1, 2),
+        (true, "invalid_encrypted_content", true, true, 1, 1),
+        (false, "invalid_request_error", false, false, 1, 1),
+        (false, "invalid_encrypted_content", false, false, 0, 1),
     ] {
         let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let app = Router::new()
@@ -426,6 +434,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
             "open-responses",
         )
         .await;
+        set_target_retry_budget(&gateway, "rejected-cipher-replay", retry_budget).await;
         let headers = authorized_headers(&gateway).await;
         let request = crate::protocol::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)

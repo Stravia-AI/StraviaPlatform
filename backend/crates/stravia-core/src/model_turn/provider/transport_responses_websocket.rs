@@ -130,7 +130,8 @@ impl ProviderAdapter {
 impl ProviderCall {
     pub(crate) async fn call_stream(&mut self) -> anyhow::Result<ProviderStreamResponse> {
         if let Some(websocket) = &self.websocket {
-            let websocket_url = responses_websocket_url(&self.outbound.url)?;
+            let websocket_url = responses_websocket_url(&self.outbound.url)
+                .map_err(ProviderRequestPreparationError)?;
             let previous_response_id = self
                 .outbound
                 .body
@@ -147,7 +148,8 @@ impl ProviderCall {
             };
             let mut headers = self.outbound.headers.clone();
             self.adapter
-                .prepare_responses_websocket_headers(&mut headers, connection)?;
+                .prepare_responses_websocket_headers(&mut headers, connection)
+                .map_err(ProviderRequestPreparationError)?;
             let observation_headers = headers.clone();
             let handshake_attempt = Arc::new(parking_lot::Mutex::new(None));
             let handshake_attempt_slot = Arc::clone(&handshake_attempt);
@@ -188,22 +190,34 @@ impl ProviderCall {
                 .await;
             match lease {
                 Ok(mut lease) => {
+                    // A completed handshake is not a failed model request. Local
+                    // body/Hook preparation below must remain outside the deadline
+                    // failure window until the request is actually sent.
+                    self.adapter.mark_upstream_idle();
                     let request_body =
                         if websocket.require_affinity && lease.previous_response_id().is_none() {
                             &websocket.full_outbound.body
                         } else {
                             &self.outbound.body
                         };
-                    let request_body = self.transfer_body(request_body).await?;
+                    let request_body = self
+                        .transfer_body(request_body)
+                        .await
+                        .map_err(ProviderRequestPreparationError)?;
                     let connection = lease.connection_metadata();
                     let request = self
                         .adapter
-                        .build_responses_websocket_request(request_body.as_ref(), connection)?;
-                    let full_request = self.adapter.build_responses_websocket_request(
-                        &websocket.full_outbound.body,
-                        connection,
-                    )?;
-                    let serialized_request = serde_json::to_string(&request)?;
+                        .build_responses_websocket_request(request_body.as_ref(), connection)
+                        .map_err(ProviderRequestPreparationError)?;
+                    let full_request = self
+                        .adapter
+                        .build_responses_websocket_request(
+                            &websocket.full_outbound.body,
+                            connection,
+                        )
+                        .map_err(ProviderRequestPreparationError)?;
+                    let serialized_request = serde_json::to_string(&request)
+                        .map_err(|error| ProviderRequestPreparationError(error.into()))?;
                     let attempt = if lease.reused_connection() {
                         self.adapter.begin_attempt_with_message(
                             "websocket",
@@ -233,6 +247,7 @@ impl ProviderCall {
                         );
                         attempt
                     };
+                    self.adapter.mark_upstream_started();
                     if let Err(error) = lease.send_text(serialized_request).await {
                         let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
                             "websocket_transport",
@@ -249,7 +264,10 @@ impl ProviderCall {
                             Some("websocket_send_error".into()),
                             None,
                         );
-                        if self.allow_retries && lease.reused_connection() {
+                        if self.allow_retries
+                            && lease.reused_connection()
+                            && self.adapter.try_record_recovery_failure()
+                        {
                             let trace = lease.trace();
                             tracing::warn!(
                                 transport = "responses_websocket",
@@ -263,6 +281,7 @@ impl ProviderCall {
                             attempt.wire("upstream_request", "close", None, None, Value::Null);
                             lease.terminal();
                             drop(lease);
+                            self.adapter.mark_upstream_idle();
                             let mut outbound = websocket.full_outbound.clone();
                             outbound.body["stream"] = Value::Bool(true);
                             return self.http_stream(outbound).await;
@@ -317,6 +336,14 @@ impl ProviderCall {
                             Some(&headers),
                             || bytes_value(&body),
                         );
+                        if !self.adapter.try_record_recovery_failure() {
+                            return Ok(ProviderStreamResponse::Error {
+                                status: status.unwrap_or(502),
+                                headers: *headers,
+                                body: serde_json::from_slice(&body).map_err(anyhow::Error::from),
+                                attempt: Box::new(attempt),
+                            });
+                        }
                         attempt.finish(
                             "failed",
                             status,
@@ -324,6 +351,7 @@ impl ProviderCall {
                             None,
                         );
                     }
+                    self.adapter.mark_upstream_idle();
                     let mut outbound = if websocket.require_affinity {
                         websocket.full_outbound.clone()
                     } else {
@@ -368,7 +396,7 @@ impl ProviderCall {
                         Some("websocket_handshake_body_read_failed".into()),
                         None,
                     );
-                    if !self.allow_retries {
+                    if !self.allow_retries || !self.adapter.try_record_recovery_failure() {
                         return Ok(ProviderStreamResponse::Error {
                             status,
                             headers: *headers,
@@ -376,6 +404,7 @@ impl ProviderCall {
                             attempt: Box::new(attempt),
                         });
                     }
+                    self.adapter.mark_upstream_idle();
                     let mut outbound = if websocket.require_affinity {
                         websocket.full_outbound.clone()
                     } else {
@@ -391,9 +420,10 @@ impl ProviderCall {
                         .expect("network connect starts an observed attempt");
                     attempt.transport_failure(&diagnostic);
                     attempt.finish("failed", None, Some("websocket_connect_error".into()), None);
-                    if !self.allow_retries {
+                    if !self.allow_retries || !self.adapter.try_record_recovery_failure() {
                         return Err(anyhow::anyhow!(diagnostic.to_string()));
                     }
+                    self.adapter.mark_upstream_idle();
                     let mut outbound = if websocket.require_affinity {
                         websocket.full_outbound.clone()
                     } else {
@@ -549,6 +579,7 @@ impl ResponsesWebSocketStream {
             return Ok(Some(bytes::Bytes::from_static(b"data: [DONE]\n\n")));
         }
         loop {
+            adapter.mark_upstream_started();
             let active_attempt = self.fallback_attempt.clone();
             let attempt = active_attempt.as_deref().unwrap_or(base_attempt);
             let message = match self.lease.next().await {
@@ -580,6 +611,7 @@ impl ResponsesWebSocketStream {
                         .await;
                 }
             };
+            adapter.mark_upstream_idle();
             let text = match message {
                 reqwest_websocket::Message::Text(text) => {
                     self.response_event_seen = true;
@@ -656,7 +688,7 @@ impl ResponsesWebSocketStream {
                         error.as_ref(),
                     );
                     attempt.transport_failure(&diagnostic);
-                    ProviderStreamError::Uncertain(diagnostic.to_string())
+                    ProviderStreamError::Local(error.to_string())
                 })?;
             if !adapter.retain_responses_websocket_event(&value) {
                 continue;
@@ -684,6 +716,7 @@ impl ResponsesWebSocketStream {
                 if self.allow_retries
                     && code == Some("websocket_connection_limit_reached")
                     && !self.event_seen
+                    && adapter.try_record_recovery_failure()
                 {
                     tracing::debug!(
                         transport = "responses_websocket",
@@ -702,6 +735,7 @@ impl ResponsesWebSocketStream {
                     && self.lease.previous_response_id().is_some()
                     && !self.event_seen
                     && !self.replayed_full_request
+                    && adapter.try_record_recovery_failure()
                 {
                     self.lease.invalidate_previous();
                     attempt.finish(
@@ -710,19 +744,18 @@ impl ResponsesWebSocketStream {
                         Some("previous_response_not_found".into()),
                         None,
                     );
+                    adapter.mark_upstream_idle();
                     let body = match &self.artifact_transfers {
                         Some(transfers) => std::borrow::Cow::Owned(
                             transfers
                                 .materialize(&adapter.binding.gateway, &self.full_request)
                                 .await
-                                .map_err(|error| {
-                                    ProviderStreamError::Uncertain(error.to_string())
-                                })?,
+                                .map_err(|error| ProviderStreamError::Local(error.to_string()))?,
                         ),
                         None => std::borrow::Cow::Borrowed(&self.full_request),
                     };
                     let replay_text = serde_json::to_string(body.as_ref())
-                        .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?;
+                        .map_err(|error| ProviderStreamError::Local(error.to_string()))?;
                     let replay_attempt = Arc::new(adapter.begin_attempt_with_message(
                         "websocket",
                         &self.websocket_url,
@@ -803,7 +836,11 @@ impl ResponsesWebSocketStream {
         diagnostic: crate::proxy::client::TransportDiagnostic,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
         attempt.transport_failure(&diagnostic);
-        if !self.allow_retries || self.event_seen || !self.lease.reused_connection() {
+        if !self.allow_retries
+            || self.event_seen
+            || !self.lease.reused_connection()
+            || !adapter.try_record_recovery_failure()
+        {
             return Err(ProviderStreamError::Uncertain(diagnostic.to_string()));
         }
         let trace = self.lease.trace();
@@ -832,6 +869,7 @@ impl ResponsesWebSocketStream {
         adapter: &ProviderAdapter,
         attempt: &AttemptObservation,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
+        adapter.mark_upstream_idle();
         attempt.finish(
             "failed",
             None,
@@ -843,13 +881,13 @@ impl ResponsesWebSocketStream {
                 transfers
                     .materialize(&adapter.binding.gateway, &self.fallback_outbound.body)
                     .await
-                    .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?,
+                    .map_err(|error| ProviderStreamError::Local(error.to_string()))?,
             ),
             None => std::borrow::Cow::Borrowed(&self.fallback_outbound.body),
         };
         let request_body = bytes::Bytes::from(
             serde_json::to_vec(body.as_ref())
-                .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?,
+                .map_err(|error| ProviderStreamError::Local(error.to_string()))?,
         );
         let fallback_attempt = Arc::new(adapter.begin_attempt(
             "sse",

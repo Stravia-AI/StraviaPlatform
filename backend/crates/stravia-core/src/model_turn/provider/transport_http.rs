@@ -107,8 +107,10 @@ impl ProviderCall {
                     .adapter
                     .refresh_auth_on_unauthorized(&mut self.outbound)
                     .await?
+                && self.adapter.try_record_recovery_failure()
             {
                 attempt.finish("failed", Some(status), Some("unauthorized".into()), None);
+                self.adapter.mark_upstream_idle();
                 (raw, status, headers, attempt) = self.call_non_stream_once(&self.outbound).await?;
             }
             if self
@@ -118,6 +120,8 @@ impl ProviderCall {
                 .and_then(Value::as_str)
                 .is_some()
                 && self.adapter.is_continuation_not_found(status, &raw)
+                && self.continuation_fallback.is_some()
+                && self.adapter.try_record_recovery_failure()
                 && let Some(full_outbound) = self.continuation_fallback.take()
             {
                 attempt.finish(
@@ -132,8 +136,12 @@ impl ProviderCall {
                     fallback_reason = "previous_response_not_found",
                     "replaying full request after unavailable Target continuation"
                 );
+                self.adapter.mark_upstream_idle();
                 self.outbound = full_outbound;
                 continue;
+            }
+            if status < 400 {
+                self.adapter.mark_upstream_idle();
             }
             let canonical = self
                 .adapter
@@ -222,8 +230,10 @@ impl ProviderCall {
                     .adapter
                     .refresh_auth_on_unauthorized(&mut outbound)
                     .await?
+                && self.adapter.try_record_recovery_failure()
             {
                 attempt.finish("failed", Some(status), Some("unauthorized".into()), None);
+                self.adapter.mark_upstream_idle();
                 (response, status, attempt) = self.call_stream_once(&outbound).await?;
             }
             let headers = response.headers().clone();
@@ -265,6 +275,8 @@ impl ProviderCall {
                     && body
                         .as_ref()
                         .is_ok_and(|body| self.adapter.is_continuation_not_found(status, body))
+                    && self.continuation_fallback.is_some()
+                    && self.adapter.try_record_recovery_failure()
                     && let Some(full_outbound) = self.continuation_fallback.take()
                 {
                     attempt.finish(
@@ -279,6 +291,7 @@ impl ProviderCall {
                         fallback_reason = "previous_response_not_found",
                         "replaying full request after unavailable Target continuation"
                     );
+                    self.adapter.mark_upstream_idle();
                     outbound = full_outbound;
                     continue;
                 }
