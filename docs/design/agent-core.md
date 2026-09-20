@@ -610,7 +610,7 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 
 ## 10. 持久化模型
 
-以下为逻辑实体，不锁定最终表名；实施时 SQLite/PostgreSQL migration 必须同步更新 `docs/database/schema.md` 并重新生成 `deploy/schema/postgres.sql`。
+以下为逻辑实体，不锁定最终表名；实施时新增或修改 SQLite/PostgreSQL migration，必须使用 `stravia-tools dump-schema` 同步重新生成 `docs/database/postgres.sql` 与 `docs/database/sqlite.sql`，不得手工修改 schema 正文。
 
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
@@ -979,7 +979,7 @@ Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-on
 - [`docs/adr/0004-emulate-responses-web-search.md`](../adr/0004-emulate-responses-web-search.md)
 - [`docs/adr/0005-client-credential-security-seam.md`](../adr/0005-client-credential-security-seam.md)
 - [`docs/adr/0006-own-protocol-conversion-behind-canonical-stages.md`](../adr/0006-own-protocol-conversion-behind-canonical-stages.md)
-- [`docs/database/schema.md`](../database/schema.md)
+- [PostgreSQL 参考 schema](../database/postgres.sql) 与 [SQLite 参考 schema](../database/sqlite.sql)
 - [`docs/design/web-search.md`](web-search.md)
 - [`docs/adr/0008-unify-web-research-behind-one-runner.md`](../adr/0008-unify-web-research-behind-one-runner.md)
 

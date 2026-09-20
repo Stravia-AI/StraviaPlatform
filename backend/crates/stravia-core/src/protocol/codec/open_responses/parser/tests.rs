@@ -261,17 +261,73 @@ fn stream_rejects_partial_response_resource_snapshots() {
 fn stream_error_preserves_upstream_status() {
     let deltas = ResponsesStreamParser::new()
             .parse_chunk(
-                "event: error\ndata: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"System messages are not allowed\"}}\n\n",
+                "event: error\ndata: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"server_error\",\"message\":\"Request rejected\"}}\n\n",
             )
             .expect("error event");
 
     assert!(deltas.iter().any(|delta| matches!(
         delta,
         AiStreamDelta::StreamError { error }
-            if error.status_code == Some(400)
-                && error.message == "System messages are not allowed"
+            if !error.is_retryable()
     )));
 }
+
+#[test]
+fn stream_error_classification_prevents_permanent_replays() {
+    use stravia_runtime_contract::protocol::ir::AiErrorKind;
+
+    for (error_type, code, expected_kind, retryable) in [
+        (
+            "invalid_request_error",
+            "invalid_request",
+            AiErrorKind::InvalidRequest,
+            false,
+        ),
+        (
+            "rate_limit_error",
+            "insufficient_quota",
+            AiErrorKind::QuotaExceeded,
+            false,
+        ),
+        (
+            "rate_limit_error",
+            "rate_limit_error",
+            AiErrorKind::RateLimitError,
+            true,
+        ),
+        (
+            "server_error",
+            "server_error",
+            AiErrorKind::ServerError,
+            true,
+        ),
+        ("unclassified", "unclassified", AiErrorKind::Unknown, false),
+    ] {
+        let payload = serde_json::json!({
+            "type": "error",
+            "sequence_number": 0,
+            "error": {
+                "type": error_type,
+                "code": code,
+                "message": "upstream failure",
+                "param": null,
+            },
+        });
+        let deltas = ResponsesStreamParser::new()
+            .parse_chunk(&format!("event: error\ndata: {payload}\n\n"))
+            .expect("upstream error event");
+        let error = deltas
+            .iter()
+            .find_map(|delta| match delta {
+                AiStreamDelta::StreamError { error } => Some(error),
+                _ => None,
+            })
+            .expect("canonical stream failure");
+        assert_eq!(error.kind, expected_kind);
+        assert_eq!(error.is_retryable(), retryable);
+    }
+}
+
 #[test]
 fn stream_accepts_known_codex_response_resource_extensions() {
     let response = dated_response(serde_json::json!({

@@ -30,11 +30,14 @@ use stravia_runtime_contract::turn_chain::TurnUnavailable;
 
 mod materialize;
 pub(crate) use materialize::{client_items_from_payloads, rebuilt_prefix};
+mod pending;
 mod project;
 mod store;
 mod write;
 
 use materialize::*;
+pub(crate) use pending::GenerationCommitFence;
+use pending::PendingGenerationCommits;
 use project::*;
 use store::*;
 
@@ -71,6 +74,7 @@ pub(crate) async fn test_chain() -> GenerationChain {
 #[derive(Clone)]
 pub(crate) struct GenerationChain {
     store: GenerationChainStore,
+    pending_commits: PendingGenerationCommits,
     artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
     redaction_mappings: Option<Arc<dyn stravia_credential_protection::store::MappingStore>>,
@@ -87,6 +91,7 @@ pub(crate) struct GenerationChainWrite {
     request: AiRequest,
     id: String,
     staged: Option<StagedGeneration>,
+    commit_fence: Option<GenerationCommitFence>,
 }
 
 #[derive(Clone)]
@@ -190,6 +195,7 @@ impl GenerationChain {
     ) -> Self {
         Self {
             store: GenerationChainStore::from_turn_chain(turn_chain, ttl),
+            pending_commits: PendingGenerationCommits::default(),
             artifacts,
             history_markers: None,
             redaction_mappings: None,
@@ -295,6 +301,9 @@ impl GenerationChain {
         principal: &Principal,
         request: &AiRequest,
     ) -> Result<Option<String>, BeginError> {
+        self.pending_commits
+            .wait_for_relevant(principal, request)
+            .await;
         let mut request = request.clone();
         request.items.retain(|item| !item.is_compaction_trigger());
         let native = self.resolve_compaction(principal, &request).await?;
@@ -389,6 +398,17 @@ impl GenerationChain {
     }
 
     pub(crate) async fn begin(
+        &self,
+        principal: Principal,
+        request: AiRequest,
+    ) -> Result<GenerationChainWrite, BeginError> {
+        self.pending_commits
+            .wait_for_relevant(&principal, &request)
+            .await;
+        self.begin_ready(principal, request).await
+    }
+
+    async fn begin_ready(
         &self,
         principal: Principal,
         mut request: AiRequest,
@@ -509,6 +529,7 @@ impl GenerationChain {
             request,
             id: self.store.allocate_id(),
             staged: None,
+            commit_fence: None,
         })
     }
 
@@ -517,9 +538,12 @@ impl GenerationChain {
         principal: Principal,
         request: AiRequest,
     ) -> Result<GenerationChainWrite, BeginError> {
+        self.pending_commits
+            .wait_for_relevant(&principal, &request)
+            .await;
         let explicit_parent = crate::router::parent_id_from_request(&request).is_some();
         if explicit_parent {
-            return self.begin(principal, request).await;
+            return self.begin_ready(principal, request).await;
         }
 
         // Native controls authorize a new operation, not replay of the source's effective
@@ -540,7 +564,7 @@ impl GenerationChain {
         let source_prefix = self
             .compaction_source_prefix(&principal, &source_request)
             .await?;
-        let mut write = self.begin(principal, request).await?;
+        let mut write = self.begin_ready(principal, request).await?;
         let Some((matched_items, source_id)) = source_prefix else {
             return Ok(write);
         };

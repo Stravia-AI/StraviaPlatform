@@ -226,6 +226,18 @@ impl GenerationChainWrite {
                 None,
             ),
         };
+        let projected = match project_client_commit(&self.parent, &self.request_delta, response) {
+            Ok(projected) => projected,
+            Err(error) => {
+                tracing::warn!(%error, "failed to project client generation history");
+                return false;
+            }
+        };
+        self.commit_fence = Some(self.chain.pending_commits.register(
+            self.principal.clone(),
+            self.id.clone(),
+            projected,
+        ));
         self.staged = Some(StagedGeneration {
             response: response.clone(),
             upstream_response_id,
@@ -234,7 +246,32 @@ impl GenerationChainWrite {
         true
     }
 
+    #[cfg(test)]
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
+        let result = self.persist_holding_fence().await;
+        self.resolve_commit_fence();
+        result
+    }
+
+    pub(crate) async fn persist_holding_fence(&mut self) -> Result<(), PersistError> {
+        let result = self.persist_inner().await;
+        if result.is_err() {
+            self.resolve_commit_fence();
+        }
+        result
+    }
+
+    fn resolve_commit_fence(&mut self) {
+        if let Some(fence) = self.commit_fence.take() {
+            fence.resolve();
+        }
+    }
+
+    pub(crate) fn take_commit_fence(&mut self) -> Option<GenerationCommitFence> {
+        self.commit_fence.take()
+    }
+
+    async fn persist_inner(&mut self) -> Result<(), PersistError> {
         let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
         if let Some(compaction) = &self.chain.compaction {
             compaction

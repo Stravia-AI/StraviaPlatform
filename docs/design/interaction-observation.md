@@ -609,8 +609,8 @@ SQLite 与 PostgreSQL 新迁移执行：
 1. 删除全部旧 `request_logs` 数据与表；
 2. 创建 Observation 关系表和等价索引；
 3. 不从 Turn Chain 回填旧 Interaction；升级后的请求记录从空状态开始；
-4. 更新 `docs/database/schema.md`；
-5. 由 migrations 重新生成 `deploy/schema/postgres.sql`，不手改 schema body。
+4. 每次新增或修改 migration，使用 `stravia-tools dump-schema` 从全部 migrations 同步重新生成 `docs/database/postgres.sql` 与 `docs/database/sqlite.sql`，不手改 schema 正文；
+5. 验证相关 SQLite 与 PostgreSQL 存储测试。
 
 代码 clean cutover：
 

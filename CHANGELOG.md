@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Immediate continuations now wait for matching in-process Generation commits before discovering or materializing their parent, preventing stale-parent Interaction branches without serializing unrelated requests. Failed or cancelled writes never publish resumable history, and observation backpressure cannot hold execution.
+- Responses stream errors preserve canonical failure categories from upstream decoding through public delivery. Transport failures use the interoperable `server_error` code; permanent request and quota errors no longer inherit a retryable generic stream category. Nested dated error envelopes, diagnostic masking, terminal ordering, and the no-replay boundary after client output commit remain intact.
 - Desktop startup failures now retain an independent recovery window with safe diagnostics, bounded startup logs, restart, and exit instead of disappearing. Optional desktop integrations degrade to warnings; failed silent launches become visible, failed-window close exits, and native dialogs cover window-creation errors without resetting or repairing stored data.
 - HTTP and Responses WebSocket failures retain redacted, length-bounded cause chains and transport-stage diagnostics, including observed response state, known HTTP status, and WebSocket close codes, without changing retries or completion semantics.
 - Command Code Debug capture reassembles NDJSON records across network chunks and split UTF-8 bytes, preserves complete EOF records, and marks malformed or incomplete tails as partial without discarding earlier complete records.

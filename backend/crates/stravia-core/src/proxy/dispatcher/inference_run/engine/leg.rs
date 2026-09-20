@@ -58,6 +58,41 @@ pub(super) enum LegFailure {
     Reconcile(String),
 }
 
+impl LegFailure {
+    pub(super) fn public_stream_error(&self) -> AiError {
+        use stravia_runtime_contract::protocol::ir::AiErrorKind;
+
+        match self {
+            Self::ModelTurn(error) => {
+                let status = model_turn_error_status(error).as_u16();
+                let kind = match error.code.as_str() {
+                    "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
+                        AiErrorKind::InvalidRequest
+                    }
+                    _ => AiError::kind_from_status(status, error.upstream_body.as_deref()),
+                };
+                AiError::new(kind, error.message.clone()).with_status(status)
+            }
+            Self::TerminalFault(Some(error)) => error.clone(),
+            Self::TerminalFault(None) | Self::Incomplete => AiError::new(
+                AiErrorKind::UnexpectedEof,
+                "upstream stream ended unexpectedly",
+            ),
+            Self::UnexpectedCompaction => AiError::new(
+                AiErrorKind::InvalidRequest,
+                "unexpected compaction terminal",
+            ),
+            Self::Hook(_) | Self::Completion(_) => {
+                AiError::new(AiErrorKind::Unknown, "Hook failed after stream commit")
+            }
+            Self::Projection(_) => AiError::new(AiErrorKind::Unknown, "stream projection failed"),
+            Self::Reconcile(_) => {
+                AiError::new(AiErrorKind::Unknown, "output reconciliation failed")
+            }
+        }
+    }
+}
+
 /// What the pump should do after `feed`.
 pub(super) enum LegReaction {
     /// The event was absorbed; keep pumping.

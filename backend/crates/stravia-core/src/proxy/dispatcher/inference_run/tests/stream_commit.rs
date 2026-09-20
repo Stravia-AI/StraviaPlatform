@@ -1,5 +1,65 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum MidStreamFailure {
+    Transport,
+    Protocol,
+}
+
+struct MidStreamFailureExecutor {
+    failure: MidStreamFailure,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
+    async fn execute(
+        &self,
+        input: crate::model_turn::TurnInput,
+    ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
+    {
+        use stravia_runtime_contract::model_turn::{CanonicalEvent, ModelTurnError};
+        use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let failure = match self.failure {
+            MidStreamFailure::Transport => ModelTurnError::new(
+                "upstream_acceptance_unknown",
+                "websocket reset at wss://internal.example with secret=token",
+            ),
+            MidStreamFailure::Protocol => ModelTurnError::new(
+                "protocol_lossy_rejected",
+                "private provider payload could not be normalized",
+            ),
+        };
+        let request = input.request;
+        let route = stravia_runtime_contract::hook::RouteContext {
+            model_id: request.model.clone(),
+            provider_id: "mid-stream-provider".into(),
+            target_id: "mid-stream-target".into(),
+            egress: OPEN_RESPONSES_2026_04_24,
+        };
+        let mut turn = crate::model_turn::ModelTurn::in_memory(
+            route,
+            request,
+            [
+                Ok(CanonicalEvent::Delta(AiStreamDelta::ToolCallStart {
+                    index: 0,
+                    id: "call-partial".into(),
+                    name: "write_file".into(),
+                })),
+                Ok(CanonicalEvent::Delta(AiStreamDelta::ToolCallDelta {
+                    index: 0,
+                    arguments: r#"{"path":"unfinished"#.into(),
+                })),
+                Err(failure),
+            ],
+        );
+        turn.streamed = true;
+        Ok(turn)
+    }
+}
+
 struct CompletedThenErrorExecutor {
     streamed: bool,
 }
@@ -40,6 +100,101 @@ impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
         );
         turn.streamed = self.streamed;
         Ok(turn)
+    }
+}
+
+#[tokio::test]
+async fn mid_stream_failures_preserve_public_retry_classification() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let headers = authorized_headers(&gateway).await;
+
+    for (failure, expected_code, private_diagnostic) in [
+        (
+            MidStreamFailure::Transport,
+            "server_error",
+            "websocket reset at wss://internal.example with secret=token",
+        ),
+        (
+            MidStreamFailure::Protocol,
+            "invalid_request",
+            "private provider payload could not be normalized",
+        ),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut request = AiRequest::new("mid-stream-failure", Vec::new());
+        request.stream.enabled = true;
+        let response = execute(RunInput {
+            gateway: gateway.clone(),
+            executor: Arc::new(MidStreamFailureExecutor {
+                failure,
+                calls: calls.clone(),
+            }),
+            headers: headers.clone(),
+            envelope: RawEnvelope::new(
+                Some(serde_json::json!({
+                    "model": "mid-stream-failure",
+                    "stream": true
+                })),
+                HashMap::new(),
+                "POST",
+                "/v1/responses",
+            ),
+            request,
+            ingress: OPEN_RESPONSES_2026_04_24,
+            context: RequestContext::new(
+                OPEN_RESPONSES_2026_04_24,
+                std::time::Duration::from_secs(30),
+            ),
+        })
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("mid-stream failure body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream body");
+        let events = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str::<serde_json::Value>(data).expect("SSE JSON"))
+            .collect::<Vec<_>>();
+        let arguments_index = events
+            .iter()
+            .position(|event| event["type"] == "response.function_call_arguments.delta")
+            .expect("partial tool arguments are delivered before reset");
+        let error_index = events
+            .iter()
+            .position(|event| event["type"] == "error")
+            .expect("stream error event");
+        let failed_index = events
+            .iter()
+            .position(|event| event["type"] == "response.failed")
+            .expect("failed terminal event");
+        assert!(arguments_index < error_index && error_index < failed_index);
+        let error = &events[error_index];
+        assert_eq!(error["error"]["type"], expected_code);
+        assert_eq!(error["error"]["code"], expected_code);
+        assert!(
+            error.get("code").is_none(),
+            "error payload must remain nested"
+        );
+        assert_eq!(events[failed_index]["response"]["status"], "failed");
+        assert_eq!(events[failed_index]["response"]["error"], error["error"]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "response.completed")
+        );
+        assert!(!body.contains(private_diagnostic));
+        assert!(body.trim_end().ends_with("data: [DONE]"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "must not replay upstream");
     }
 }
 
@@ -263,7 +418,7 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("live protected "), "{body}");
         assert!(body.contains(r#""reasoning_content":"summary"#), "{body}");
-        assert!(body.contains("stream_mid_error"), "{body}");
+        assert!(body.contains(r#""finish_reason":"failed""#), "{body}");
         assert!(!body.contains("opaque-reasoning"), "{body}");
 
         let generation_count = sqlx::query_scalar::<_, i64>(
@@ -517,7 +672,7 @@ async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
             .expect("failed stream body");
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("> R2"), "{body}");
-        assert!(body.contains("stream_mid_error"), "{body}");
+        assert!(body.contains(r#""finish_reason":"failed""#), "{body}");
         assert!(!body.contains(r#""content":"C2""#), "{body}");
 
         let generation_count = sqlx::query_scalar::<_, i64>(
@@ -1266,16 +1421,17 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
             "{}: {body}",
             failure.id()
         );
-        assert!(body.contains("event: error"), "{}: {body}", failure.id());
+        let stream_error = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "error")
+            .expect("post-commit stream error");
+        assert_eq!(stream_error["error"]["code"], "unknown");
+        assert!(stream_error.get("code").is_none());
         assert!(
-            body.contains("response_stream_failed")
-                && body.contains("The response stream failed.")
-                && !body.contains("stream aborted"),
-            "{}: {body}",
-            failure.id()
-        );
-        assert!(
-            !body.contains("must not replace committed output"),
+            !body.contains("must not replace committed output")
+                && !body.contains("late Hook error"),
             "{}: {body}",
             failure.id()
         );

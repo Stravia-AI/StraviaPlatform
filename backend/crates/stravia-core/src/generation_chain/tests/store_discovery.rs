@@ -1,6 +1,235 @@
 use super::*;
 use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
+type PendingPersist = tokio::task::JoinHandle<Result<(), PersistError>>;
+
+async fn blocked_generation_commit(
+    fail: bool,
+) -> (
+    Arc<CommitBarrierTurnChainStore>,
+    GenerationChain,
+    Principal,
+    Vec<AiItem>,
+    String,
+    String,
+    PendingPersist,
+) {
+    let backend = Arc::new(CommitBarrierTurnChainStore::new(
+        crate::turn_chain::test_store().await,
+    ));
+    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let owner = principal("commit-fence-owner");
+    let question = user_message("question");
+    let first_answer = AiItem::output_text("first answer");
+    let follow_up = user_message("follow up");
+    let pending_answer = AiItem::output_text("pending answer");
+
+    let mut root = chain
+        .begin(owner.clone(), responses_request(vec![question.clone()]))
+        .await
+        .expect("begin durable root");
+    let mut root_response = AiResponse::new("root-upstream", "model");
+    root_response.push_output_text("first answer");
+    assert!(root.stage(&mut root_response, &generation_source(), None));
+    root.persist().await.expect("persist durable root");
+    let root_id = root.id().to_owned();
+
+    let mut pending = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                question.clone(),
+                first_answer.clone(),
+                follow_up.clone(),
+            ]),
+        )
+        .await
+        .expect("begin pending continuation");
+    assert_eq!(pending.parent_id(), Some(root_id.as_str()));
+    let pending_id = pending.id().to_owned();
+    let mut pending_response = AiResponse::new(pending_id.clone(), "model");
+    pending_response.push_output_text("pending answer");
+    assert!(pending.stage(&mut pending_response, &generation_source(), None,));
+    let delivered_history = vec![question, first_answer, follow_up, pending_answer];
+
+    backend.block_next_commit(fail);
+    let persist = tokio::spawn(async move { pending.persist().await });
+    backend.wait_until_blocked().await;
+    (
+        backend,
+        chain,
+        owner,
+        delivered_history,
+        root_id,
+        pending_id,
+        persist,
+    )
+}
+
+#[tokio::test]
+async fn delivered_prefix_waits_for_commit_without_serializing_real_branches() {
+    let (backend, chain, owner, delivered, root_id, pending_id, persist) =
+        blocked_generation_commit(false).await;
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut history = delivered.clone();
+    history.push(user_message("immediate continuation"));
+    let mut matching = Box::pin(chain.begin(owner.clone(), responses_request(history)));
+    backend.force_stale_discovery();
+    assert!(
+        matches!(futures::poll!(&mut matching), std::task::Poll::Pending),
+        "matching begin must wait instead of snapshotting the stale durable prefix",
+    );
+    backend.allow_current_discovery();
+    let explicit = {
+        let chain = chain.clone();
+        let owner = owner.clone();
+        let started = Arc::clone(&started);
+        let pending_id = pending_id.clone();
+        tokio::spawn(async move {
+            let mut request = responses_request(vec![user_message("explicit continuation")]);
+            crate::router::stamp_previous_response_id(&mut request, &pending_id);
+            started.add_permits(1);
+            chain.begin(owner, request).await
+        })
+    };
+    let item_reference = {
+        let chain = chain.clone();
+        let owner = owner.clone();
+        let started = Arc::clone(&started);
+        let pending_id = pending_id.clone();
+        tokio::spawn(async move {
+            let mut reference = user_message("");
+            reference.meta = Some(serde_json::json!({
+                "__open_responses_item_reference":
+                    crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                        "msg",
+                        &pending_id,
+                        0,
+                    )
+            }));
+            let mut request = responses_request(vec![
+                reference,
+                user_message("continuation with item reference"),
+            ]);
+            crate::router::stamp_previous_response_id(&mut request, &pending_id);
+            started.add_permits(1);
+            chain.begin(owner, request).await
+        })
+    };
+    started
+        .acquire_many(2)
+        .await
+        .expect("continuations started")
+        .forget();
+
+    let mut branch_history = delivered[..2].to_vec();
+    branch_history.push(user_message("real branch from durable root"));
+    let branch = chain
+        .begin(owner.clone(), responses_request(branch_history))
+        .await
+        .expect("unrelated branch must not wait for pending commit");
+    assert_eq!(branch.parent_id(), Some(root_id.as_str()));
+
+    let mut other_history = delivered.clone();
+    other_history.push(user_message("other principal"));
+    let other = chain
+        .begin(
+            principal("commit-fence-other"),
+            responses_request(other_history),
+        )
+        .await
+        .expect("another Principal must not wait for pending commit");
+    assert_eq!(other.parent_id(), None);
+
+    tokio::task::yield_now().await;
+    backend.release_commit();
+    persist
+        .await
+        .expect("persist task")
+        .expect("pending commit succeeds");
+    let matching = matching.await.expect("matching continuation begins");
+    assert_eq!(matching.parent_id(), Some(pending_id.as_str()));
+    assert_eq!(matching.request_delta().items.len(), 1);
+    let explicit = explicit
+        .await
+        .expect("explicit begin task")
+        .expect("explicit continuation begins");
+    assert_eq!(explicit.parent_id(), Some(pending_id.as_str()));
+    let item_reference = item_reference
+        .await
+        .expect("item-reference begin task")
+        .expect("pending item reference resolves after commit");
+    assert_eq!(item_reference.parent_id(), Some(pending_id.as_str()));
+    assert!(
+        item_reference
+            .request()
+            .items
+            .iter()
+            .any(|item| item.content.to_text() == "pending answer")
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_commit_releases_waiter_without_publishing_a_node() {
+    let (backend, chain, owner, mut delivered, root_id, pending_id, persist) =
+        blocked_generation_commit(true).await;
+    delivered.push(user_message("continue after failed commit"));
+    let continuation = {
+        let chain = chain.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move { chain.begin(owner, responses_request(delivered)).await })
+    };
+    tokio::task::yield_now().await;
+    backend.release_commit();
+    assert!(persist.await.expect("persist task").is_err());
+    let continuation = continuation
+        .await
+        .expect("continuation task")
+        .expect("failed commit releases continuation");
+    assert_eq!(continuation.parent_id(), Some(root_id.as_str()));
+    assert_eq!(continuation.request_delta().items.len(), 3);
+    assert!(
+        backend
+            .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new(pending_id),)
+            .await
+            .is_err(),
+        "failed commit must not publish a resumable node",
+    );
+}
+
+#[tokio::test]
+async fn cancelled_pending_commit_releases_waiter_without_publishing_a_node() {
+    let (backend, chain, owner, mut delivered, root_id, pending_id, persist) =
+        blocked_generation_commit(false).await;
+    delivered.push(user_message("continue after cancelled commit"));
+    let continuation = {
+        let chain = chain.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move { chain.begin(owner, responses_request(delivered)).await })
+    };
+    tokio::task::yield_now().await;
+    persist.abort();
+    assert!(
+        persist
+            .await
+            .expect_err("persist task is cancelled")
+            .is_cancelled()
+    );
+    let continuation = continuation
+        .await
+        .expect("continuation task")
+        .expect("cancelled commit releases continuation");
+    assert_eq!(continuation.parent_id(), Some(root_id.as_str()));
+    assert_eq!(continuation.request_delta().items.len(), 3);
+    assert!(
+        backend
+            .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new(pending_id),)
+            .await
+            .is_err(),
+        "cancelled commit must not publish a resumable node",
+    );
+}
+
 #[tokio::test]
 async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     let backend = Arc::new(crate::turn_chain::test_store().await);

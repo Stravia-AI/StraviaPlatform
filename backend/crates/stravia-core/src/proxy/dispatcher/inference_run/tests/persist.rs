@@ -294,6 +294,243 @@ async fn delivered_terminal_publishes_response_chain() {
 }
 
 #[tokio::test]
+async fn terminal_commit_window_keeps_generation_and_interaction_parentage_aligned() {
+    let (provider_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse("first output"),
+        openai_sse("second output"),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let barrier = Arc::new(CommitBarrierStore::new(Arc::clone(&gateway.turn_chains)));
+    gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
+        barrier.clone(),
+        std::time::Duration::from_secs(60),
+        None,
+    );
+    configure_route(&gateway, "commit-window-parent", &[provider_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let mut events = gateway.observation.subscribe(0);
+    let question = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::User,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let mut first = AiRequest::new("commit-window-parent", vec![question.clone()]);
+    first.stream.enabled = true;
+    first.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+
+    barrier.block_next_commit();
+    let first_response = execute_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        first,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let mut chunks = first_response.into_body().into_data_stream();
+    let mut wire = String::new();
+    while !wire.contains("data: [DONE]\n\n") {
+        let chunk = chunks
+            .next()
+            .await
+            .expect("terminal frame")
+            .expect("terminal bytes");
+        wire.push_str(std::str::from_utf8(&chunk).expect("SSE UTF-8"));
+    }
+    let completed = wire
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .find(|event| event["type"] == "response.completed")
+        .expect("completed response");
+    let first_id = completed["response"]["id"]
+        .as_str()
+        .expect("response ID")
+        .to_owned();
+    drop(chunks);
+    barrier.wait_until_blocked().await;
+
+    let mut second = AiRequest::new(
+        "commit-window-parent",
+        vec![
+            question,
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first output"),
+            stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                    "second".into(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+    second.stream.enabled = true;
+    second.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+    let continuation = tokio::spawn({
+        let gateway = gateway.clone();
+        let headers = headers.clone();
+        async move {
+            execute_request_with_headers(
+                gateway,
+                headers,
+                second,
+                OPEN_RESPONSES_2026_04_24,
+                "/v1/responses",
+            )
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+    barrier.release_commit();
+
+    let continuation = continuation.await.expect("continuation task");
+    assert_eq!(continuation.status(), StatusCode::OK);
+    let continuation_body = to_bytes(continuation.into_body(), usize::MAX)
+        .await
+        .expect("continuation response body");
+    assert!(String::from_utf8_lossy(&continuation_body).contains("second output"));
+    wait_for_observed_run_finish(&mut events).await;
+    wait_for_observed_run_finish(&mut events).await;
+    gateway
+        .observation
+        .flush()
+        .await
+        .expect("observation flush");
+
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .expect("observation forest");
+    let interactions: Vec<_> = forest
+        .roots
+        .iter()
+        .flat_map(|root| root.interactions.iter())
+        .collect();
+    assert_eq!(
+        interactions.len(),
+        1,
+        "commit window must not split interaction"
+    );
+    let detail = gateway
+        .observation
+        .get_interaction(&interactions[0].id, Default::default())
+        .await
+        .expect("interaction query")
+        .expect("interaction");
+    assert_eq!(detail.runs.len(), 2);
+    let parent_run = detail
+        .runs
+        .iter()
+        .find(|run| run.generation_node_id.as_deref() == Some(first_id.as_str()))
+        .expect("delivered parent run");
+    let continued = detail
+        .runs
+        .iter()
+        .find(|run| run.generation_parent_id.as_deref() == Some(first_id.as_str()))
+        .expect("continuation keeps the delivered Generation parent");
+    assert_eq!(
+        continued.parent_run_id.as_deref(),
+        Some(parent_run.id.as_str())
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unavailable_observation_writer_never_holds_generation_progress() {
+    let (provider_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse("first output"),
+        openai_sse("second output"),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "observation-unavailable", &[provider_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    gateway.observation.shutdown().await;
+
+    let question = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::User,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let mut first = AiRequest::new("observation-unavailable", vec![question.clone()]);
+    first.stream.enabled = true;
+    first.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+    let first = execute_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        first,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    let first_body = to_bytes(first.into_body(), usize::MAX)
+        .await
+        .expect("first response body");
+    assert!(String::from_utf8_lossy(&first_body).contains("first output"));
+
+    let mut second = AiRequest::new(
+        "observation-unavailable",
+        vec![
+            question,
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first output"),
+            stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                    "second".into(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+    second.stream.enabled = true;
+    second.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+    let second = execute_request_with_headers(
+        gateway,
+        headers,
+        second,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    let second_body = to_bytes(second.into_body(), usize::MAX)
+        .await
+        .expect("second response body");
+    assert!(String::from_utf8_lossy(&second_body).contains("second output"));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn store_false_keeps_the_gateway_generation_chain_available() {
     let (provider_url, provider_calls) = serve_openai_sequence(vec![
         openai_response("first output"),

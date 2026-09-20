@@ -1377,6 +1377,7 @@ impl ResponsesStreamParser {
                     if let Some(status) = status {
                         error = error.with_status(status);
                     }
+                    error.kind = super::stream_error_kind(&error);
                     deltas.push(AiStreamDelta::StreamError { error });
                 }
                 if event == "response.failed" {

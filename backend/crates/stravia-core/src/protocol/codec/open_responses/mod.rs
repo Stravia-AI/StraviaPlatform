@@ -5,6 +5,54 @@ pub mod formatter;
 pub mod parser;
 pub mod stream;
 
+use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
+
+pub(super) fn stream_error_kind(error: &AiError) -> AiErrorKind {
+    if !matches!(error.kind, AiErrorKind::StreamMidError) {
+        return error.kind.clone();
+    }
+    if let Some(status) = error.status_code.filter(|status| *status >= 400) {
+        return AiError::kind_from_status(status, error.raw.as_ref());
+    }
+    let Some(upstream) = error
+        .raw
+        .as_ref()
+        .and_then(|raw| raw.pointer("/response/error").or_else(|| raw.get("error")))
+    else {
+        return error.kind.clone();
+    };
+    if AiError::kind_from_status(429, upstream.get("code")) == AiErrorKind::QuotaExceeded {
+        return AiErrorKind::QuotaExceeded;
+    }
+    for discriminator in [upstream.get("type"), upstream.get("code")]
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        let classified = match discriminator {
+            "authentication_error" => Some(AiErrorKind::AuthenticationError),
+            "authorization_error" | "permission_error" | "permission_denied" => {
+                Some(AiErrorKind::AuthorizationError)
+            }
+            "not_found" | "not_found_error" | "model_not_found" => Some(AiErrorKind::NotFoundError),
+            "rate_limit_error" | "too_many_requests" => Some(AiErrorKind::RateLimitError),
+            "quota_exceeded" => Some(AiErrorKind::QuotaExceeded),
+            "invalid_request" | "invalid_request_error" | "protocol_lossy_rejected" => {
+                Some(AiErrorKind::InvalidRequest)
+            }
+            "server_error" | "model_error" => Some(AiErrorKind::ServerError),
+            "service_unavailable" => Some(AiErrorKind::ServiceUnavailable),
+            "timeout" => Some(AiErrorKind::Timeout),
+            "content_filtered" => Some(AiErrorKind::ContentFiltered),
+            _ => None,
+        };
+        if let Some(kind) = classified {
+            return kind;
+        }
+    }
+    AiErrorKind::Unknown
+}
+
 const REGISTERED_EXTENSION_ITEM_TYPES: &[&str] = &["stravia:agent_result", "stravia:media_result"];
 
 pub(crate) fn is_registered_extension_item(item_type: &str) -> bool {

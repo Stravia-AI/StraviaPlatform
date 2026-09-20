@@ -55,6 +55,128 @@ async fn wait_for_observed_run_finish(
 
 struct NormalizingTestVendor;
 
+struct CommitBarrierStore {
+    inner: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore>,
+    block_next: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+impl CommitBarrierStore {
+    fn new(inner: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore>) -> Self {
+        Self {
+            inner,
+            block_next: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    fn block_next_commit(&self) {
+        self.block_next.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_blocked(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("commit barrier remains open")
+            .forget();
+    }
+
+    fn release_commit(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl stravia_runtime_contract::turn_chain::TurnChainStore for CommitBarrierStore {
+    async fn materialize(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        kind: stravia_runtime_contract::turn_chain::TurnNodeKind,
+        id: &stravia_runtime_contract::turn_chain::TurnNodeId,
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
+        self.inner.materialize(principal, kind, id).await
+    }
+
+    async fn materialize_with_expiry(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        kind: stravia_runtime_contract::turn_chain::TurnNodeKind,
+        id: &stravia_runtime_contract::turn_chain::TurnNodeId,
+    ) -> Result<
+        stravia_runtime_contract::turn_chain::MaterializedTurnChain,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
+        self.inner
+            .materialize_with_expiry(principal, kind, id)
+            .await
+    }
+
+    async fn commit(
+        &self,
+        commit: stravia_runtime_contract::turn_chain::TurnCommit,
+    ) -> Result<
+        stravia_runtime_contract::turn_chain::TurnNodeId,
+        stravia_runtime_contract::turn_chain::TurnCommitError,
+    > {
+        if self.block_next.swap(false, Ordering::AcqRel) {
+            self.entered.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .map_err(|_| {
+                    stravia_runtime_contract::turn_chain::TurnCommitError::Storage(
+                        "commit barrier closed".into(),
+                    )
+                })?
+                .forget();
+        }
+        self.inner.commit(commit).await
+    }
+
+    async fn find_reusable_prefixes(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        kind: stravia_runtime_contract::turn_chain::TurnNodeKind,
+        query: &stravia_runtime_contract::turn_chain::ReusablePrefixQuery,
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::ReusablePrefixCandidate>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
+        self.inner
+            .find_reusable_prefixes(principal, kind, query)
+            .await
+    }
+
+    async fn rebuild_prefixes(
+        &self,
+        namespace_prefix: &str,
+        decode: &(
+             dyn Fn(
+            Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+            i64,
+        ) -> Result<
+            Option<stravia_runtime_contract::turn_chain::ReusablePrefixMetadata>,
+            String,
+        > + Send
+                 + Sync
+         ),
+    ) -> Result<(), stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.rebuild_prefixes(namespace_prefix, decode).await
+    }
+
+    async fn sweep_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.sweep_expired().await
+    }
+}
+
 struct FailingParentDiscoveryStore {
     inner: crate::turn_chain::SqlTurnChainStore,
     discovery_attempts: Arc<AtomicUsize>,

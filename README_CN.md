@@ -186,7 +186,7 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 ## 文档
 
 - [架构设计](docs/design/architecture.md) 与 [设计文档](docs/design/) · [ADR](docs/adr/)
-- [数据库结构](docs/database/schema.md) · [更新日志](CHANGELOG.md)
+- 数据库结构：[PostgreSQL](docs/database/postgres.sql) · [SQLite](docs/database/sqlite.sql) · [更新日志](CHANGELOG.md)
 
 ## 开发
 

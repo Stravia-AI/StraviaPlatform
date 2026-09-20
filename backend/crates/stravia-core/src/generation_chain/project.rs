@@ -11,6 +11,63 @@ pub(super) fn project_client_output(
     project_client_history(ingress, response, prefix).map_err(TurnCommitError::Storage)
 }
 
+pub(super) struct ProjectedClientCommit {
+    pub(super) client_request_delta: AiRequest,
+    pub(super) client_items: Vec<AiItem>,
+    pub(super) client_output: Vec<AiItem>,
+    pub(super) client_history_mutation: Option<EffectiveHistoryMutation>,
+    pub(super) client_history: ClientHistoryState,
+}
+
+pub(super) fn project_client_commit(
+    parent: &ActiveGenerationChain,
+    request_delta: &AiRequest,
+    response: &AiResponse,
+) -> Result<ProjectedClientCommit, TurnCommitError> {
+    let fresh_states = &parent.fresh_inline_states;
+    let inline_boundary = crate::protocol::codec::open_responses::inline_compaction_boundary;
+    let mut client_request_delta = canonical_client_history_request(request_delta);
+    let mut client_items = parent
+        .replacement_client_items
+        .clone()
+        .unwrap_or_else(|| parent.parent_client_items.clone());
+    let parent_items = client_items.len();
+    if parent.replacement_client_items.is_none() {
+        client_items.extend(client_request_delta.items.clone());
+    }
+    let mut client_output = project_client_output(
+        ProtocolTransform::inferred_ingress(request_delta),
+        response,
+        &mut client_items,
+    )?;
+    let client_inline = if let Some(start) = inline_boundary(&client_output, fresh_states) {
+        client_items.clear();
+        client_output.drain(..start);
+        true
+    } else if let Some(start) = inline_boundary(&client_items, fresh_states) {
+        client_items.drain(..start);
+        true
+    } else {
+        false
+    };
+    let client_history_mutation = (client_inline || parent.replacement_client_items.is_some())
+        .then(|| EffectiveHistoryMutation::Replace {
+            items: client_items.clone(),
+        });
+    if client_history_mutation.is_none() {
+        client_request_delta.items = client_items[parent_items..].to_vec();
+    }
+    client_items.extend(client_output.clone());
+    let client_history = ClientHistoryState::from_request(&client_request_delta, &client_items);
+    Ok(ProjectedClientCommit {
+        client_request_delta,
+        client_items,
+        client_output,
+        client_history_mutation,
+        client_history,
+    })
+}
+
 pub(crate) fn project_client_history(
     ingress: ProtocolId,
     response: &AiResponse,
