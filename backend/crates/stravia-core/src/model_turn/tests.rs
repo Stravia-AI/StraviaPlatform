@@ -1016,6 +1016,21 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
         events.last(),
         Some(Err(ModelTurnError { code, .. })) if code == "upstream_stream_error"
     ));
+    let Some(Err(error)) = events.last() else {
+        panic!("truncated upstream stream must expose a diagnostic");
+    };
+    assert!(error.message.contains("stage=receive"), "{}", error.message);
+    assert!(
+        error.message.contains("has_received_response_event=true"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("http_status=200"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("caused by:"), "{}", error.message);
     assert!(
         !events
             .iter()

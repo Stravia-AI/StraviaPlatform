@@ -341,6 +341,10 @@ diagnostics/observation-debug/
 
 `artifact_normalized_request` 内容记录提供已收存输入的稳定引用；Provider 发送时生成的内联正文和签名地址不替代该内容身份。导出对引用执行只读可用性查询，缺失或逻辑过期内容标为不可恢复，不续期或打开文件。旧 Trace 不自动回填或改写；显式离线去重只改变存储表示，不补造媒体内容或改变既有缺失声明。旧记录参与新请求时，新记录仍采用外置契约。
 
+`command-code/generate/v1` 的上游响应按 NDJSON 应用记录重组，不按 `Content-Type` 或网络 chunk 猜测消息边界。单 chunk 中的多行分别记录，跨 chunk 的记录与 UTF-8 字节先合并，再执行已有脱敏和媒体外置。EOF 时完整的无换行尾行仍可记录；畸形记录或不完整尾部不落盘，Trace 标记 `incomplete_structured_wire_omitted`，此前已完成的记录保留。单条记录仍受 wire 重组内存上限约束，其他协议继续使用原有 JSON/SSE 捕获规则。
+
+传输失败使用 `transport_failure` 内容记录保存错误类别、`connect`／`send`／`receive`／`decode` 阶段、`has_received_response_event`、已知 HTTP 状态、WebSocket 数字关闭码和可用的底层 cause chain。HTTP 的响应事件指已观察到 body chunk 或完整 body，不仅是收到 headers；WebSocket 指应用消息，不包括 Ping/Pong。成功升级的 WebSocket 诊断状态为 101，回退 HTTP 后使用实际 HTTP 状态。原因文本先通过凭据脱敏，再限制为 4096 个 Unicode 字符；普通传输失败消息包含安全的阶段与原因摘要，超限显式标记 `[truncated]`。协议解码／规范化错误保持原错误分类，并在 Debug 中补充阶段和 cause chain。此诊断不改变重试、回退、超时或成功判定，也不为旧 Trace 补录原因。
+
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 
 ### 6.3 容量与失败

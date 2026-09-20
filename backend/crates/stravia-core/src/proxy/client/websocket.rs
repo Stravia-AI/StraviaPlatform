@@ -147,10 +147,14 @@ pub(crate) enum ResponsesWebSocketAcquireError {
         headers: Box<HeaderMap>,
         body: bytes::Bytes,
     },
-    #[error("Responses WebSocket handshake body could not be read")]
-    HandshakeBodyRead { status: u16, headers: HeaderMap },
+    #[error("Responses WebSocket handshake body could not be read: {diagnostic}")]
+    HandshakeBodyRead {
+        status: u16,
+        headers: Box<HeaderMap>,
+        diagnostic: TransportDiagnostic,
+    },
     #[error("Responses WebSocket connection failed: {0}")]
-    Transport(String),
+    Transport(TransportDiagnostic),
 }
 
 pub(crate) struct ResponsesWebSocketLease {
@@ -387,16 +391,31 @@ impl ResponsesWebSocketRegistry {
             Ok(response) => response,
             Err(error) => {
                 self.mark_transient_failure(namespace, trace);
-                return Err(ResponsesWebSocketAcquireError::Transport(error.to_string()));
+                let (category, stage) = match &error {
+                    reqwest_websocket::Error::Reqwest(source) if source.is_connect() => {
+                        ("connect", "connect")
+                    }
+                    reqwest_websocket::Error::Reqwest(source) if source.is_timeout() => {
+                        ("timeout", "send")
+                    }
+                    reqwest_websocket::Error::Handshake(_) => ("websocket_upgrade", "decode"),
+                    _ => ("websocket_transport", "send"),
+                };
+                let diagnostic =
+                    TransportDiagnostic::from_error(category, stage, false, None, None, &error);
+                return Err(ResponsesWebSocketAcquireError::Transport(diagnostic));
             }
         };
         let status = response.status().as_u16();
         let handshake_headers = response.headers().clone();
         if status != 101 {
-            let body = response.into_inner().bytes().await.map_err(|_| {
+            let body = response.into_inner().bytes().await.map_err(|error| {
+                let diagnostic =
+                    TransportDiagnostic::from_reqwest("receive", false, Some(status), &error);
                 ResponsesWebSocketAcquireError::HandshakeBodyRead {
                     status,
-                    headers: handshake_headers.clone(),
+                    headers: Box::new(handshake_headers.clone()),
+                    diagnostic,
                 }
             })?;
             if (200..300).contains(&status) || matches!(status, 400 | 404 | 405 | 426 | 501) {
@@ -419,13 +438,27 @@ impl ResponsesWebSocketRegistry {
                 });
             }
             self.mark_transient_failure(namespace, trace);
-            return Err(ResponsesWebSocketAcquireError::Transport(format!(
-                "unexpected WebSocket handshake status {status}"
-            )));
+            let diagnostic = TransportDiagnostic::from_message(
+                "handshake_status",
+                "connect",
+                false,
+                Some(status),
+                None,
+                format!("unexpected WebSocket handshake status {status}"),
+            );
+            return Err(ResponsesWebSocketAcquireError::Transport(diagnostic));
         }
         let socket = response.into_websocket().await.map_err(|error| {
             self.mark_transient_failure(namespace, trace);
-            ResponsesWebSocketAcquireError::Transport(error.to_string())
+            let diagnostic = TransportDiagnostic::from_error(
+                "websocket_upgrade",
+                "decode",
+                false,
+                Some(status),
+                None,
+                &error,
+            );
+            ResponsesWebSocketAcquireError::Transport(diagnostic)
         })?;
         let connection_id = stravia_runtime_contract::identifier::new_id();
         let connection =
@@ -1072,6 +1105,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncated_websocket_handshake_body_retains_receive_stage_status_and_safe_cause() {
+        let url = serve_once(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\ncontent-length: 4096\r\nconnection: close\r\n\r\npartial",
+        )
+        .await
+        .replacen("http://", "ws://", 1);
+
+        let result = ResponsesWebSocketRegistry::default()
+            .acquire(
+                &reqwest::Client::new(),
+                "target",
+                test_trace(),
+                ResponsesWebSocketRequest {
+                    url: &url,
+                    headers: HeaderMap::new(),
+                    on_connect_start: None,
+                },
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: false,
+                },
+            )
+            .await;
+        let Err(ResponsesWebSocketAcquireError::HandshakeBodyRead {
+            status, diagnostic, ..
+        }) = result
+        else {
+            panic!("truncated handshake body must remain a typed read failure");
+        };
+
+        assert_eq!(status, 503);
+        let diagnostic = diagnostic.to_string();
+        assert!(diagnostic.contains("stage=receive"), "{diagnostic}");
+        assert!(diagnostic.contains("http_status=503"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("has_received_response_event=false"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("secret"), "{diagnostic}");
+    }
+
+    #[tokio::test]
     async fn responses_websocket_reuses_affinity_for_finalized_requests() {
         let (url, mut requests, connections) = websocket_server().await;
         let registry = ResponsesWebSocketRegistry::default();
@@ -1457,30 +1533,41 @@ mod tests {
             .expect("reserve unused address");
         let address = listener.local_addr().expect("unused address");
         drop(listener);
-        let url = format!("ws://{address}/v1/responses");
+        let url = format!("ws://{address}/v1/responses?api_key=connect-secret");
         let registry = ResponsesWebSocketRegistry::default();
         let client = reqwest::Client::new();
 
-        assert!(matches!(
-            registry
-                .acquire(
-                    &client,
-                    "target",
-                    test_trace(),
-                    ResponsesWebSocketRequest {
-                        url: &url,
-                        headers: HeaderMap::new(),
-                        on_connect_start: None,
-                    },
-                    ResponsesWebSocketAffinityHint {
-                        previous_response_id: None,
-                        session_affinity: None,
-                        require_affinity: false,
-                    },
-                )
-                .await,
-            Err(ResponsesWebSocketAcquireError::Transport(_))
-        ));
+        let first = registry
+            .acquire(
+                &client,
+                "target",
+                test_trace(),
+                ResponsesWebSocketRequest {
+                    url: &url,
+                    headers: HeaderMap::new(),
+                    on_connect_start: None,
+                },
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: false,
+                },
+            )
+            .await;
+        let Err(ResponsesWebSocketAcquireError::Transport(diagnostic)) = first else {
+            panic!("connection refusal must remain a typed transport failure");
+        };
+        let diagnostic = diagnostic.to_string();
+        assert!(diagnostic.contains("category=connect"), "{diagnostic}");
+        assert!(diagnostic.contains("stage=connect"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("has_received_response_event=false"),
+            "{diagnostic}"
+        );
+        assert!(
+            !diagnostic.contains("connect-secret"),
+            "leaked query credential: {diagnostic}"
+        );
         assert!(matches!(
             registry
                 .acquire(

@@ -1710,12 +1710,17 @@ async fn begin_attempt(
         } => {
             let kind = AiError::kind_from_status(status, body.as_ref().ok());
             let retry_after = retry_after(&headers);
+            let message = body
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("upstream returned HTTP {status}"));
             attempt.finish("failed", Some(status), Some("upstream_error".into()), None);
             return Err(AttemptFailure::upstream(
                 kind,
                 Some(status),
                 "upstream_error",
-                format!("upstream returned HTTP {status}"),
+                message,
                 retry_after,
             )
             .with_upstream_body(native_compaction_requested, Some(status), body.ok()));

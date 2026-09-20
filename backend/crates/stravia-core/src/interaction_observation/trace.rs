@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, BufRead};
@@ -22,6 +23,8 @@ const MANAGED_DIRECTORY: &str = "observation-debug";
 const WRITER_OVERFLOW: &str = "writer_overflow";
 const STORAGE_ERROR: &str = "storage_error";
 const CREDENTIAL_REDACTION_UNSUPPORTED: &str = "credential_redaction_unsupported";
+const COMMAND_CODE_PROTOCOL: &str = "command-code/generate/v1";
+const INCOMPLETE_STRUCTURED_WIRE_OMITTED: &str = "incomplete_structured_wire_omitted";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TraceRecord {
@@ -227,6 +230,7 @@ struct TraceState {
     // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
     queued_sequence: parking_lot::Mutex<i64>,
     wire_pending: parking_lot::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
+    ndjson_pending: parking_lot::Mutex<std::collections::HashMap<String, (Vec<u8>, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     event_count: AtomicU64,
@@ -302,6 +306,7 @@ impl TraceManager {
         let state = Arc::new(TraceState {
             queued_sequence: parking_lot::Mutex::new(0),
             wire_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ndjson_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
@@ -434,6 +439,33 @@ impl TraceManager {
     }
 }
 
+fn is_command_code_ndjson(record: &TraceRecord) -> bool {
+    record.protocol.as_deref() == Some(COMMAND_CODE_PROTOCOL)
+        && record.direction.as_deref() == Some("upstream_response")
+        && matches!(
+            record.message_type.as_deref(),
+            Some("body_chunk" | "sse_chunk")
+        )
+}
+
+fn captured_payload_bytes(payload: &Value) -> Result<Cow<'_, [u8]>, &'static str> {
+    if let Some(text) = payload.as_str() {
+        return Ok(Cow::Borrowed(text.as_bytes()));
+    }
+    let Some(encoded) = payload
+        .as_object()
+        .filter(|object| object.get("encoding").and_then(Value::as_str) == Some("base64"))
+        .and_then(|object| object.get("data"))
+        .and_then(Value::as_str)
+    else {
+        return Err(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map(Cow::Owned)
+        .map_err(|_| INCOMPLETE_STRUCTURED_WIRE_OMITTED)
+}
+
 impl TraceHandle {
     pub(crate) fn protected_secrets(&self) -> super::redaction::ProtectedSecrets {
         self.state.protected.clone()
@@ -442,6 +474,16 @@ impl TraceHandle {
         if self.state.stopped.load(Ordering::Acquire) || self.state.finished.load(Ordering::Acquire)
         {
             return TraceWriteOutcome::Partial(STORAGE_ERROR);
+        }
+        if is_command_code_ndjson(&record) {
+            let payload = std::mem::take(&mut record.payload);
+            return match captured_payload_bytes(&payload) {
+                Ok(bytes) => self.record_command_code_ndjson(&record, &bytes),
+                Err(reason) => {
+                    self.mark_partial(reason, false);
+                    TraceWriteOutcome::Partial(reason)
+                }
+            };
         }
         if matches!(
             record.message_type.as_deref(),
@@ -478,6 +520,72 @@ impl TraceHandle {
             record.representation = "reassembled_application_message".into();
         }
         self.queue_record(record)
+    }
+
+    fn record_command_code_ndjson(&self, record: &TraceRecord, chunk: &[u8]) -> TraceWriteOutcome {
+        let key = format!(
+            "{}:{}:{}:{}",
+            record.protocol.as_deref().unwrap_or_default(),
+            record.direction.as_deref().unwrap_or_default(),
+            record.attempt_id.as_deref().unwrap_or_default(),
+            record.message_type.as_deref().unwrap_or_default()
+        );
+        let mut chunk_template = record.clone();
+        chunk_template.payload = Value::Null;
+        let mut outcome = TraceWriteOutcome::Queued;
+        let mut limit_exceeded = false;
+        let mut pending = self.state.ndjson_pending.lock();
+        let (buffer, template) = pending
+            .entry(key.clone())
+            .or_insert_with(|| (Vec::new(), chunk_template.clone()));
+        for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
+            if buffer.len().saturating_add(fragment.len()) as u64 > WIRE_MESSAGE_LIMIT_BYTES {
+                limit_exceeded = true;
+                break;
+            }
+            buffer.extend_from_slice(fragment);
+            if fragment.last() != Some(&b'\n') {
+                continue;
+            }
+            let mut line = std::mem::take(buffer);
+            while line
+                .last()
+                .is_some_and(|byte| matches!(*byte, b'\n' | b'\r'))
+            {
+                line.pop();
+            }
+            let mut framed = template.clone();
+            *template = chunk_template.clone();
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let Ok(text) = String::from_utf8(line) else {
+                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
+                outcome = TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
+                continue;
+            };
+            if serde_json::from_str::<serde::de::IgnoredAny>(&text).is_err() {
+                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
+                outcome = TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
+                continue;
+            }
+            framed.payload = Value::String(text);
+            framed.representation = "reassembled_application_message".into();
+            if let partial @ TraceWriteOutcome::Partial(_) = self.queue_record(framed) {
+                outcome = partial;
+            }
+        }
+        if limit_exceeded || buffer.is_empty() {
+            pending.remove(&key);
+        }
+        drop(pending);
+        if limit_exceeded {
+            self.mark_partial("structured_wire_capture_limit", false);
+            if outcome == TraceWriteOutcome::Queued {
+                outcome = TraceWriteOutcome::Partial("structured_wire_capture_limit");
+            }
+        }
+        outcome
     }
 
     fn queue_record(&self, mut record: TraceRecord) -> TraceWriteOutcome {
@@ -526,6 +634,21 @@ impl TraceHandle {
 
     pub(crate) async fn finish(&self) -> TraceManifest {
         if !self.state.finished.swap(true, Ordering::AcqRel) {
+            let ndjson_pending = std::mem::take(&mut *self.state.ndjson_pending.lock());
+            for (_, (bytes, mut record)) in ndjson_pending {
+                if bytes.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                let complete = serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_ok();
+                match String::from_utf8(bytes) {
+                    Ok(text) if complete => {
+                        record.payload = Value::String(text);
+                        record.representation = "reassembled_application_message".into();
+                        let _ = self.queue_record(record);
+                    }
+                    _ => self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false),
+                }
+            }
             let pending = std::mem::take(&mut *self.state.wire_pending.lock());
             for (_, (text, mut record)) in pending {
                 let trimmed = text.trim_start();
@@ -533,7 +656,7 @@ impl TraceHandle {
                     || trimmed.starts_with("data:")
                     || trimmed.starts_with("event:")
                 {
-                    self.mark_partial("incomplete_structured_wire_omitted", false);
+                    self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
                 } else {
                     // Plain-text HTTP errors are complete at EOF, not at a JSON/SSE boundary.
                     // Delay their redaction until now so split upload grants remain secret.
@@ -1040,6 +1163,10 @@ fn subtract_saturating(counter: &AtomicU64, amount: u64) {
 fn writer_unavailable() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "trace writer unavailable")
 }
+
+#[cfg(test)]
+#[path = "trace/trace_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

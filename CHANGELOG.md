@@ -9,6 +9,8 @@
 ### Fixed
 
 - Desktop startup failures now retain an independent recovery window with safe diagnostics, bounded startup logs, restart, and exit instead of disappearing. Optional desktop integrations degrade to warnings; failed silent launches become visible, failed-window close exits, and native dialogs cover window-creation errors without resetting or repairing stored data.
+- HTTP and Responses WebSocket failures retain redacted, length-bounded cause chains and transport-stage diagnostics, including observed response state, known HTTP status, and WebSocket close codes, without changing retries or completion semantics.
+- Command Code Debug capture reassembles NDJSON records across network chunks and split UTF-8 bytes, preserves complete EOF records, and marks malformed or incomplete tails as partial without discarding earlier complete records.
 - Responses streams now close indexed reasoning items on their authoritative `ItemDone`, preserving late signatures and preventing already-completed thinking from being replayed after subsequent tool calls by OMP. Terminal responses retain the same items without duplicate completion events.
 - Devin multi-turn tool continuations preserve signed thinking without separating tool calls from their matching results, fixing `invalid_argument` failures with OMP Responses history. Historical user images and images returned by client tools remain attached to their original messages instead of being replaced or silently discarded.
 
