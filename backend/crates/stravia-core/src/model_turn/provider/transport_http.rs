@@ -24,7 +24,7 @@ impl ProviderCall {
         let (raw, status, headers, response_body) = match result {
             Ok(response) => response,
             Err(error) => {
-                if let Some(decode) =
+                let diagnostic = if let Some(decode) =
                     error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
                 {
                     attempt.wire_lazy(
@@ -40,15 +40,45 @@ impl ProviderCall {
                         Some("response_decode_error".into()),
                         None,
                     );
+                    crate::proxy::client::TransportDiagnostic::from_error(
+                        "response_decode",
+                        "decode",
+                        true,
+                        Some(decode.status),
+                        None,
+                        decode,
+                    )
+                } else if let Some(transport) =
+                    error.downcast_ref::<crate::proxy::client::UpstreamTransportError>()
+                {
+                    let diagnostic = transport.diagnostic().clone();
+                    attempt.finish(
+                        "failed",
+                        diagnostic.http_status,
+                        Some("provider_transport_error".into()),
+                        None,
+                    );
+                    diagnostic
                 } else {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                        "request",
+                        "send",
+                        false,
+                        None,
+                        None,
+                        error.as_ref(),
+                    );
                     attempt.finish(
                         "failed",
                         None,
                         Some("provider_transport_error".into()),
                         None,
                     );
-                }
-                return Err(error);
+                    diagnostic
+                };
+                attempt.transport_failure(&diagnostic);
+                let safe = diagnostic.to_string();
+                return Err(error.context(safe));
             }
         };
         attempt.wire_lazy(
@@ -154,13 +184,28 @@ impl ProviderCall {
                 Ok((response, status, attempt))
             }
             Err(error) => {
+                let diagnostic = error
+                    .downcast_ref::<crate::proxy::client::UpstreamTransportError>()
+                    .map(|transport| transport.diagnostic().clone())
+                    .unwrap_or_else(|| {
+                        crate::proxy::client::TransportDiagnostic::from_error(
+                            "request",
+                            "send",
+                            false,
+                            None,
+                            None,
+                            error.as_ref(),
+                        )
+                    });
+                attempt.transport_failure(&diagnostic);
                 attempt.finish(
                     "failed",
-                    None,
+                    diagnostic.http_status,
                     Some("provider_transport_error".into()),
                     None,
                 );
-                Err(error)
+                let safe = diagnostic.to_string();
+                Err(error.context(safe))
             }
         }
     }
@@ -183,14 +228,35 @@ impl ProviderCall {
             }
             let headers = response.headers().clone();
             if status >= 400 {
-                let body_bytes = response.bytes().await.map_err(anyhow::Error::from);
+                let body_bytes = response.bytes().await.map_err(|error| {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_reqwest(
+                        "receive",
+                        false,
+                        Some(status),
+                        &error,
+                    );
+                    attempt.transport_failure(&diagnostic);
+                    anyhow::Error::new(error).context(diagnostic.to_string())
+                });
                 if let Ok(bytes) = &body_bytes {
                     attempt.wire_lazy("upstream_response", "http_body", Some(status), None, || {
                         bytes_value(bytes)
                     });
                 }
-                let body = body_bytes
-                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from));
+                let body = body_bytes.and_then(|bytes| {
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                            "response_decode",
+                            "decode",
+                            true,
+                            Some(status),
+                            None,
+                            &error,
+                        );
+                        attempt.transport_failure(&diagnostic);
+                        anyhow::Error::new(error).context(diagnostic.to_string())
+                    })
+                });
                 if outbound
                     .body
                     .get("previous_response_id")
@@ -233,6 +299,7 @@ impl ProviderCall {
                 source: ProviderStreamSource::Http(response.bytes_stream().boxed()),
                 status,
                 attempt,
+                response_event_seen: false,
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
             })));
         }

@@ -192,6 +192,7 @@ pub(crate) struct ProviderStream {
     reasoning: StreamReasoningNormalizer,
     pub status: u16,
     pub attempt: AttemptObservation,
+    response_event_seen: bool,
     response_continuation_available: Arc<AtomicBool>,
 }
 
@@ -400,6 +401,10 @@ impl AttemptObservation {
             headers: headers.map(headers_value).unwrap_or(Value::Null),
             payload,
         });
+    }
+
+    pub(crate) fn transport_failure(&self, diagnostic: &crate::proxy::client::TransportDiagnostic) {
+        self.checkpoint("transport_failure", diagnostic);
     }
 
     pub(crate) fn checkpoint<T: serde::Serialize>(&self, stage: &str, payload: &T) {
@@ -766,6 +771,13 @@ impl ProviderAdapter {
 }
 
 impl ProviderStream {
+    fn diagnostic_http_status(&self) -> u16 {
+        match &self.source {
+            ProviderStreamSource::Http(_) => self.status,
+            ProviderStreamSource::ResponsesWebSocket(stream) => stream.diagnostic_http_status(),
+        }
+    }
+
     pub(crate) fn attempt(&self) -> &AttemptObservation {
         match &self.source {
             ProviderStreamSource::ResponsesWebSocket(stream) => {
@@ -788,7 +800,19 @@ impl ProviderStream {
                 let Some(raw) = bytes.next().await else {
                     return Ok(None);
                 };
-                raw.map_err(|error| ProviderStreamError::Transport(error.to_string()))?
+                match raw {
+                    Ok(raw) => raw,
+                    Err(error) => {
+                        let diagnostic = crate::proxy::client::TransportDiagnostic::from_reqwest(
+                            "receive",
+                            self.response_event_seen,
+                            Some(self.status),
+                            &error,
+                        );
+                        self.attempt.transport_failure(&diagnostic);
+                        return Err(ProviderStreamError::Transport(diagnostic.to_string()));
+                    }
+                }
             }
             ProviderStreamSource::ResponsesWebSocket(stream) => {
                 let raw = stream.next_raw(adapter, &self.attempt, self.status).await?;
@@ -802,6 +826,7 @@ impl ProviderStream {
                 raw
             }
         };
+        self.response_event_seen = true;
         if matches!(&self.source, ProviderStreamSource::Http(_)) {
             self.attempt.wire_lazy(
                 "upstream_response",
@@ -815,30 +840,83 @@ impl ProviderStream {
             .adapter
             .normalize_stream_chunk(&raw)
             .await
-            .map_err(ProviderStreamError::Normalize)?;
-        let mut deltas = self.decoder.decode_chunk(&normalized).map_err(|error| {
-            tracing::debug!(
-                transport = "responses_websocket",
-                error = %error,
-                "failed to decode upstream WebSocket event"
-            );
-            error
-        })?;
+            .map_err(|error| {
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                    "protocol_normalize",
+                    "decode",
+                    true,
+                    Some(self.diagnostic_http_status()),
+                    None,
+                    &error,
+                );
+                self.attempt().transport_failure(&diagnostic);
+                ProviderStreamError::Normalize(error)
+            })?;
+        let mut deltas = self
+            .decoder
+            .decode_chunk(&normalized)
+            .inspect_err(|error| {
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                    "protocol_decode",
+                    "decode",
+                    true,
+                    Some(self.diagnostic_http_status()),
+                    None,
+                    error,
+                );
+                self.attempt().transport_failure(&diagnostic);
+                tracing::debug!(
+                    error = %diagnostic,
+                    "failed to decode upstream event"
+                );
+            })?;
         self.reasoning.normalize(&mut deltas, false);
         self.adapter
             .normalize_stream_deltas(&mut deltas)
             .await
-            .map_err(ProviderStreamError::Normalize)?;
+            .map_err(|error| {
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                    "protocol_normalize",
+                    "decode",
+                    true,
+                    Some(self.diagnostic_http_status()),
+                    None,
+                    &error,
+                );
+                self.attempt().transport_failure(&diagnostic);
+                ProviderStreamError::Normalize(error)
+            })?;
         Ok(Some(ProviderStreamChunk { deltas }))
     }
 
     pub(crate) async fn finish(&mut self) -> Result<Vec<AiStreamDelta>, ProviderStreamError> {
-        let mut deltas = self.decoder.finish()?;
+        let mut deltas = self.decoder.finish().inspect_err(|error| {
+            let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                "protocol_decode",
+                "decode",
+                self.response_event_seen,
+                Some(self.diagnostic_http_status()),
+                None,
+                error,
+            );
+            self.attempt().transport_failure(&diagnostic);
+        })?;
         self.reasoning.normalize(&mut deltas, true);
         self.adapter
             .normalize_stream_deltas(&mut deltas)
             .await
-            .map_err(ProviderStreamError::Normalize)?;
+            .map_err(|error| {
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                    "protocol_normalize",
+                    "decode",
+                    self.response_event_seen,
+                    Some(self.diagnostic_http_status()),
+                    None,
+                    &error,
+                );
+                self.attempt().transport_failure(&diagnostic);
+                ProviderStreamError::Normalize(error)
+            })?;
         Ok(deltas)
     }
 }

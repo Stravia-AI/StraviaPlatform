@@ -17,6 +17,7 @@ pub(super) struct ResponsesWebSocketStream {
     done_marker_sent: bool,
     done: bool,
     event_seen: bool,
+    response_event_seen: bool,
     replayed_full_request: bool,
     allow_retries: bool,
     artifact_transfers: Option<ArtifactTransfers>,
@@ -25,6 +26,7 @@ pub(super) struct ResponsesWebSocketStream {
     client: ProxyClient,
     fallback_outbound: OutboundRequest,
     http_fallback: Option<BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>>,
+    http_fallback_status: Option<u16>,
     pub(super) fallback_attempt: Option<Arc<AttemptObservation>>,
 }
 
@@ -232,7 +234,21 @@ impl ProviderCall {
                         attempt
                     };
                     if let Err(error) = lease.send_text(serialized_request).await {
-                        attempt.finish("failed", None, Some("websocket_send_error".into()), None);
+                        let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                            "websocket_transport",
+                            "send",
+                            false,
+                            Some(101),
+                            None,
+                            error.as_ref(),
+                        );
+                        attempt.transport_failure(&diagnostic);
+                        attempt.finish(
+                            "failed",
+                            Some(101),
+                            Some("websocket_send_error".into()),
+                            None,
+                        );
                         if self.allow_retries && lease.reused_connection() {
                             let trace = lease.trace();
                             tracing::warn!(
@@ -252,7 +268,7 @@ impl ProviderCall {
                             return self.http_stream(outbound).await;
                         }
                         return Ok(ProviderStreamResponse::Uncertain {
-                            message: error.to_string(),
+                            message: diagnostic.to_string(),
                         });
                     }
                     let mut fallback_outbound = websocket.full_outbound.clone();
@@ -328,7 +344,11 @@ impl ProviderCall {
                     outbound.body["stream"] = Value::Bool(true);
                     return self.http_stream(outbound).await;
                 }
-                Err(ResponsesWebSocketAcquireError::HandshakeBodyRead { status, headers }) => {
+                Err(ResponsesWebSocketAcquireError::HandshakeBodyRead {
+                    status,
+                    headers,
+                    diagnostic,
+                }) => {
                     let attempt = handshake_attempt
                         .lock()
                         .take()
@@ -340,6 +360,7 @@ impl ProviderCall {
                         Some(&headers),
                         Value::Null,
                     );
+                    attempt.transport_failure(&diagnostic);
                     attempt.gap("websocket_handshake_body_read_failed");
                     attempt.finish(
                         "failed",
@@ -350,10 +371,8 @@ impl ProviderCall {
                     if !self.allow_retries {
                         return Ok(ProviderStreamResponse::Error {
                             status,
-                            headers,
-                            body: Err(anyhow::anyhow!(
-                                "WebSocket handshake body could not be read"
-                            )),
+                            headers: *headers,
+                            body: Err(anyhow::anyhow!(diagnostic.to_string())),
                             attempt: Box::new(attempt),
                         });
                     }
@@ -365,14 +384,15 @@ impl ProviderCall {
                     outbound.body["stream"] = Value::Bool(true);
                     return self.http_stream(outbound).await;
                 }
-                Err(ResponsesWebSocketAcquireError::Transport(error)) => {
+                Err(ResponsesWebSocketAcquireError::Transport(diagnostic)) => {
                     let attempt = handshake_attempt
                         .lock()
                         .take()
                         .expect("network connect starts an observed attempt");
+                    attempt.transport_failure(&diagnostic);
                     attempt.finish("failed", None, Some("websocket_connect_error".into()), None);
                     if !self.allow_retries {
-                        return Err(anyhow::anyhow!(error));
+                        return Err(anyhow::anyhow!(diagnostic.to_string()));
                     }
                     let mut outbound = if websocket.require_affinity {
                         websocket.full_outbound.clone()
@@ -410,7 +430,18 @@ impl ProviderCall {
                     return Ok(ProviderStreamResponse::Error {
                         status,
                         headers: *headers,
-                        body: serde_json::from_slice(&body).map_err(anyhow::Error::from),
+                        body: serde_json::from_slice(&body).map_err(|error| {
+                            let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                                "response_decode",
+                                "decode",
+                                true,
+                                Some(status),
+                                None,
+                                &error,
+                            );
+                            attempt.transport_failure(&diagnostic);
+                            anyhow::Error::new(error).context(diagnostic.to_string())
+                        }),
                         attempt: Box::new(attempt),
                     });
                 }
@@ -438,18 +469,21 @@ impl ProviderCall {
                 done: false,
                 done_marker_sent: false,
                 event_seen: false,
+                response_event_seen: false,
                 replayed_full_request: false,
                 allow_retries: self.allow_retries,
                 artifact_transfers: self.artifact_transfers.clone(),
                 client: self.client.clone(),
                 fallback_outbound,
                 http_fallback: None,
+                http_fallback_status: None,
                 fallback_attempt: None,
                 full_request,
                 websocket_url,
             })),
             status: 200,
             attempt,
+            response_event_seen: false,
             response_continuation_available,
         })))
     }
@@ -460,6 +494,10 @@ impl ResponsesWebSocketStream {
         self.http_fallback.is_some()
     }
 
+    pub(super) fn diagnostic_http_status(&self) -> u16 {
+        self.http_fallback_status.unwrap_or(101)
+    }
+
     pub(super) async fn next_raw(
         &mut self,
         adapter: &ProviderAdapter,
@@ -467,29 +505,38 @@ impl ResponsesWebSocketStream {
         status: u16,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
         if let Some(stream) = &mut self.http_fallback {
+            let fallback_status = self.http_fallback_status.unwrap_or(status);
             return match stream.next().await {
                 Some(Ok(bytes)) => {
                     if let Some(fallback_attempt) = &self.fallback_attempt {
                         fallback_attempt.wire_lazy(
                             "upstream_response",
                             "sse_chunk",
-                            Some(status),
+                            Some(fallback_status),
                             None,
                             || bytes_value(&bytes),
                         );
                     }
+                    self.response_event_seen = true;
                     Ok(Some(bytes))
                 }
                 Some(Err(error)) => {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_reqwest(
+                        "receive",
+                        self.response_event_seen,
+                        Some(fallback_status),
+                        &error,
+                    );
                     if let Some(fallback_attempt) = &self.fallback_attempt {
+                        fallback_attempt.transport_failure(&diagnostic);
                         fallback_attempt.finish(
                             "failed",
-                            None,
+                            Some(fallback_status),
                             Some("provider_transport_error".into()),
                             None,
                         );
                     }
-                    Err(ProviderStreamError::Transport(error.to_string()))
+                    Err(ProviderStreamError::Transport(diagnostic.to_string()))
                 }
                 None => Ok(None),
             };
@@ -507,23 +554,35 @@ impl ResponsesWebSocketStream {
             let message = match self.lease.next().await {
                 Some(Ok(message)) => message,
                 Some(Err(error)) => {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                        "websocket_transport",
+                        "receive",
+                        self.response_event_seen,
+                        Some(101),
+                        None,
+                        &error,
+                    );
                     return self
-                        .recover_reused_connection(adapter, attempt, "receive", error.to_string())
+                        .recover_reused_connection(adapter, attempt, diagnostic)
                         .await;
                 }
                 None => {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_message(
+                        "websocket_eof",
+                        "receive",
+                        self.response_event_seen,
+                        Some(101),
+                        None,
+                        "Responses WebSocket closed before a terminal event",
+                    );
                     return self
-                        .recover_reused_connection(
-                            adapter,
-                            attempt,
-                            "receive",
-                            "Responses WebSocket closed before a terminal event".into(),
-                        )
+                        .recover_reused_connection(adapter, attempt, diagnostic)
                         .await;
                 }
             };
             let text = match message {
                 reqwest_websocket::Message::Text(text) => {
+                    self.response_event_seen = true;
                     attempt.wire_lazy("upstream_response", "text", Some(status), None, || {
                         Value::String(text.to_string())
                     });
@@ -542,39 +601,63 @@ impl ResponsesWebSocketStream {
                     continue;
                 }
                 reqwest_websocket::Message::Close { code, reason } => {
+                    let close_code = format!("{code:?}");
                     attempt.wire_lazy(
                         "upstream_response",
                         "close",
                         Some(status),
                         None,
-                        || serde_json::json!({"code": format!("{code:?}"), "reason": reason.to_string()}),
+                        || serde_json::json!({"code": close_code, "reason": reason.to_string()}),
                     );
+                    let diagnostic =
+                        websocket_close_diagnostic(code, &reason, self.response_event_seen);
                     return self
-                        .recover_reused_connection(
-                            adapter,
-                            attempt,
-                            "receive",
-                            "Responses WebSocket closed before a terminal event".into(),
-                        )
+                        .recover_reused_connection(adapter, attempt, diagnostic)
                         .await;
                 }
                 reqwest_websocket::Message::Binary(bytes) => {
+                    self.response_event_seen = true;
                     attempt.wire_lazy("upstream_response", "binary", Some(status), None, || {
                         bytes_value(&bytes)
                     });
-                    return Err(ProviderStreamError::Uncertain(
-                        "Responses WebSocket returned a binary event".into(),
-                    ));
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_message(
+                        "protocol_frame",
+                        "decode",
+                        true,
+                        Some(101),
+                        None,
+                        "Responses WebSocket returned a binary event",
+                    );
+                    attempt.transport_failure(&diagnostic);
+                    return Err(ProviderStreamError::Uncertain(diagnostic.to_string()));
                 }
             };
             let mut value: Value = serde_json::from_str(&text).map_err(|error| {
-                ProviderStreamError::Uncertain(format!(
-                    "Responses WebSocket returned invalid JSON: {error}"
-                ))
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                    "protocol_decode",
+                    "decode",
+                    true,
+                    Some(101),
+                    None,
+                    &error,
+                );
+                attempt.transport_failure(&diagnostic);
+                ProviderStreamError::Uncertain(diagnostic.to_string())
             })?;
             adapter
                 .normalize_responses_websocket_event(&mut value)
-                .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?;
+                .map_err(|error| {
+                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                        "protocol_normalize",
+                        "decode",
+                        true,
+                        Some(101),
+                        None,
+                        error.as_ref(),
+                    );
+                    attempt.transport_failure(&diagnostic);
+                    ProviderStreamError::Uncertain(diagnostic.to_string())
+                })?;
             if !adapter.retain_responses_websocket_event(&value) {
                 continue;
             }
@@ -648,13 +731,22 @@ impl ResponsesWebSocketStream {
                         || Value::String(replay_text.clone()),
                     ));
                     if let Err(error) = self.lease.send_text(replay_text).await {
+                        let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
+                            "websocket_transport",
+                            "send",
+                            self.response_event_seen,
+                            Some(101),
+                            None,
+                            error.as_ref(),
+                        );
+                        replay_attempt.transport_failure(&diagnostic);
                         replay_attempt.finish(
                             "failed",
-                            None,
+                            Some(101),
                             Some("websocket_send_error".into()),
                             None,
                         );
-                        return Err(ProviderStreamError::Uncertain(error.to_string()));
+                        return Err(ProviderStreamError::Uncertain(diagnostic.to_string()));
                     }
                     self.fallback_attempt = Some(replay_attempt);
                     self.replayed_full_request = true;
@@ -708,11 +800,11 @@ impl ResponsesWebSocketStream {
         &mut self,
         adapter: &ProviderAdapter,
         attempt: &AttemptObservation,
-        failure_stage: &'static str,
-        error: String,
+        diagnostic: crate::proxy::client::TransportDiagnostic,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
+        attempt.transport_failure(&diagnostic);
         if !self.allow_retries || self.event_seen || !self.lease.reused_connection() {
-            return Err(ProviderStreamError::Uncertain(error));
+            return Err(ProviderStreamError::Uncertain(diagnostic.to_string()));
         }
         let trace = self.lease.trace();
         tracing::warn!(
@@ -720,14 +812,14 @@ impl ResponsesWebSocketStream {
             provider_id = trace.provider_id,
             target_id = trace.target_id,
             transport_attempt = trace.transport_attempt,
-            failure_stage,
+            failure_stage = diagnostic.stage.as_str(),
             fallback_transport = "http_sse",
             "reused upstream WebSocket failed before a response; retrying silently"
         );
         attempt.wire("upstream_request", "close", None, None, Value::Null);
         attempt.finish(
             "failed",
-            None,
+            diagnostic.http_status,
             Some("websocket_connection_error".into()),
             None,
         );
@@ -776,13 +868,27 @@ impl ResponsesWebSocketStream {
         let (response, status) = match result {
             Ok(response) => response,
             Err(error) => {
+                let diagnostic = error
+                    .downcast_ref::<crate::proxy::client::UpstreamTransportError>()
+                    .map(|transport| transport.diagnostic().clone())
+                    .unwrap_or_else(|| {
+                        crate::proxy::client::TransportDiagnostic::from_error(
+                            "request",
+                            "send",
+                            false,
+                            None,
+                            None,
+                            error.as_ref(),
+                        )
+                    });
+                fallback_attempt.transport_failure(&diagnostic);
                 fallback_attempt.finish(
                     "failed",
-                    None,
+                    diagnostic.http_status,
                     Some("provider_transport_error".into()),
                     None,
                 );
-                return Err(ProviderStreamError::Transport(error.to_string()));
+                return Err(ProviderStreamError::Transport(diagnostic.to_string()));
             }
         };
         fallback_attempt.wire(
@@ -799,6 +905,8 @@ impl ResponsesWebSocketStream {
             )));
         }
         self.fallback_attempt = Some(fallback_attempt);
+        self.http_fallback_status = Some(status);
+        self.response_event_seen = false;
         self.http_fallback = Some(response.bytes_stream().boxed());
         let stream = self
             .http_fallback
@@ -811,18 +919,26 @@ impl ResponsesWebSocketStream {
                         bytes_value(&bytes)
                     });
                 }
+                self.response_event_seen = true;
                 Ok(Some(bytes))
             }
             Some(Err(error)) => {
+                let diagnostic = crate::proxy::client::TransportDiagnostic::from_reqwest(
+                    "receive",
+                    false,
+                    Some(status),
+                    &error,
+                );
                 if let Some(attempt) = &self.fallback_attempt {
+                    attempt.transport_failure(&diagnostic);
                     attempt.finish(
                         "failed",
-                        None,
+                        Some(status),
                         Some("provider_transport_error".into()),
                         None,
                     );
                 }
-                Err(ProviderStreamError::Transport(error.to_string()))
+                Err(ProviderStreamError::Transport(diagnostic.to_string()))
             }
             None => Ok(None),
         }
@@ -845,6 +961,21 @@ fn responses_websocket_url(http_url: &str) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
+fn websocket_close_diagnostic(
+    code: reqwest_websocket::CloseCode,
+    reason: &str,
+    has_received_response_event: bool,
+) -> crate::proxy::client::TransportDiagnostic {
+    crate::proxy::client::TransportDiagnostic::from_message(
+        "websocket_close",
+        "receive",
+        has_received_response_event,
+        Some(101),
+        Some(code.to_string()),
+        format!("Responses WebSocket closed before a terminal event: {reason}"),
+    )
+}
+
 fn responses_websocket_terminal(event_type: &str, value: &Value) -> bool {
     matches!(
         event_type,
@@ -860,4 +991,28 @@ fn response_completed(event_type: &str, value: &Value) -> bool {
     event_type == "response.completed"
         || (event_type == "response.done"
             && value.pointer("/response/status").and_then(Value::as_str) == Some("completed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn early_websocket_close_preserves_code_response_state_and_redacts_reason_url() {
+        let diagnostic = websocket_close_diagnostic(
+            reqwest_websocket::CloseCode::Policy,
+            "denied by https://close-user:close-password@example.test/path?token=close-secret",
+            false,
+        );
+        let rendered = diagnostic.to_string();
+
+        assert_eq!(diagnostic.stage, "receive");
+        assert!(!diagnostic.has_received_response_event);
+        assert_eq!(diagnostic.http_status, Some(101));
+        assert_eq!(diagnostic.websocket_close_code.as_deref(), Some("1008"));
+        assert!(rendered.contains("websocket_close_code=1008"));
+        for secret in ["close-user", "close-password", "close-secret"] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+    }
 }

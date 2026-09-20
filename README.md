@@ -132,6 +132,7 @@ Retryable failures exhaust a configurable per-target budget before cooldown (def
 - Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
 - See the token usage and provider quotas that services actually report.
 - Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
+- Transport failure diagnostics retain the failure stage and available underlying causes, with redaction and explicit length limits. Debug capture reassembles Command Code NDJSON records across network chunks, including split UTF-8, and marks incomplete tails rather than silently treating them as complete.
 
 ### Credential protection
 
