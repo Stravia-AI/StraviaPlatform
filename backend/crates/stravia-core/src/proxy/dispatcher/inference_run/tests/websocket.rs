@@ -43,8 +43,7 @@ async fn precommit_connection_limit_falls_back_to_http_on_the_same_target() {
 
 #[tokio::test]
 async fn stale_reused_websocket_falls_back_then_retries_websocket() {
-    let (base_url, websocket_connections, http_requests, websocket_closed) =
-        serve_stale_websocket_fallback().await;
+    let (base_url, websocket_connections, http_requests) = serve_stale_websocket_fallback().await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -75,7 +74,6 @@ async fn stale_reused_websocket_falls_back_then_retries_websocket() {
         String::from_utf8_lossy(&first_body)
     );
     assert!(String::from_utf8_lossy(&first_body).contains("websocket first"));
-    websocket_closed.notified().await;
 
     let second = execute_protocol_request_with_session(
         gateway.clone(),

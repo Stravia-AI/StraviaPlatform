@@ -124,6 +124,24 @@ impl VendorExtension for OpenAiCodexChannel {
             HeaderName::from_static("x-client-request-id"),
             HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())?,
         );
+        // Codex HTTP 400s generation fields outside the Responses subset it
+        // accepts, so strip them here where HTTP fallback and the WebSocket
+        // frame share the post-encoded body. `service_tier` stays: meaningful
+        // tiers are still sent over HTTP and feed the routing hint below.
+        if let Some(object) = body.as_object_mut() {
+            for field in [
+                "frequency_penalty",
+                "presence_penalty",
+                "temperature",
+                "top_p",
+                "top_logprobs",
+                "truncation",
+                "max_output_tokens",
+                "max_tool_calls",
+            ] {
+                object.remove(field);
+            }
+        }
         // Codex HTTP 400s `service_tier: auto` (response echo / inherited).
         // Drop it before the routing hint so HTTP fallback matches WebSocket.
         if body.get("service_tier").and_then(serde_json::Value::as_str) == Some("auto")
@@ -158,22 +176,14 @@ impl VendorExtension for OpenAiCodexChannel {
         connection: ResponsesWebSocketConnectionMetadata<'_>,
     ) -> anyhow::Result<serde_json::Value> {
         let mut request = super::openai_responses_websocket_request(body)?;
+        // The unsupported generation fields are already stripped from the
+        // shared post-encoded body; `service_tier` must additionally never
+        // reach the WebSocket frame even when a meaningful tier was kept for
+        // HTTP and the routing hint.
         let object = request
             .as_object_mut()
             .expect("OpenAI Responses WebSocket request is an object");
-        for field in [
-            "frequency_penalty",
-            "presence_penalty",
-            "temperature",
-            "top_p",
-            "top_logprobs",
-            "truncation",
-            "max_output_tokens",
-            "max_tool_calls",
-            "service_tier",
-        ] {
-            object.remove(field);
-        }
+        object.remove("service_tier");
         request["client_metadata"] = serde_json::json!({
             "session_id": connection.session_id,
             "thread_id": connection.thread_id,
@@ -475,6 +485,21 @@ mod tests {
             .await
             .expect("post-encode");
         assert_eq!(body["store"], false);
+        // The same post-encoded body is sent verbatim by the HTTP fallback,
+        // so the fields Codex rejects must already be gone here.
+        for field in [
+            "frequency_penalty",
+            "presence_penalty",
+            "temperature",
+            "top_p",
+            "top_logprobs",
+            "truncation",
+            "max_output_tokens",
+            "max_tool_calls",
+        ] {
+            assert!(body.get(field).is_none(), "{field}");
+        }
+        assert_eq!(body["service_tier"], "default");
         assert_eq!(
             headers
                 .get("openai-beta")
@@ -535,6 +560,7 @@ mod tests {
             "truncation",
             "max_output_tokens",
             "max_tool_calls",
+            "service_tier",
         ] {
             assert!(websocket_request.get(field).is_none(), "{field}");
         }
@@ -552,26 +578,32 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
         );
+        // Continuation bodies reach the WebSocket hook through post_encode
+        // too; an `auto` tier must vanish from both wire formats while the
+        // rest of the cleanup is inherited from the shared body.
+        let mut continuation_body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "previous_response_id": "resp_parent",
+            "input": [],
+            "store": false,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+            "temperature": 1.0,
+            "top_p": 0.98,
+            "top_logprobs": 0,
+            "truncation": "disabled",
+            "max_output_tokens": 100,
+            "max_tool_calls": 10,
+            "service_tier": "auto",
+            "instructions": "stable"
+        });
+        let mut continuation_headers = HeaderMap::new();
+        OpenAiCodexChannel
+            .post_encode(&context, &mut continuation_body, &mut continuation_headers)
+            .await
+            .expect("continuation post-encode");
         let continuation = OpenAiCodexChannel
-            .responses_websocket_request(
-                &context,
-                &serde_json::json!({
-                    "previous_response_id": "resp_parent",
-                    "input": [],
-                    "store": false,
-                    "frequency_penalty": 0.0,
-                    "presence_penalty": 0.0,
-                    "temperature": 1.0,
-                    "top_p": 0.98,
-                    "top_logprobs": 0,
-                    "truncation": "disabled",
-                    "max_output_tokens": 100,
-                    "max_tool_calls": 10,
-                    "service_tier": "auto",
-                    "instructions": "stable"
-                }),
-                connection,
-            )
+            .responses_websocket_request(&context, &continuation_body, connection)
             .expect("continuation WebSocket request");
         for field in [
             "frequency_penalty",

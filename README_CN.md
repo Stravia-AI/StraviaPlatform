@@ -109,7 +109,9 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 
 Devin 保留不同的完成原因，以及可在来源兼容时回放的签名或隐藏思考，包括晚于正文到达的签名。多轮回放保留原用户消息和工具结果中的图片；即使客户端把思考排到工具调用之后，也会保持调用与结果紧邻。Custom 工具的原始文本由 JSON `input` 字符串承载，不再丢弃。Anthropic 请求中显式的 `output_config.effort` 优先于 `thinking.type` 及其 token 预算。
 
-Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭该项，保留晚到签名，不再拖到整轮结束，也不会重复发送完成事件。
+Codex OAuth 在 HTTP、WebSocket 及 HTTP 回退请求中统一省略不支持的采样与输出控制参数（`temperature`、`top_p`、`presence_penalty`、`frequency_penalty`、`top_logprobs`、`truncation`、`max_output_tokens`、`max_tool_calls`）。Devin 将零值 `presence_penalty`、`frequency_penalty` 视为未设置；非零 penalty、`seed` 和 `stop` 仍明确返回不支持参数的错误。
+
+Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭该项，保留晚到签名，不再拖到整轮结束，也不会重复发送完成事件。保留的上游 Responses WebSocket 连接在请求间空闲时继续处理 Ping 和 Close；发现对端关闭或意外的空闲数据后，先移除连接及其续接亲和，避免再次借出，健康连接仍可复用。
 
 客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
 

@@ -3499,7 +3499,6 @@ async fn serve_connection_limit_fallback() -> (String, Arc<AtomicUsize>, Arc<Ato
 struct StaleWebSocketFixture {
     websocket_connections: Arc<AtomicUsize>,
     http_requests: Arc<AtomicUsize>,
-    websocket_closed: Arc<tokio::sync::Notify>,
 }
 
 async fn stale_websocket_handler(
@@ -3526,8 +3525,14 @@ async fn stale_websocket_handler(
                     .expect("send Responses WebSocket event");
             }
         }
-        drop(socket);
-        fixture.websocket_closed.notify_one();
+        // Close only after the next request reaches this reused connection.
+        // Idle peer closures are now retired before checkout; this exercises
+        // the remaining race after checkout and before any response event.
+        while let Some(Ok(frame)) = socket.recv().await {
+            if matches!(frame, AxumWebSocketMessage::Text(_)) {
+                break;
+            }
+        }
     })
 }
 
@@ -3541,23 +3546,16 @@ async fn stale_websocket_http_handler(
     )
 }
 
-async fn serve_stale_websocket_fallback() -> (
-    String,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<tokio::sync::Notify>,
-) {
+async fn serve_stale_websocket_fallback() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stale WebSocket provider");
     let address = listener.local_addr().expect("provider address");
     let websocket_connections = Arc::new(AtomicUsize::new(0));
     let http_requests = Arc::new(AtomicUsize::new(0));
-    let websocket_closed = Arc::new(tokio::sync::Notify::new());
     let fixture = StaleWebSocketFixture {
         websocket_connections: websocket_connections.clone(),
         http_requests: http_requests.clone(),
-        websocket_closed: websocket_closed.clone(),
     };
     let app = Router::new()
         .route(
@@ -3574,7 +3572,6 @@ async fn serve_stale_websocket_fallback() -> (
         format!("http://{address}/v1"),
         websocket_connections,
         http_requests,
-        websocket_closed,
     )
 }
 

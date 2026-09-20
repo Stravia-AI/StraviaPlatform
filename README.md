@@ -109,7 +109,9 @@ OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemi
 
 Devin preserves distinct completion reasons and signed or redacted thinking for compatible-source replay, including signatures received after the answer. Multi-turn replay retains images in their original user messages and tool results, and keeps tool calls adjacent to their results even when a client returns thinking after the call. Custom tool text is carried as a JSON `input` string rather than discarded. For Anthropic requests, an explicit `output_config.effort` takes precedence over `thinking.type` and its token budget.
 
-Responses streams close each indexed reasoning item when its authoritative completion arrives, retaining late signatures without deferring the item to the end of the response or emitting duplicate completion events.
+Codex OAuth omits unsupported sampling and output controls (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `top_logprobs`, `truncation`, `max_output_tokens`, and `max_tool_calls`) from both HTTP and WebSocket requests, including HTTP fallback. Devin accepts zero `presence_penalty` and `frequency_penalty` as absent; nonzero penalties, `seed`, and `stop` remain explicit unsupported-parameter errors.
+
+Responses streams close each indexed reasoning item when its authoritative completion arrives, retaining late signatures without deferring the item to the end of the response or emitting duplicate completion events. Retained upstream Responses WebSocket connections continue handling Ping and Close frames between requests. Peer closure or unexpected idle data retires the connection and its continuation affinity before reuse; healthy connections remain reusable.
 
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
