@@ -212,13 +212,22 @@ pub(crate) fn encode_get_chat_message_request(
     if req.embedding.is_some() {
         bail!("Devin Connect does not expose an embeddings endpoint");
     }
+    // A zero penalty (±0.0) is a no-op upstreams often send unconditionally
+    // — encode it as absent. A nonzero value would change sampling, which
+    // the wire cannot express, so it stays a hard rejection.
     if req.generation.seed.is_some()
-        || req.generation.presence_penalty.is_some()
-        || req.generation.frequency_penalty.is_some()
+        || req
+            .generation
+            .presence_penalty
+            .is_some_and(|penalty| penalty != 0.0)
+        || req
+            .generation
+            .frequency_penalty
+            .is_some_and(|penalty| penalty != 0.0)
         || req.generation.stop.is_some()
     {
         bail!(
-            "Devin Connect cannot represent seed, presence_penalty, frequency_penalty, or stop sequences"
+            "Devin Connect cannot represent seed, nonzero presence/frequency penalties, or stop sequences"
         );
     }
     if req.response_format.is_some() {
@@ -2128,6 +2137,47 @@ mod tests {
         let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
         req.generation.seed = Some(1);
         assert!(encode_get_chat_message_request(&req, "t", &shape(&req), None).is_err());
+
+        // A nonzero penalty changes sampling and must not be dropped
+        // silently — the wire cannot express it.
+        let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        req.generation.presence_penalty = Some(0.5);
+        assert!(encode_get_chat_message_request(&req, "t", &shape(&req), None).is_err());
+
+        let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        req.generation.frequency_penalty = Some(-0.5);
+        assert!(encode_get_chat_message_request(&req, "t", &shape(&req), None).is_err());
+    }
+
+    /// Zero penalties (including -0.0) are sampling no-ops upstreams send
+    /// unconditionally — they preserve the absent-field sampling configuration.
+    #[test]
+    fn zero_penalties_encode_as_absent() {
+        let fixed = SessionShape {
+            trajectory_id: "11111111-1111-1111-1111-111111111111".into(),
+            cascade_id: "22222222-2222-2222-2222-222222222222".into(),
+            step_index: 0,
+        };
+        let plain = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        let baseline = encode_get_chat_message_request(&plain, "tok", &fixed, None).unwrap();
+
+        let mut zeroed = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        zeroed.generation.presence_penalty = Some(0.0);
+        zeroed.generation.frequency_penalty = Some(-0.0);
+        let encoded = encode_get_chat_message_request(&zeroed, "tok", &fixed, None).unwrap();
+        // ChatMessage UUIDs are fresh per encoding; compare the sampling
+        // configuration rather than those unrelated message identities.
+        let baseline_config = parse_fields(&baseline)
+            .unwrap()
+            .into_iter()
+            .find(|field| field.number == 8)
+            .expect("sampling configuration");
+        let encoded_config = parse_fields(&encoded)
+            .unwrap()
+            .into_iter()
+            .find(|field| field.number == 8)
+            .expect("sampling configuration");
+        assert_eq!(encoded_config.bytes, baseline_config.bytes);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod lifecycle_tests;
+
 const RESPONSES_WEBSOCKET_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const RESPONSES_WEBSOCKET_TRANSIENT_COOLDOWN: std::time::Duration =
     std::time::Duration::from_secs(15);
@@ -71,7 +74,49 @@ struct ResponsesWebSocketConnectionRecord {
     provider_id: String,
     target_id: String,
     transport_attempt: String,
+    /// Read pump that services the socket while it is retained but no lease
+    /// owns it (answers Ping, notices peer Close / stray late frames). Stopped
+    /// before any checkout contends the socket lock.
+    idle: Option<tokio::task::JoinHandle<()>>,
+    /// Acquire calls parked between "idle reader stopped" and "socket owned
+    /// (or cancelled)". While nonzero, nobody may spawn a new idle reader —
+    /// the last waiter to leave restores it.
+    checkout_waiters: usize,
 }
+
+impl Drop for ResponsesWebSocketConnectionRecord {
+    fn drop(&mut self) {
+        if let Some(idle) = self.idle.take() {
+            idle.abort();
+        }
+    }
+}
+
+/// RAII marker for an in-flight `acquire` checkout: decrement on every exit
+/// path, and when the last waiter leaves without claiming the socket, resume
+/// the idle reader so the retained connection never goes unserviced.
+struct ResponsesWebSocketCheckout<'a> {
+    registry: &'a ResponsesWebSocketRegistry,
+    connection_id: &'a str,
+    /// `false` once the socket was handed to a lease — the lease's own drop
+    /// path decides whether to re-park the connection.
+    resume_idle: bool,
+}
+
+impl Drop for ResponsesWebSocketCheckout<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.registry.state.lock();
+            if let Some(record) = state.connections.get_mut(self.connection_id) {
+                record.checkout_waiters -= 1;
+            }
+        }
+        if self.resume_idle {
+            self.registry.service_idle_connection(self.connection_id);
+        }
+    }
+}
+
 struct ResponsesWebSocketConnection {
     socket: reqwest_websocket::WebSocket,
     tip: Option<String>,
@@ -214,54 +259,103 @@ impl ResponsesWebSocketRegistry {
         };
 
         if let Some((connection_id, connection, matched_response)) = affinity {
-            let connection = connection.lock_owned().await;
-            let still_current = {
-                let state = self.state.lock();
-                state.connections.contains_key(&connection_id)
-                    && if matched_response {
-                        response_affinity
-                            .as_ref()
-                            .is_some_and(|key| state.affinity.get(key) == Some(&connection_id))
-                    } else {
-                        session_affinity_key
-                            .as_ref()
-                            .is_some_and(|key| state.affinity.get(key) == Some(&connection_id))
+            // Stop the idle reader before contending the socket lock, and
+            // register as a waiter. If this acquire is cancelled while parked,
+            // the RAII guard decrements and — when it was the last waiter —
+            // restarts the reader so the retained socket is never unserviced.
+            let registered = {
+                let mut state = self.state.lock();
+                if let Some(record) = state.connections.get_mut(&connection_id) {
+                    if let Some(idle) = record.idle.take() {
+                        idle.abort();
                     }
+                    record.checkout_waiters += 1;
+                    true
+                } else {
+                    false
+                }
             };
-            if still_current {
-                let reusable_previous = previous_response_id
-                    .filter(|previous| connection.tip.as_deref() == Some(*previous));
+            if registered {
+                let mut checkout = ResponsesWebSocketCheckout {
+                    registry: self,
+                    connection_id: &connection_id,
+                    resume_idle: true,
+                };
+                let mut connection = connection.lock_owned().await;
+                let still_current = {
+                    let state = self.state.lock();
+                    state.connections.contains_key(&connection_id)
+                        && if matched_response {
+                            response_affinity
+                                .as_ref()
+                                .is_some_and(|key| state.affinity.get(key) == Some(&connection_id))
+                        } else {
+                            session_affinity_key
+                                .as_ref()
+                                .is_some_and(|key| state.affinity.get(key) == Some(&connection_id))
+                        }
+                };
+                // The idle pump may have been stopped while the peer still had
+                // frames in flight; anything already readable here is residual
+                // idle traffic, not part of the next turn — drain it without
+                // blocking. A data frame, Close, EOF or transport error retires
+                // the connection; Ping/Pong are answered/skipped.
+                let mut clean = still_current;
+                if clean {
+                    clean = drain_idle_frames(&mut connection);
+                }
+                if clean {
+                    // The lease now decides whether the connection is parked again.
+                    checkout.resume_idle = false;
+                    drop(checkout);
+                    let reusable_previous = previous_response_id
+                        .filter(|previous| connection.tip.as_deref() == Some(*previous));
+                    tracing::debug!(
+                        transport = "responses_websocket",
+                        target_namespace = namespace,
+                        provider_id = trace.provider_id,
+                        target_id = trace.target_id,
+                        transport_attempt = trace.transport_attempt,
+                        continuation = true,
+                        "reusing upstream connection"
+                    );
+                    return Ok(ResponsesWebSocketLease {
+                        registry: self.clone(),
+                        namespace: namespace.to_owned(),
+                        connection_id,
+                        provider_id: trace.provider_id.to_owned(),
+                        target_id: trace.target_id.to_owned(),
+                        transport_attempt: trace.transport_attempt.to_owned(),
+                        connection,
+                        previous_response_id: reusable_previous.map(str::to_owned),
+                        session_affinity: session_affinity.map(str::to_owned),
+                        reused_connection: true,
+                        handshake_headers: HeaderMap::new(),
+                        terminal: false,
+                    });
+                }
                 tracing::debug!(
-                    transport = "responses_websocket",
                     target_namespace = namespace,
                     provider_id = trace.provider_id,
                     target_id = trace.target_id,
                     transport_attempt = trace.transport_attempt,
-                    continuation = true,
-                    "reusing upstream connection"
+                    "Responses WebSocket affinity tip changed while queued; opening a new connection"
                 );
-                return Ok(ResponsesWebSocketLease {
-                    registry: self.clone(),
-                    namespace: namespace.to_owned(),
-                    connection_id,
-                    provider_id: trace.provider_id.to_owned(),
-                    target_id: trace.target_id.to_owned(),
-                    transport_attempt: trace.transport_attempt.to_owned(),
-                    connection,
-                    previous_response_id: reusable_previous.map(str::to_owned),
-                    session_affinity: session_affinity.map(str::to_owned),
-                    reused_connection: true,
-                    handshake_headers: HeaderMap::new(),
-                    terminal: false,
-                });
+                if still_current {
+                    // The socket was still registered but the drain found residual
+                    // idle traffic (data frame, Close, EOF, transport error):
+                    // retire it so the affinity cannot hand it out again. The
+                    // record drop stops any lingering pump; the guard release
+                    // then closes the socket.
+                    let mut state = self.state.lock();
+                    if state.connections.remove(&connection_id).is_some() {
+                        state
+                            .affinity
+                            .retain(|_, candidate| candidate != &connection_id);
+                    }
+                }
+                drop(connection);
             }
-            tracing::debug!(
-                target_namespace = namespace,
-                provider_id = trace.provider_id,
-                target_id = trace.target_id,
-                transport_attempt = trace.transport_attempt,
-                "Responses WebSocket affinity tip changed while queued; opening a new connection"
-            );
         }
 
         let connection_value = |name: &str| {
@@ -353,28 +447,50 @@ impl ResponsesWebSocketRegistry {
                     target_id: trace.target_id.to_owned(),
                     transport_attempt: trace.transport_attempt.to_owned(),
                     created_at: tokio::time::Instant::now(),
+                    idle: None,
+                    checkout_waiters: 0,
                 },
             );
             if let Some(key) = session_affinity_key {
                 state.affinity.insert(key, connection_id.clone());
             }
         }
-        let expiry_registry = self.clone();
+        // Weak so the timer never keeps the registry alive; dropping the
+        // registry must reap its connections deterministically.
+        let expiry_state = std::sync::Arc::downgrade(&self.state);
         let expiry_connection_id = connection_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RESPONSES_WEBSOCKET_MAX_AGE).await;
+            let Some(state) = expiry_state.upgrade() else {
+                return;
+            };
             let removed = {
-                let mut state = expiry_registry.state.lock();
+                let mut state = state.lock();
                 let removed = state.connections.remove(&expiry_connection_id);
                 state
                     .affinity
                     .retain(|_, candidate| candidate != &expiry_connection_id);
                 removed
             };
-            if let Some(record) = removed {
+            if let Some(mut record) = removed {
+                // Stop the idle reader first so it cannot contend the lock
+                // we are about to take or interfere with the close.
+                if let Some(idle) = record.idle.take() {
+                    idle.abort();
+                }
                 let mut connection = record.connection.lock().await;
                 connection.tip = None;
-                let _ = futures::SinkExt::close(&mut connection.socket).await;
+                if let Err(error) = futures::SinkExt::close(&mut connection.socket).await {
+                    tracing::debug!(
+                        transport = "responses_websocket",
+                        target_namespace = record.namespace,
+                        provider_id = record.provider_id,
+                        target_id = record.target_id,
+                        transport_attempt = record.transport_attempt,
+                        error = %error,
+                        "failed to send WebSocket close on max-age expiry"
+                    );
+                }
                 tracing::debug!(
                     transport = "responses_websocket",
                     target_namespace = record.namespace,
@@ -449,6 +565,130 @@ impl ResponsesWebSocketRegistry {
             "invalidated upstream continuation affinity"
         );
     }
+
+    /// Park a registered, unowned connection: spawn the idle read pump that
+    /// answers upstream Ping and notices peer Close / stray late frames.
+    /// No-op while the record is gone, a pump already runs, or a checkout is
+    /// waiting for the socket lock — the last waiter to leave calls this.
+    fn service_idle_connection(&self, connection_id: &str) {
+        let mut state = self.state.lock();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            state.connections.remove(connection_id);
+            state
+                .affinity
+                .retain(|_, candidate| candidate != connection_id);
+            return;
+        };
+        let Some(record) = state.connections.get_mut(connection_id) else {
+            return;
+        };
+        if record.idle.is_some() || record.checkout_waiters != 0 {
+            return;
+        }
+        // Register the task under the same lock as the eligibility check.
+        // Otherwise a checkout can miss an unregistered reader owning its socket.
+        record.idle = Some(runtime.spawn(idle_connection_pump(
+            std::sync::Arc::downgrade(&self.state),
+            connection_id.to_owned(),
+            record.connection.clone(),
+        )));
+    }
+}
+
+/// Idle read pump for a retained, unowned connection.
+///
+/// Owns the socket lock while parked. Control frames are answered by the
+/// transport (tungstenite auto-pongs Ping); anything else — a late data frame,
+/// a peer Close, EOF, or a transport error — retires the connection: it is
+/// removed from the registry, all affinities cleared, and the socket closed
+/// so no stale wire can be handed to a later acquire.
+///
+/// Cancellation (abort) is safe at any await: `Mutex::lock` and
+/// `StreamExt::next` drop the guard cleanly — aborting while a read is in
+/// flight leaves the socket inside the mutex untouched for the next owner.
+async fn idle_connection_pump(
+    state: std::sync::Weak<parking_lot::Mutex<ResponsesWebSocketRegistryState>>,
+    connection_id: String,
+    connection: std::sync::Arc<tokio::sync::Mutex<ResponsesWebSocketConnection>>,
+) {
+    use futures::{SinkExt, StreamExt};
+    let mut connection = connection.lock().await;
+    let close_reason = loop {
+        match connection.socket.next().await {
+            // Pings are auto-ponged by tungstenite; Pongs need no action.
+            Some(Ok(reqwest_websocket::Message::Ping(_)))
+            | Some(Ok(reqwest_websocket::Message::Pong(_))) => {}
+            Some(Ok(reqwest_websocket::Message::Text(_)))
+            | Some(Ok(reqwest_websocket::Message::Binary(_))) => break "idle_frame",
+            Some(Ok(reqwest_websocket::Message::Close { .. })) => break "peer_close",
+            Some(Err(error)) => {
+                tracing::debug!(transport = "responses_websocket", connection_id, error = %error, "idle WebSocket read failed");
+                break "transport_error";
+            }
+            None => break "eof",
+        }
+    };
+    // Self-detach: remove our own handle first so the record drop below does
+    // not abort this task mid-teardown.
+    let removed = state.upgrade().and_then(|state| {
+        let mut state = state.lock();
+        if let Some(record) = state.connections.get_mut(&connection_id)
+            && record
+                .idle
+                .as_ref()
+                .is_some_and(|idle| idle.id() == tokio::task::id())
+        {
+            record.idle = None;
+        }
+        let removed = state.connections.remove(&connection_id);
+        state
+            .affinity
+            .retain(|_, candidate| candidate != &connection_id);
+        removed
+    });
+    connection.tip = None;
+    if let Err(error) = SinkExt::close(&mut connection.socket).await {
+        tracing::debug!(
+            transport = "responses_websocket",
+            connection_id,
+            error = %error,
+            "failed to send WebSocket close while retiring idle connection"
+        );
+    }
+    if let Some(record) = removed {
+        tracing::debug!(
+            transport = "responses_websocket",
+            target_namespace = record.namespace,
+            provider_id = record.provider_id,
+            target_id = record.target_id,
+            transport_attempt = record.transport_attempt,
+            connection_age_ms = record.created_at.elapsed().as_millis(),
+            close_reason,
+            "closed idle upstream connection"
+        );
+    }
+}
+
+/// Drain frames that are already readable on a parked socket a checkout just
+/// acquired. These are residual idle traffic — never part of the next turn.
+/// Returns `true` while the wire is clean; `false` once a data frame, Close,
+/// EOF, or transport error makes the connection unusable.
+fn drain_idle_frames(connection: &mut ResponsesWebSocketConnection) -> bool {
+    use futures::{FutureExt, StreamExt};
+    loop {
+        let Some(frame) = connection.socket.next().now_or_never() else {
+            return true;
+        };
+        match frame {
+            Some(Ok(reqwest_websocket::Message::Ping(_)))
+            | Some(Ok(reqwest_websocket::Message::Pong(_))) => {}
+            Some(Err(error)) => {
+                tracing::debug!(transport = "responses_websocket", error = %error, "retained WebSocket read failed before checkout");
+                return false;
+            }
+            Some(Ok(_)) | None => return false,
+        }
+    }
 }
 
 impl ResponsesWebSocketLease {
@@ -488,6 +728,23 @@ impl ResponsesWebSocketLease {
 
     pub(crate) fn completed(&mut self, response_id: String) {
         let mut state = self.registry.state.lock();
+        prune_expired_connections(&mut state);
+        if !state.connections.contains_key(&self.connection_id) {
+            // The record was already retired (peer close, expiry, or a dirty
+            // idle frame) while this lease still owned the socket — there is
+            // nothing live to attach the affinity to.
+            self.terminal = true;
+            tracing::debug!(
+                transport = "responses_websocket",
+                target_namespace = self.namespace,
+                provider_id = self.provider_id,
+                target_id = self.target_id,
+                transport_attempt = self.transport_attempt,
+                continuation = true,
+                "completed response on an already-retired connection"
+            );
+            return;
+        }
         state.affinity.retain(|key, connection_id| {
             connection_id != &self.connection_id
                 || matches!(key, ResponsesWebSocketAffinity::Session { .. })
@@ -581,6 +838,11 @@ impl ResponsesWebSocketLease {
 impl Drop for ResponsesWebSocketLease {
     fn drop(&mut self) {
         if self.terminal {
+            // A completed lease releases the socket back to the pool: park it
+            // under the idle pump so it keeps answering Ping and notices a
+            // peer Close. No-op when the record is already gone or a checkout
+            // is queued (the last waiter restarts the pump itself).
+            self.registry.service_idle_connection(&self.connection_id);
             return;
         }
         let mut state = self.registry.state.lock();
