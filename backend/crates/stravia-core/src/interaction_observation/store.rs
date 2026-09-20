@@ -1072,6 +1072,127 @@ impl ObservationStore {
         }
     }
 
+    /// 超时未收到工具回传的等待叶 Run 按 client_wait_expired 转为 disconnected。
+    /// HTTP 客户端没有连接关闭信号，闲置窗口是平台唯一能用的判定；
+    /// 已收齐回传或仍有 child 的 Run 不算等待叶，不在此转换。
+    pub(super) async fn expire_idle_waiting_client(
+        &self,
+        now: i64,
+        idle_ms: i64,
+    ) -> anyhow::Result<Vec<ObservationEvent>> {
+        let cutoff = now.saturating_sub(idle_ms);
+        let payload = serde_json::json!({"status":"disconnected","reason":"client_wait_expired"});
+        match self {
+            Self::Sqlite(pool) => {
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let candidates: Vec<(String, String)> = sqlx::query_as("SELECT interaction_id,id FROM inference_run_observations r WHERE r.status='waiting_client' AND r.last_active_at<=? AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) ORDER BY r.interaction_id,r.id").bind(cutoff).fetch_all(&mut *tx).await?;
+                let mut events = Vec::new();
+                let mut index = 0;
+                while index < candidates.len() {
+                    let iid = candidates[index].0.clone();
+                    let evidence = client_tool_evidence_sqlite(&mut tx, &iid).await?;
+                    let resolved = resolved_evidence(&evidence);
+                    let mut last_seq = None;
+                    while index < candidates.len() && candidates[index].0 == iid {
+                        let rid = candidates[index].1.clone();
+                        index += 1;
+                        if resolved.contains(rid.as_str()) {
+                            continue;
+                        }
+                        let expiry: Option<i64> = sqlx::query_scalar("UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_wait_expired',last_active_at=? WHERE id=? AND status='waiting_client' RETURNING expires_at").bind(now).bind(&rid).fetch_optional(&mut *tx).await?;
+                        let Some(expiry) = expiry else { continue };
+                        let seq = next_sqlite(&mut tx).await?;
+                        sqlx::query("UPDATE inference_run_observations SET last_event_sequence=? WHERE id=?").bind(seq).bind(&rid).execute(&mut *tx).await?;
+                        insert_event_sqlite(
+                            &mut tx,
+                            EventInsert {
+                                sequence: seq,
+                                occurred_at: now,
+                                interaction_id: Some(&iid),
+                                run_id: Some(&rid),
+                                rejection_id: None,
+                                kind: "run_state_changed",
+                                payload: &payload,
+                                expires_at: expiry,
+                            },
+                        )
+                        .await?;
+                        events.push(event(
+                            seq,
+                            now,
+                            Some(&iid),
+                            Some(&rid),
+                            None,
+                            "run_state_changed",
+                            payload.clone(),
+                        ));
+                        last_seq = Some(seq);
+                    }
+                    if let Some(seq) = last_seq {
+                        recompute_status_sqlite(&mut tx, &iid, now, seq).await?;
+                    }
+                }
+                tx.commit().await?;
+                Ok(events)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let candidates: Vec<(String, String)> = sqlx::query_as("SELECT interaction_id,id FROM inference_run_observations r WHERE r.status='waiting_client' AND r.last_active_at<=$1 AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id) ORDER BY r.interaction_id,r.id").bind(cutoff).fetch_all(&mut *tx).await?;
+                let mut events = Vec::new();
+                let mut index = 0;
+                while index < candidates.len() {
+                    let iid = candidates[index].0.clone();
+                    let evidence = client_tool_evidence_postgres(&mut tx, &iid).await?;
+                    let resolved = resolved_evidence(&evidence);
+                    let mut last_seq = None;
+                    while index < candidates.len() && candidates[index].0 == iid {
+                        let rid = candidates[index].1.clone();
+                        index += 1;
+                        if resolved.contains(rid.as_str()) {
+                            continue;
+                        }
+                        let expiry: Option<i64> = sqlx::query_scalar("UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_wait_expired',last_active_at=$1 WHERE id=$2 AND status='waiting_client' RETURNING expires_at").bind(now).bind(&rid).fetch_optional(&mut *tx).await?;
+                        let Some(expiry) = expiry else { continue };
+                        let seq: i64 =
+                            sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                                .fetch_one(&mut *tx)
+                                .await?;
+                        sqlx::query("UPDATE inference_run_observations SET last_event_sequence=$1 WHERE id=$2").bind(seq).bind(&rid).execute(&mut *tx).await?;
+                        insert_event_postgres(
+                            &mut tx,
+                            EventInsert {
+                                sequence: seq,
+                                occurred_at: now,
+                                interaction_id: Some(&iid),
+                                run_id: Some(&rid),
+                                rejection_id: None,
+                                kind: "run_state_changed",
+                                payload: &payload,
+                                expires_at: expiry,
+                            },
+                        )
+                        .await?;
+                        events.push(event(
+                            seq,
+                            now,
+                            Some(&iid),
+                            Some(&rid),
+                            None,
+                            "run_state_changed",
+                            payload.clone(),
+                        ));
+                        last_seq = Some(seq);
+                    }
+                    if let Some(seq) = last_seq {
+                        recompute_status_postgres(&mut tx, &iid, now, seq).await?;
+                    }
+                }
+                tx.commit().await?;
+                Ok(events)
+            }
+        }
+    }
+
     pub async fn finish_run(
         &self,
         interaction_id: &str,
@@ -2795,6 +2916,86 @@ mod tests {
         let pool = crate::db::init_pool(directory.path()).await?;
         crate::migrations::migrate_sqlite(&pool).await?;
         close_and_priority_scenario(&ObservationStore::Sqlite(pool.clone())).await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_waiting_client_leaf_expires_but_active_and_resolved_do_not() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        let handoff = || RunEvent::ClientToolHandoff {
+            tool_id: "call".into(),
+            name: "probe".into(),
+            input: None,
+        };
+        for id in ["stale", "fresh", "resolved", "parent"] {
+            admit_waiting_scenario_run(&store, id, id, None).await?;
+            store
+                .persist_run_event(id, id, &handoff(), 2, i64::MAX)
+                .await?;
+            finish_scenario_run(&store, id, id, "waiting_client").await?;
+        }
+        // resolved：同交互后续 Run 回传了同一工具 ID。
+        admit_waiting_scenario_run(&store, "resolved", "resolved-next", None).await?;
+        store
+            .persist_run_event(
+                "resolved",
+                "resolved-next",
+                &RunEvent::ClientToolResult {
+                    tool_id: "call".into(),
+                    content: Value::Null,
+                    is_error: false,
+                },
+                4,
+                i64::MAX,
+            )
+            .await?;
+        finish_scenario_run(&store, "resolved", "resolved-next", "completed").await?;
+        // parent：续接准入已使父 Run 终结为 superseded，超时清理不得改写该终态。
+        admit_waiting_scenario_run(&store, "parent", "parent-child", Some("parent")).await?;
+        // 固定闲置窗口两侧：stale/resolved/parent 上次活动远在窗口外，fresh 在窗口内。
+        // resolved 与 parent 仅靠各自豁免条件存活，不能用活动时间掩盖。
+        sqlx::query("UPDATE inference_run_observations SET last_active_at=0 WHERE id IN ('stale','resolved','parent')")
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE inference_run_observations SET last_active_at=100 WHERE id='fresh'")
+            .execute(&pool)
+            .await?;
+        let events = store.expire_idle_waiting_client(110, 20).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "run_state_changed");
+        assert_eq!(events[0].run_id.as_deref(), Some("stale"));
+        assert_eq!(
+            events[0].payload,
+            serde_json::json!({"status":"disconnected","reason":"client_wait_expired"})
+        );
+        let detail = store
+            .get_interaction("stale", ForestQuery::default())
+            .await?
+            .unwrap();
+        assert_eq!(detail.interaction.status, "disconnected");
+        let run = detail.runs.iter().find(|run| run.id == "stale").unwrap();
+        assert_eq!(run.status, "disconnected");
+        assert_eq!(run.terminal_reason.as_deref(), Some("client_wait_expired"));
+        for (iid, rid, expected_status) in [
+            ("fresh", "fresh", "waiting_client"),
+            ("resolved", "resolved", "waiting_client"),
+            ("parent", "parent", "superseded"),
+        ] {
+            let run = store
+                .get_interaction(iid, ForestQuery::default())
+                .await?
+                .unwrap()
+                .runs
+                .into_iter()
+                .find(|run| run.id == rid)
+                .unwrap();
+            assert_eq!(run.status, expected_status, "{rid}");
+        }
         pool.close().await;
         Ok(())
     }

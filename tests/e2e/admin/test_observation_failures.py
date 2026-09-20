@@ -866,6 +866,106 @@ def test_expired_waiting_client_is_removed_with_events_and_trace(
 
 @pytest.mark.e2e
 @pytest.mark.admin
+def test_idle_waiting_client_expires_to_disconnected_on_retention_sweep(
+    stravia_binary: Path,
+) -> None:
+    mock_port = find_free_port()
+    mock_server, _ = minimal_mock_provider(mock_port)
+    try:
+        with tempfile.TemporaryDirectory(prefix="stravia-waiting-idle-e2e-") as temporary:
+            data_dir = Path(temporary)
+            env, process, logs = _start_initialized(
+                stravia_binary, data_dir, f"http://127.0.0.1:{mock_port}"
+            )
+            try:
+                route_id, api_key = _create_route(env, "observation-branch-idle")
+                status, response = http_request(
+                    "POST",
+                    f"{env['proxy']}/v1/chat/completions",
+                    payload={
+                        "model": "observation-branch-idle",
+                        "messages": [{"role": "user", "content": "observation-branch: idle waiting expiry"}],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "local_probe",
+                                    "parameters": {"type": "object"},
+                                },
+                            }
+                        ],
+                    },
+                    headers={"authorization": f"Bearer {api_key}"},
+                )
+                assert status == 200, response
+                def finished_waiting() -> dict[str, Any] | None:
+                    item = next(
+                        (
+                            item
+                            for item in _route_interactions(env, route_id)
+                            if item["status"] == "waiting_client"
+                        ),
+                        None,
+                    )
+                    if item is None:
+                        return None
+                    run = _detail(env, item["id"])["runs"][0]
+                    return item if any(
+                        event["kind"] == "run_finished" for event in run["events"]
+                    ) else None
+
+                waiting = _wait_for("idle waiting fixture", finished_waiting)
+                # 借 bundle 导出通道排空 writer 队列，保证没有迟到事件把
+                # last_active_at 重新刷成新值覆盖下面的陈旧化 UPDATE。
+                download_observation_bundle(env, _detail(env, waiting["id"]))
+                # 服务器仍在运行：WAL 下单次 UPDATE 不会与短事务冲突，
+                # 不能用重启制造陈旧记录，重启恢复会先把它标成 interrupted。
+                stale_at = int(time.time() * 1000) - 25 * 60 * 60 * 1000
+                with closing(
+                    sqlite3.connect(data_dir / "db" / "gateway.db", timeout=10)
+                ) as connection:
+                    connection.execute(
+                        "UPDATE inference_run_observations SET last_active_at = ? "
+                        "WHERE interaction_id = ? AND status = 'waiting_client'",
+                        (stale_at, waiting["id"]),
+                    )
+                    connection.commit()
+                status, setting = http_request(
+                    "PUT",
+                    f"{env['admin']}/api/v1/settings/log_retention_days",
+                    payload={"value": "30"},
+                    headers=env["auth"],
+                )
+                assert status == 200, setting
+
+                def expired() -> dict[str, Any] | None:
+                    detail = _detail(env, waiting["id"])
+                    return (
+                        detail
+                        if detail["interaction"]["status"] == "disconnected"
+                        else None
+                    )
+
+                detail = _wait_for("idle wait expiry", expired)
+                run = detail["runs"][0]
+                assert run["status"] == "disconnected"
+                assert run["terminal_reason"] == "client_wait_expired"
+                transitions = [
+                    event for event in run["events"] if event["kind"] == "run_state_changed"
+                ]
+                assert transitions[-1]["payload"] == {
+                    "status": "disconnected",
+                    "reason": "client_wait_expired",
+                }
+            finally:
+                stop_stravia_server(process, logs)
+    finally:
+        mock_server.shutdown()
+        mock_server.server_close()
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_history_cleanup_expires_event_cursor_without_rewinding_sequence(
     stravia_binary: Path,
 ) -> None:

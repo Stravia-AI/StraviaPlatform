@@ -86,6 +86,10 @@ impl ClientConnectionObservation {
     }
 }
 
+/// HTTP 客户端没有连接关闭信号；等待工具回传的叶 Run 闲置超过该窗口按
+/// client_wait_expired 转 disconnected。窗口必须覆盖合法的长时客户端工具执行。
+const WAITING_CLIENT_IDLE_MS: i64 = 24 * 60 * 60 * 1000;
+
 struct Inner {
     store: ObservationStore,
     writer: mpsc::Sender<WriterCommand>,
@@ -392,6 +396,22 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         self.purge_history(Some(now)).await?;
+        for event in self
+            .inner
+            .store
+            .expire_idle_waiting_client(now, WAITING_CLIENT_IDLE_MS)
+            .await?
+        {
+            self.inner
+                .trace_sequence
+                .fetch_max(event.sequence, Ordering::AcqRel);
+            let _ =
+                self.inner
+                    .updates
+                    .send(ObservationUpdate::Event(project_event_for_management(
+                        event,
+                    )));
+        }
         self.inner
             .unpersisted_gaps
             .lock()
