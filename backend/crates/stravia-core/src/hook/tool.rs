@@ -59,6 +59,10 @@ impl PlatformToolRegistry {
         self.tools.get(id).map(|tool| tool.activity_label())
     }
 
+    pub fn external_name(&self, id: &ToolId) -> Option<&str> {
+        self.tools.get(id).map(|tool| tool.external_name())
+    }
+
     pub fn execution_limit(&self, id: &ToolId) -> Duration {
         self.tools
             .get(id)
@@ -96,7 +100,7 @@ impl PlatformToolRegistry {
                 name: provider_name,
                 description: tool.description().map(str::to_string),
                 parameters: tool.parameters(),
-                strict: Some(true),
+                strict: Some(tool.strict_schema()),
                 cache_control: None,
                 meta: None,
             },

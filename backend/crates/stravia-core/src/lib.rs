@@ -15,6 +15,7 @@ pub mod hook;
 mod interaction_observation;
 pub mod mcp;
 pub(crate) mod media;
+pub mod media_generation;
 mod migrations;
 pub(crate) mod model_turn;
 pub mod plugin;

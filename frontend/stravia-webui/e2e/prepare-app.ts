@@ -228,6 +228,21 @@ export async function prepareApp(page: Page): Promise<void> {
       })
       return
     }
+    if (path === '/media-generation/config') {
+      await route.fulfill({
+        json: {
+          data: {
+            config: { enabled: false, image: { route_id: null } },
+            validation: { valid: false, code: 'media_generation_route_missing', message: null },
+          },
+        },
+      })
+      return
+    }
+    if (path === '/media-generation/eligible-routes') {
+      await route.fulfill({ json: { data: [] } })
+      return
+    }
 
     await route.fulfill({ json: { data: [] } })
   })

@@ -124,6 +124,7 @@ API 密钥管理，用于代理端口和 MCP 的访问认证及并发执行数�
 | `transparent_injection_enabled` | INTEGER | `0` | 是否允许 Stravia 在兼容模型请求中自动暴露所选高级功能；不控制显式调用或 MCP |
 | `inject_media_understanding` | INTEGER | `0` | Transparent Injection 开启时是否选择 Media Understanding；平台 Gate 关闭时保留但不生效 |
 | `inject_web_search` | INTEGER | `0` | Transparent Injection 开启时是否选择 Web Search；平台 Gate 关闭时保留但不生效 |
+| `inject_media_generation` | INTEGER | `0` | Transparent Injection 开启时是否选择 Media Generation；平台 Gate 关闭时保留但不生效 |
 | `expires_at` | TEXT | NULL | 过期时间 |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
 | `updated_at` | TEXT | `datetime('now')` | 更新时间 |
@@ -813,6 +814,8 @@ Media Understanding migration 11 新增旧 `api_keys.allow_media_understanding`�
 Reusable Response Prefix migration 15 为 `turn_chain_nodes` 增加 nullable prefix namespace/fingerprint/item-count/completed-at 字段与 lookup index。升级前节点不回填索引；只有升级后完整交付、上游 `completed` 且 Hook 未改变输出语义的 Response 节点可写入。该 migration 同时执行 Anonymous Principal clean cutover：删除 `principal = 'anonymous'` 的 Turn Chain、Artifact 和 upload 数据，关联子表按外键级联。认证 API key 数据保持不变。
 
 Advanced Capabilities / Web Search migration 18 是 destructive clean cutover：SQLite 与 PostgreSQL 都删除旧 `allow_web_research`、`allow_media_understanding` 和 `web_search_injection_enabled`，加入 `transparent_injection_enabled`、`inject_media_understanding` 和 `inject_web_search`；把旧自动行为映射到对应 selection；把 settings key 移到 `web_search_config`；删除旧 Research Turn；并把 kind 约束切换为 `web_search`。SQLite 重建 Turn 表时保留 migration 15 的 reusable-prefix 字段和索引。升级前必须备份数据库和匹配二进制；回滚必须恢复 migration 18 之前的数据库，不能只回退应用文件。
+
+Media Generation Injection migration 53 为 `api_keys` 增加缺省为关闭的 `inject_media_generation` selection；既有与新建 API Key 均不会自动透明注入媒体生成，平台 Gate 关闭时保留该偏好但不生效。
 
 Revisioned Provider Catalog migration 20 不改变表 shape。它仅把可由既有 `preset_key` 或旧 source identity 确定的 Provider `models_source` 转换为 `catalog`，并补齐缺失的 Catalog Provider ID；无法安全确定 identity 的行保持原值，以便管理员诊断和修复。Provider 凭据、channel、路由与既有 Provider Model metadata 均不修改。
 

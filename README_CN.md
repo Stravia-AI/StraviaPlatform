@@ -126,7 +126,24 @@ Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭
 - `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
 - **联网搜索** —— Agent 循环替模型搜索、读网页，可用内嵌 Moli 引擎、Exa 或智谱，也可绑定 Codex 搜索。
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
+- **媒体生成** —— 通过已有 Codex OAuth Route 生成或编辑一张图片，再用 Artifact Reference 在后续工具中复用。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
+
+#### 图片生成
+
+在 **高级功能 → 媒体生成** 中绑定已保存的图片 Route，再开启能力。所有已启用 Target 必须使用已启用的 OpenAI Codex OAuth Provider、GPT-5 或更高代模型，以及已连接的凭据；已禁用 Target 不参与校验。保存配置不会触发生图。执行前再次校验绑定，并沿用凭据刷新、Route 优先级、重试与切换策略。具体账号和模型是否可用仍取决于上游支持。
+
+MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自动暴露还要求 API Key 同时开启透明注入总开关并选择 **媒体生成**。新旧 Key 的该选项均默认关闭；它不是独立权限。
+
+```json
+{"type":"image","input":{"prompt":"A small blue house","aspect_ratio":"4:3","resolution":"2K"}}
+```
+
+`input` 内只有 `prompt` 必填。可选 `aspect_ratio` 接受 `1:1`、`3:4`、`4:3`、`9:16`、`16:9`；`resolution` 接受 `1K`、`2K`、`4K`。它们表达偏好，不保证精确尺寸。当前 Codex 适配将各分辨率档位均约束到已核实的 hosted-tool 尺寸：正方形 `1024×1024`、竖向 `1024×1536`、横向 `1536×1024`。两项偏好均省略时不发送 `size`。平台不裁剪、拉伸或超分辨率处理。
+
+编辑时添加有序的 `reference_images`：当前 Principal 拥有且**不附带读取选项**的纯 `sa:…` 引用，或公网 HTTP(S) 图片 URL。本地文件先走现有 `/v1/artifacts/uploads` 上传流程。公网来源在生图前安全抓取并收存，不透传源 URL。平台最多接受五张 JPEG/PNG/WebP 参考图，每张不超过 32 MiB、单边 8192 像素、总计 2500 万像素。非法、缺失、过期或其他 Principal 的文件在生图前即被拒绝。
+
+成功结果只包含 `artifact_reference`、`mime_type`、`size` 和从实际解码文件读取的 `media: {width,height}`。引用可用于下一次编辑；显式下载调用 `StraviaRead`，参数为 `{"path":"sa:…?download=1"}`。无图片、损坏图片或收存失败均返回错误，不产生空图成功结果。执行状态不明时，Route 重试可能重复生成并额外消耗额度；取消、输入错误、收存失败不会触发重新生图。用量仅记录上游实际报告的值。
 
 ### 密钥、用量与请求记录
 

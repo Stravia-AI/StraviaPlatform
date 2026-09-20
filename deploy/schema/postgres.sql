@@ -106,11 +106,12 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    mcp_access_enabled boolean DEFAULT false NOT NULL,
+    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
     inject_web_search boolean DEFAULT false NOT NULL,
+    inject_media_generation boolean DEFAULT false NOT NULL,
     CONSTRAINT api_keys_concurrency_limit_check CHECK ((concurrency_limit > 0))
 );
 
@@ -347,7 +348,7 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text NOT NULL,
+    model_id text CONSTRAINT models_name_not_null NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text,
     is_enabled boolean DEFAULT true,
     priority integer DEFAULT 0,

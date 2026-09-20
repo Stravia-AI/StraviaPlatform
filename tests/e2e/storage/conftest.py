@@ -187,6 +187,12 @@ def build_harness(work_dir: Path) -> None:
                             .bind(r#"{"secret":"legacy"}"#)
                             .execute(&pool)
                             .await?;
+                        sqlx::query("INSERT INTO api_keys (id, token, name) VALUES ($1, $2, $3)")
+                            .bind("legacy-generation-key")
+                            .bind("isolated-upgrade-fixture-key")
+                            .bind("Existing key")
+                            .execute(&pool)
+                            .await?;
                     }
                     "inspect_observation" => {
                         let tables: i64 = sqlx::query_scalar(
@@ -304,9 +310,17 @@ def build_harness(work_dir: Path) -> None:
                 transparent_injection_enabled: false,
                 inject_media_understanding: false,
                 inject_web_search: false,
+                inject_media_generation: false,
                 expires_at: None,
                 model_ids: vec![route.id.clone()],
             }).await?;
+
+            ensure!(!api_key.inject_media_generation, "new keys must not auto-inject media generation");
+            admin.update_api_key(&api_key.id, serde_json::from_value(serde_json::json!({
+                "inject_media_generation": true
+            }))?).await?;
+            let reread_key = admin.get_api_key(&api_key.id).await?;
+            ensure!(reread_key.inject_media_generation, "media generation injection selection persists independently");
 
             ensure!(admin.list_providers().await?.len() == 1, "provider count");
             let routes = admin.list_models().await?;

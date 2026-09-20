@@ -31,6 +31,7 @@ pub struct ApiKeyAccessRecord {
     pub transparent_injection_enabled: bool,
     pub inject_media_understanding: bool,
     pub inject_web_search: bool,
+    pub inject_media_generation: bool,
 }
 
 #[derive(Debug, Clone)]

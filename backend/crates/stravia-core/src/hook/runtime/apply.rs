@@ -354,6 +354,17 @@ pub(super) fn apply_request_actions(
                     .map_err(|error| {
                         invalid_action(hook_id, EventKind::Request, error.to_string())
                     })?;
+                // A hook may adopt an explicit client declaration. Preserve its
+                // forced selection through the registry's collision-safe rename,
+                // but never redirect a still-present client-owned tool.
+                if let Some(stravia_runtime_contract::protocol::ir::ToolChoice::Named { name }) =
+                    staged_request.tool_choice.as_mut()
+                    && registry.external_name(&tool_id) == Some(name.as_str())
+                    && protected_specs.contains_key(name)
+                    && !existing_names.contains(name)
+                {
+                    name.clone_from(&exposed.provider_name);
+                }
                 protected_specs.insert(exposed.provider_name.clone(), exposed.spec.clone());
                 staged_request
                     .tools

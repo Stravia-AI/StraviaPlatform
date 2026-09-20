@@ -11,6 +11,7 @@ use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod media_generation;
 mod snapshots;
 
 struct EchoTool;
@@ -289,6 +290,7 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -326,6 +328,7 @@ async fn set_concurrency_limit(app: &TestApp, limit: i32) {
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
@@ -418,6 +421,7 @@ async fn media_test_app_with_answer(
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -1037,6 +1041,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -1080,6 +1085,7 @@ async fn media_tool_requires_mcp_access_independently_from_transparent_injection
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
@@ -1108,6 +1114,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 mcp_access_enabled: Some(true),
                 transparent_injection_enabled: Some(false),
                 inject_web_search: Some(false),
+                inject_media_generation: None,
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
@@ -1145,6 +1152,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
@@ -1214,6 +1222,7 @@ async fn mcp_transport_preserves_bearer_only_authentication_mappings() {
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
@@ -1284,6 +1293,7 @@ async fn expired_mcp_credential_uses_canonical_unauthorized_status() {
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 expires_at: Some("2000-01-01T00:00:00Z".into()),
                 model_ids: None,
                 inject_media_understanding: None,

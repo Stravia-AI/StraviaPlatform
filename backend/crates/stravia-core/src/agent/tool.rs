@@ -50,6 +50,9 @@ pub trait AgentTool: Send + Sync {
     fn id(&self) -> VersionedToolId;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
+    fn strict_schema(&self) -> bool {
+        true
+    }
     fn parallel_safe(&self) -> bool {
         false
     }
@@ -133,7 +136,7 @@ impl AgentToolRegistry {
                     name,
                     description: Some(tool.description().to_owned()),
                     parameters: tool.input_schema(),
-                    strict: Some(true),
+                    strict: Some(tool.strict_schema()),
                     cache_control: None,
                     meta: None,
                 })

@@ -67,6 +67,8 @@ pub struct TurnInput {
     pub extra_headers: reqwest::header::HeaderMap,
     pub cancellation: CancellationToken,
     pub deadline: Instant,
+    pub(crate) allow_responses_websocket: bool,
+    pub(crate) attachments_normalized: bool,
     pub(crate) observer: Option<RunObserver>,
     pub(crate) compaction_records: CompactionPublications,
     pub(crate) compaction_source_generation_id: Option<String>,
@@ -82,6 +84,8 @@ impl TurnInput {
             extra_headers: reqwest::header::HeaderMap::new(),
             cancellation: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_secs(300),
+            allow_responses_websocket: true,
+            attachments_normalized: false,
             observer: None,
             compaction_records: Arc::default(),
             compaction_source_generation_id: None,
@@ -101,6 +105,16 @@ impl TurnInput {
     pub fn with_execution(mut self, cancellation: CancellationToken, deadline: Instant) -> Self {
         self.cancellation = cancellation;
         self.deadline = deadline;
+        self
+    }
+
+    pub(crate) fn without_responses_websocket(mut self) -> Self {
+        self.allow_responses_websocket = false;
+        self
+    }
+
+    pub(crate) fn with_normalized_attachments(mut self) -> Self {
+        self.attachments_normalized = true;
         self
     }
 

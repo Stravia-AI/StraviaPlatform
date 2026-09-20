@@ -25,6 +25,7 @@ mod credential_protection;
 mod extensions;
 pub mod identity;
 mod media;
+mod media_generation;
 mod model_catalog;
 mod model_data;
 mod oauth;
@@ -52,6 +53,9 @@ use auth_data::*;
 use model_catalog::*;
 use model_data::*;
 
+#[cfg(test)]
+#[path = "tests/media_generation.rs"]
+mod media_generation_tests;
 #[cfg(test)]
 mod session_tests;
 

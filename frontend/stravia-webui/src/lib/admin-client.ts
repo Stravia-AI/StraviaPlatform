@@ -66,6 +66,9 @@ import type {
   CompatibleCodexProvider,
   MediaUnderstandingConfigView,
   UpdateMediaUnderstandingConfig,
+  MediaGenerationConfig,
+  MediaGenerationConfigView,
+  EligibleMediaGenerationRoute,
   ThinkingLevel,
   ProviderAllowanceSnapshot,
   ProviderAllowanceTarget,
@@ -215,6 +218,14 @@ export const admin = {
     get: () => request<MediaUnderstandingConfigView>('GET', '/media-understanding'),
     update: (input: UpdateMediaUnderstandingConfig) =>
       request<MediaUnderstandingConfigView>('PUT', '/media-understanding', input),
+  },
+  mediaGeneration: {
+    config: {
+      get: () => request<MediaGenerationConfigView>('GET', '/media-generation/config'),
+      update: (input: MediaGenerationConfig) =>
+        request<MediaGenerationConfigView>('PUT', '/media-generation/config', input),
+    },
+    eligibleRoutes: () => request<EligibleMediaGenerationRoute[]>('GET', '/media-generation/eligible-routes'),
   },
   oauth: {
     init: (vendor: string, useProxy: boolean, callbackMode: OAuthCallbackMode, locale: Locale) =>

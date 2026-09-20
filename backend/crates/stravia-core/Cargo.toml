@@ -58,9 +58,9 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 tempfile = { workspace = true }
 parking_lot = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
-image = { workspace = true }
 office_oxide = { workspace = true }
 stravia-media = { workspace = true, features = ["test-support"] }
 tower = { workspace = true }

@@ -28,6 +28,11 @@ impl AdminService {
         if key == "artifact_upload_signing_key" {
             anyhow::bail!("reserved internal setting");
         }
+        if key == crate::media_generation::config::SETTINGS_KEY {
+            self.update_media_generation_config(serde_json::from_str(value)?)
+                .await?;
+            return Ok(());
+        }
         if key == "artifact_settings" {
             // Serialize the persisted configuration and the live backend cutover together.
             static SAVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

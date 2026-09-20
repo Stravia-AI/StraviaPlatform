@@ -42,11 +42,15 @@ pub(super) const DATED_EVENT_TYPES: &[&str] = &[
     "response.refusal.done",
 ];
 
-// OpenAI's rolling Responses transport emits these equivalents while Stravia
+// OpenAI's rolling Responses transport adds aliases and hosted-tool events while Stravia
 // continues to expose the fixed 2026-04-24 protocol to its own clients.
 const ROLLING_RESPONSES_EVENT_TYPES: &[&str] = &[
     "response.reasoning_text.delta",
     "response.reasoning_text.done",
+    "response.image_generation_call.in_progress",
+    "response.image_generation_call.generating",
+    "response.image_generation_call.completed",
+    "response.image_generation_call.partial_image",
 ];
 
 #[derive(serde::Deserialize)]
@@ -549,6 +553,10 @@ impl ResponsesResponseParser {
                             )?
                             .ok_or_else(|| anyhow::anyhow!("function_call_output item is empty"))?;
                         items.push(with_wire_metadata(canonical, item));
+                    }
+                    "image_generation_call" => {
+                        super::validate_hosted_image_generation_item(item, true)?;
+                        items.push(with_wire_metadata(AiItem::unknown(item.clone()), item));
                     }
                     "reasoning" => {
                         let summary = item
@@ -1109,6 +1117,24 @@ impl ResponsesStreamParser {
                     });
                 }
             }
+            "response.image_generation_call.in_progress"
+            | "response.image_generation_call.generating"
+            | "response.image_generation_call.completed"
+            | "response.image_generation_call.partial_image" => {
+                let (_, item_type) = self.open_item_for_event(payload)?;
+                if item_type != "image_generation_call" {
+                    anyhow::bail!(
+                        "image generation event references no open image generation item"
+                    );
+                }
+                if event == "response.image_generation_call.partial_image" {
+                    required_stream_index(payload, "partial_image_index", event)?;
+                    let image = required_stream_text(payload, "partial_image_b64", event)?;
+                    if image.is_empty() {
+                        anyhow::bail!("partial image event contains an empty image");
+                    }
+                }
+            }
             "response.output_item.added" | "response.output_item.done" => {
                 let index = payload
                     .get("output_index")
@@ -1124,6 +1150,11 @@ impl ResponsesStreamParser {
                     .ok_or_else(|| anyhow::anyhow!("output item type is missing"))?;
                 if super::is_registered_extension_item(item_type) {
                     super::validate_extension_item(item, event == "response.output_item.done")?;
+                } else if super::is_hosted_image_generation_item(item_type) {
+                    super::validate_hosted_image_generation_item(
+                        item,
+                        event == "response.output_item.done",
+                    )?;
                 }
                 if event == "response.output_item.done" && item_type == "function_call" {
                     let arguments = item
@@ -1143,6 +1174,7 @@ impl ResponsesStreamParser {
                         | "compaction"
                         | "compaction_trigger"
                 ) && !super::is_registered_extension_item(item_type)
+                    && !super::is_hosted_image_generation_item(item_type)
                 {
                     anyhow::bail!("unsupported Open Responses output item type: {item_type}");
                 }

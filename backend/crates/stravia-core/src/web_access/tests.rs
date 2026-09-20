@@ -286,6 +286,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -628,6 +629,7 @@ async fn embedded_local_runtime_is_available_and_remains_optional() {
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -700,6 +702,7 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -875,6 +878,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })

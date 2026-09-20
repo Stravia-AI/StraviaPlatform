@@ -416,12 +416,14 @@ impl AttemptObservation {
             return;
         };
         match serde_json::to_value(payload) {
-            Ok(payload) => observer.record(RunEvent::Content {
-                stage: stage.to_owned(),
-                model_turn_id: Some(self.model_turn_id.clone()),
-                attempt_id: Some(self.id.clone()),
-                payload,
-            }),
+            Ok(payload) => {
+                observer.record(RunEvent::Content {
+                    stage: stage.to_owned(),
+                    model_turn_id: Some(self.model_turn_id.clone()),
+                    attempt_id: Some(self.id.clone()),
+                    payload,
+                });
+            }
             Err(_) => observer.record(RunEvent::ObservationGap {
                 reason: format!("{stage}_serialization_failed"),
             }),

@@ -133,6 +133,7 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![final_route.id],
             inject_media_understanding: false,
         })
@@ -238,6 +239,7 @@ async fn hook_rewrite_checks_the_final_model_binding() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![initial_model_id],
             inject_media_understanding: false,
         })

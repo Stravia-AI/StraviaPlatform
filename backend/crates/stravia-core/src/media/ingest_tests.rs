@@ -69,6 +69,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![route.id],
             inject_media_understanding: false,
         })
@@ -322,6 +323,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
                 inject_web_search: false,
+                inject_media_generation: false,
                 model_ids: vec![route.id.clone()],
                 inject_media_understanding: false,
             })

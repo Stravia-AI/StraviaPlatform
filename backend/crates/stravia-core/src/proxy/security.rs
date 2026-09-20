@@ -168,6 +168,15 @@ impl<'a> Security<'a> {
         Ok(key.transparent_injection_enabled && key.inject_media_understanding)
     }
 
+    pub(crate) async fn generation_transparent_injection_enabled(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+    ) -> Result<bool, GatewayError> {
+        let key = self.principal_key(principal).await?;
+        validate_key_state(&key)?;
+        Ok(key.transparent_injection_enabled && key.inject_media_generation)
+    }
+
     async fn principal_key(
         &self,
         principal: &stravia_runtime_contract::Principal,
@@ -420,6 +429,7 @@ mod tests {
                     inject_media_understanding: false,
                     transparent_injection_enabled: true,
                     inject_web_search: true,
+                    inject_media_generation: false,
                 }),
                 binding: true,
                 visible_model_ids: vec!["protected-model-id".into()],

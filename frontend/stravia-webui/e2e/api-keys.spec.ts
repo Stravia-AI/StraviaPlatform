@@ -17,6 +17,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
     inject_media_understanding: true,
+    inject_media_generation: true,
     inject_web_search: true,
     expires_at: null,
     created_at: '2026-08-17T00:00:00Z',
@@ -41,6 +42,16 @@ test('API Key editor preserves disabled transparent injection selections', async
   })
   await page.route('**/api/v1/media-understanding', async (route) => {
     await route.fulfill({ json: { data: { enabled: false } } })
+  })
+  await page.route('**/api/v1/media-generation/config', async (route) => {
+    await route.fulfill({
+      json: {
+        data: {
+          config: { enabled: false, image: { route_id: null } },
+          validation: { valid: false, code: 'media_generation_route_missing', message: null },
+        },
+      },
+    })
   })
 
   await page.setViewportSize({ width: 1279, height: 800 })
@@ -73,23 +84,28 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(page.locator('#api-key-mcp-access')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'true')
   const mediaSelection = page.locator('#api-key-inject-media-understanding')
+  const generationSelection = page.locator('#api-key-inject-media-generation')
   const searchSelection = page.locator('#api-key-inject-web-search')
   await expect(mediaSelection).toHaveAttribute('aria-checked', 'true')
+  await expect(generationSelection).toHaveAttribute('aria-checked', 'true')
   await expect(searchSelection).toHaveAttribute('aria-checked', 'true')
   await expect(mediaSelection).toBeDisabled()
+  await expect(generationSelection).toBeDisabled()
   await expect(searchSelection).toBeDisabled()
   await expect(
     page.getByRole('link', { name: 'Turn on this feature in Advanced Features before Stravia can expose it.' }),
-  ).toHaveCount(2)
+  ).toHaveCount(3)
   await page.getByRole('button', { name: 'Save API Key' }).click()
 
   expect(persistedKey.inject_media_understanding).toBe(true)
+  expect(persistedKey.inject_media_generation).toBe(true)
   expect(persistedKey.inject_web_search).toBe(true)
   await expect(editor).toBeHidden()
   await expect(page).toHaveURL(/\/api-keys$/)
   await page.reload()
   await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(2).click()
   await expect(page.locator('#api-key-inject-media-understanding')).toHaveAttribute('aria-checked', 'true')
+  await expect(page.locator('#api-key-inject-media-generation')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
 })
 
@@ -109,6 +125,7 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
     inject_media_understanding: true,
+    inject_media_generation: true,
     inject_web_search: true,
     expires_at: null,
     created_at: '2026-08-17T00:00:00Z',

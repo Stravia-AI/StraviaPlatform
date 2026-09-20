@@ -89,6 +89,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: false,
+            inject_media_generation: false,
             inject_media_understanding: true,
             model_ids: vec![parent.id],
         })
@@ -238,6 +239,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             mcp_access_enabled: true,
             transparent_injection_enabled: true,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![parent_model.id],
             inject_media_understanding: true,
         })
@@ -487,6 +489,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![mixed_model.id, unsupported_model.id],
             inject_media_understanding: false,
         })

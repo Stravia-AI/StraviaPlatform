@@ -50,7 +50,7 @@ pub(super) fn provider_select(suffix: Option<&str>) -> String {
 
 pub(super) fn api_key_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, TRUE) AS is_enabled, COALESCE(mcp_access_enabled, FALSE) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
+        "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, TRUE) AS is_enabled, COALESCE(mcp_access_enabled, FALSE) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, COALESCE(inject_media_generation, FALSE) AS inject_media_generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -72,6 +72,7 @@ pub(super) fn api_key_with_bindings(row: ApiKey, model_ids: Vec<String>) -> ApiK
         transparent_injection_enabled: row.transparent_injection_enabled,
         inject_media_understanding: row.inject_media_understanding,
         inject_web_search: row.inject_web_search,
+        inject_media_generation: row.inject_media_generation,
         expires_at: row.expires_at,
         created_at: row.created_at,
         updated_at: row.updated_at,

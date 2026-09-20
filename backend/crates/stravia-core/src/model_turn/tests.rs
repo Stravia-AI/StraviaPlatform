@@ -337,6 +337,7 @@ async fn gateway_with_captured_thinking(
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids,
             inject_media_understanding: false,
         })
@@ -494,6 +495,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -615,6 +617,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -697,6 +700,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -799,6 +803,7 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -882,6 +887,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -992,6 +998,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -2167,6 +2174,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![route.id],
         })

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Media Generation exposes one `generate` tool through platform-managed model calls and MCP. Image generation and editing reuse Codex OAuth, saved Routes, safe reference ingestion, and Principal-scoped Artifacts with actual image metadata. The configuration-only Advanced Features page supports English/Chinese and light/dark themes. Per-key automatic injection is independent and defaults off on SQLite and PostgreSQL upgrades; retries reuse existing Route policy and may consume quota more than once.
+
 ### Changed
 
 - History storage now deduplicates repeated instructions, tool definitions, and response profiles within each Principal, without compression or changing replay semantics. SQLite and PostgreSQL keep explicit content references with branch-safe retention. Debug segments independently deduplicate metadata and payloads; exports restore complete records, while diagnostic checkpoints focus on target selection/start/end instead of individual deltas. `stravia-tools migrate-data --optimize-storage` verifies and optimizes an offline SQLite destination copy, preserving source data for rollback and reclaiming free pages only in the copy. Older binaries cannot read the new storage representation.

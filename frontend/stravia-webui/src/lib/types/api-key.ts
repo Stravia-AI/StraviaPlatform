@@ -8,6 +8,7 @@ export interface ApiKey {
   transparent_injection_enabled: boolean
   inject_web_search: boolean
   inject_media_understanding: boolean
+  inject_media_generation: boolean
   expires_at?: string | null
   created_at: string
   updated_at: string
@@ -22,6 +23,7 @@ export interface CreateApiKey {
   transparent_injection_enabled: boolean
   inject_web_search: boolean
   inject_media_understanding: boolean
+  inject_media_generation: boolean
   expires_at?: string
   model_ids: string[]
 }
@@ -35,6 +37,7 @@ export interface UpdateApiKey {
   transparent_injection_enabled?: boolean
   inject_web_search?: boolean
   inject_media_understanding?: boolean
+  inject_media_generation?: boolean
   expires_at?: string
   model_ids?: string[]
 }

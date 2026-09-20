@@ -150,6 +150,10 @@ def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:
             "INSERT INTO request_logs (id, created_at, client_request_body) VALUES (?, ?, ?)",
             ("legacy-log-must-not-survive", 1, '{"secret":"legacy"}'),
         )
+        connection.execute(
+            "INSERT INTO api_keys (id, token, name) VALUES (?, ?, ?)",
+            ("legacy-generation-key", "isolated-upgrade-fixture-key", "Existing key"),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -181,6 +185,9 @@ def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
             wait_for_setup_token(logs, proc),
             {"backend": "sqlite"},
         )
+        status, key = session.request("GET", "/api/v1/api-keys/legacy-generation-key")
+        assert status == 200, key
+        assert key["data"]["inject_media_generation"] is False
         status, body = http_request(
             "GET", f"{base}/api/v1/observations/interactions", headers=session.auth_headers()
         )
@@ -271,6 +278,9 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                     {"backend": "postgres", "url": postgres_dsn},
                 )
                 headers = session.auth_headers()
+                status, key = session.request("GET", "/api/v1/api-keys/legacy-generation-key")
+                assert status == 200, key
+                assert key["data"]["inject_media_generation"] is False
                 status, body = http_request(
                     "GET", f"{admin_base}/api/v1/status", headers=headers
                 )

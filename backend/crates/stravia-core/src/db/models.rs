@@ -259,6 +259,8 @@ pub struct ApiKey {
     pub inject_media_understanding: bool,
     #[serde(default)]
     pub inject_web_search: bool,
+    #[serde(default)]
+    pub inject_media_generation: bool,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -280,6 +282,8 @@ pub struct ApiKeyWithBindings {
     pub inject_media_understanding: bool,
     #[serde(default)]
     pub inject_web_search: bool,
+    #[serde(default)]
+    pub inject_media_generation: bool,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -465,6 +469,8 @@ pub struct CreateApiKey {
     pub inject_media_understanding: bool,
     #[serde(default)]
     pub inject_web_search: bool,
+    #[serde(default)]
+    pub inject_media_generation: bool,
     #[serde(default, alias = "route_ids")]
     pub model_ids: Vec<String>,
 }
@@ -480,6 +486,7 @@ pub struct UpdateApiKey {
     pub transparent_injection_enabled: Option<bool>,
     pub inject_media_understanding: Option<bool>,
     pub inject_web_search: Option<bool>,
+    pub inject_media_generation: Option<bool>,
     pub expires_at: Option<String>,
     #[serde(alias = "route_ids")]
     pub model_ids: Option<Vec<String>>,

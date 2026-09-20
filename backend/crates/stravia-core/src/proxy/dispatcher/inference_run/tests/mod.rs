@@ -662,6 +662,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: Some(model_ids),
@@ -678,6 +679,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
                 inject_web_search: false,
+                inject_media_generation: false,
                 model_ids,
                 inject_media_understanding: false,
             })
@@ -708,6 +710,7 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
                 inject_web_search: None,
+                inject_media_generation: None,
                 inject_media_understanding: None,
                 expires_at: None,
                 model_ids: None,
@@ -1697,6 +1700,7 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     expires_at: None,
                     model_ids,
                     inject_media_understanding: None,
@@ -1872,6 +1876,7 @@ async fn assert_hidden_round_rechecks_access(
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model_id],
             inject_media_understanding: false,
         })
@@ -4113,6 +4118,8 @@ mod continuation;
 mod lifecycle;
 #[cfg(test)]
 mod media;
+#[cfg(test)]
+mod media_generation;
 #[cfg(test)]
 mod persist;
 #[cfg(test)]

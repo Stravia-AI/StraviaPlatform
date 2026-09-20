@@ -150,6 +150,11 @@ pub trait PlatformTool: Send + Sync + 'static {
         false
     }
     fn parameters(&self) -> Value;
+    /// Whether the schema uses the provider's strict subset, including required
+    /// properties. Runtime argument validation is still owned by the tool.
+    fn strict_schema(&self) -> bool {
+        true
+    }
 
     async fn execute(
         &self,

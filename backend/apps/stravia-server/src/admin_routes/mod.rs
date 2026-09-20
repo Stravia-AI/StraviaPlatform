@@ -61,6 +61,14 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         )
         .route("/vendors", get(list_vendor_metadata))
         .route(
+            "/media-generation/config",
+            get(get_media_generation_config).put(update_media_generation_config),
+        )
+        .route(
+            "/media-generation/eligible-routes",
+            get(eligible_media_generation_routes),
+        )
+        .route(
             "/media-understanding",
             get(get_media_understanding_handler).put(update_media_understanding_handler),
         )
@@ -329,6 +337,7 @@ async fn readyz_handler(State(gw): State<Gateway>) -> impl IntoResponse {
 
 mod api_keys;
 mod credential_protection;
+mod media_generation;
 mod models;
 mod observations;
 mod providers;
@@ -340,6 +349,7 @@ mod web;
 
 use api_keys::*;
 use credential_protection::*;
+use media_generation::*;
 use models::*;
 use observations::*;
 use providers::*;

@@ -38,7 +38,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         sqlx::query(
-            "INSERT INTO api_keys (id, token, name, concurrency_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::timestamptz)",
+            "INSERT INTO api_keys (id, token, name, concurrency_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::timestamptz)",
         )
         .bind(&id)
         .bind(&key)
@@ -48,6 +48,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
         .bind(input.transparent_injection_enabled)
         .bind(input.inject_media_understanding)
         .bind(input.inject_web_search)
+        .bind(input.inject_media_generation)
         .bind(input.expires_at.as_deref().map(str::trim).unwrap_or(""))
         .execute(&self.pool)
         .await?;
@@ -76,10 +77,13 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .inject_media_understanding
             .unwrap_or(current.inject_media_understanding);
         let inject_web_search = input.inject_web_search.unwrap_or(current.inject_web_search);
+        let inject_media_generation = input
+            .inject_media_generation
+            .unwrap_or(current.inject_media_generation);
         let expires_at = input.expires_at.or(current.expires_at);
 
         sqlx::query(
-            "UPDATE api_keys SET token=$1, name=$2, concurrency_limit=$3, is_enabled=$4, mcp_access_enabled=$5, transparent_injection_enabled=$6, inject_media_understanding=$7, inject_web_search=$8, expires_at=NULLIF($9, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$10",
+            "UPDATE api_keys SET token=$1, name=$2, concurrency_limit=$3, is_enabled=$4, mcp_access_enabled=$5, transparent_injection_enabled=$6, inject_media_understanding=$7, inject_web_search=$8, inject_media_generation=$9, expires_at=NULLIF($10, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$11",
         )
         .bind(key)
         .bind(name.trim())
@@ -89,6 +93,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
         .bind(transparent_injection_enabled)
         .bind(inject_media_understanding)
         .bind(inject_web_search)
+        .bind(inject_media_generation)
         .bind(expires_at.as_deref().map(str::trim).unwrap_or(""))
         .bind(id)
         .execute(&self.pool)
@@ -166,9 +171,10 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
                 bool,
                 bool,
+                bool,
             ),
         >(
-            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search FROM api_keys WHERE token = $1",
+            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, COALESCE(inject_media_generation, FALSE) AS inject_media_generation FROM api_keys WHERE token = $1",
         )
         .bind(raw_key)
         .fetch_optional(&self.pool)
@@ -184,6 +190,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
+                inject_media_generation,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -193,6 +200,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
+                inject_media_generation,
             },
         ))
     }
@@ -209,9 +217,10 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
                 bool,
                 bool,
+                bool,
             ),
         >(
-            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search FROM api_keys WHERE id = $1",
+            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, COALESCE(inject_media_generation, FALSE) AS inject_media_generation FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -226,6 +235,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
+                inject_media_generation,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -235,6 +245,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
+                inject_media_generation,
             },
         ))
     }

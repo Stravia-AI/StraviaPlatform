@@ -11,6 +11,67 @@ pub(crate) fn is_registered_extension_item(item_type: &str) -> bool {
     REGISTERED_EXTENSION_ITEM_TYPES.contains(&item_type)
 }
 
+pub(super) fn is_hosted_image_generation_item(item_type: &str) -> bool {
+    item_type == "image_generation_call"
+}
+
+pub(crate) fn hosted_image_generation_requested(
+    request: &stravia_runtime_contract::protocol::ir::AiRequest,
+) -> bool {
+    matches!(
+        request.ext.as_ref(),
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension))
+            if extension.passthrough_tools.iter().any(|tool| {
+                tool.get("type").and_then(serde_json::Value::as_str)
+                    == Some("image_generation")
+            })
+    )
+}
+
+pub(super) fn validate_hosted_image_generation_item(
+    item: &serde_json::Value,
+    require_completed: bool,
+) -> anyhow::Result<()> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("image generation output item must be an object"))?;
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("image_generation_call") {
+        anyhow::bail!("image generation output item has an invalid type");
+    }
+    if object
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("image generation output item is missing id");
+    }
+    let status = object.get("status").and_then(serde_json::Value::as_str);
+    if !matches!(
+        status,
+        Some("in_progress" | "generating" | "completed" | "failed")
+    ) {
+        anyhow::bail!("image generation output item has an invalid status");
+    }
+    if require_completed && status != Some("completed") {
+        anyhow::bail!("image generation output item did not complete");
+    }
+    if status == Some("completed")
+        && object
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("completed image generation output item has no result");
+    }
+    if let Some(result) = object.get("result")
+        && !result.is_null()
+        && !result.is_string()
+    {
+        anyhow::bail!("image generation output item result must be a string or null");
+    }
+    Ok(())
+}
+
 pub(super) fn validate_extension_item(
     item: &serde_json::Value,
     require_completed: bool,

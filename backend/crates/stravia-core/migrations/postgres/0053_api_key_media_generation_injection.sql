@@ -1,0 +1,2 @@
+ALTER TABLE api_keys
+ADD COLUMN inject_media_generation BOOLEAN NOT NULL DEFAULT FALSE;

@@ -1380,4 +1380,30 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
             (Some("openai".to_string()), Some("openai".to_string()))
         );
     }
+
+    #[tokio::test]
+    async fn media_generation_injection_defaults_false_for_existing_keys() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite");
+        migrate_sqlite_range(&pool, 1, 52).await;
+        sqlx::query(
+            "INSERT INTO api_keys (id, token, name) VALUES ('existing', 'sk-existing', 'Existing')",
+        )
+        .execute(&pool)
+        .await
+        .expect("existing API key");
+
+        migrate_sqlite_range(&pool, 53, 53).await;
+
+        let inject_media_generation = sqlx::query_scalar::<_, bool>(
+            "SELECT inject_media_generation FROM api_keys WHERE id = 'existing'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Media Generation injection preference");
+        assert!(!inject_media_generation);
+    }
 }

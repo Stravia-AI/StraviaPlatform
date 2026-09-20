@@ -45,6 +45,19 @@ const mediaUnderstandingQuery = createQuery(() => ({
   queryKey: ['media-understanding-config'],
   queryFn: admin.mediaUnderstanding.get,
 }))
+const mediaGenerationQuery = createQuery(() => ({
+  queryKey: ['media-generation-config'],
+  queryFn: admin.mediaGeneration.config.get,
+}))
+const mediaGenerationStatus = $derived(
+  mediaGenerationQuery.isPending
+    ? ('loading' as const)
+    : mediaGenerationQuery.isError
+      ? ('unavailable' as const)
+      : mediaGenerationQuery.data?.config?.enabled
+        ? ('enabled' as const)
+        : ('disabled' as const),
+)
 let editorOpen = $state(false)
 let editorApiKey = $state<ApiKey>()
 let editorSession = $state(0)
@@ -335,7 +348,8 @@ async function deleteKey(): Promise<void> {
     apiKey={editorApiKey}
     {models}
     webSearchEnabled={webSearchQuery.data?.enabled ?? false}
-    mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false} />
+    mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false}
+    {mediaGenerationStatus} />
 {/key}
 
 <AlertDialog.Root bind:open={deleteOpen}>

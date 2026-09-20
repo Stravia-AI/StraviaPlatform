@@ -1276,13 +1276,13 @@ pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionRep
             let mut output = String::with_capacity(text.len());
             for line in text.split_inclusive('\n') {
                 if let Some(data) = line.strip_prefix("data:")
-                    && let Ok(mut envelope) = serde_json::from_str::<Value>(data.trim())
+                    && data.trim_start().starts_with(['{', '['])
                 {
-                    let mut line_report = RedactionReport::default();
-                    externalize_envelope(&mut envelope, &mut line_report);
+                    let mut payload = Value::String(data.trim().to_owned());
+                    let line_report = externalize_capture(&mut payload, true);
                     if !line_report.kinds.is_empty() {
                         output.push_str("data: ");
-                        output.push_str(&envelope.to_string());
+                        output.push_str(payload.as_str().expect("wire capture remains text"));
                         if line.ends_with('\n') {
                             output.push('\n');
                         }
@@ -1304,6 +1304,8 @@ pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionRep
                 "\"file_data\"",
                 "\"base64\"",
                 "\"base64_pdf\"",
+                "\"image_generation_call\"",
+                "\"partial_image_b64\"",
             ]
             .iter()
             .any(|key| text.contains(key))
@@ -1357,6 +1359,7 @@ fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
         "response.audio.delta"
             | "response.output_audio.delta"
             | "response.image_generation_call.partial_image"
+            | "image_generation_call"
     ) {
         externalize_media(value, report);
         return;
@@ -1410,6 +1413,7 @@ fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
         "request",
         "canonical_request",
         "canonical_response",
+        "item",
     ] {
         if let Some(nested) = object.get_mut(key) {
             externalize_envelope(nested, report);
@@ -1420,6 +1424,13 @@ fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
 // Called exclusively for a known protocol media block, never arbitrary business JSON.
 fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
     let Value::Object(object) = value else { return };
+    if object.get("type").and_then(Value::as_str) == Some("unknown")
+        && let Some(raw) = object.get_mut("raw")
+        && raw.get("type").and_then(Value::as_str) == Some("image_generation_call")
+    {
+        externalize_media(raw, report);
+        return;
+    }
     if object.get("type").and_then(Value::as_str) == Some("tool_result") {
         if object.get("content_kind").and_then(Value::as_str) != Some("json")
             && let Some(Value::Array(blocks)) = object.get_mut("content")
@@ -1468,6 +1479,7 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
             | "response.audio.delta"
             | "response.output_audio.delta"
             | "response.image_generation_call.partial_image"
+            | "image_generation_call"
     ) || object.contains_key("inlineData")
         || object.contains_key("inline_data")
         || object.contains_key("fileData")
@@ -1502,6 +1514,7 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
         "audio",
         "delta",
         "partial_image_b64",
+        "result",
     ] {
         let Some(source) = object.get_mut(key) else {
             continue;

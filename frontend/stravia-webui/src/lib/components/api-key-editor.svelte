@@ -33,6 +33,7 @@ interface KeyForm {
   transparentInjectionEnabled: boolean
   injectWebSearch: boolean
   injectMediaUnderstanding: boolean
+  injectMediaGeneration: boolean
   modelIds: string[]
 }
 
@@ -42,6 +43,7 @@ interface Props {
   models: Route[]
   webSearchEnabled: boolean
   mediaUnderstandingEnabled: boolean
+  mediaGenerationStatus: 'enabled' | 'disabled' | 'loading' | 'unavailable'
   presentation?: 'sheet' | 'page'
   onSaved?: () => void | Promise<void>
 }
@@ -52,6 +54,7 @@ let {
   models,
   webSearchEnabled,
   mediaUnderstandingEnabled,
+  mediaGenerationStatus,
   presentation = 'sheet',
   onSaved,
 }: Props = $props()
@@ -78,6 +81,7 @@ function keyForm(source: ApiKey | undefined = apiKey): KeyForm {
     transparentInjectionEnabled: source?.transparent_injection_enabled ?? false,
     injectWebSearch: source?.inject_web_search ?? false,
     injectMediaUnderstanding: source?.inject_media_understanding ?? false,
+    injectMediaGeneration: source?.inject_media_generation ?? false,
     modelIds: source?.model_ids ?? [],
   }
 }
@@ -141,6 +145,7 @@ async function saveKey(): Promise<void> {
       transparent_injection_enabled: form.transparentInjectionEnabled,
       inject_web_search: form.injectWebSearch,
       inject_media_understanding: form.injectMediaUnderstanding,
+      inject_media_generation: form.injectMediaGeneration,
       expires_at: form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined,
       model_ids: form.modelIds,
     }
@@ -346,6 +351,32 @@ async function saveKey(): Promise<void> {
                   class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground">
                   {m.api_key_editor_platform_capability_disabled()}
                 </a>
+              {/if}
+            </Field.Content>
+          </Field.Field>
+          <Field.Field orientation="horizontal" class="min-w-52 flex-1 basis-52">
+            <Switch
+              id="api-key-inject-media-generation"
+              class="-mt-2.5"
+              bind:checked={form.injectMediaGeneration}
+              disabled={mediaGenerationStatus !== 'enabled'}
+              aria-busy={mediaGenerationStatus === 'loading'} />
+            <Field.Content>
+              <Field.Label for="api-key-inject-media-generation">
+                {m.api_key_editor_media_generation()}
+              </Field.Label>
+              {#if mediaGenerationStatus === 'disabled'}
+                <a
+                  href={resolve('/media-generation')}
+                  class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground">
+                  {m.api_key_editor_platform_capability_disabled()}
+                </a>
+              {:else if mediaGenerationStatus === 'loading'}
+                <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
+              {:else if mediaGenerationStatus === 'unavailable'}
+                <span class="text-sm text-destructive" role="status">
+                  {m.api_key_editor_platform_capability_unavailable()}
+                </span>
               {/if}
             </Field.Content>
           </Field.Field>

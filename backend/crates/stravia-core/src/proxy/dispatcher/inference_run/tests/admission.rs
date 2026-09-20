@@ -101,6 +101,7 @@ async fn principal_concurrency_limit_allows_multiple_slots_and_isolates_principa
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: Vec::new(),
             inject_media_understanding: false,
         })

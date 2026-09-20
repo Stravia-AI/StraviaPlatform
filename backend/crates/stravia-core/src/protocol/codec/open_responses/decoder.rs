@@ -512,7 +512,9 @@ fn is_item_reference(item: &Value) -> bool {
 }
 
 pub(super) fn set_input_graph_metadata(item: &mut AiItem, wire: &Value) {
-    if !item.is_compaction() && !item.is_compaction_trigger() {
+    // Raw items already preserve every wire field. Copying their payload into
+    // graph metadata duplicates media outside the content externalization path.
+    if !item.is_compaction() && !item.is_compaction_trigger() && item.unknown_ref().is_none() {
         let extras: serde_json::Map<String, Value> = wire
             .as_object()
             .into_iter()

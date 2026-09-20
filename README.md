@@ -126,7 +126,24 @@ Retryable failures exhaust a configurable per-target budget before cooldown (def
 - `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
 - **Web Search** — an agent loop searches and reads pages for the model, using the embedded Moli engine, Exa, or Zhipu — or a Codex search binding.
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
+- **Media Generation** — generate or edit one image through an existing Codex OAuth Route, then reuse its Artifact Reference in later tools.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
+
+#### Image generation
+
+In **Advanced Features → Media Generation**, bind a saved image Route and enable the capability. Every enabled Target must use an enabled OpenAI Codex OAuth Provider with a GPT-5-or-later model and connected credentials; disabled Targets do not participate. Saving validates configuration without generating an image. Execution validates the binding again and uses the existing credential refresh, Route priority, retry, and failover policies. Actual account/model availability remains subject to upstream support.
+
+The same `generate` tool is available through MCP and explicit compatible model requests. Automatic exposure additionally requires the API key's transparent-injection switch and **Media Generation** selection. That selection defaults to off for new and existing keys; it is not a separate permission.
+
+```json
+{"type":"image","input":{"prompt":"A small blue house","aspect_ratio":"4:3","resolution":"2K"}}
+```
+
+Only `prompt` is required inside `input`. Optional `aspect_ratio` accepts `1:1`, `3:4`, `4:3`, `9:16`, or `16:9`; `resolution` accepts `1K`, `2K`, or `4K`. These are preferences, not exact dimensions. The Codex adapter currently clamps all resolution tiers to its verified hosted-tool sizes: square `1024×1024`, portrait `1024×1536`, and landscape `1536×1024`. With neither preference specified, it omits `size`. No cropping, scaling, or upsampling is performed.
+
+For editing, add ordered `reference_images`: plain owned `sa:…` references **without read options**, or public HTTP(S) image URLs. Upload local files through the existing `/v1/artifacts/uploads` flow first. Public URLs are safely fetched and stored before generation; source URLs are not forwarded. The platform accepts at most five JPEG/PNG/WebP references, each at most 32 MiB, 8192 pixels per edge, and 25 megapixels. Invalid, missing, expired, or another Principal's files fail before generation.
+
+Success returns only `artifact_reference`, `mime_type`, `size`, and `media: {width,height}` measured from the decoded file. Reuse the reference for the next edit, or call `StraviaRead` with `{"path":"sa:…?download=1"}` for an authorized download. No image, invalid image, or failed storage is an error, not a successful empty result. Route retries can repeat generation and consume additional quota when execution is uncertain; cancellation, invalid input, and storage failures do not trigger regeneration. Usage is recorded only when reported upstream.
 
 ### Keys, usage, and request history
 

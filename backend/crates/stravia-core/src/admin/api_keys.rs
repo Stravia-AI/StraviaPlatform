@@ -33,6 +33,7 @@ impl AdminService {
                 transparent_injection_enabled: input.transparent_injection_enabled,
                 inject_media_understanding: input.inject_media_understanding,
                 inject_web_search: input.inject_web_search,
+                inject_media_generation: input.inject_media_generation,
                 expires_at,
                 model_ids: input.model_ids,
             })
@@ -80,6 +81,9 @@ impl AdminService {
             .inject_media_understanding
             .unwrap_or(current.inject_media_understanding);
         let inject_web_search = input.inject_web_search.unwrap_or(current.inject_web_search);
+        let inject_media_generation = input
+            .inject_media_generation
+            .unwrap_or(current.inject_media_generation);
         let expires_at = match input.expires_at {
             Some(value) => normalize_api_key_expiry(Some(value))?,
             None => current.expires_at,
@@ -98,6 +102,7 @@ impl AdminService {
                     transparent_injection_enabled: Some(transparent_injection_enabled),
                     inject_media_understanding: Some(inject_media_understanding),
                     inject_web_search: Some(inject_web_search),
+                    inject_media_generation: Some(inject_media_generation),
                     expires_at,
                     model_ids: input.model_ids,
                 },
@@ -227,6 +232,7 @@ mod expiry_tests {
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
                 inject_web_search: false,
+                inject_media_generation: false,
                 inject_media_understanding: false,
                 model_ids: Vec::new(),
             })
@@ -245,6 +251,7 @@ mod expiry_tests {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
@@ -265,6 +272,7 @@ mod expiry_tests {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
@@ -285,6 +293,7 @@ mod expiry_tests {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
@@ -309,6 +318,7 @@ mod expiry_tests {
                         transparent_injection_enabled: false,
                         inject_media_understanding: false,
                         inject_web_search: false,
+                        inject_media_generation: false,
                         model_ids: Vec::new(),
                     })
                     .await
@@ -389,12 +399,14 @@ mod expiry_tests {
         assert_eq!(created_json["transparent_injection_enabled"], true);
         assert_eq!(created_json["inject_media_understanding"], true);
         assert_eq!(created_json["inject_web_search"], false);
+        assert_eq!(created_json["inject_media_generation"], false);
         assert!(created_json.get("allow_web_research").is_none());
         assert!(created_json.get("allow_media_understanding").is_none());
         assert!(created_json.get("web_search_injection_enabled").is_none());
 
         let update = serde_json::from_value(serde_json::json!({
-            "inject_web_search": true
+            "inject_web_search": true,
+            "inject_media_generation": true
         }))
         .expect("partial update");
         let updated = admin
@@ -405,6 +417,7 @@ mod expiry_tests {
         assert_eq!(updated_json["transparent_injection_enabled"], true);
         assert_eq!(updated_json["inject_media_understanding"], true);
         assert_eq!(updated_json["inject_web_search"], true);
+        assert_eq!(updated_json["inject_media_generation"], true);
 
         for legacy_field in [
             "allow_web_research",

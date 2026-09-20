@@ -8,6 +8,7 @@ import CogIcon from '@lucide/svelte/icons/cog'
 import GaugeIcon from '@lucide/svelte/icons/gauge'
 import KeyRoundIcon from '@lucide/svelte/icons/key-round'
 import ImagesIcon from '@lucide/svelte/icons/images'
+import ImagePlusIcon from '@lucide/svelte/icons/image-plus'
 import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard'
 import ListTreeIcon from '@lucide/svelte/icons/list-tree'
 import PanelLeftIcon from '@lucide/svelte/icons/panel-left'
@@ -98,6 +99,7 @@ const navigationGroups = [
     label: m.app_shell_nav_advanced_features,
     items: [
       { href: '/media-understanding', label: m.app_shell_nav_media_understanding, icon: ImagesIcon, beta: true },
+      { href: '/media-generation', label: m.app_shell_nav_media_generation, icon: ImagePlusIcon, beta: true },
       { href: '/web-search', label: m.app_shell_nav_web_search, icon: SearchCheckIcon, beta: true },
       { href: '/reversible-redaction', label: m.reversible_redaction_title, icon: KeyRoundIcon },
     ],

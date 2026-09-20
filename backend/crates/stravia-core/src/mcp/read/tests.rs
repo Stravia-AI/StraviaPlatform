@@ -69,6 +69,7 @@ async fn document_fixture() -> (
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
             inject_web_search: true,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })

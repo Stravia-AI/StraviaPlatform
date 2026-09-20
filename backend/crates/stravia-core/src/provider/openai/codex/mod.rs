@@ -9,6 +9,8 @@ use crate::provider::vendor_ext::{
     ResolvedTargetCapabilities, ResponsesWebSocketConnectionMetadata, VendorCtx, VendorExtension,
 };
 
+pub(crate) mod media_generation;
+
 pub struct OpenAiCodexChannel;
 
 /// Retain only client hints that are part of the Codex upstream contract.

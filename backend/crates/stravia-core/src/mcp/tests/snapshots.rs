@@ -244,6 +244,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })

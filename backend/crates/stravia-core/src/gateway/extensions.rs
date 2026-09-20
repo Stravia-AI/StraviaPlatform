@@ -138,6 +138,10 @@ pub(super) async fn configure_gateway_extensions(
         }),
     );
     *gateway.web_search_runner_state.write().await = Some(search_runner);
+    let generate = crate::media_generation::platform::GenerateTool::new(gateway);
+    hooks.push(crate::media_generation::platform::hook(generate.clone()));
+    tools.push(Arc::new(generate.clone()));
+    mcp_tools.push(Arc::new(generate));
     let (hook_runtime, read_tool) = hook_runtime_with_web_search(gateway, hooks, tools)?;
     gateway.hook_runtime = hook_runtime;
     mcp_tools.push(Arc::new(read_tool));

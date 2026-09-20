@@ -101,6 +101,7 @@ async fn protected_responses_router_with_hook(
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -118,6 +119,7 @@ async fn protected_responses_router_with_hook(
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     inject_web_search: None,
+                    inject_media_generation: None,
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
@@ -606,6 +608,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![model.id],
             inject_media_understanding: false,
         })
@@ -649,6 +652,7 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -739,6 +743,7 @@ async fn artifact_create_upload_response_hides_the_artifact_identity() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })
@@ -797,6 +802,7 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
         })

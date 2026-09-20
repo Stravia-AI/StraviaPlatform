@@ -21,6 +21,19 @@ const mediaUnderstandingQuery = createQuery(() => ({
   queryKey: ['media-understanding-config'],
   queryFn: admin.mediaUnderstanding.get,
 }))
+const mediaGenerationQuery = createQuery(() => ({
+  queryKey: ['media-generation-config'],
+  queryFn: admin.mediaGeneration.config.get,
+}))
+const mediaGenerationStatus = $derived(
+  mediaGenerationQuery.isPending
+    ? ('loading' as const)
+    : mediaGenerationQuery.isError
+      ? ('unavailable' as const)
+      : mediaGenerationQuery.data?.config?.enabled
+        ? ('enabled' as const)
+        : ('disabled' as const),
+)
 const apiKey = $derived(apiKeysQuery.data?.find((item) => item.id === apiKeyId))
 
 async function returnToApiKeys(): Promise<void> {
@@ -54,5 +67,6 @@ async function returnToApiKeys(): Promise<void> {
     models={modelsQuery.data ?? []}
     webSearchEnabled={webSearchQuery.data?.enabled ?? false}
     mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false}
+    {mediaGenerationStatus}
     onSaved={returnToApiKeys} />
 {/if}

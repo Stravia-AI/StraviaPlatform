@@ -64,11 +64,13 @@ impl LiveModelTurnExecutor {
 #[async_trait]
 impl ModelTurnExecutor for LiveModelTurnExecutor {
     async fn execute(&self, mut input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
-        tokio::select! {
-            biased;
-            _ = input.cancellation.cancelled() => return Err(interruption_error(input.deadline)),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
-            result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(|error| ModelTurnError::new("attachment_ingest_failed", error.to_string()))?,
+        if !input.attachments_normalized {
+            tokio::select! {
+                biased;
+                _ = input.cancellation.cancelled() => return Err(interruption_error(input.deadline)),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+                result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(|error| ModelTurnError::new("attachment_ingest_failed", error.to_string()))?,
+            }
         }
         let model_turn_id = stravia_runtime_contract::identifier::new_id();
         let operation_started = Instant::now();
@@ -564,6 +566,9 @@ async fn execute_inner(
 
     if input.authorization == ModelTurnAuthorization::CapabilityGrant
         && stravia_media::contains_images(&input.request)
+        && !crate::protocol::codec::open_responses::hosted_image_generation_requested(
+            &input.request,
+        )
         && !crate::media::model_is_image_capable(gateway, &route).await
     {
         return Err(ModelTurnError::new(
@@ -1234,8 +1239,10 @@ async fn prepare_attempt(
             "Native compaction state is not compatible with this Target binding",
         ));
     }
-    let websocket_enabled =
-        !compact && openai_generation_target && target_capabilities.responses_websocket;
+    let websocket_enabled = input.allow_responses_websocket
+        && !compact
+        && openai_generation_target
+        && target_capabilities.responses_websocket;
     if let Some(level) = provider_request.reasoning.level {
         let Some(control) = crate::thinking::mapping_control(&target.thinking_level_map, level)
         else {

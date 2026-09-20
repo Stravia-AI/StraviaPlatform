@@ -258,6 +258,22 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.backend_error_auth_session_required({}, options)
     case 'AUTH_COMPLETION_IN_PROGRESS':
       return m.backend_error_auth_completion_in_progress({}, options)
+    case 'media_generation_config_invalid':
+      return m.media_generation_config_invalid({}, options)
+    case 'media_generation_config_unavailable':
+      return m.media_generation_config_unavailable({}, options)
+    case 'media_generation_route_missing':
+      return m.media_generation_route_required({}, options)
+    case 'media_generation_route_disabled':
+      return m.media_generation_route_disabled({}, options)
+    case 'media_generation_targets_missing':
+      return m.media_generation_targets_missing({}, options)
+    case 'media_generation_provider_missing':
+      return m.media_generation_provider_missing({}, options)
+    case 'media_generation_target_incompatible':
+      return m.media_generation_target_incompatible({}, options)
+    case 'media_generation_oauth_unavailable':
+      return m.media_generation_oauth_unavailable({}, options)
     default:
       return m.backend_error_unknown({ message: payload.message || raw }, options)
   }

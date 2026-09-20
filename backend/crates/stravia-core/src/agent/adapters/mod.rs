@@ -91,6 +91,9 @@ impl AgentTool for PlatformToolAgentAdapter {
     fn input_schema(&self) -> Value {
         self.tool.parameters()
     }
+    fn strict_schema(&self) -> bool {
+        self.tool.strict_schema()
+    }
     fn parallel_safe(&self) -> bool {
         self.tool.parallel_safe()
     }

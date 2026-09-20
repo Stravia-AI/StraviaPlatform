@@ -157,7 +157,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let key = admin.create_api_key(CreateApiKey {
             key: None, name: "local publication client".into(), concurrency_limit: None,
             expires_at: None, mcp_access_enabled: false, transparent_injection_enabled: false,
-            inject_web_search: false, inject_media_understanding: false, model_ids: vec![route.id],
+            inject_web_search: false, inject_media_generation: false, inject_media_understanding: false, model_ids: vec![route.id],
         }).await.unwrap();
         sqlx::query("CREATE TRIGGER deny_native_publication BEFORE INSERT ON native_compactions BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END")
             .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
@@ -337,6 +337,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
             inject_web_search: false,
+            inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![route.id],
         }).await.unwrap();
