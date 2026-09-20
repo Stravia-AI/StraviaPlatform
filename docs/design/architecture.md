@@ -900,7 +900,9 @@ SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）与 Windows/Linux WebView 分别位于 `state/desktop-port.json`、`state/desktop-webview/`。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+
+Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
 旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
 
