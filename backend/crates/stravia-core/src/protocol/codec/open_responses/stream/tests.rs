@@ -1336,6 +1336,112 @@ fn reasoning_item_seals_before_a_later_function_call_completes() {
 }
 
 #[test]
+fn indexed_reasoning_item_done_seals_before_tool_completion() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+
+    let mut formatter = ResponsesStreamFormatter::new();
+    let open = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-indexed-reasoning-tool".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDeltaWithMetadata {
+            text: "Inspect the fixture.".into(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 1,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 1,
+            arguments: r#"{"path":"fixture.txt"}"#.into(),
+        },
+    ]);
+    assert!(
+        event_bodies(&open)
+            .iter()
+            .all(|event| event["type"] != "response.output_item.done"),
+        "工具开始不代表思考签名已经完整，不能提前封口"
+    );
+
+    let completed = AiItem::reasoning(
+        Vec::new(),
+        vec!["Inspect the fixture.".into()],
+        Some("late-signature".into()),
+    );
+    let closed = formatter.format_deltas(&[
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: completed.clone(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 1,
+            tool_call: ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"fixture.txt"}"#.into(),
+            },
+        },
+    ]);
+    let bodies = event_bodies(&closed);
+    let completed_items = bodies
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed_items
+            .iter()
+            .map(|event| event["output_index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [0, 1],
+        "权威思考项必须在工具完成前交付，不依赖整轮终态"
+    );
+    assert_eq!(
+        completed_items[0]["item"]["encrypted_content"],
+        "late-signature"
+    );
+    assert_eq!(
+        completed_items[0]["item"]["content"][0]["text"],
+        "Inspect the fixture."
+    );
+
+    let terminal = formatter.format_deltas(&[
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: completed,
+        },
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let terminal = event_bodies(&terminal);
+    assert!(
+        terminal
+            .iter()
+            .all(|event| event["type"] != "response.output_item.done"),
+        "重复 ItemDone 与终帧不能再次交付已关闭项"
+    );
+    let output = &terminal
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap()["response"]["output"];
+    assert_eq!(
+        output,
+        &serde_json::Value::Array(
+            completed_items
+                .iter()
+                .map(|event| event["item"].clone())
+                .collect()
+        ),
+        "终态快照必须保留已交付项及相同顺序"
+    );
+}
+
+#[test]
 fn thinking_resuming_after_a_function_call_opens_a_new_reasoning_item() {
     let mut formatter = ResponsesStreamFormatter::new();
     let events = formatter.format_deltas(&[

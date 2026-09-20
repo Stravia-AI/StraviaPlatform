@@ -991,6 +991,57 @@ impl ResponsesStreamFormatter {
         ));
     }
 
+    fn seal_indexed_reasoning_item(
+        &mut self,
+        events: &mut Vec<SseEvent>,
+        output_index: usize,
+        mut reasoning: PendingIndexedReasoning,
+    ) {
+        Self::finish_active_indexed_reasoning_summary(events, output_index, &mut reasoning);
+        let summary = reasoning
+            .summary
+            .into_values()
+            .map(|text| serde_json::json!({"type": "summary_text", "text": text}))
+            .collect::<Vec<_>>();
+        let mut content = Vec::with_capacity(reasoning.content.len());
+        for (content_index, text) in reasoning.content {
+            events.push(SseEvent::new(
+                Some("response.reasoning_text.done"),
+                serde_json::json!({
+                    "type": "response.reasoning_text.done",
+                    "item_id": reasoning.item_id,
+                    "output_index": output_index,
+                    "content_index": content_index,
+                    "text": text
+                })
+                .to_string(),
+            ));
+            content.push(serde_json::json!({
+                "type": "reasoning_text",
+                "text": text
+            }));
+        }
+        let mut item = serde_json::json!({
+            "type": "reasoning",
+            "id": reasoning.item_id,
+            "summary": summary,
+            "content": content
+        });
+        if let Some(encrypted_content) = reasoning.encrypted_content {
+            item["encrypted_content"] = serde_json::Value::String(encrypted_content);
+        }
+        events.push(SseEvent::new(
+            Some("response.output_item.done"),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item
+            })
+            .to_string(),
+        ));
+        self.sealed_reasoning_items.insert(output_index, item);
+    }
+
     fn emit_terminal(
         &mut self,
         status: &str,
@@ -1000,51 +1051,8 @@ impl ResponsesStreamFormatter {
 
         self.seal_reasoning_item(&mut events);
 
-        let mut indexed_reasoning_output = Vec::new();
-        for (output_index, reasoning) in &mut self.indexed_reasoning {
-            Self::finish_active_indexed_reasoning_summary(&mut events, *output_index, reasoning);
-            let mut summary = Vec::new();
-            for text in reasoning.summary.values() {
-                let part = serde_json::json!({"type": "summary_text", "text": text});
-                summary.push(part);
-            }
-            let mut content = Vec::new();
-            for (content_index, text) in &reasoning.content {
-                events.push(SseEvent::new(
-                    Some("response.reasoning_text.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_text.done",
-                        "item_id": reasoning.item_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
-                        "text": text
-                    })
-                    .to_string(),
-                ));
-                content.push(serde_json::json!({
-                    "type": "reasoning_text",
-                    "text": text
-                }));
-            }
-            let mut item = serde_json::json!({
-                "type": "reasoning",
-                "id": reasoning.item_id,
-                "summary": summary,
-                "content": content
-            });
-            if let Some(encrypted_content) = &reasoning.encrypted_content {
-                item["encrypted_content"] = serde_json::Value::String(encrypted_content.clone());
-            }
-            events.push(SseEvent::new(
-                Some("response.output_item.done"),
-                serde_json::json!({
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": item
-                })
-                .to_string(),
-            ));
-            indexed_reasoning_output.push((*output_index, item));
+        for (output_index, reasoning) in std::mem::take(&mut self.indexed_reasoning) {
+            self.seal_indexed_reasoning_item(&mut events, output_index, reasoning);
         }
 
         for call in &self.tool_calls {
@@ -1109,7 +1117,7 @@ impl ResponsesStreamFormatter {
             ));
         }
 
-        let mut indexed_output: Vec<(usize, serde_json::Value)> = indexed_reasoning_output;
+        let mut indexed_output = Vec::new();
         for (output_index, message) in &self.indexed_messages {
             let mut content_by_index = BTreeMap::new();
             for (content_index, text) in &message.content {
@@ -1770,12 +1778,18 @@ impl ResponsesStreamFormatter {
                             .expect("indexed message was inserted")
                             .status = item.status();
                     }
-                    if let Some((_, _, encrypted_content)) = item.reasoning_ref() {
+                    if let Some((_, _, encrypted_content)) = item.reasoning_ref()
+                        && !self.sealed_reasoning_items.contains_key(index)
+                    {
                         self.ensure_indexed_reasoning(&mut events, *index, None);
-                        self.indexed_reasoning
-                            .get_mut(index)
-                            .expect("indexed reasoning was inserted")
-                            .encrypted_content = encrypted_content.map(str::to_owned);
+                        let mut reasoning = self
+                            .indexed_reasoning
+                            .remove(index)
+                            .expect("indexed reasoning was inserted");
+                        reasoning.encrypted_content = encrypted_content.map(str::to_owned);
+                        // ItemDone 才证明晚到签名完整；此时立即收口，避免工具先
+                        // 完成的 SSE 顺序被客户端持久化为 call → reasoning。
+                        self.seal_indexed_reasoning_item(&mut events, *index, reasoning);
                     }
                 }
                 AiStreamDelta::Usage(u) => {

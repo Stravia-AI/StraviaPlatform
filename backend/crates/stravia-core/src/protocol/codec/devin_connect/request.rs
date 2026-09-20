@@ -53,6 +53,7 @@
 //!   match `[A-Za-z0-9_-]` or the request fails upstream with a vague
 //!   `invalid_argument` — both are handled before encoding.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
@@ -693,21 +694,11 @@ fn push_message(out: &mut Vec<ChatMsg>, message: ChatMsg) {
 }
 
 fn collect_chat_messages(req: &AiRequest) -> anyhow::Result<Vec<ChatMsg>> {
-    // The upstream only reliably accepts images on the CURRENT turn — every
-    // user/tool message after the last assistant message. History images in
-    // #10 are answered with invalid_argument, so older images degrade to a
-    // text placeholder (live-verified by the reference implementation).
-    let last_assistant = req
-        .items
-        .iter()
-        .rposition(|item| matches!(item.role, Role::Assistant))
-        .map(|index| index + 1)
-        .unwrap_or(0);
     let mut out: Vec<ChatMsg> = Vec::new();
-    for (index, item) in req.items.iter().enumerate() {
+    for item in &req.items {
         match item.role {
             Role::System | Role::Developer => {}
-            Role::User => encode_user_item(item, index >= last_assistant, &mut out)?,
+            Role::User => encode_user_item(item, &mut out)?,
             Role::Assistant => encode_assistant_item(item, &mut out)?,
             Role::Tool => encode_tool_result_item(item, &mut out)?,
         }
@@ -717,24 +708,23 @@ fn collect_chat_messages(req: &AiRequest) -> anyhow::Result<Vec<ChatMsg>> {
     Ok(out)
 }
 
-/// Upstream requires each assistant tool call to be followed immediately by
-/// its source=4 result — the "all calls, then all results" grouping clients
-/// send is reordered into interleaved call/result pairs by call id. Results
-/// already paired stay put; calls without a matching result keep position.
+/// 上游要求助手调用后紧邻对应的 source=4 结果。客户端可将较晚封口的
+/// thinking 排到 call 之后，因此先保留同一助手回合的正文与签名，再按
+/// call id 排列 call/result；不跨用户或工具结果边界移动内容。
 fn pair_tool_calls_with_results(prompts: Vec<ChatMsg>) -> Vec<ChatMsg> {
     let is_call = |m: &ChatMsg| m.source == SOURCE_ASSISTANT && !m.tool_calls.is_empty();
     let is_result = |m: &ChatMsg| m.source == SOURCE_TOOL_RESULT && m.tool_call_id.is_some();
     let mut out: Vec<ChatMsg> = Vec::with_capacity(prompts.len());
     let mut index = 0;
     while index < prompts.len() {
-        if !is_call(&prompts[index]) {
+        if prompts[index].source != SOURCE_ASSISTANT {
             out.push(prompts[index].clone());
             index += 1;
             continue;
         }
-        // Collect the consecutive call prompts and the result block after.
+        // 用户与工具结果是回合边界，不能跨过它们移动另一个回合的思考。
         let calls_start = index;
-        while index < prompts.len() && is_call(&prompts[index]) {
+        while index < prompts.len() && prompts[index].source == SOURCE_ASSISTANT {
             index += 1;
         }
         let results_start = index;
@@ -747,8 +737,10 @@ fn pair_tool_calls_with_results(prompts: Vec<ChatMsg>) -> Vec<ChatMsg> {
                 by_id.entry(id.as_str()).or_insert(result);
             }
         }
+        let assistant = &prompts[calls_start..results_start];
+        out.extend(assistant.iter().filter(|prompt| !is_call(prompt)).cloned());
         let mut consumed: Vec<&ChatMsg> = Vec::new();
-        for call_prompt in &prompts[calls_start..results_start] {
+        for call_prompt in assistant.iter().filter(|prompt| is_call(prompt)) {
             out.push((*call_prompt).clone());
             // The tool_call submessages carry the ids but stay encoded; the
             // id list is recovered by decoding each call once.
@@ -813,11 +805,7 @@ impl ChatMsg {
     }
 }
 
-fn encode_user_item(
-    item: &AiItem,
-    attach_images: bool,
-    out: &mut Vec<ChatMsg>,
-) -> anyhow::Result<()> {
+fn encode_user_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
     let mut current = ChatMsg {
         source: SOURCE_USER,
         ..ChatMsg::default()
@@ -841,23 +829,7 @@ fn encode_user_item(
                 current.text.push_str(text);
             }
             ContentBlock::Image { source, .. } => {
-                if !attach_images {
-                    // History image: upstream rejects #10 outside the
-                    // current turn — degrade to a placeholder instead.
-                    if !current.text.is_empty() {
-                        current.text.push('\n');
-                    }
-                    current.text.push_str("[Image omitted from history]");
-                    continue;
-                }
-                match source {
-                    MediaSource::Base64 { media_type, data } => {
-                        current.images.push(encode_image(data, media_type));
-                    }
-                    MediaSource::Url(_) | MediaSource::FileId { .. } => {
-                        bail!("Devin Connect accepts only inline image bytes")
-                    }
-                }
+                current.images.push(encode_inline_image(source)?);
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -1007,21 +979,35 @@ fn encode_thinking(block: &ContentBlock) -> anyhow::Result<ChatMsg> {
 
 fn encode_tool_result_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
     let mut tool_error = false;
+    let mut images = Vec::new();
     let text = match &item.content {
         MessageContent::Text(value) => value.clone(),
         MessageContent::Blocks(blocks) => {
-            tool_error = blocks.iter().any(|block| {
-                matches!(block, ContentBlock::ToolResult { is_error, .. } if *is_error == Some(true))
-            });
-            blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text, .. } => Some(text.clone()),
-                    ContentBlock::ToolResult { content, .. } => Some(tool_result_text(content)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            let mut text = String::new();
+            let mut separator = "";
+            for block in blocks {
+                let fragment = match block {
+                    ContentBlock::Text { text, .. } => Cow::Borrowed(text.as_str()),
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        tool_error |= *is_error == Some(true);
+                        Cow::Owned(tool_result_text(content))
+                    }
+                    ContentBlock::Image { source, .. } => {
+                        images.push(encode_inline_image(source)?);
+                        continue;
+                    }
+                    other => bail!(
+                        "Devin Connect cannot represent tool result content block `{}`",
+                        content_block_name(other)
+                    ),
+                };
+                text.push_str(separator);
+                text.push_str(&fragment);
+                separator = "\n";
+            }
+            text
         }
     };
     let text = if text.is_empty() {
@@ -1037,6 +1023,7 @@ fn encode_tool_result_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Res
                 text,
                 tool_call_id: Some(tool_call_id.to_string()),
                 tool_error,
+                images,
                 ..ChatMsg::default()
             },
         ),
@@ -1047,6 +1034,7 @@ fn encode_tool_result_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Res
             ChatMsg {
                 source: SOURCE_USER,
                 text: format!("[tool result]: {text}"),
+                images,
                 ..ChatMsg::default()
             },
         ),
@@ -1068,13 +1056,16 @@ fn tool_result_text(content: &Value) -> String {
     }
 }
 
-fn encode_image(base64_data: &str, media_type: &str) -> Vec<u8> {
+fn encode_inline_image(source: &MediaSource) -> anyhow::Result<Vec<u8>> {
+    let MediaSource::Base64 { media_type, data } = source else {
+        bail!("Devin Connect accepts only inline image bytes");
+    };
     // ImageData{#1 base64 text, #2 mime} — verified from wire: #1 carries the
     // base64 STRING, not raw image bytes.
     let mut out = Vec::new();
-    write_string_field(&mut out, 1, base64_data);
+    write_string_field(&mut out, 1, data);
     write_string_field(&mut out, 2, media_type);
-    out
+    Ok(out)
 }
 
 fn encode_tool_call(
@@ -1687,6 +1678,78 @@ mod tests {
         assert!(msg.iter().any(|f| f.number == 7 && f.bytes == b"c1"));
     }
 
+    #[test]
+    fn late_thinking_keeps_tool_continuation_adjacent() {
+        let replay = ThinkingReplay {
+            signature: "signed-thought".into(),
+            signature_type: "native".into(),
+            output_id: "output-1".into(),
+            ..Default::default()
+        };
+        // Responses 客户端可能在 function_call 之后回传较晚封口的 reasoning。
+        let req = AiRequest::new(
+            "swe-2",
+            vec![
+                text_item(Role::User, "Read the fixture."),
+                AiItem::function_call(ToolCall {
+                    id: "call-1#output-1".into(),
+                    name: "read".into(),
+                    arguments: r#"{"path":"fixture.json"}"#.into(),
+                }),
+                AiItem::reasoning(
+                    Vec::new(),
+                    vec!["Inspect the fixture.".into()],
+                    Some(replay.encode()),
+                ),
+                AiItem {
+                    tool_call_id: Some("call-1#output-1".into()),
+                    ..text_item(Role::Tool, r#"{"fixture_code":"RIVER-593"}"#)
+                },
+            ],
+        );
+        let fields = top_level(&req);
+        let prompts: Vec<_> = fields
+            .iter()
+            .filter(|field| field.number == 3 && field.wire_type == 2)
+            .map(|field| parse_fields(field.bytes).unwrap())
+            .collect();
+        let call_index = prompts
+            .iter()
+            .position(|prompt| prompt.iter().any(|field| field.number == 6))
+            .unwrap();
+        let result = &prompts[call_index + 1];
+        assert!(
+            result
+                .iter()
+                .any(|field| field.number == 2 && field.scalar == 4)
+        );
+        assert!(
+            result
+                .iter()
+                .any(|field| field.number == 7 && field.bytes == b"call-1#output-1")
+        );
+        assert!(result.iter().any(|field| {
+            field.number == 3 && field.bytes == br#"{"fixture_code":"RIVER-593"}"#
+        }));
+        let thinking = prompts
+            .iter()
+            .position(|prompt| prompt.iter().any(|field| field.number == 12))
+            .unwrap();
+        assert!(thinking < call_index);
+        for (number, value) in [
+            (11, b"Inspect the fixture.".as_slice()),
+            (12, b"signed-thought".as_slice()),
+            (15, b"output-1".as_slice()),
+            (18, b"native".as_slice()),
+        ] {
+            assert!(
+                prompts[thinking]
+                    .iter()
+                    .any(|field| field.number == number && field.bytes == value)
+            );
+        }
+    }
+
     /// The upstream rejects "all calls, then all results" groupings and
     /// orphan source=4 turns alike: results must interleave directly after
     /// the assistant prompt carrying their call, and unmatched results drop
@@ -1752,10 +1815,8 @@ mod tests {
         );
     }
 
-    /// History images are answered with invalid_argument upstream — only the
-    /// current turn (after the last assistant message) may carry #10.
     #[test]
-    fn history_images_degrade_to_text_placeholder() {
+    fn history_images_remain_available_for_followup_questions() {
         let image_item = || AiItem {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Image {
@@ -1770,10 +1831,6 @@ mod tests {
             tool_call_id: None,
             meta: None,
         };
-        // First turn keeps the image.
-        let fields = top_level(&AiRequest::new("m", vec![image_item()]));
-        assert!(sub_message(&fields, 3, 0).iter().any(|f| f.number == 10));
-        // Once an assistant turn exists, the older image degrades to text.
         let fields = top_level(&AiRequest::new(
             "m",
             vec![
@@ -1783,11 +1840,74 @@ mod tests {
             ],
         ));
         let history = sub_message(&fields, 3, 0);
-        assert!(history.iter().all(|f| f.number != 10));
+        let image = sub_message(&history, 10, 0);
         assert!(
-            history
+            image
                 .iter()
-                .any(|f| f.number == 3 && f.bytes == b"[Image omitted from history]")
+                .any(|field| field.number == 1 && field.bytes == b"aGk=")
+        );
+        assert!(
+            image
+                .iter()
+                .any(|field| field.number == 2 && field.bytes == b"image/png")
+        );
+    }
+
+    #[test]
+    fn tool_result_images_preserve_pixels_and_call_association() {
+        let req = AiRequest::new(
+            "swe-2",
+            vec![
+                text_item(Role::User, "Read the image."),
+                AiItem::function_call(ToolCall {
+                    id: "read-image".into(),
+                    name: "read".into(),
+                    arguments: r#"{"path":"image.png"}"#.into(),
+                }),
+                AiItem {
+                    role: Role::Tool,
+                    content: MessageContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "Image from read.".into(),
+                            cache_control: None,
+                        },
+                        ContentBlock::Image {
+                            source: MediaSource::Base64 {
+                                media_type: "image/png".into(),
+                                data: "aGk=".into(),
+                            },
+                            detail: None,
+                            cache_control: None,
+                        },
+                    ]),
+                    tool_calls: None,
+                    tool_call_id: Some("read-image".into()),
+                    meta: None,
+                },
+            ],
+        );
+        let fields = top_level(&req);
+        let result = sub_message(&fields, 3, 2);
+        let image = sub_message(&result, 10, 0);
+        assert!(
+            image
+                .iter()
+                .any(|field| field.number == 1 && field.bytes == b"aGk=")
+        );
+        assert!(
+            image
+                .iter()
+                .any(|field| field.number == 2 && field.bytes == b"image/png")
+        );
+        assert!(
+            result
+                .iter()
+                .any(|field| field.number == 7 && field.bytes == b"read-image")
+        );
+        assert!(
+            result
+                .iter()
+                .any(|field| field.number == 3 && field.bytes == b"Image from read.")
         );
     }
 
