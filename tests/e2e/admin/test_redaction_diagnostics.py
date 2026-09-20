@@ -193,7 +193,7 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
             _, _, archive = download_observation_bundle(env, detail)
             events = observation_bundle_events(archive)
             for predicate in (
-                lambda event: event.get("stage") == "client_projection_event",
+                lambda event: event.get("stage") == "client_projection_content",
                 lambda event: event.get("direction") == "platform_to_client",
             ):
                 records = [event for event in events if predicate(event)]

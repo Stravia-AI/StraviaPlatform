@@ -267,17 +267,17 @@ def test_protocol_matrix(
         "upstream_response",
         "platform_to_client",
     } <= directions
-    stages = {event.get("stage") for event in trace if isinstance(event, dict)}
-    assert {
-        "decoded_request",
-        "restored_request",
-        "effective_model_request",
-        "canonical_request",
-        "canonical_terminal_response",
-        "response_after_hook",
-        "client_projection_event",
-        "delivery_terminal",
-    } <= stages
+    selected = {
+        event["payload"]["target_id"]
+        for event in trace
+        if event.get("stage") == "target_selected"
+    }
+    attempted = {
+        event["payload"]["target_id"]
+        for event in run["events"]
+        if event["kind"] == "target_attempt_started"
+    }
+    assert selected == attempted
 
 
 # ---------------------------------------------------------------------------

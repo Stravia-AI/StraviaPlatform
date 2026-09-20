@@ -589,7 +589,7 @@ pub(super) async fn complete_canonical_response(
         }
     }
     let observer = context.observer.clone();
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
         stage: "response_after_hook".into(),
         model_turn_id: Some(context.model_turn_id.clone()),
         attempt_id: None,
@@ -659,8 +659,8 @@ pub(super) async fn complete_canonical_response(
             return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
         }
     };
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
-        stage: "client_projection_event".into(),
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
+        stage: "client_projection_content".into(),
         model_turn_id: Some(context.model_turn_id.clone()),
         attempt_id: None,
         payload: super::checkpoint_payload(&observer, &response),

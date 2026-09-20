@@ -15,6 +15,69 @@ impl SqlTurnChainStore {
     pub fn postgres(pool: PgPool) -> Self {
         Self::Postgres(pool)
     }
+
+    /// 离线维护：分批去重既有生成历史，校验完整还原后才提交。
+    /// 调用方必须独占实例；不修改父边、业务版本、保留期或索引。
+    /// 损坏内容、引用冲突和存储错误均返回错误，已完成批次可安全重入。
+    pub async fn optimize_storage(&self) -> anyhow::Result<u64> {
+        let mut rewritten = 0;
+        macro_rules! optimize {
+            ($pool:expr, $put:ident, $restore:ident) => {{
+                let mut cursor = String::new();
+                loop {
+                    let mut transaction = $pool.begin().await?;
+                    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+                        "SELECT id, principal, CAST(payload_version AS BIGINT), payload FROM turn_chain_nodes \
+                         WHERE kind = 'response' AND storage_format = 0 AND id > $1 ORDER BY id LIMIT 64"
+                    ).bind(&cursor).fetch_all(&mut *transaction).await?;
+                    if rows.is_empty() { break; }
+                    for (id, principal, version, payload) in rows {
+                        cursor.clone_from(&id);
+                        let original = serde_json::from_str::<serde_json::Value>(&payload)?;
+                        let encoded = content::encode(original.clone())?;
+                        if encoded.format == 0 { continue; }
+                        content::$put(&mut transaction, &id, &principal, &encoded).await?;
+                        sqlx::query("UPDATE turn_chain_nodes SET payload = $1, storage_format = $2 WHERE id = $3")
+                            .bind(&encoded.payload).bind(encoded.format).bind(&id)
+                            .execute(&mut *transaction).await?;
+                        let mut restored = vec![decode_node(TurnNodeId::new(id), TurnNodeKind::Response, None, version, encoded.payload)
+                            .map_err(|error| anyhow::anyhow!("{error:?}"))?];
+                        content::$restore(&mut transaction, &mut restored).await?;
+                        anyhow::ensure!(restored[0].payload == original, "history restoration mismatch");
+                        rewritten += 1;
+                    }
+                    transaction.commit().await?;
+                }
+            }};
+        }
+        match self {
+            Self::Sqlite(pool) => optimize!(pool, put_sqlite, restore_sqlite),
+            Self::Postgres(pool) => optimize!(pool, put_postgres, restore_postgres),
+        }
+        self.remove_unreferenced_contents().await?;
+        Ok(rewritten)
+    }
+
+    async fn remove_unreferenced_contents(&self) -> anyhow::Result<()> {
+        const DELETE: &str = "DELETE FROM turn_chain_contents WHERE NOT EXISTS \
+            (SELECT 1 FROM turn_chain_content_refs r WHERE r.principal = turn_chain_contents.principal \
+             AND r.content_key = turn_chain_contents.content_key)";
+        match self {
+            Self::Sqlite(pool) => {
+                sqlx::query(DELETE).execute(pool).await?;
+            }
+            Self::Postgres(pool) => {
+                let mut transaction = pool.begin().await?;
+                // 清理与插入共享内容互斥，避免 MVCC 快照漏看刚建立的引用。
+                sqlx::query("LOCK TABLE turn_chain_contents IN SHARE ROW EXCLUSIVE MODE")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query(DELETE).execute(&mut *transaction).await?;
+                transaction.commit().await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn unix_millis_after(ttl: Duration) -> i64 {
@@ -135,7 +198,7 @@ impl TurnChainStore for SqlTurnChainStore {
             .map(|(_, _, _, _, expires_at, _)| deadline_from_unix_millis(*expires_at, now))
             .min()
             .ok_or(TurnUnavailable::Unavailable)?;
-        let nodes = rows
+        let mut nodes = rows
             .into_iter()
             .map(|(id, parent_id, payload_version, payload, _, _)| {
                 decode_node(
@@ -147,6 +210,29 @@ impl TurnChainStore for SqlTurnChainStore {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        match self {
+            Self::Sqlite(pool) => {
+                content::restore_sqlite(
+                    &mut *pool
+                        .acquire()
+                        .await
+                        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
+                    &mut nodes,
+                )
+                .await
+            }
+            Self::Postgres(pool) => {
+                content::restore_postgres(
+                    &mut *pool
+                        .acquire()
+                        .await
+                        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
+                    &mut nodes,
+                )
+                .await
+            }
+        }
+        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
         Ok(MaterializedTurnChain { nodes, expires_at })
     }
 
@@ -154,8 +240,9 @@ impl TurnChainStore for SqlTurnChainStore {
         let principal = commit.principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         let expires_at = unix_millis_after(commit.idle_ttl);
-        let payload = serde_json::to_string(&commit.payload)
+        let encoded = content::encode(commit.payload)
             .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+        let payload = &encoded.payload;
         let payload_version = i64::from(commit.payload_version);
         let prefix_namespace = commit
             .reusable_prefix
@@ -235,7 +322,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 .bind(commit.parent_id.as_ref().map(TurnNodeId::as_str))
                 .bind(&principal)
                 .bind(payload_version)
-                .bind(&payload)
+                .bind(payload)
                 .bind(now)
                 .bind(expires_at)
                 .bind(prefix_namespace)
@@ -245,6 +332,15 @@ impl TurnChainStore for SqlTurnChainStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                content::put_sqlite(&mut transaction, commit.id.as_str(), &principal, &encoded)
+                    .await
+                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                sqlx::query("UPDATE turn_chain_nodes SET storage_format = $1 WHERE id = $2")
+                    .bind(encoded.format)
+                    .bind(commit.id.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
                 transaction
                     .commit()
                     .await
@@ -303,7 +399,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 .bind(commit.parent_id.as_ref().map(TurnNodeId::as_str))
                 .bind(&principal)
                 .bind(payload_version)
-                .bind(&payload)
+                .bind(payload)
                 .bind(now)
                 .bind(expires_at)
                 .bind(prefix_namespace)
@@ -313,6 +409,15 @@ impl TurnChainStore for SqlTurnChainStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                content::put_postgres(&mut transaction, commit.id.as_str(), &principal, &encoded)
+                    .await
+                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                sqlx::query("UPDATE turn_chain_nodes SET storage_format = $1 WHERE id = $2")
+                    .bind(encoded.format)
+                    .bind(commit.id.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
                 transaction
                     .commit()
                     .await
@@ -420,7 +525,7 @@ impl TurnChainStore for SqlTurnChainStore {
          ),
     ) -> Result<(), TurnUnavailable> {
         macro_rules! rebuild {
-            ($pool:expr) => {{
+            ($pool:expr, $restore:ident) => {{
                 let mut transaction = $pool.begin().await
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                 let now = chrono::Utc::now().timestamp_millis();
@@ -448,9 +553,11 @@ impl TurnChainStore for SqlTurnChainStore {
                             .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                         continue;
                     }
-                    let nodes = rows.into_iter().map(|(id, parent_id, version, payload, _)| {
+                    let mut nodes = rows.into_iter().map(|(id, parent_id, version, payload, _)| {
                         decode_node(TurnNodeId::new(id), TurnNodeKind::Response, parent_id, version, payload)
                     }).collect::<Result<Vec<_>, _>>()?;
+                    content::$restore(&mut transaction, &mut nodes).await
+                        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                     let Some(prefix) = decode(nodes, completed_at)
                         .map_err(TurnUnavailable::Storage)? else { continue };
                     sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = $1, prefix_fingerprint = $2, prefix_item_count = $3 WHERE id = $4 AND principal = $5")
@@ -461,8 +568,8 @@ impl TurnChainStore for SqlTurnChainStore {
             }};
         }
         match self {
-            Self::Sqlite(pool) => rebuild!(pool),
-            Self::Postgres(pool) => rebuild!(pool),
+            Self::Sqlite(pool) => rebuild!(pool, restore_sqlite),
+            Self::Postgres(pool) => rebuild!(pool, restore_postgres),
         }
         Ok(())
     }
@@ -494,6 +601,9 @@ impl TurnChainStore for SqlTurnChainStore {
             .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
             removed = removed.saturating_add(rows);
             if rows == 0 {
+                self.remove_unreferenced_contents()
+                    .await
+                    .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                 return Ok(removed);
             }
         }

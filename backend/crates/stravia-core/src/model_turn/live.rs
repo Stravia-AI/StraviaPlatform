@@ -110,13 +110,13 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             if observer.debug_enabled() {
                 match serde_json::to_value(&input.request) {
                     Ok(payload) => {
-                        observer.record(RunEvent::Checkpoint {
+                        observer.record(RunEvent::Content {
                             stage: "artifact_normalized_request".into(),
                             model_turn_id: Some(model_turn_id.clone()),
                             attempt_id: None,
                             payload: payload.clone(),
                         });
-                        observer.record(RunEvent::Checkpoint {
+                        observer.record(RunEvent::Content {
                             stage: "canonical_request".into(),
                             model_turn_id: Some(model_turn_id.clone()),
                             attempt_id: None,
@@ -615,6 +615,19 @@ async fn execute_inner(
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut last_error = None;
     while let Some(target) = attempts.next_healthy() {
+        if let Some(observer) = &input.observer {
+            observer.record_debug(|| RunEvent::TargetSelected {
+                model_turn_id: model_turn_id.clone(),
+                payload: serde_json::json!({
+                    "target_id": selected_target_key(&target),
+                    "provider_id": target.provider_id,
+                    "model": target.model,
+                    "priority": target.priority,
+                    "half_open_probe": attempts.current_is_probe(),
+                    "selection": if last_error.is_some() { "failover" } else { "initial" },
+                }),
+            });
+        }
         let mut omit_protected_thinking = false;
         loop {
             // The target may have been re-cooled by another request while this
@@ -1246,7 +1259,7 @@ async fn prepare_attempt(
     }
     provider_request.model.clone_from(&route.model_id);
     if let Some(observer) = &input.observer {
-        observer.record_debug(|| RunEvent::Checkpoint {
+        observer.record_debug(|| RunEvent::Content {
             stage: "artifact_normalized_request".into(),
             model_turn_id: Some(model_turn_id.to_owned()),
             attempt_id: None,
@@ -1652,11 +1665,11 @@ async fn begin_attempt(
         policy.record_success(target);
         call.attempt.confirm_usage(&response.usage);
         call.attempt
-            .checkpoint("canonical_terminal_response", &response);
+            .capture_content("canonical_terminal_response", &response);
         let canonical_deltas = ai_response_to_deltas(&response);
         for delta in &canonical_deltas {
             call.attempt.observe_delta(delta);
-            call.attempt.checkpoint("canonical_delta", delta);
+            call.attempt.capture_content("canonical_content", delta);
         }
         call.attempt.finish(
             "completed",
@@ -2041,7 +2054,7 @@ async fn begin_attempt(
         provider_stream.attempt().confirm_usage(&response.usage);
         provider_stream
             .attempt()
-            .checkpoint("canonical_terminal_response", &response);
+            .capture_content("canonical_terminal_response", &response);
         provider_stream.attempt().finish(
             "completed",
             Some(provider_stream.status),
@@ -2074,7 +2087,7 @@ async fn send_deltas(
         attempt.observe_delta(delta);
     }
     for delta in deltas {
-        attempt.checkpoint("canonical_delta", &delta);
+        attempt.capture_content("canonical_content", &delta);
         tx.send(Ok(CanonicalEvent::Delta(delta)))
             .await
             .map_err(|_| ())?;

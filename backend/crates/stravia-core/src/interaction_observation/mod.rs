@@ -10,11 +10,13 @@ pub(crate) mod scope;
 mod store;
 mod tail;
 mod trace;
+mod trace_storage;
 mod types;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
 pub(crate) use redaction::{redact_text, redact_url, redact_value};
+pub(crate) use trace::optimize_trace_directory;
 pub use types::*;
 
 use parking_lot::Mutex;
@@ -1128,7 +1130,10 @@ impl RunObserver {
     }
     pub(crate) fn record(&self, event: RunEvent) {
         if !self.inner.debug_enabled
-            && matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. })
+            && matches!(
+                event,
+                RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
+            )
         {
             return;
         }
@@ -1271,7 +1276,10 @@ impl RunObserver {
         {
             trace.mark_partial("observation_gap", false);
         }
-        if matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. }) {
+        if matches!(
+            event,
+            RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
+        ) {
             if let Some(trace) = &self.inner.trace {
                 // Trace owns its queue. The next durable observation boundary includes this
                 // record; already published snapshot cutoffs cannot include future capture.
@@ -1642,18 +1650,18 @@ fn collect_captured_artifacts(
 async fn load_trace_values(
     snapshot: trace::TraceSnapshot,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
-    let mut values = Vec::new();
-    for segment in snapshot.segments {
-        let mut bytes = tokio::fs::read(segment.path).await?;
-        bytes.truncate(usize::try_from(segment.bytes).unwrap_or(usize::MAX));
-        for line in bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-        {
-            values.push(serde_json::from_slice(line)?);
+    tokio::task::spawn_blocking(move || {
+        let mut values = Vec::new();
+        for segment in snapshot.segments {
+            trace_storage::visit(&segment.path, segment.bytes, |record| {
+                values.push(record);
+                Ok(())
+            })?;
         }
-    }
-    Ok(values)
+        Ok::<_, std::io::Error>(values)
+    })
+    .await?
+    .map_err(Into::into)
 }
 fn record_trace(trace: &TraceHandle, run: Option<&str>, rejection: Option<&str>, event: RunEvent) {
     record_trace_at(trace, run, rejection, event, 0)
@@ -1665,6 +1673,7 @@ pub(super) fn record_trace_at(
     event: RunEvent,
     sequence: i64,
 ) {
+    let diagnostic = matches!(&event, RunEvent::TargetSelected { .. });
     let (
         stage,
         direction,
@@ -1678,7 +1687,23 @@ pub(super) fn record_trace_at(
         model_turn_id,
         attempt_id,
     ) = match event {
-        RunEvent::Checkpoint {
+        RunEvent::TargetSelected {
+            model_turn_id,
+            payload,
+        } => (
+            Some("target_selected".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            serde_json::Value::Null,
+            payload,
+            Some(model_turn_id),
+            None,
+        ),
+        RunEvent::Content {
             stage,
             payload,
             model_turn_id,
@@ -1744,8 +1769,10 @@ pub(super) fn record_trace_at(
         attempt_id,
         layer: if direction.is_some() {
             "wire".into()
-        } else {
+        } else if diagnostic {
             "canonical".into()
+        } else {
+            "content".into()
         },
         direction,
         stage,
@@ -1974,7 +2001,7 @@ mod snapshot_tests {
                 );
             observation.flush().await?;
             let admitted = observation.inner.store.max_sequence().await?;
-            let checkpoint = |stage: &str| RunEvent::Checkpoint {
+            let checkpoint = |stage: &str| RunEvent::Content {
                 stage: stage.into(),
                 model_turn_id: None,
                 attempt_id: None,
@@ -2023,9 +2050,10 @@ mod snapshot_tests {
             .fetch_all(&pool)
             .await?;
             assert!(
-                !rows
-                    .iter()
-                    .any(|(_, kind)| matches!(kind.as_str(), "wire" | "checkpoint"))
+                !rows.iter().any(|(_, kind)| matches!(
+                    kind.as_str(),
+                    "wire" | "content" | "target_selected"
+                ))
             );
             assert_eq!(
                 rows.iter()

@@ -650,19 +650,16 @@ def test_observation_tool_replay_and_trace_survive_restart(
         events = [event for run in detail["runs"] for event in run["events"]]
         results = [event["payload"]["content"] for event in events if event["kind"] == "client_tool_result"]
         assert sorted(results) == ["result-0", "result-1", "result-2"]
-        assert not any(event["kind"] in {"wire", "checkpoint"} for event in events)
+        assert not any(event["kind"] in {"wire", "content", "target_selected"} for event in events)
         assert [run["debug_enabled"] for run in detail["runs"]] == [True, False, True, True]
         _, _, archive = download_observation_bundle(env, detail)
         records = observation_bundle_events(archive)
         assert {record.get("direction") for record in records if record.get("layer") == "wire"} == {
             "client_to_platform", "upstream_request", "upstream_response", "platform_to_client",
         }
-        assert {
-            "decoded_request", "restored_request", "effective_model_request", "canonical_request",
-            "canonical_terminal_response", "response_after_hook", "client_projection_event", "delivery_terminal",
-        } <= {
-            record.get("stage") for record in records
-        }
+        content = json.dumps([record["payload"] for record in records if record.get("layer") == "content"])
+        for result in ("result-0", "result-1", "result-2"):
+            assert result in content
     finally:
         if process is not None:
             stop_stravia_server(process, logs)

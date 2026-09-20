@@ -394,7 +394,11 @@ pub(crate) enum RunEvent {
         status: String,
         reason: Option<String>,
     },
-    Checkpoint {
+    TargetSelected {
+        model_turn_id: String,
+        payload: Value,
+    },
+    Content {
         stage: String,
         model_turn_id: Option<String>,
         attempt_id: Option<String>,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- History storage now deduplicates repeated instructions, tool definitions, and response profiles within each Principal, without compression or changing replay semantics. SQLite and PostgreSQL keep explicit content references with branch-safe retention. Debug segments independently deduplicate metadata and payloads; exports restore complete records, while diagnostic checkpoints focus on target selection/start/end instead of individual deltas. `stravia-tools migrate-data --optimize-storage` verifies and optimizes an offline SQLite destination copy, preserving source data for rollback and reclaiming free pages only in the copy. Older binaries cannot read the new storage representation.
+
 ### Fixed
 
 - Responses streams now close indexed reasoning items on their authoritative `ItemDone`, preserving late signatures and preventing already-completed thinking from being replayed after subsequent tool calls by OMP. Terminal responses retain the same items without duplicate completion events.

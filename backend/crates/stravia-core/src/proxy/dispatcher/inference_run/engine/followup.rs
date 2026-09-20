@@ -78,7 +78,7 @@ pub(super) async fn prepare_hook_response(
         None,
     );
     if let Some(observer) = observer {
-        observer.record_debug(|| RunEvent::Checkpoint {
+        observer.record_debug(|| RunEvent::Content {
             stage: "response_after_hook".into(),
             model_turn_id: None,
             attempt_id: None,
@@ -90,8 +90,8 @@ pub(super) async fn prepare_hook_response(
         .await
         .map_err(|error| HookRespondError::Failure(error.to_string()))?;
     if let Some(observer) = observer {
-        observer.record_debug(|| RunEvent::Checkpoint {
-            stage: "client_projection_event".into(),
+        observer.record_debug(|| RunEvent::Content {
+            stage: "client_projection_content".into(),
             model_turn_id: None,
             attempt_id: None,
             payload: checkpoint_payload(observer, &response),

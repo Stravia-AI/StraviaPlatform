@@ -19,6 +19,7 @@ mod schema;
     long_about = "Commands for protocol-conversion testing and schema review:\n\
                   - record: scenario-driven recording against real LLM endpoints\n\
                   - replay: persistent stub upstream that replays fixtures by replay_model\n\
+                  - migrate-data: verified offline copy, with optional structural storage deduplication\n\
                   - dump-schema: print the final-state DDL for a storage backend"
 )]
 struct Cli {

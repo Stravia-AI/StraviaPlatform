@@ -835,8 +835,8 @@ pub(super) async fn deliver_projected(
         })?;
     if progress == DeliveryProgress::Sent {
         if observe_delivery {
-            observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
-                stage: "client_projection_event".into(),
+            observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
+                stage: "client_projection_content".into(),
                 model_turn_id: Some(model_turn_id.to_owned()),
                 attempt_id: None,
                 payload: debug_payload,

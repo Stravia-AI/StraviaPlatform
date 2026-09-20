@@ -1569,19 +1569,11 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
 
     ticket_data, headers, archive = download_observation_bundle(admin_env, detail)
     records = observation_bundle_events(archive)
-    stages = [event.get("stage") for event in records if isinstance(event, dict)]
-    required = {
-        "decoded_request",
-        "restored_request",
-        "effective_model_request",
-        "canonical_request",
-        "canonical_delta",
-        "canonical_terminal_response",
-        "response_after_hook",
-        "client_projection_event",
-        "delivery_terminal",
-    }
-    assert required <= set(stages)
+    diagnostics = [event for event in records if event.get("layer") == "canonical"]
+    assert [event["stage"] for event in diagnostics] == ["target_selected"]
+    started = next(event for event in run["events"] if event["kind"] == "target_attempt_started")
+    assert diagnostics[0]["payload"]["target_id"] == started["payload"]["target_id"]
+    assert "debug payload" in json.dumps([event["payload"] for event in records if event.get("layer") == "content"])
     directions = {event.get("direction") for event in records if isinstance(event, dict)}
     assert {
         "client_to_platform",

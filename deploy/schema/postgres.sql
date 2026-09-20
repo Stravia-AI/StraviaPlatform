@@ -106,7 +106,7 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
+    mcp_access_enabled boolean DEFAULT false NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
@@ -347,12 +347,13 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text CONSTRAINT models_name_not_null NOT NULL,
+    model_id text NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text,
     is_enabled boolean DEFAULT true,
     priority integer DEFAULT 0,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    display_name text
+    display_name text,
+    default_thinking_level text
 );
 
 
@@ -421,6 +422,33 @@ CREATE TABLE public.observation_events (
     rejection_id text,
     kind text NOT NULL,
     payload jsonb NOT NULL,
+    expires_at bigint NOT NULL
+);
+
+
+--
+-- Name: observation_pending_tools; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.observation_pending_tools (
+    principal text NOT NULL,
+    tool_id text NOT NULL,
+    run_id text NOT NULL,
+    interaction_id text NOT NULL,
+    expires_at bigint NOT NULL
+);
+
+
+--
+-- Name: observation_tail_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.observation_tail_sources (
+    run_id text NOT NULL,
+    interaction_id text NOT NULL,
+    principal text NOT NULL,
+    last_unit_hash text NOT NULL,
+    generation_node_id text,
     expires_at bigint NOT NULL
 );
 
@@ -565,6 +593,7 @@ CREATE TABLE public.providers (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     adapter_credentials text DEFAULT '{}'::text NOT NULL,
+    vendor_options text DEFAULT '{}'::text NOT NULL,
     CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text])))
 );
 
@@ -653,6 +682,29 @@ CREATE TABLE public.target_attempt_observations (
 
 
 --
+-- Name: turn_chain_content_refs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_chain_content_refs (
+    node_id text NOT NULL,
+    principal text NOT NULL,
+    path text NOT NULL,
+    content_key text NOT NULL
+);
+
+
+--
+-- Name: turn_chain_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_chain_contents (
+    principal text NOT NULL,
+    content_key text NOT NULL,
+    content text NOT NULL
+);
+
+
+--
 -- Name: turn_chain_nodes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -669,8 +721,10 @@ CREATE TABLE public.turn_chain_nodes (
     prefix_fingerprint text,
     prefix_item_count bigint,
     prefix_completed_at bigint,
+    storage_format integer DEFAULT 0 NOT NULL,
     CONSTRAINT turn_chain_nodes_kind_check CHECK ((kind = ANY (ARRAY['response'::text, 'agent'::text, 'web_search'::text]))),
-    CONSTRAINT turn_chain_nodes_payload_version_check CHECK ((payload_version > 0))
+    CONSTRAINT turn_chain_nodes_payload_version_check CHECK ((payload_version > 0)),
+    CONSTRAINT turn_chain_nodes_storage_format_check CHECK ((storage_format = ANY (ARRAY[0, 1])))
 );
 
 
@@ -911,6 +965,22 @@ ALTER TABLE ONLY public.observation_events
 
 
 --
+-- Name: observation_pending_tools observation_pending_tools_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_pending_tools
+    ADD CONSTRAINT observation_pending_tools_pkey PRIMARY KEY (principal, tool_id, run_id);
+
+
+--
+-- Name: observation_tail_sources observation_tail_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tail_sources
+    ADD CONSTRAINT observation_tail_sources_pkey PRIMARY KEY (run_id);
+
+
+--
 -- Name: provider_allowance_samples provider_allowance_samples_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -980,6 +1050,22 @@ ALTER TABLE ONLY public.settings
 
 ALTER TABLE ONLY public.target_attempt_observations
     ADD CONSTRAINT target_attempt_observations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: turn_chain_content_refs turn_chain_content_refs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_content_refs
+    ADD CONSTRAINT turn_chain_content_refs_pkey PRIMARY KEY (node_id, path);
+
+
+--
+-- Name: turn_chain_contents turn_chain_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_contents
+    ADD CONSTRAINT turn_chain_contents_pkey PRIMARY KEY (principal, content_key);
 
 
 --
@@ -1217,10 +1303,24 @@ CREATE INDEX idx_reversible_redaction_mappings_principal_expiry ON public.revers
 
 
 --
+-- Name: idx_turn_chain_content_refs_content; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_turn_chain_content_refs_content ON public.turn_chain_content_refs USING btree (principal, content_key);
+
+
+--
 -- Name: idx_turn_chain_expiry; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_turn_chain_expiry ON public.turn_chain_nodes USING btree (expires_at);
+
+
+--
+-- Name: idx_turn_chain_node_principal; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_turn_chain_node_principal ON public.turn_chain_nodes USING btree (id, principal);
 
 
 --
@@ -1347,6 +1447,34 @@ CREATE INDEX observation_events_rejection_idx ON public.observation_events USING
 --
 
 CREATE INDEX observation_events_run_idx ON public.observation_events USING btree (run_id, sequence);
+
+
+--
+-- Name: observation_pending_tools_expiry_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_pending_tools_expiry_idx ON public.observation_pending_tools USING btree (expires_at);
+
+
+--
+-- Name: observation_pending_tools_lookup_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_pending_tools_lookup_idx ON public.observation_pending_tools USING btree (principal, tool_id);
+
+
+--
+-- Name: observation_tail_sources_expiry_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_tail_sources_expiry_idx ON public.observation_tail_sources USING btree (expires_at);
+
+
+--
+-- Name: observation_tail_sources_hash_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_tail_sources_hash_idx ON public.observation_tail_sources USING btree (principal, last_unit_hash);
 
 
 --
@@ -1585,6 +1713,38 @@ ALTER TABLE ONLY public.observation_events
 
 
 --
+-- Name: observation_pending_tools observation_pending_tools_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_pending_tools
+    ADD CONSTRAINT observation_pending_tools_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_pending_tools observation_pending_tools_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_pending_tools
+    ADD CONSTRAINT observation_pending_tools_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_tail_sources observation_tail_sources_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tail_sources
+    ADD CONSTRAINT observation_tail_sources_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_tail_sources observation_tail_sources_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tail_sources
+    ADD CONSTRAINT observation_tail_sources_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: provider_allowance_samples provider_allowance_samples_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1638,6 +1798,22 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 ALTER TABLE ONLY public.target_attempt_observations
     ADD CONSTRAINT target_attempt_observations_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_chain_content_refs turn_chain_content_refs_node_id_principal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_content_refs
+    ADD CONSTRAINT turn_chain_content_refs_node_id_principal_fkey FOREIGN KEY (node_id, principal) REFERENCES public.turn_chain_nodes(id, principal) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_chain_content_refs turn_chain_content_refs_principal_content_key_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_content_refs
+    ADD CONSTRAINT turn_chain_content_refs_principal_content_key_fkey FOREIGN KEY (principal, content_key) REFERENCES public.turn_chain_contents(principal, content_key);
 
 
 --

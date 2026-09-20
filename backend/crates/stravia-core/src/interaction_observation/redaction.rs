@@ -169,7 +169,9 @@ impl ProtectedSecrets {
                     self.value(value);
                 }
             }
-            RunEvent::Checkpoint { payload, .. } => self.value(payload),
+            RunEvent::Content { payload, .. } | RunEvent::TargetSelected { payload, .. } => {
+                self.value(payload)
+            }
             RunEvent::Wire {
                 direction,
                 payload,
@@ -772,7 +774,7 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
             report.merge(redact_value(value));
         }
         RunEvent::ObservationGap { reason } => redact_string(reason, &mut report),
-        // Checkpoint and Wire payloads are redacted by TraceHandle::record before its queue.
+        // Debug 内容与 Wire 在 TraceHandle::record 入队前执行最终脱敏。
         _ => {}
     }
     report

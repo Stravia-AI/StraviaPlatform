@@ -133,6 +133,8 @@ Retryable failures exhaust a configurable per-target budget before cooldown (def
 - See the token usage and provider quotas that services actually report.
 - Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
 
+History storage shares identical instructions, tool definitions, and response profiles within each Principal. Debug segments share repeated content and metadata without compression; target selection/start/end form the diagnostic sequence, while request and streamed content remain captured. Existing history stays readable. To optimize retained SQLite data, stop every host using the source and run `stravia-tools migrate-data --from <source-root> --to <new-root> --optimize-storage` to review the plan, then add `--apply --source-stopped`. The tool validates restored content and reclaims free SQLite pages only in the destination copy; the source remains available for rollback. Older binaries cannot read the new storage format.
+
 ### Credential protection
 
 Off by default — turn it on once and it covers every Stravia API key, with nothing to change in your clients.

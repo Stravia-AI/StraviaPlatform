@@ -133,6 +133,8 @@ Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭
 - 查看服务商实际上报的 token 用量与配额。
 - 打开 Debug 可捕获 HTTP/SSE/WebSocket 流量，按交互下载诊断包；凭据字段永远先脱敏。
 
+历史存储在同一 Principal 内共享完全相同的 instructions、工具定义与响应 profile。Debug 分段通过内容和元数据引用去重，不使用压缩算法；诊断主线收敛到 target 选择、开始、结束，请求及流式内容继续采集。旧历史保持可读。优化已保留的 SQLite 数据前，先停止所有使用源目录的实例，再运行 `stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storage` 查看计划，确认后追加 `--apply --source-stopped`。工具只在目标副本中校验内容还原并回收 SQLite 空闲页，源数据保留用于回退；旧版程序不能读取新存储格式。
+
 ### 凭据保护
 
 默认关闭。打开一次，所有 Stravia API 密钥的请求都会自动保护 —— 客户端不用改任何东西。

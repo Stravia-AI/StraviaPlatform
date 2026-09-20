@@ -239,8 +239,8 @@ impl WebSocketRunDelivery {
                     text: visible.to_owned(),
                 });
             }
-            self.observer.record_debug(|| RunEvent::Checkpoint {
-                stage: "client_projection_event".into(),
+            self.observer.record_debug(|| RunEvent::Content {
+                stage: "client_projection_content".into(),
                 model_turn_id: None,
                 attempt_id: None,
                 payload: value,
@@ -276,7 +276,7 @@ impl WebSocketRunDelivery {
         let delivery_completed_at = (status == "delivered")
             .then_some(self.delivery_completed_at)
             .flatten();
-        self.observer.record_debug(|| RunEvent::Checkpoint {
+        self.observer.record_debug(|| RunEvent::Content {
             stage: "delivery_terminal".into(),
             model_turn_id: None,
             attempt_id: None,
@@ -730,7 +730,7 @@ impl RunTerminalContext {
         reason: Option<String>,
         delivery_completed_at: Option<i64>,
     ) {
-        observer.record_debug(|| RunEvent::Checkpoint {
+        observer.record_debug(|| RunEvent::Content {
             stage: "delivery_terminal".into(),
             model_turn_id: None,
             attempt_id: None,

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -196,11 +196,12 @@ fn write_trace<W: Write>(
     zip: &mut ZipWriter<zip::write::StreamWriter<W>>,
     snapshot: &TraceSnapshot,
 ) -> io::Result<()> {
-    // Segment bytes have already passed the sole pre-queue redaction boundary. Copying the
-    // immutable byte cutoffs directly preserves JSONL fidelity and keeps export memory bounded.
+    // 存储引用只属于磁盘表示；导出恢复完整记录，wire 字符串不重新解释。
     for segment in &snapshot.segments {
-        let file = std::fs::File::open(&segment.path)?;
-        io::copy(&mut file.take(segment.bytes), &mut *zip)?;
+        super::trace_storage::visit(&segment.path, segment.bytes, |record| {
+            serde_json::to_writer(&mut *zip, &record).map_err(io::Error::other)?;
+            zip.write_all(b"\n")
+        })?;
     }
     Ok(())
 }

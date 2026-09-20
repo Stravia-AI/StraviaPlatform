@@ -9119,6 +9119,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "sqlx",
+ "stravia-core",
  "tempfile",
  "tokio",
  "toml 1.1.5+spec-1.1.0",

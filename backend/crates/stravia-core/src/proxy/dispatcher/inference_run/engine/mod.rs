@@ -284,7 +284,7 @@ pub(super) async fn orchestrate(
         .take::<IngressObserver>()
         .expect("Inference Run ingress observer");
     ingress_observer.set_model(&request.model);
-    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+    ingress_observer.record_debug(|| RunEvent::Content {
         stage: "decoded_request".into(),
         model_turn_id: None,
         attempt_id: None,
@@ -367,7 +367,7 @@ pub(super) async fn orchestrate(
         );
     }
     client_request.clone_from(&request);
-    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+    ingress_observer.record_debug(|| RunEvent::Content {
         stage: "artifact_normalized_request".into(),
         model_turn_id: None,
         attempt_id: None,
@@ -524,13 +524,13 @@ pub(super) async fn orchestrate(
             ),
         );
     }
-    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+    ingress_observer.record_debug(|| RunEvent::Content {
         stage: "artifact_normalized_request".into(),
         model_turn_id: None,
         attempt_id: None,
         payload: checkpoint_payload(&ingress_observer, &request),
     });
-    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+    ingress_observer.record_debug(|| RunEvent::Content {
         stage: "restored_request".into(),
         model_turn_id: None,
         attempt_id: None,
@@ -1024,7 +1024,7 @@ async fn acquire_turn(
             .extensions
             .get::<crate::interaction_observation::RunObserver>()
             .expect("admitted Inference Run observer");
-        observer.record_debug(|| RunEvent::Checkpoint {
+        observer.record_debug(|| RunEvent::Content {
             stage: "effective_model_request".into(),
             model_turn_id: None,
             attempt_id: None,

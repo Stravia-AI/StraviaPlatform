@@ -42,7 +42,7 @@ impl Gateway {
                 ),
             });
             if observer.debug_enabled() {
-                observer.record_debug(|| RunEvent::Checkpoint {
+                observer.record_debug(|| RunEvent::Content {
                     stage: "platform_tool_call".into(),
                     model_turn_id: Some(job.model_turn_id.clone()),
                     attempt_id: None,
@@ -99,7 +99,7 @@ impl Gateway {
                 content: Some(result.content.clone()),
             });
             if observer.debug_enabled() {
-                observer.record_debug(|| RunEvent::Checkpoint {
+                observer.record_debug(|| RunEvent::Content {
                     stage: "platform_tool_result".into(),
                     model_turn_id: Some(job.model_turn_id),
                     attempt_id: None,

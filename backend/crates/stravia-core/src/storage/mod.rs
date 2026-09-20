@@ -1,3 +1,4 @@
+pub mod maintenance;
 pub mod memory;
 pub mod postgres;
 pub mod sql;

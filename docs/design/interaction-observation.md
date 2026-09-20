@@ -8,7 +8,7 @@
 - 一次 Interaction 覆盖一次新 User 输入到最终生成响应之间的一个或多个 Inference Run，并允许 Run 子树分叉；
 - 正在执行的状态、客户端可见输出和 Confirmed Upstream Usage 通过 SSE 在 1 秒内更新；
 - Debug 按每个 Inference Run 准入时的进程级开关快照生效；
-- Debug Trace 覆盖四个方向的应用协议级 wire、稳定 canonical checkpoint、HTTP/SSE/WebSocket；
+- Debug Trace 覆盖四个方向的应用协议级 wire、完整 canonical 内容与 target 级诊断、HTTP/SSE/WebSocket；
 - Interaction Debug Bundle 以版本化 ZIP 流式导出，明确完整、部分或缺失状态；
 - 普通 Observation 保存可读思考及客户端、平台工具输入/返回，不保存完整 canonical 或 wire payload，也不采集模型思考的签名和密文；
 - Observation 只服务诊断，不成为推理执行、Generation Chain 或模型历史的事实源。
@@ -172,7 +172,7 @@ clear_history() -> ClearHistoryResult
 
 - `IngressObserver` 在认证/解码前捕获可形成 Rejected Request Observation 的最小元数据；
 - `RunObserver` 持有该 Run 的 Debug 快照、Interaction 关联和终态 guard；
-- typed `RunEvent` 表达 Model Turn、Target attempt、Platform Tool、canonical checkpoint、Client Projection、Delivery 与 usage；
+- typed `RunEvent` 表达 Model Turn、Target attempt、Platform Tool、内容采集、Client Projection、Delivery 与 usage；`TargetSelected` 与 `Content` 分离，不用逐事件 checkpoint 承载正文；
 - AdminService 只调用查询、开关、清理、票据和流式导出接口；
 - Axum/Tauri adapter 不解释 Interaction 分组、Trace 完整度、ZIP 内容或保留策略；
 - Generation Chain 只提供已确认的 node/root/parent 关联，不接收运行中或失败 Observation 状态；
@@ -218,25 +218,27 @@ clear_history() -> ClearHistoryResult
 
 只对新封口的 1–16 KiB 文本尝试 `zip-deflate-v1` 压缩，含容器、base64 与元数据仍有净收益时才采用；读取、SSE 和导出恢复普通 `text` 契约。旧 payload 不改写、不删除。思考和工具内容不进入 `visible_tail`，沿用既有凭据脱敏及 `log_retention_days`，不受 Debug 开关控制；业务敏感内容仍可能保留。普通事件不保存完整 canonical request/response。
 
-### 5.2 Debug canonical checkpoint
+### 5.2 Debug 内容采集与 target 级诊断
 
-Debug Run 额外写入以下稳定语义阶段：
+Debug Run 将以下内容记录为 `layer=content`，保留内容而不为每个 delta 建立诊断检查点：
 
 1. `decoded_request`
 2. `restored_request`
 3. `effective_model_request`
 4. 每个 Model Turn 的 `canonical_request`
-5. 每个 Model Turn 的 `canonical_delta`
+5. 每个 Model Turn 的 `canonical_content`
 6. 每个 Model Turn 的 `canonical_terminal_response`
 7. `platform_tool_call`
 8. `platform_tool_result`
 9. `response_after_hook`
-10. `client_projection_event`
+10. `client_projection_content`
 11. `delivery_terminal`
 
 每项带 Interaction ID、Run ID、Model Turn ID、Target attempt ID（适用时）、单调事件序号与 UTC 时间。不得序列化锁、缓存、credential object、连接对象或其他临时 Rust 内部状态。
 
-`Wire` 与 `Checkpoint` 直接写入 Debug Trace 队列，不再逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、可见输出、工具结果及 Trace manifest 状态仍持久化并驱动 SSE。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减。manifest 按独立两秒维护周期或显式生命周期边界持久化；普通详情、summary 与事件分页均只读已提交状态，不触发 flush，也不叠加未提交 manifest。Interaction 导出票据只排空目标 Interaction 的待写文本与 Trace，再固定截止水位；既有 ZIP 截止水位不能包含之后的新采集内容。四方向 Wire 与 canonical checkpoint 仍由 ZIP 提供，Debug 关闭时不采集。
+诊断检查点仅记录 `target_selected`；开始和结束使用已有 `target_attempt_started`、`target_attempt_finished`，包含重试、失败、取消与耗时，已确认 usage 沿用现有事件。降低诊断粒度不改变内容采集、流终态检测或凭据保护。
+
+`Wire`、`Content` 与 `TargetSelected` 直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、可见输出、工具结果及 Trace manifest 状态仍持久化并驱动 SSE。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减。manifest 按独立两秒维护周期或显式生命周期边界持久化；普通详情、summary 与事件分页均只读已提交状态，不触发 flush，也不叠加未提交 manifest。Interaction 导出票据只排空目标 Interaction 的待写文本与 Trace，再固定截止水位；既有 ZIP 截止水位不能包含之后的新采集内容。四方向 Wire、canonical 内容和 target 诊断仍由 ZIP 提供，Debug 关闭时不采集。
 
 ### 5.3 顺序与 SSE cursor
 
@@ -329,9 +331,15 @@ diagnostics/observation-debug/
     └── ...
 ```
 
-每条记录包含 schema version、sequence、recorded_at、layer、direction/stage、transport、protocol、representation、status、headers、payload encoding 与 payload。普通可识别 UTF-8 内容保留原契约；只在已知协议媒体位置外置内容，标明 `artifact_externalized`，保留实际请求的 model、system、工具结果和 Provider 字段，不用入口快照覆盖后来请求。具有可证明内容身份时保存 Artifact Reference 与必要元数据；不能关联的媒体、尚未完成鉴权收存的正文或无法可靠识别的二进制正文记录明确的 omission／unrecoverable 状态，不以 base64 再存一份正文。普通文本中的媒体形状 JSON 和业务工具参数不因此当成媒体。HTTP/SSE 需要跨块识别凭据和媒体时重组完整应用消息并标记表示变化，不承诺原始 chunk 或网络 packet 边界。
+每条逻辑记录包含 schema version、sequence、recorded_at、layer、direction/stage、transport、protocol、representation、status、headers、payload encoding 与 payload。普通可识别 UTF-8 内容保留原契约；只在已知协议媒体位置外置内容，标明 `artifact_externalized`，保留实际请求的 model、system、工具结果和 Provider 字段，不用入口快照覆盖后来请求。具有可证明内容身份时保存 Artifact Reference 与必要元数据；不能关联的媒体、尚未完成鉴权收存的正文或无法可靠识别的二进制正文记录明确的 omission／unrecoverable 状态，不以 base64 再存一份正文。普通文本中的媒体形状 JSON 和业务工具参数不因此当成媒体。HTTP/SSE 需要跨块识别凭据和媒体时重组完整应用消息并标记表示变化，不承诺原始 chunk 或网络 packet 边界。
 
-`artifact_normalized_request` checkpoint 提供已收存输入的稳定引用；Provider 发送时生成的内联正文和签名地址不替代该内容身份。导出对引用执行只读可用性查询，缺失或逻辑过期内容标为不可恢复，不续期或打开文件。旧 Trace 与历史不回填或改写；旧记录参与新请求时，新记录仍采用外置契约。
+新逻辑记录使用 schema version `2`。诊断主线为 `target_selected` 加普通 Observation 的 `target_attempt_started`／`target_attempt_finished`；同 Target 重试仍有独立 attempt，切换 Target 则新增选择记录。选择记录描述实际身份、priority、半开探测以及 initial/failover，不推测路由内部没有提供的亲和依据。完整请求阶段、canonical delta 和客户端投影归入 `layer=content`；后两者分别使用 `canonical_content`、`client_projection_content`，不再作为逐事件诊断检查点。内容顺序、部分输出、错误和 usage 的既有采集不因此取消。
+
+物理分段采用 `trace_storage=1` JSONL：sequence 与 recorded_at 独立存储，元数据与 payload 分别内联或引用本段更早记录的字节偏移。只复用完整内容相等的定义，引用不递归、不跨分段；每个活跃 writer 的候选缓存最多 8 MiB，超限只放弃复用，不删除内容。滚动分段时重置候选缓存。此结构不使用压缩算法；旧 JSONL 仍可读取。快照保持已落盘字节前缀，导出和 Artifact 扫描统一还原逻辑记录，外部不会收到存储引用。已有 ZIP 导出封装不变。
+
+`stravia-tools migrate-data --optimize-storage` 可在独占的离线目标副本中去重已有分段：逐条比较还原结果与旧记录，校验成功且字节数减少才替换；失败不发布目标副本。旧记录的 schema version、内容、时间、顺序及独有诊断信息保持不变，manifest 的字节数更新为实际落盘值。
+
+`artifact_normalized_request` 内容记录提供已收存输入的稳定引用；Provider 发送时生成的内联正文和签名地址不替代该内容身份。导出对引用执行只读可用性查询，缺失或逻辑过期内容标为不可恢复，不续期或打开文件。旧 Trace 不自动回填或改写；显式离线去重只改变存储表示，不补造媒体内容或改变既有缺失声明。旧记录参与新请求时，新记录仍采用外置契约。
 
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 
@@ -656,7 +664,7 @@ Rust workspace 新增：
 
 - 每个 Run 独立快照开关；同一 Interaction 的 ON/OFF/ON 形成明确 partial Bundle。
 - HTTP、SSE 与 upstream Responses WebSocket 覆盖四方向适用消息、顺序、时间和 attempt ID。
-- Debug Run 包含全部约定 canonical checkpoint；普通 Run 不持久化或返回隐藏 payload。
+- Debug Run 包含完整约定内容与 target 级诊断；普通 Run 不持久化或返回隐藏 payload。
 - credential header、URL 与结构化 body 凭据在落盘前脱敏；ZIP、API 和错误不出现原值。
 - Trace 落盘不设容量上限，只统计保留字节；队列、writer 或存储丢失时请求继续、Trace partial；不完整原因只出现在详情和诊断包中。
 - 运行中票据固定 sequence；ZIP manifest 与 events 一致。

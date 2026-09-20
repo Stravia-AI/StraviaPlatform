@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::redaction::{RedactionKind, redact_error, redact_headers, redact_url, redact_value};
 use super::types::TraceManifest;
 
-pub(crate) const TRACE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const TRACE_SCHEMA_VERSION: u32 = 2;
 // 重组单条 wire 消息的内存缓冲上限；不是落盘容量配额，超限只影响该条消息。
 const WIRE_MESSAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const SEGMENT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
@@ -145,9 +145,9 @@ impl TraceRecord {
                             | "restored_request"
                             | "effective_model_request"
                             | "canonical_terminal_response"
-                            | "canonical_delta"
+                            | "canonical_content"
                             | "response_after_hook"
-                            | "client_projection_event"
+                            | "client_projection_content"
                     )
                 )
             {
@@ -741,6 +741,7 @@ struct ActiveWriter {
     segment: u32,
     segment_bytes: u64,
     file: tokio::fs::File,
+    encoder: super::trace_storage::Encoder,
 }
 
 struct WriteFailure {
@@ -749,12 +750,22 @@ struct WriteFailure {
 
 impl ActiveWriter {
     async fn write_record(&mut self, bytes: &[u8]) -> Result<u64, WriteFailure> {
+        let mut encoded = self
+            .encoder
+            .encode(bytes, self.segment_bytes)
+            .map_err(|_| WriteFailure { written: 0 })?;
         if self.segment_bytes > 0
-            && self.segment_bytes.saturating_add(bytes.len() as u64) > SEGMENT_LIMIT_BYTES
-            && (self.flush().await.is_err() || self.rotate().await.is_err())
+            && self.segment_bytes.saturating_add(encoded.len() as u64) > SEGMENT_LIMIT_BYTES
         {
-            return Err(WriteFailure { written: 0 });
+            if self.flush().await.is_err() || self.rotate().await.is_err() {
+                return Err(WriteFailure { written: 0 });
+            }
+            encoded = self
+                .encoder
+                .encode(bytes, 0)
+                .map_err(|_| WriteFailure { written: 0 })?;
         }
+        let bytes = encoded.as_slice();
         use tokio::io::AsyncWriteExt;
         let mut written = 0usize;
         while written < bytes.len() {
@@ -774,6 +785,7 @@ impl ActiveWriter {
     async fn rotate(&mut self) -> io::Result<()> {
         self.segment += 1;
         self.segment_bytes = 0;
+        self.encoder = super::trace_storage::Encoder::default();
         self.file = open_segment(&self.directory, self.segment).await?;
         Ok(())
     }
@@ -799,6 +811,7 @@ async fn create_writer(root: &Path, trace_id: &str) -> io::Result<ActiveWriter> 
         segment: 1,
         segment_bytes: 0,
         file,
+        encoder: super::trace_storage::Encoder::default(),
     })
 }
 
@@ -982,6 +995,42 @@ fn is_segment_name(name: &str) -> bool {
         && name[8..14].bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn optimize_trace_directory(root: &Path) -> io::Result<Vec<(String, u64)>> {
+    let mut reports = Vec::new();
+    if !root.exists() {
+        return Ok(reports);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if validate_trace_id(&id).is_err() {
+            continue;
+        }
+        if !entry.file_type()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trace directory is not a directory",
+            ));
+        }
+        let mut bytes = 0;
+        for segment in fs::read_dir(entry.path())? {
+            let segment = segment?;
+            if !is_segment_name(&segment.file_name().to_string_lossy()) {
+                continue;
+            }
+            if !segment.file_type()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trace segment is not a file",
+                ));
+            }
+            bytes += super::trace_storage::optimize_segment(&segment.path())?;
+        }
+        reports.push((id, bytes));
+    }
+    Ok(reports)
+}
+
 fn subtract_saturating(counter: &AtomicU64, amount: u64) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some(current.saturating_sub(amount))
@@ -995,6 +1044,46 @@ fn writer_unavailable() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn structural_trace_preserves_content_scope_and_snapshot_cutoffs() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let manager = TraceManager::new(root.path().to_owned())?;
+        let trace = manager.create();
+        let payload = serde_json::json!({"text":"原文与空白\n ".repeat(10_000)});
+        for sequence in 1..=3 {
+            let mut record = binary_record(String::new());
+            record.sequence = sequence;
+            record.recorded_at = sequence * 10;
+            record.payload = payload.clone();
+            record.payload_encoding = "json".into();
+            record.direction = None;
+            record.transport = None;
+            record.message_type = None;
+            record.stage = Some("canonical_content".into());
+            record.layer = "content".into();
+            trace.record(record);
+        }
+        trace.flush().await?;
+        let snapshot = trace.snapshot(2).await?;
+        let mut records = Vec::new();
+        for segment in &snapshot.segments {
+            super::super::trace_storage::visit(&segment.path, segment.bytes, |record| {
+                records.push(record);
+                Ok(())
+            })?;
+        }
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["sequence"], 1);
+        assert_eq!(records[1]["sequence"], 2);
+        assert_eq!(records[1]["recorded_at"], 20);
+        assert_eq!(records[0]["payload"], payload);
+        assert_eq!(records[1]["payload"], payload);
+        let manifest = trace.finish().await;
+        assert_eq!(manifest.event_count, 3);
+        assert!(manifest.bytes_written < serde_json::to_vec(&payload)?.len() as u64 * 2);
+        Ok(())
+    }
 
     fn binary_record(payload: String) -> TraceRecord {
         TraceRecord {

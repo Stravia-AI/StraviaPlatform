@@ -802,7 +802,7 @@ impl ObservationStore {
             }
             if matches!(
                 run_event,
-                RunEvent::Checkpoint { .. } | RunEvent::Wire { .. }
+                RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
             ) {
                 continue;
             }
@@ -3108,7 +3108,11 @@ mod tests {
         assert_eq!(delivery_after.payload, delivery_before.payload);
         let restarted: Vec<_> = events
             .iter()
-            .filter(|event| event.kind == "process_restarted")
+            // PostgreSQL 合同同时包含其他 waiting 场景，只核验本场景的两个 Run。
+            .filter(|event| {
+                event.kind == "process_restarted"
+                    && matches!(event.run_id.as_deref(), Some("pending" | "active"))
+            })
             .collect();
         assert_eq!(restarted.len(), 2);
         assert!(restarted.iter().all(|event| event.payload

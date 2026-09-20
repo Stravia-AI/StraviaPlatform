@@ -535,6 +535,7 @@ Generation Chain（其 Responses 投影为 Response Chain）、Agent Turn 与 Se
 | `parent_id` | TEXT | NULL | 父节点（FK → turn_chain_nodes.id, ON DELETE RESTRICT） |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
 | `payload_version` | INTEGER NOT NULL | — | Canonical transcript / Search Turn payload 版本 |
+| `storage_format` | INTEGER NOT NULL | `0` | `0` 为原始 JSON；`1` 为结构去重封装，不改变 `payload_version` |
 | `payload` | JSON/TEXT NOT NULL | — | Generation Chain 节点的 canonical 输入 delta、最终输出和 resolved profile delta；或 Agent/Search Turn payload（不含网页正文和内部 Agent transcript） |
 | `prefix_namespace` | TEXT | NULL | Reusable Response Prefix 的 Principal 外 Target/Provider/config/model/effective-profile namespace hash；仅可安全复用的已完成 Response 节点写入 |
 | `prefix_fingerprint` | TEXT | NULL | 节点完整 canonical effective context 的 SHA-256 指纹 |
@@ -546,6 +547,31 @@ Generation Chain（其 Responses 投影为 Response Chain）、Agent Turn 与 Se
 **索引**:`idx_turn_chain_parent`、`idx_turn_chain_principal_kind`、`idx_turn_chain_expiry`、`idx_turn_chain_reusable_prefix`(`principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC, prefix_completed_at DESC, expires_at, id DESC`,仅索引非 NULL namespace)
 
 Generation Chain 的新 Response payload 使用版本 5，工具结果保存可选 `content_kind`（`json` 或 `content_blocks`），缺失值表示旧记录没有语义证明。普通 Tool Text 与此前编码成字符串的 content blocks 使用内部消息标记区分；读取版本 1–4 时仅从真实 `AiItem.meta` 移除该保留键，不改写业务 JSON 或无关元数据。旧记录仍可读取，但可逆脱敏开启时会拒绝无法明确解释的工具数组历史。Agent/Search payload 的版本规则不变；此调整不新增 SQL 列。
+
+Migration 0052 在 SQLite/PostgreSQL 同时增加结构存储格式及内容引用表。格式 `1` 的 `payload` 为 `{data, references}`：`data` 保留完整结构，仅被外置的位置变为 JSON null；`references` 为必须恢复的引用数量。SQL store 在返回业务 payload 前完整恢复，不让 Generation Chain、父链物化或 prefix 重建理解物理引用。未知字段、空值、不同 profile、正文与工具结果不删除。
+
+去重覆盖至少 256 UTF-8 bytes 的 instructions、tools，以及两个 Open Responses profile。先提取 profile 内 instructions/tools，再共享其剩余结构，避免共享对象再次内嵌相同大字段。SHA-256 候选命中后仍比较完整序列化内容；不同内容不复用。新写入在节点事务中建立全部引用，旧记录保持可读，显式离线维护才改写已有 payload。
+
+### turn_chain_contents
+
+| Column | Type | Description |
+|---|---|---|
+| `principal` | TEXT NOT NULL | 内容隔离主体 |
+| `content_key` | TEXT NOT NULL | 完整 SHA-256 的 55 位 base26 编码，仅用于内部内容查找 |
+| `content` | TEXT NOT NULL | 不可变 JSON 内容，无压缩编码 |
+
+主键 `(principal, content_key)`。不跨 Principal 共享；同一内容在多个节点或一个节点的多个位置复用。内容没有独立 TTL，只有不存在任何节点引用时才回收，不能因某条分支过期删除另一条分支仍需的内容。
+
+### turn_chain_content_refs
+
+| Column | Type | Description |
+|---|---|---|
+| `node_id` | TEXT NOT NULL | 所属历史节点 |
+| `principal` | TEXT NOT NULL | 必须与节点、内容所属主体一致 |
+| `path` | TEXT NOT NULL | 待恢复位置的 JSON Pointer |
+| `content_key` | TEXT NOT NULL | 引用的内容身份 |
+
+主键 `(node_id, path)`；`(node_id, principal)` 外键引用节点并随节点删除，`(principal, content_key)` 外键引用内容且禁止删除仍被引用的内容。`idx_turn_chain_node_principal` 唯一索引支持节点复合外键；`idx_turn_chain_content_refs_content` 支持内容回收。恢复先还原 profile 再还原叶子，缺失、损坏、数量不符或覆盖非 null 内容均显式失败。
 
 ---
 

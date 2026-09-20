@@ -4,6 +4,7 @@ use std::time::Duration;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::turn_chain::*;
 
+mod content;
 mod sql;
 
 pub use sql::SqlTurnChainStore;
@@ -21,5 +22,7 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
     SqlTurnChainStore::sqlite(pool)
 }
 
+#[cfg(test)]
+mod content_tests;
 #[cfg(test)]
 mod tests;

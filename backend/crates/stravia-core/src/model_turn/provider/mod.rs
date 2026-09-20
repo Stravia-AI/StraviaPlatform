@@ -402,7 +402,7 @@ impl AttemptObservation {
         });
     }
 
-    pub(crate) fn checkpoint<T: serde::Serialize>(&self, stage: &str, payload: &T) {
+    pub(crate) fn capture_content<T: serde::Serialize>(&self, stage: &str, payload: &T) {
         let Some(observer) = self
             .observer
             .as_ref()
@@ -411,7 +411,7 @@ impl AttemptObservation {
             return;
         };
         match serde_json::to_value(payload) {
-            Ok(payload) => observer.record(RunEvent::Checkpoint {
+            Ok(payload) => observer.record(RunEvent::Content {
                 stage: stage.to_owned(),
                 model_turn_id: Some(self.model_turn_id.clone()),
                 attempt_id: Some(self.id.clone()),

@@ -1,4 +1,4 @@
-//! Offline, copy-only data migration. No application database/schema code is invoked.
+//! 离线复制迁移；结构优化仅在显式启用时作用于目标副本，源数据不改写。
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
@@ -19,6 +19,9 @@ pub struct MigrateDataArgs {
     /// Explicit legacy platform WebView data directory; never inferred from the current user.
     #[arg(long)]
     webview_from: Option<PathBuf>,
+    /// Deduplicate history and debug content in the destination copy, then reclaim SQLite free pages.
+    #[arg(long)]
+    optimize_storage: bool,
     #[arg(long, requires = "source_stopped")]
     apply: bool,
     /// Confirm every host using the source (including an external SQLite root) is stopped.
@@ -58,9 +61,18 @@ pub async fn run(args: MigrateDataArgs) -> Result<()> {
     for path in &plan.skipped {
         println!("Skip rebuildable lock/SQLite sidecar: {}", path.display());
     }
-    println!(
-        "No schema migration; no PostgreSQL connection or S3 operation. Source data is never rewritten."
-    );
+    if args.optimize_storage {
+        ensure!(
+            plan.database.is_some(),
+            "--optimize-storage requires a local SQLite database; external databases are never modified"
+        );
+        println!(
+            "Destination only: apply schema migrations, deduplicate history/debug content without compression, verify restoration, and reclaim SQLite free pages."
+        );
+    } else {
+        println!("No schema migration.");
+    }
+    println!("No PostgreSQL connection or S3 operation. Source data is never rewritten.");
     println!(
         "Apply may create .instance.lock in source roots and retains a sibling destination reservation lock; these coordination files contain no data."
     );
@@ -93,6 +105,10 @@ pub async fn run(args: MigrateDataArgs) -> Result<()> {
         .tempdir_in(parent)?;
     secure_staging(staging.path())?;
     plan.populate(staging.path()).await?;
+    if args.optimize_storage {
+        let report = stravia_core::storage::maintenance::optimize_data_copy(staging.path()).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     // A failed population leaves no target and TempDir removes the private staging tree.
     // The sibling reservation serializes publication. An open child lock would
     // prevent directory rename on Windows; no host can see the target before rename.
@@ -749,6 +765,7 @@ mod tests {
             to: root.join("new"),
             config: None,
             webview_from: None,
+            optimize_storage: false,
             apply: false,
             source_stopped: false,
         }
@@ -994,6 +1011,7 @@ mod tests {
             to: second.clone(),
             config: None,
             webview_from: None,
+            optimize_storage: false,
             apply: true,
             source_stopped: true,
         })
@@ -1033,6 +1051,7 @@ mod tests {
             to: args.to.clone(),
             config: None,
             webview_from: None,
+            optimize_storage: false,
             apply: false,
             source_stopped: false,
         })
