@@ -1,5 +1,8 @@
-import { locales, overwriteGetLocale, setLocale, type Locale } from '$lib/paraglide/runtime.js'
+import { invoke } from '@tauri-apps/api/core'
+
 import { isTauri } from '$lib/auth'
+import { locales, overwriteGetLocale, setLocale } from '$lib/paraglide/runtime.js'
+import type { Locale } from '$lib/paraglide/runtime.js'
 
 export type { Locale }
 
@@ -10,9 +13,7 @@ const LOCALE_STORAGE_KEY = 'stravia-locale'
 // 桌面托盘菜单等原生文案跟随界面语言；同步是尽力而为，失败不影响界面。
 function syncDesktopLocale(locale: Locale): void {
   if (!isTauri) return
-  void import('@tauri-apps/api/core')
-    .then(({ invoke }) => invoke('set_desktop_locale', { locale }))
-    .catch((error: unknown) => console.warn('Stravia desktop locale sync failed', error))
+  void invoke('set_desktop_locale', { locale }).catch(() => console.warn('Stravia desktop locale sync failed'))
 }
 
 function isLocale(value: string): value is Locale {
@@ -36,6 +37,7 @@ function detectClientLocale(): Locale {
 
 class LocaleState {
   current = $state<Locale>('en-US')
+  #desktopSyncReady = false
 
   restore(): void {
     const saved = localStorage.getItem(LOCALE_STORAGE_KEY)
@@ -47,7 +49,13 @@ class LocaleState {
     this.current = next
     document.documentElement.lang = next
     if (persist) localStorage.setItem(LOCALE_STORAGE_KEY, next)
-    syncDesktopLocale(next)
+    if (this.#desktopSyncReady) syncDesktopLocale(next)
+  }
+
+  enableDesktopSync(): void {
+    if (!isTauri || this.#desktopSyncReady) return
+    this.#desktopSyncReady = true
+    syncDesktopLocale(this.current)
   }
 }
 

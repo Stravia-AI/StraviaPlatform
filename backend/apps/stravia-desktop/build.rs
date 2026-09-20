@@ -1,6 +1,10 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "get_desktop_startup_state",
+            "restart_desktop",
+            "exit_desktop",
+            "open_desktop_logs",
             "get_admin_session",
             "get_server_port",
             "get_desktop_port_state",

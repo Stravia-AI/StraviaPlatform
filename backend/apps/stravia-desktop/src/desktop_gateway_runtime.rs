@@ -356,7 +356,7 @@ pub(crate) fn autostart_root_argument(root: &Path) -> anyhow::Result<String> {
 }
 
 pub(crate) fn desktop_runtime_dir(
-    app: &tauri::App,
+    app: &tauri::AppHandle,
     root_override: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     let root = if let Some(root) = root_override {
@@ -372,7 +372,7 @@ pub(crate) fn desktop_runtime_dir(
 }
 
 pub(crate) fn desktop_preference_store(
-    app: &tauri::App,
+    app: &tauri::AppHandle,
     runtime_dir: &Path,
 ) -> anyhow::Result<Arc<dyn DesktopPreferenceStore>> {
     let path = stravia_core::data_paths::DataPaths::new(runtime_dir).desktop_port();
@@ -946,7 +946,6 @@ impl DesktopGatewayRuntime {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         let _operation = self.operation.lock().await;
         self.request_shutdown();

@@ -61,6 +61,8 @@ Agent behavior is defined and versioned by the platform — Stravia is not a use
 
 **Desktop** — download the Windows (NSIS) or Linux (AppImage) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) and open it. The full platform runs locally with an integrated management UI. macOS builds are not currently provided.
 
+If startup fails, the desktop app keeps a recovery window with diagnostic details, a copy action, an available startup-log link, restart, and exit. Resolve the reported problem before restarting; Stravia does not automatically reset or repair the database. Failed silent launches also show this window, and closing it exits instead of hiding in the tray. Nonessential desktop integration failures appear as warnings without blocking the gateway. If the window itself cannot be created, a native error dialog reports the failure and available log location before exit.
+
 **Server** — one container:
 
 ```bash
