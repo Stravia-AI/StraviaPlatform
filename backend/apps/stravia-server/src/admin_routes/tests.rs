@@ -1,6 +1,8 @@
 use super::*;
+use crate::AdminMode;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use stravia_core::admin::identity::AdminAuth;
 use stravia_core::config::GatewayConfig;
 use tower::ServiceExt;
 
@@ -735,6 +737,92 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
     assert_eq!(updated.status(), StatusCode::OK);
     let updated_body = to_bytes(updated.into_body(), usize::MAX).await?;
     assert!(String::from_utf8_lossy(&updated_body).contains("0.987654321098765432"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Target Status Provider".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: None,
+                protocol: "openai-compatible".into(),
+                base_url: "https://example.test/v1".into(),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::None,
+            use_proxy: false,
+        })
+        .await?;
+    gateway
+        .admin()
+        .create_manual_provider_model(
+            &provider.id,
+            "upstream-model",
+            CreateManualProviderModel {
+                metadata: serde_json::json!({"id": "upstream-model", "name": "Upstream Model"}),
+            },
+        )
+        .await?;
+    gateway
+        .admin()
+        .create_model(CreateRoute {
+            model_id: "statused-model".into(),
+            display_name: None,
+            balance: None,
+            target_provider: provider.id,
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+            default_thinking_level: None,
+        })
+        .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway,
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+
+    let denied = app
+        .clone()
+        .oneshot(Request::get("/api/v1/models/statused-model/target-statuses").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let tokens = auth.login_native().await?;
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/models/statused-model/target-statuses")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/v1/models/no-such-model/target-statuses")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let body = to_bytes(missing.into_body(), usize::MAX).await?;
+    let payload: serde_json::Value = serde_json::from_slice(&body)?;
+    assert!(payload["error"].is_string());
+    assert!(payload.get("data").is_none());
     Ok(())
 }
 

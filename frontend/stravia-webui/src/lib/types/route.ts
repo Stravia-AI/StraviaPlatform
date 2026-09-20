@@ -105,3 +105,13 @@ export interface UpsertTarget {
   target_cooldown_ms?: number
   thinking_level_map?: ThinkingLevelMapping[]
 }
+
+export type TargetRuntimeState = 'available' | 'cooling_down' | 'half_open' | 'probing'
+
+export interface TargetRuntimeStatus {
+  target_id: string
+  provider_id: string
+  model: string
+  state: TargetRuntimeState
+  cooldown_remaining_ms: number | null
+}

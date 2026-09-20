@@ -123,7 +123,6 @@ impl Gateway {
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
-        let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let provider_catalog = provider_catalog::ProviderCatalog::new(paths.catalog_root())?;
         let retention_days = match storage.settings().get("log_retention_days").await {
@@ -302,7 +301,6 @@ impl Gateway {
             proxy_client_cache: Arc::new(tokio::sync::RwLock::new(None)),
             responses_websockets: proxy::client::ResponsesWebSocketRegistry::default(),
             model_cache,
-            health_registry,
             cache_affinity: router::cache_affinity::CacheAffinity::default(),
             route_policy_state: router::RoutePolicyState::default(),
             ollama_capability_cache,

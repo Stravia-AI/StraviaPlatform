@@ -26,8 +26,8 @@ use crate::proxy::context::RequestContext;
 use crate::proxy::planner::{ProtocolMode, ProtocolPlan, negotiate};
 use crate::proxy::security::Security;
 use crate::router::{
-    AttemptFailureDisposition, RouteAttemptContext, RoutePolicyState, SelectedTarget,
-    selected_target_key,
+    AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
+    SelectedTarget, selected_target_key,
 };
 use crate::router::{ContinuationLookup, ContinuationTarget};
 use stravia_runtime_contract::hook::RouteContext;
@@ -614,9 +614,14 @@ async fn execute_inner(
     let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut last_error = None;
-    while let Some(target) = attempts.next_healthy(&gateway.health_registry) {
+    while let Some(target) = attempts.next_healthy() {
         let mut omit_protected_thinking = false;
         loop {
+            // The target may have been re-cooled by another request while this
+            // one prepared or backed off; never send on a stale generation.
+            if !attempts.retry_current() {
+                break;
+            }
             let attempt_started = Instant::now();
             let mut protected_thinking_sent = false;
             let result = match prepare_attempt(
@@ -626,14 +631,26 @@ async fn execute_inner(
                 &input,
                 &model_turn_id,
                 omit_protected_thinking,
+                attempts.current_is_probe(),
             )
             .await
             {
+                // Preparation awaits storage/protocol work; another request may
+                // have cooled the target meanwhile — recheck right before the
+                // upstream send, not only before the backoff sleep.
+                Ok(_) if !attempts.retry_current() => break,
                 Ok(mut prepared) => {
                     protected_thinking_sent = prepared.protected_thinking_replayed;
                     let timeout_signal = (target.first_token_timeout_ms != 0)
                         .then(|| prepared.provider_call.first_token_timeout_signal())
                         .flatten();
+                    // If the outer deadline/cancellation select drops this
+                    // in-flight probe before first token, a real deadline
+                    // expiry must re-cool the target; a user cancel only
+                    // releases the probe via the policy Drop.
+                    let mut probe_guard = attempts
+                        .current_is_probe()
+                        .then(|| ProbeDeadlineGuard::armed(&attempts, &target, input.deadline));
                     let attempt = begin_attempt(
                         gateway,
                         &route,
@@ -644,10 +661,12 @@ async fn execute_inner(
                         AttemptRoutePolicy {
                             state: attempts.state().clone(),
                             context: attempts.context().clone(),
+                            epoch: attempts.current_epoch(),
+                            probe: attempts.current_is_probe(),
                         },
                     );
 
-                    if target.first_token_timeout_ms == 0 {
+                    let result = if target.first_token_timeout_ms == 0 {
                         attempt.await
                     } else {
                         // timeout 只借用 future；先标记原因，再让其中的观察器随取消释放。
@@ -672,7 +691,11 @@ async fn execute_inner(
                                 ))
                             }
                         }
+                    };
+                    if let Some(guard) = &mut probe_guard {
+                        guard.disarm();
                     }
+                    result
                 }
                 Err(failure) => Err(failure),
             };
@@ -684,26 +707,39 @@ async fn execute_inner(
                 Err(failure) => failure,
             };
             if native_compaction_requested {
+                recool_failed_probe(&attempts, &target, &failure);
                 return Err(failure.finish(input.observer.as_ref()));
             }
+            // A half-open probe gets exactly one upstream request: never spend
+            // the protected-reasoning correction on it.
             if !omit_protected_thinking
                 && protected_thinking_sent
                 && failure.protected_reasoning_rejected
+                && !attempts.current_is_probe()
             {
                 // 只在上游明确拒绝密文/签名、且尚未产出 canonical 输出时修正一次请求。
                 omit_protected_thinking = true;
                 continue;
             }
             let Some(kind) = failure.kind.clone() else {
+                recool_failed_probe(&attempts, &target, &failure);
                 return Err(failure.finish(input.observer.as_ref()));
             };
             if !failure.record_health {
+                recool_failed_probe(&attempts, &target, &failure);
+                attempts.skip_current();
+                last_error = Some(failure);
+                break;
+            }
+            // A local platform failure on a probe (credential, adapter, storage
+            // — no upstream request ever left) must only release the probe
+            // slot, never re-cool the target as if upstream had answered.
+            if attempts.current_is_probe() && !failure.is_upstream() {
                 attempts.skip_current();
                 last_error = Some(failure);
                 break;
             }
             match attempts.record_failure(
-                &gateway.health_registry,
                 &target,
                 crate::router::selector::AttemptFailureSignal {
                     kind,
@@ -757,6 +793,12 @@ impl AttemptFailure {
     fn upstream_origin(mut self) -> Self {
         self.diagnostic.source = Some("upstream".into());
         self
+    }
+
+    /// `true` when the failure came from the upstream provider rather than
+    /// local preparation or validation.
+    fn is_upstream(&self) -> bool {
+        self.diagnostic.source.as_deref() == Some("upstream")
     }
     fn retryable(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -880,6 +922,7 @@ async fn prepare_attempt(
     input: &TurnInput,
     model_turn_id: &str,
     omit_protected_thinking: bool,
+    probe: bool,
 ) -> Result<PreparedAttempt, AttemptFailure> {
     let gateway = &executor.gateway;
     let target_key = selected_target_key(target);
@@ -1340,7 +1383,10 @@ async fn prepare_attempt(
         adapter.bind(client, outbound)
     };
     provider_call.set_artifact_transfers(input.principal.clone(), artifact_transfers);
-    if compact || controls.requested() {
+    // A half-open probe is exactly one upstream request: internal retries and
+    // fallbacks (401 refresh, previous_response_not_found replay, WebSocket
+    // reconnect/SSE fallback) would spend extra upstream shots on it.
+    if compact || controls.requested() || probe {
         provider_call.disable_retries();
     }
     Ok(PreparedAttempt {
@@ -1387,16 +1433,58 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
 struct AttemptRoutePolicy {
     state: RoutePolicyState,
     context: RouteAttemptContext,
+    /// Runtime generation of the selected target; guards the success write so
+    /// a stale in-flight attempt can never clear a newer cooldown.
+    epoch: u64,
+    /// `true` while this attempt holds the target's half-open probe slot.
+    probe: bool,
 }
 
 impl AttemptRoutePolicy {
-    fn record_success(
-        &self,
-        health: &crate::router::health::HealthRegistry,
-        target: &SelectedTarget,
-    ) {
+    fn record_success(&self, target: &SelectedTarget) {
         self.state
-            .record_success(health, &self.context, &selected_target_key(target));
+            .record_success(&self.context, &selected_target_key(target), self.epoch);
+    }
+}
+
+/// Drop guard for an in-flight half-open probe. `begin_attempt` futures can be
+/// dropped wholesale by the outer deadline/cancellation select before first
+/// token; when that drop is a real deadline expiry the sent request timed out
+/// upstream, so the probe re-cools the target. A user cancellation disarms
+/// nothing — the guard checks the deadline at drop time — and the policy Drop
+/// simply releases the probe slot back to `HalfOpen`.
+struct ProbeDeadlineGuard {
+    state: RoutePolicyState,
+    target_key: String,
+    epoch: u64,
+    cooldown_ms: i64,
+    deadline: Instant,
+    armed: bool,
+}
+
+impl ProbeDeadlineGuard {
+    fn armed(attempts: &RouteAttemptPolicy, target: &SelectedTarget, deadline: Instant) -> Self {
+        Self {
+            state: attempts.state().clone(),
+            target_key: selected_target_key(target),
+            epoch: attempts.current_epoch(),
+            cooldown_ms: target.target_cooldown_ms,
+            deadline,
+            armed: attempts.current_is_probe(),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeDeadlineGuard {
+    fn drop(&mut self) {
+        if self.armed && Instant::now() >= self.deadline {
+            self.state
+                .record_failure(&self.target_key, self.epoch, self.cooldown_ms);
+        }
     }
 }
 
@@ -1454,6 +1542,7 @@ async fn begin_attempt(
             crate::protocol::codec::open_responses::parser::parse_compaction_response(&raw)
                 .map_err(|error| {
                     AttemptFailure::terminal("invalid_compaction_response", error.to_string())
+                        .upstream_origin()
                 })?;
         if let Some(usage) = &response.usage {
             attempt.confirm_usage(usage);
@@ -1464,7 +1553,7 @@ async fn begin_attempt(
             None,
             Some(attempt_started.elapsed().as_millis() as i64),
         );
-        policy.record_success(&gateway.health_registry, target);
+        policy.record_success(target);
         return Ok(ModelTurn {
             model_turn_id: prepared.model_turn_id,
             route: prepared.route,
@@ -1537,10 +1626,10 @@ async fn begin_attempt(
                     Some(error.stable_code().to_owned()),
                     None,
                 );
-                return Err(AttemptFailure::terminal(
-                    error.stable_code(),
-                    error.to_string(),
-                ));
+                return Err(
+                    AttemptFailure::terminal(error.stable_code(), error.to_string())
+                        .upstream_origin(),
+                );
             }
         };
         crate::media::ingest::normalize_response(
@@ -1560,7 +1649,7 @@ async fn begin_attempt(
             &prepared.route.target_id,
             &response.usage,
         );
-        policy.record_success(&gateway.health_registry, target);
+        policy.record_success(target);
         call.attempt.confirm_usage(&response.usage);
         call.attempt
             .checkpoint("canonical_terminal_response", &response);
@@ -1711,20 +1800,29 @@ async fn begin_attempt(
     let route_id = route.id.clone();
     let route_policy_state = policy.state.clone();
     let attempt_context = policy.context.clone();
+    let attempt_epoch = policy.epoch;
+    let attempt_probe = policy.probe;
+    let target_cooldown_ms = target.target_cooldown_ms;
     let target_key = prepared.route.target_id.clone();
     let health_target_key = selected_target_key(target);
-    let reservation =
-        route_policy_state.reservation(attempt_context.clone(), health_target_key.clone());
+    let reservation = route_policy_state.reservation(
+        attempt_context.clone(),
+        health_target_key.clone(),
+        attempt_epoch,
+        attempt_probe,
+    );
     let gateway = gateway.clone();
-    let target = target.clone();
     let cancellation = input.cancellation.clone();
     let deadline = input.deadline;
     let failure_observer = input.observer.clone();
     tokio::spawn(async move {
         let mut accumulator = StreamResponseAccumulator::default();
         let terminal_error = handle_terminal_stream_error(
-            &gateway.health_registry,
+            &route_policy_state,
             &health_target_key,
+            attempt_epoch,
+            target_cooldown_ms,
+            attempt_probe,
             &first_deltas,
         );
         if send_deltas(
@@ -1758,14 +1856,43 @@ async fn begin_attempt(
                 biased;
                 _ = cancellation.cancelled() => {
                     let error = interruption_error(deadline);
+                    // A cancellation that is really the deadline expiring means
+                    // the sent probe request timed out upstream: re-cool. A
+                    // user cancel only releases the probe slot.
+                    if error.code == "deadline_exceeded" && attempt_probe {
+                        route_policy_state.record_failure(
+                            &health_target_key,
+                            attempt_epoch,
+                            target_cooldown_ms,
+                        );
+                    }
                     let outcome = if error.code == "cancelled" { "cancelled" } else { "failed" };
                     provider_stream.attempt().finish(outcome, None, Some(error.code.clone()), None);
                     let _ = tx.send(Err(error)).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    if attempt_probe {
+                        route_policy_state.record_failure(
+                            &health_target_key,
+                            attempt_epoch,
+                            target_cooldown_ms,
+                        );
+                    }
                     provider_stream.attempt().finish("failed", None, Some("deadline_exceeded".into()), None);
                     let _ = tx.send(Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))).await;
+                    return;
+                }
+                // The consumer may drop between chunks: release the
+                // reservation/probe immediately instead of holding it until
+                // the next upstream chunk or the deadline.
+                _ = tx.closed() => {
+                    provider_stream.attempt().finish(
+                        "interrupted",
+                        Some(provider_stream.status),
+                        Some("consumer_disconnected".into()),
+                        None,
+                    );
                     return;
                 }
                 chunk = provider_stream.next() => chunk,
@@ -1773,8 +1900,11 @@ async fn begin_attempt(
             match next {
                 Ok(Some(chunk)) => {
                     let terminal_error = handle_terminal_stream_error(
-                        &gateway.health_registry,
+                        &route_policy_state,
                         &health_target_key,
+                        attempt_epoch,
+                        target_cooldown_ms,
+                        attempt_probe,
                         &chunk.deltas,
                     );
                     if send_deltas(
@@ -1806,9 +1936,11 @@ async fn begin_attempt(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    gateway
-                        .health_registry
-                        .record_failure(&selected_target_key(&target));
+                    route_policy_state.record_failure(
+                        &health_target_key,
+                        attempt_epoch,
+                        target_cooldown_ms,
+                    );
                     let failure = stream_failure(error);
                     provider_stream.attempt().finish(
                         "failed",
@@ -1826,8 +1958,11 @@ async fn begin_attempt(
         match provider_stream.finish().await {
             Ok(deltas) => {
                 let terminal_error = handle_terminal_stream_error(
-                    &gateway.health_registry,
+                    &route_policy_state,
                     &health_target_key,
+                    attempt_epoch,
+                    target_cooldown_ms,
+                    attempt_probe,
                     &deltas,
                 );
                 if send_deltas(&tx, &mut accumulator, provider_stream.attempt(), deltas)
@@ -1853,6 +1988,11 @@ async fn begin_attempt(
                 }
             }
             Err(error) => {
+                route_policy_state.record_failure(
+                    &health_target_key,
+                    attempt_epoch,
+                    target_cooldown_ms,
+                );
                 let failure = stream_failure(error);
                 provider_stream.attempt().finish(
                     "failed",
@@ -1896,11 +2036,7 @@ async fn begin_attempt(
             &target_key,
             &response.usage,
         );
-        route_policy_state.record_success(
-            &gateway.health_registry,
-            &attempt_context,
-            &health_target_key,
-        );
+        route_policy_state.record_success(&attempt_context, &health_target_key, attempt_epoch);
         reservation.complete();
         provider_stream.attempt().confirm_usage(&response.usage);
         provider_stream
@@ -1946,6 +2082,24 @@ async fn send_deltas(
     Ok(())
 }
 
+/// Re-cools the target when a half-open probe met an upstream failure on a
+/// path that never reaches `RouteAttemptPolicy::record_failure` (early
+/// returns and `record_health == false`). Local preparation/validation
+/// failures only release the probe slot via `skip_current`/Drop instead.
+fn recool_failed_probe(
+    attempts: &RouteAttemptPolicy,
+    target: &SelectedTarget,
+    failure: &AttemptFailure,
+) {
+    if attempts.current_is_probe() && failure.is_upstream() {
+        attempts.state().record_failure(
+            &selected_target_key(target),
+            attempts.current_epoch(),
+            target.target_cooldown_ms,
+        );
+    }
+}
+
 fn is_first_output(delta: &AiStreamDelta) -> bool {
     match delta {
         AiStreamDelta::TextDelta(text)
@@ -1974,17 +2128,29 @@ fn is_terminal_delta(delta: &AiStreamDelta) -> bool {
 }
 
 fn handle_terminal_stream_error(
-    health: &crate::router::health::HealthRegistry,
+    state: &RoutePolicyState,
     target_key: &str,
+    epoch: u64,
+    cooldown_ms: i64,
+    probe: bool,
     deltas: &[AiStreamDelta],
 ) -> bool {
+    // UnexpectedEof is a terminal upstream failure: it must re-cool the target
+    // (and never let a probe turn green), like a degrading StreamError.
+    if deltas
+        .iter()
+        .any(|delta| matches!(delta, AiStreamDelta::UnexpectedEof))
+    {
+        state.record_failure(target_key, epoch, cooldown_ms);
+        return true;
+    }
     let Some(error) = deltas.iter().find_map(|delta| match delta {
         AiStreamDelta::StreamError { error } => Some(error),
         _ => None,
     }) else {
         return false;
     };
-    let degrades_health = error.status_code.map_or_else(
+    let degrades = error.status_code.map_or_else(
         || error.is_retryable(),
         |status| {
             matches!(
@@ -1998,8 +2164,10 @@ fn handle_terminal_stream_error(
             )
         },
     );
-    if degrades_health {
-        health.record_failure(target_key);
+    // A half-open probe's single shot fails on any terminal stream error, not
+    // only degrading ones: re-cool the full window.
+    if degrades || probe {
+        state.record_failure(target_key, epoch, cooldown_ms);
     }
     true
 }
@@ -2013,10 +2181,10 @@ fn stream_failure(error: ProviderStreamError) -> AttemptFailure {
             AttemptFailure::terminal("upstream_acceptance_unknown", message).upstream_origin()
         }
         ProviderStreamError::Decode(error) => {
-            AttemptFailure::terminal("protocol_lossy_rejected", error.to_string())
+            AttemptFailure::terminal("protocol_lossy_rejected", error.to_string()).upstream_origin()
         }
         ProviderStreamError::Normalize(error) => {
-            AttemptFailure::terminal(error.stable_code(), error.to_string())
+            AttemptFailure::terminal(error.stable_code(), error.to_string()).upstream_origin()
         }
     }
 }
@@ -2166,7 +2334,11 @@ fn normalize_provider_effective_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
+    use super::{
+        ProbeDeadlineGuard, handle_terminal_stream_error, insert_default_prompt_cache_key,
+    };
+    use crate::router::{RoutePolicyState, TargetRuntimeState};
+    use std::time::{Duration, Instant};
     use stravia_runtime_contract::protocol::ir::AiError;
     use stravia_runtime_contract::protocol::ir::AiErrorKind;
     use stravia_runtime_contract::protocol::ir::AiStreamDelta;
@@ -2183,39 +2355,191 @@ mod tests {
     }
 
     #[test]
-    fn request_scoped_stream_errors_do_not_degrade_target_health() {
-        let health = crate::router::health::HealthRegistry::new();
+    fn request_scoped_stream_errors_do_not_cool_the_target() {
+        let state = RoutePolicyState::default();
         let deltas = vec![AiStreamDelta::StreamError {
             error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
         }];
 
         for _ in 0..3 {
             assert!(handle_terminal_stream_error(
-                &health,
+                &state,
                 "provider:model",
+                0,
+                120_000,
+                false,
                 &deltas
             ));
         }
 
-        assert!(health.is_healthy("provider:model"));
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::Available
+        );
     }
 
     #[test]
-    fn retryable_stream_errors_degrade_target_health() {
-        let health = crate::router::health::HealthRegistry::new();
+    fn retryable_stream_errors_cool_the_target() {
+        let state = RoutePolicyState::default();
         let deltas = vec![AiStreamDelta::StreamError {
             error: AiError::new(AiErrorKind::StreamMidError, "unavailable").with_status(503),
         }];
 
-        for _ in 0..3 {
-            assert!(handle_terminal_stream_error(
-                &health,
-                "provider:model",
-                &deltas
-            ));
-        }
+        assert!(handle_terminal_stream_error(
+            &state,
+            "provider:model",
+            0,
+            120_000,
+            false,
+            &deltas
+        ));
 
-        assert!(!health.is_healthy("provider:model"));
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::CoolingDown
+        );
+    }
+
+    #[test]
+    fn unexpected_eof_is_a_terminal_stream_error_that_cools_the_target() {
+        let state = RoutePolicyState::default();
+        let deltas = vec![AiStreamDelta::UnexpectedEof];
+
+        assert!(handle_terminal_stream_error(
+            &state,
+            "provider:model",
+            0,
+            120_000,
+            false,
+            &deltas
+        ));
+
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::CoolingDown
+        );
+    }
+
+    #[test]
+    fn half_open_probe_recools_on_request_scoped_stream_error() {
+        let state = RoutePolicyState::default();
+        let deltas = vec![AiStreamDelta::StreamError {
+            error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
+        }];
+
+        assert!(handle_terminal_stream_error(
+            &state,
+            "provider:model",
+            0,
+            120_000,
+            true,
+            &deltas
+        ));
+
+        // The same error leaves a normal attempt untouched but must re-cool a
+        // probe: the single half-open shot failed.
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::CoolingDown
+        );
+    }
+
+    #[test]
+    fn stale_epoch_stream_errors_still_terminate_without_recooling() {
+        let state = RoutePolicyState::default();
+        let deltas = vec![AiStreamDelta::StreamError {
+            error: AiError::new(AiErrorKind::StreamMidError, "unavailable").with_status(503),
+        }];
+
+        // A newer generation already cooled the target; a late stream error
+        // from the superseded attempt is terminal for its consumer but must
+        // not rewrite the newer cooldown window.
+        state.record_failure("provider:model", 0, 60_000);
+        let before = state
+            .target_status("provider:model")
+            .cooldown_remaining_ms
+            .expect("cooling");
+
+        assert!(handle_terminal_stream_error(
+            &state,
+            "provider:model",
+            0,
+            120_000,
+            false,
+            &deltas
+        ));
+
+        let status = state.target_status("provider:model");
+        assert_eq!(status.state, TargetRuntimeState::CoolingDown);
+        assert!(status.cooldown_remaining_ms.unwrap() <= before);
+    }
+
+    fn probe_guard(state: &RoutePolicyState, deadline: Instant) -> ProbeDeadlineGuard {
+        ProbeDeadlineGuard {
+            state: state.clone(),
+            target_key: "provider:model".into(),
+            epoch: 0,
+            cooldown_ms: 120_000,
+            deadline,
+            armed: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_in_flight_probe_recools_when_deadline_expired() {
+        let state = RoutePolicyState::default();
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let pending = {
+            let state = state.clone();
+            async move {
+                let _guard = probe_guard(&state, deadline);
+                std::future::pending::<()>().await
+            }
+        };
+
+        // The outer select drops the in-flight probe once the deadline fires.
+        while Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(50), pending).await;
+
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::CoolingDown
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_in_flight_probe_releases_without_cooling_on_user_cancel() {
+        let state = RoutePolicyState::default();
+        let pending = {
+            let state = state.clone();
+            async move {
+                // Deadline far in the future: a drop here models user cancellation.
+                let _guard = probe_guard(&state, Instant::now() + Duration::from_secs(3600));
+                std::future::pending::<()>().await
+            }
+        };
+
+        let _ = tokio::time::timeout(Duration::from_millis(10), pending).await;
+
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::Available
+        );
+    }
+
+    #[test]
+    fn disarmed_probe_guard_does_not_cool_on_drop() {
+        let state = RoutePolicyState::default();
+        let mut guard = probe_guard(&state, Instant::now() - Duration::from_secs(1));
+        guard.disarm();
+        drop(guard);
+
+        assert_eq!(
+            state.target_status("provider:model").state,
+            TargetRuntimeState::Available
+        );
     }
 
     #[test]

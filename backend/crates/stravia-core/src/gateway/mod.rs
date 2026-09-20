@@ -31,7 +31,6 @@ use crate::auth::types::AuthSession;
 use crate::hook::HookRuntime;
 use crate::hook::PlatformToolRegistry;
 use crate::mcp::{McpTool, McpToolRegistry};
-use crate::router::health::HealthRegistry;
 use config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
 use storage::sql::config::SqlBackendConfig;
 use storage::{DynStorage, PostgresStorage, SqliteStorage};
@@ -72,7 +71,6 @@ pub struct Gateway {
     pub(crate) responses_websockets: proxy::client::ResponsesWebSocketRegistry,
     pub(crate) principal_admission: Arc<admission::PrincipalAdmission>,
     pub model_cache: Arc<tokio::sync::RwLock<router::RouteCache>>,
-    pub health_registry: Arc<HealthRegistry>,
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
     pub(crate) route_policy_state: router::RoutePolicyState,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
@@ -123,7 +121,6 @@ impl Gateway {
             principal_admission: Arc::clone(&self.principal_admission),
             responses_websockets: self.responses_websockets.clone(),
             model_cache: Arc::clone(&self.model_cache),
-            health_registry: Arc::clone(&self.health_registry),
             cache_affinity: self.cache_affinity.clone(),
             route_policy_state: self.route_policy_state.clone(),
             ollama_capability_cache: Arc::clone(&self.ollama_capability_cache),

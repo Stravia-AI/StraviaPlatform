@@ -194,7 +194,6 @@ mod tests {
         ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind,
     };
     use crate::router::continuation::ContinuationTarget;
-    use crate::router::health::HealthRegistry;
     use crate::router::selector::{
         AttemptFailureDisposition, AttemptFailureSignal, ConversationIdentity, RouteAttemptContext,
         TargetSchedulingSnapshot,
@@ -312,7 +311,6 @@ mod tests {
 
     struct Fixture {
         selector: RouteSelector,
-        health: HealthRegistry,
         policy_state: RoutePolicyState,
         cache_affinity: CacheAffinity,
     }
@@ -327,7 +325,6 @@ mod tests {
                 continuation,
                 policy_state.clone(),
             ),
-            health: HealthRegistry::new(),
             policy_state,
             cache_affinity,
         }
@@ -341,8 +338,8 @@ mod tests {
         Arc::new(StaticContinuation(None))
     }
 
-    fn next_provider(policy: &mut RouteAttemptPolicy, health: &HealthRegistry) -> Option<String> {
-        policy.next_healthy(health).map(|target| target.provider_id)
+    fn next_provider(policy: &mut RouteAttemptPolicy) -> Option<String> {
+        policy.next_healthy().map(|target| target.provider_id)
     }
 
     fn large_usage() -> Usage {
@@ -584,14 +581,8 @@ mod tests {
             .await
             .expect("select");
 
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("low")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("high"));
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("low"));
     }
 
     #[tokio::test]
@@ -606,13 +597,10 @@ mod tests {
             .select(&principal(), &route, &request(), None, None)
             .await
             .expect("first select");
-        let failed = first
-            .next_healthy(&fixture.health)
-            .expect("cooling target selected first");
+        let failed = first.next_healthy().expect("cooling target selected first");
         assert_eq!(failed.provider_id, "cooling");
         assert_eq!(
             first.record_failure(
-                &fixture.health,
                 &failed,
                 AttemptFailureSignal {
                     kind: AiErrorKind::ServiceUnavailable,
@@ -631,11 +619,8 @@ mod tests {
             .select(&principal(), &route, &request(), None, None)
             .await
             .expect("second select");
-        assert_eq!(
-            next_provider(&mut second, &fixture.health).as_deref(),
-            Some("healthy")
-        );
-        assert_eq!(next_provider(&mut second, &fixture.health), None);
+        assert_eq!(next_provider(&mut second).as_deref(), Some("healthy"));
+        assert_eq!(next_provider(&mut second), None);
     }
 
     #[tokio::test]
@@ -647,7 +632,6 @@ mod tests {
             ..Default::default()
         }));
         fixture.policy_state.record_success(
-            &fixture.health,
             &RouteAttemptContext {
                 principal: principal().continuation_key(),
                 route_id: "route-id".into(),
@@ -658,6 +642,7 @@ mod tests {
                 now_ms: 0,
             },
             "affinity:model",
+            0,
         );
         let route = route(vec![target("primary", 10), target("affinity", 0)]);
 
@@ -666,10 +651,7 @@ mod tests {
             .select(&principal(), &route, &request, None, None)
             .await
             .expect("select");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("affinity")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("affinity"));
     }
 
     #[tokio::test]
@@ -690,10 +672,7 @@ mod tests {
             .select(&principal(), &route, &seeded, None, None)
             .await
             .expect("select");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("affinity")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("affinity"));
 
         // A conversation identity suppresses the cache hint entirely.
         let mut identified = request();
@@ -707,7 +686,7 @@ mod tests {
             .await
             .expect("select with conversation");
         assert_eq!(
-            next_provider(&mut identified_policy, &fixture.health).as_deref(),
+            next_provider(&mut identified_policy).as_deref(),
             Some("primary")
         );
     }
@@ -758,10 +737,7 @@ mod tests {
             .select(&principal(), &route, &request, None, None)
             .await
             .expect("select");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("continued")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("continued"));
     }
 
     #[tokio::test]
@@ -779,11 +755,8 @@ mod tests {
             .select(&principal(), &route, &request(), Some(&plan), None)
             .await
             .expect("select");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("native")
-        );
-        assert_eq!(next_provider(&mut policy, &fixture.health), None);
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("native"));
+        assert_eq!(next_provider(&mut policy), None);
 
         let empty_plan = MediaRoutingPlan {
             mode: MediaRoutingMode::Native,
@@ -848,10 +821,7 @@ mod tests {
             .select(&principal(), &route, &request(), None, None)
             .await
             .expect("stale snapshot still selects");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("idle")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("idle"));
     }
 
     #[tokio::test]
@@ -913,9 +883,6 @@ mod tests {
             .select(&principal(), &route, &request(), None, None)
             .await
             .expect("select");
-        assert_eq!(
-            next_provider(&mut policy, &fixture.health).as_deref(),
-            Some("output_heavy")
-        );
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("output_heavy"));
     }
 }

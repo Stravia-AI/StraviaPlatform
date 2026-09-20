@@ -1,6 +1,5 @@
 pub(crate) mod cache_affinity;
 pub(crate) mod continuation;
-pub mod health;
 mod matcher;
 pub(crate) mod selection;
 pub mod selector;
@@ -14,7 +13,8 @@ pub(crate) use selection::{RouteSelector, SelectionError};
 pub use selector::{
     AttemptFailureDisposition, ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy,
     RouteAttemptReservation, RoutePolicyState, RouteSchedulingSnapshot, SelectedTarget,
-    TargetSchedulingSnapshot, conversation_identity, selected_target_key,
+    TargetRuntimeState, TargetRuntimeStatus, TargetSchedulingSnapshot, conversation_identity,
+    selected_target_key,
 };
 
 use crate::db::models::Route;

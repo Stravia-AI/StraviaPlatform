@@ -656,6 +656,39 @@ async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn target_statuses_use_exact_route_id_and_never_storage_id() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    let route = RouteModule::new(&admin)
+        .bind(RouteBind::At {
+            route_id: "ExactRoute".into(),
+            provider_id: provider.id,
+            provider_model_id: "upstream-model".into(),
+            priority: 1,
+            first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
+            target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
+            target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
+        })
+        .await?;
+
+    let statuses = admin.get_model_target_statuses("ExactRoute").await?;
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|status| status.target_id.as_str())
+            .collect::<Vec<_>>(),
+        route
+            .targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(admin.get_model_target_statuses("exactroute").await.is_err());
+    assert!(admin.get_model_target_statuses(&route.id).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
 async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();

@@ -34,6 +34,16 @@ pub(super) async fn get_model_handler(
     }
 }
 
+pub(super) async fn get_model_target_statuses_handler(
+    State(gw): State<Gateway>,
+    Path(route_id): Path<String>,
+) -> impl IntoResponse {
+    match gw.admin().get_model_target_statuses(&route_id).await {
+        Ok(statuses) => Json(serde_json::json!({ "data": statuses })).into_response(),
+        Err(error) => err(error),
+    }
+}
+
 pub(super) async fn bind_route_handler(
     State(gw): State<Gateway>,
     Json(input): Json<BindRouteInput>,
