@@ -1,6 +1,6 @@
 # Web Search 设计
 
-> 状态：已实施
+> 状态：现有 Local/Codex 基线已实施；第 5.2 节多能力插件与搜索 Route 契约已确认、尚待实施。
 > 更新：2026-09-15
 > 相关决策：[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)、[ADR-0017](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)
 
@@ -22,7 +22,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 }
 ```
 
-所有读取入口只接受必填字符串 `path`，禁止额外顶层字段。搜索文本严格 percent-decode 一次，文字中的 `+` 不变；首个未编码 `?` 后按 form query 解码。`previous_turn_id` 是单值续接参数，`allowed_domains` 可重复，原始列表最多 20 项，规范化后去重。新根省略允许域名即无限制，续接省略则继承父策略，显式非空列表替换；不支持空列表清空，改为启动新根。未知、重复单值和无效编码明确拒绝。
+所有读取入口只接受必填字符串 `path`，禁止额外顶层字段。搜索文本严格 percent-decode 一次，文字中的 `+` 不变；首个未编码 `?` 后按 form query 解码。`previous_turn_id` 是单值续接参数，`allowed_domains` 可重复，原始列表最多 20 项，规范化后去重。新根省略允许域名即无限制，续接省略则继承父策略，显式非空列表替换；不支持空列表清空，改为启动新根。未知、重复单值和无效编码明确拒绝。插件化目标契约中，续接仅适用于 Local 搜索；外部搜索不提供续接，尝试续接其结果明确拒绝，不忽略参数后启动新请求。
 
 `blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
 
@@ -56,7 +56,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 - source 必须来自当前或祖先 Turn 的已验证 evidence；
 - partial 结果必须说明预算或超时限制。
 
-`SearchTurn` 是 principal-scoped、不可变的 continuation point。根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。当前持久化 identity 为 `kind = "web_search"`；ID 使用平台统一的 28 位小写字母裸格式，不带类型前缀。
+`SearchTurn` 是 principal-scoped、不可变的报告记录。Local 根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。外部搜索目标契约仅保留报告、引用与历史身份，不保存跨请求研究会话，不因返回报告 ID 就承诺续接。当前持久化 identity 为 `kind = "web_search"`；ID 使用平台统一的 28 位小写字母裸格式，不带类型前缀。
 
 ### 统一资源读取与文本分页
 
@@ -120,22 +120,24 @@ Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`�
 - deadline 取调用方 request deadline 与 Local total time 的较早值；
 - `SearchReportValidator` 用本次运行收集的 evidence 校验最终报告。
 
-### 5.2 Codex
+### 5.2 外部完整搜索：Vendor Plugin 与 Route
 
-`CodexAgenticSearchBackend` 固定管理员选择的 OAuth Provider/账号和 upstream Model。它使用 Codex hosted web search，不读取或执行 Stravia 的 Local turns/time budget。
+本节为已确认的插件化目标契约，取代原 Codex 固定 Provider/账号与 upstream Model 的接入方式，不表示代码已经完成迁移。详见 [Vendor 插件设计](vendor-plugins.md) 与 [完整规格](../../.scratch/vendor-wasm-plugins/spec.md)。
 
-Codex 仍受以下边界约束：
+- 管理员为外部完整搜索绑定 Route，由宿主选择具备完整搜索能力的 Target。Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
+- Target 支持 Provider + 上游模型，也支持仅 Provider 的独立研究服务，不强迫后者建立 Provider Model 或虚假模型 ID。上游 wire 要求的固定标识由插件处理。
+- [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。其固定 model 参数不等于管理员必须选择模型；该服务是设计参考，不自动列入本期正式供应商交付清单。
+- 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。
+- 外部搜索沿用 Route 的选择、重试和 Target 切换策略；插件提供错误分类，宿主在结果提交前对明确可重试的上游错误决定重试或切换。取消、参数错误及权限错误不触发，结果提交后不重放；接受重复执行与重复消耗额度风险。
+- 插件归一答案和引用，宿主继续执行 Search Report 验证、来源策略、平台 Gate、Principal 隔离及交付。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。
 
-- 调用方 cancellation；
-- 外层 request deadline；
-- Provider eligibility、OAuth credential 和固定 upstream Model；
-- 传输、响应大小、SSE 完成状态和引用 annotation 校验。
+所有外部后端仍受调用方 cancellation、外层 request deadline、Target 能力资格、连接凭据、传输和响应大小限制及完整结果校验约束；流式接入还须验证其完成状态。不把供应商扩展权限视为平台工具注册权限。
 
-配置仍保存 Local budget 数值。Codex 模式忽略这些值；切回 Local 后重新显示并校验原值。
+配置仍保存 Local budget 数值。外部搜索不执行 Local turns/time budget；切回 Local 后重新显示并校验原值。
 
 ## 6. Admin 与持久化
 
-Admin REST canonical paths：
+以下为现有基线的 Admin REST canonical paths；插件化实施须将 Codex 专属候选与固定绑定迁入通用能力资格及 Route 配置，清洁迁移调用方与已存设置，不保留平行专属接入。具体新字段、端点与迁移形状在实施阶段确定，不在此虚构已实现接口。
 
 - `GET` / `PUT /api/v1/web-search/config`
 - `GET /api/v1/web-search/eligible-models`
@@ -184,6 +186,8 @@ core 保留输入修整、错误映射、准入与异步解析调度；adapter �
 
 ## 9. 验证边界
 
+- 插件化目标：真实 Wasm 经公开搜索入口执行，覆盖同连接多能力、模型型与 Provider-only Target、Route 重试切换、外部续接拒绝与 Local 续接保留；使用本地上游，不调用收费生产服务。
+- 能力移除：保留受影响绑定并明确不可用；内置自动更新不为能力移除暂停确认，数据丢弃仍须确认。兼容在途搜索使用旧版完成，不兼容更新取消并阻止迟到报告提交。
 - Admin API：配置读写、Local/Codex validation、旧字段拒绝；
 - Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；
 - Search contract：Search Report provenance、continuation、branch、28 位裸 Turn ID，以及 `{turn_id}:{ordinal}` / `[sc:{turn_id}:{ordinal}]` 的 Source 对应关系；
