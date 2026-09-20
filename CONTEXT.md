@@ -585,6 +585,11 @@ _避免使用_：SDK、Provider Adapter
 
 Adapter Credentials 是一条 Provider 上由其 Vendor 声明的多字段上游凭据；它不同于客户端 API Key，也不同于 OAuth Credential。
 
+## Media Generation
+
+Media Generation 是根据内容要求及可选参考素材生成媒体 Artifact 的高级能力，用户可见名称为“媒体生成”。不同生成类型拥有各自的输入契约，产物统一沿用 Artifact 的身份、Principal 归属与保留期语义；它不同于解释已有内容的 Media Understanding。
+_避免使用_：Image Generation（当指整个高级能力）、Media Understanding、文件上传
+
 ## Media Understanding
 
 Media Understanding 是针对一个或多个多模态 Artifact 回答开放问题的平台能力。它面向图片、PDF、视频、音频等内容持续扩展；文字提取、描述、比较与推理都是同一能力的用例，不形成彼此重叠的专用工具。用户可见名称为“多模态理解”。
