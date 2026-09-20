@@ -169,7 +169,7 @@ The same Rust core powers both; the management surface is the same WebUI.
 ## Documentation
 
 - [Architecture](docs/design/architecture.md) and [design documents](docs/design/) · [ADRs](docs/adr/)
-- [Database schema](docs/database/schema.md) · [Changelog](CHANGELOG.md)
+- Database schema: [PostgreSQL](docs/database/postgres.sql) · [SQLite](docs/database/sqlite.sql) · [Changelog](CHANGELOG.md)
 
 ## Development
 

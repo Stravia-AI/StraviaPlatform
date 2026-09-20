@@ -899,8 +899,19 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 | PostgreSQL | Server 自托管实例 | `backend/crates/stravia-core/src/storage/postgres/` |
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
-统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别位于 `deploy/schema/postgres.sql`、`deploy/schema/sqlite.sql`，不包含业务数据或 SQLx 迁移历史。
-SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。权威 Schema 文档为 [docs/database/schema.md](../database/schema.md)（含供审阅的 `deploy/schema/postgres.sql`）。
+统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
+SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。结构以 migrations 为事实来源；两份 SQL 仅供 DBA 审阅，不能用于初始化部署，应由 `stravia-server` 对空数据库应用 migrations。
+
+每次新增或修改 migration，都必须通过工具同步重新生成两份参考文件，并与 migration 一并交付，不得手工修改 schema 正文：
+
+```bash
+stravia-tools dump-schema --backend sqlite --output docs/database/sqlite.sql
+stravia-tools dump-schema --backend postgres --output docs/database/postgres.sql
+```
+
+SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需要指向非生产开发服务器的 `DATABASE_URL`、具有 `CREATEDB` 权限的角色，以及 PATH 中与服务端版本兼容的 `pg_dump`。工具创建独立临时数据库、执行迁移、导出后删除，不在连接 URL 指定的原数据库上迁移；不得使用生产连接。密码经环境变量传给 `pg_dump`，不放入命令行参数。
+
+默认 migration 目录来自工具编译时的源码位置；移动工具后可使用 `--migrations-dir backend/crates/stravia-core/migrations`。目录在运行时读取，新增迁移无需手工维护导出列表。使用 `--output` 在导出和清理成功后写入 UTF-8 文件。PostgreSQL 的最终约束可能由 `pg_dump` 表示为 `ALTER TABLE ... ADD CONSTRAINT`，这不是历史迁移的拼接；跨环境比较生成文件时应固定 PostgreSQL 与 `pg_dump` 主版本。
 
 ### 10.2 核心表结构（最终态，post-migration）
 
@@ -968,7 +979,7 @@ CREATE TABLE api_key_models (
     PRIMARY KEY (api_key_id, model_id)
 );
 
--- Interaction Observation（完整列与索引见 docs/database/schema.md / migration 34）
+-- Interaction Observation（完整列与索引见 docs/database/postgres.sql、docs/database/sqlite.sql）
 CREATE TABLE interaction_observations (
     id TEXT PRIMARY KEY,
     principal TEXT NOT NULL,
