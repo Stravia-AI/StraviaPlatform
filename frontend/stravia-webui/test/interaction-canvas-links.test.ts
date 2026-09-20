@@ -152,4 +152,33 @@ describe('canvas links', () => {
       { id: 'inferred-source-child', source: 'source', target: 'child', kind: 'inferred' },
     ])
   })
+
+  test('legacy records without tail events fall back to the latest intermediate turn', () => {
+    const root = interaction('root', null, 10)
+    const mid = interaction('mid', null, 20, [inferred('root')])
+    const orphan = interaction('orphan', 'mid', 30)
+    const grandchild = interaction('grandchild', 'root', 40)
+    // orphan 经 confirmed mid → inferred root 挂在 root 之下，成为 grandchild 的中间轮；
+    // 无 tail 事件的旧记录按时间 fallback 取最晚的 orphan。
+    expect(canvasLinks([root, mid, orphan, grandchild])).toEqual([
+      { id: 'inferred-root-mid', source: 'root', target: 'mid', kind: 'inferred' },
+      { id: 'confirmed-mid-orphan', source: 'mid', target: 'orphan', kind: 'confirmed' },
+      { id: 'inferred-orphan-grandchild', source: 'orphan', target: 'grandchild', kind: 'inferred' },
+    ])
+  })
+
+  test('a first-parent cycle never fabricates intermediates', () => {
+    const root = interaction('root', null, 5)
+    const a = interaction('a', 'b', 10)
+    const b = interaction('b', 'a', 20)
+    // c 的确认父是 root 且 inferred(a)；a↔b 成环 DFS 不可达，
+    // fallback 回溯也不能顺环把 a 算作 root 之下的中间轮，c 仍直连 root。
+    const c = interaction('c', 'root', 30, [inferred('a')])
+    expect(visualParent(c, [root, a, b, c])).toEqual({ id: 'root', kind: 'confirmed' })
+    expect(canvasLinks([root, a, b, c])).toEqual([
+      { id: 'confirmed-b-a', source: 'b', target: 'a', kind: 'confirmed' },
+      { id: 'confirmed-a-b', source: 'a', target: 'b', kind: 'confirmed' },
+      { id: 'confirmed-root-c', source: 'root', target: 'c', kind: 'confirmed' },
+    ])
+  })
 })

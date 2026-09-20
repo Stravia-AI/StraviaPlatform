@@ -583,6 +583,31 @@ test.describe('Interaction Observation canvas', () => {
     await prepareApp(page)
   })
 
+  test('returning to a running interaction restores readable cards after fitting a wide forest', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    for (let index = 0; index < 40; index++) {
+      fixture.addInteraction(
+        interaction(
+          `wide-${index}`,
+          'root-a',
+          'interaction-atlas',
+          `Wide ${index}`,
+          routeIds.atlas,
+          'completed',
+          20_000 + index,
+        ),
+      )
+    }
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs')
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    await expect.poll(async () => (await viewportTransform(page)).zoom).toBeLessThan(0.5)
+    await page.getByRole('button', { name: 'Return to running interaction', exact: true }).click()
+    await expect.poll(async () => (await viewportTransform(page)).zoom).toBeGreaterThanOrEqual(0.9)
+    await expect(node(page, 'Cinder', 'running')).toBeInViewport()
+  })
+
   test('a large chain mounts only its viewport instead of measuring every card at the origin', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     for (let index = 0; index < 300; index++) {
@@ -851,7 +876,8 @@ test.describe('Interaction Observation canvas', () => {
       payload: { text: ' New child preview' },
     })
     await expect(node(page, 'Nova', 'running').locator('article')).toContainText('New child preview')
-    await expect(node(page, 'Atlas', 'completed')).toHaveCount(1)
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    await expect(node(page, 'Atlas', 'completed')).toBeVisible()
     expect(fixture.summaryRequests.at(-1)?.pathname).toBe('/api/v1/observations/interactions/interaction-nova/summary')
     expect(fixture.detailRequests).toEqual([])
     await expect(page.getByRole('complementary', { name: 'Observation details' })).toHaveCount(0)
@@ -1449,6 +1475,7 @@ test.describe('Interaction Observation canvas', () => {
     granite.client_output_delivered = true
     fixture.addInteraction(granite)
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const graniteNode = node(page, 'Granite', 'failed')
     await expect(graniteNode).toBeVisible()
     await graniteNode.click()
@@ -1881,6 +1908,7 @@ test.describe('Interaction Observation canvas', () => {
   test('opens readable conversation bubbles while retaining raw events in diagnostics', async ({ page }) => {
     await installObservationFixture(page, false, true)
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const atlas = node(page, 'Atlas', 'completed')
     const cardUsage = atlas.getByLabel('Reported usage')
     await expect(cardUsage.getByTitle('Input')).toContainText('920')
@@ -2582,6 +2610,7 @@ test.describe('Interaction Observation canvas', () => {
   }) => {
     await installObservationFixture(page)
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const card = node(page, 'Atlas', 'completed')
     const input = card.getByRole('button', { name: 'User input preview', exact: true })
     const output = card.getByRole('button', { name: 'Model output preview', exact: true })
@@ -2663,6 +2692,7 @@ test.describe('Interaction Observation canvas', () => {
       }),
     )
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     const download = page.waitForEvent('download')
     const ticketRequest = page.waitForRequest((request) =>
@@ -2684,6 +2714,9 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
 
     await expect(page.getByText('1 / 3 chains', { exact: true })).toBeVisible()
+    const initialPane = (await page.locator('.svelte-flow__pane').boundingBox())!
+    await page.mouse.move(initialPane.x + initialPane.width / 2, initialPane.y + initialPane.height * 0.9)
+    await page.mouse.wheel(0, 1200)
     await expect.poll(() => fixture.forestRequests.some((url) => url.searchParams.has('cursor'))).toBe(true)
     await page.getByRole('button', { name: 'Load and show all chains' }).click()
     await expect(page.getByRole('progressbar', { name: 'Loading all chains' })).toBeVisible()
@@ -2765,6 +2798,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.setViewportSize({ width: 1280, height: 800 })
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
 
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     await page.getByRole('button', { name: 'Close', exact: true }).click()
@@ -2820,6 +2854,7 @@ test.describe('Interaction Observation canvas', () => {
   test('fullscreen preserves the selected interaction and exits by button or Escape', async ({ page }) => {
     await installObservationFixture(page)
     await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await page.getByRole('button', { name: 'Enter fullscreen', exact: true }).click()
@@ -3012,6 +3047,7 @@ test.describe('Interaction Observation canvas', () => {
       await page.setViewportSize({ width: 390, height: 740 })
       await installObservationFixture(page)
       await page.goto('/logs')
+      await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
       const card = node(page, 'Atlas', 'completed')
       const tooltip = page.getByRole('tooltip')
       for (const [label, text] of [

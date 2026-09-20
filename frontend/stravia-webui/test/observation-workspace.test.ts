@@ -448,3 +448,24 @@ describe('hidden failure reveal', () => {
     expect(h.snap().followPaused).toBe(true)
   })
 })
+
+describe('selected path', () => {
+  test('walks confirmed ancestors through the shared parent-edge index', async () => {
+    const chain = [
+      summary('i1', { last_event_sequence: 5 }),
+      summary('i2', { parent_interaction_id: 'i1', started_at: 2_000 }),
+      summary('i3', { parent_interaction_id: 'i2', started_at: 3_000 }),
+    ]
+    const h = harness({
+      forest: () => Promise.resolve(forestPage([root('root1', chain)])),
+      // detail 响应须返回链内节点本身；默认 detailFor 的 summary 没有 parent，会截断路径。
+      interaction: (id) =>
+        Promise.resolve({ ...detailFor(id), interaction: chain.find((item) => item.id === id) ?? summary(id) }),
+    })
+    await h.controller.start()
+    await h.controller.selectInteraction(chain[2])
+    expect([...h.snap().selectedPath].sort()).toEqual(['i1', 'i2', 'i3'])
+    await h.controller.selectInteraction(chain[0])
+    expect([...h.snap().selectedPath]).toEqual(['i1'])
+  })
+})

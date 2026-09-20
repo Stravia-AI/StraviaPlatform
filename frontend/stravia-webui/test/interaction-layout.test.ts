@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { layoutForest, type LayoutRequest } from '../src/lib/interaction-layout'
+import { layoutForest, type CachedLayout, type LayoutRequest } from '../src/lib/interaction-layout'
 
 function request(roots: LayoutRequest['roots'], edges: LayoutRequest['edges'] = []): LayoutRequest {
   return { requestId: 1, roots, edges }
@@ -13,6 +13,22 @@ function xOf(positions: { id: string; x: number }[], id: string): number {
 }
 
 describe('interaction layout columns', () => {
+  test('reclaims a narrowed group width before positioning the next root', () => {
+    const roots: LayoutRequest['roots'] = [
+      { id: 'tree', startedAt: 200, interactions: Array.from({ length: 8 }, (_, index) => ({ id: `turn-${index}` })) },
+      { id: 'next', startedAt: 100, interactions: [{ id: 'next' }] },
+    ]
+    const cache = new Map<string, CachedLayout>()
+    layoutForest(request(roots), cache)
+    const connected = request(
+      roots,
+      Array.from({ length: 7 }, (_, index) => ({ source: `turn-${index}`, target: `turn-${index + 1}` })),
+    )
+    const retained = layoutForest(connected, cache)
+    const fresh = layoutForest(connected, new Map())
+    expect(xOf(retained, 'next')).toBe(xOf(fresh, 'next'))
+  })
+
   test('places the newest root request in the leftmost column', () => {
     const positions = layoutForest(
       request([

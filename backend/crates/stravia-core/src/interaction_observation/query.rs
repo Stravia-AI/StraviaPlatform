@@ -8,8 +8,11 @@ use super::{store::ObservationStore, types::*};
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-// 与卡片四项展示合计一致：未知分项按 0。按根 DAG（含子孙）合计，隐藏低于阈值的链路。
-const CHAIN_TOKEN_SUM: &str = "COALESCE((SELECT SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0)) FROM target_attempt_observations a WHERE a.interaction_id IN (SELECT id FROM interaction_observations WHERE root_id=i.root_id)),0)";
+// 与卡片四项展示合计一致：未知分项按 0，input 减 cache_read 夹 0，不另计 reasoning。
+// 按根 DAG（含子孙）合计，隐藏低于阈值的链路：按 root_id 一次聚合全部 target
+// attempts，IN 集合判定避免对每行 Interaction 重算同一根的合计。仅在调用方确认
+// min_tokens>0 时拼接，因此无 attempt 的根（聚合无行、按 0 计）必然被过滤。
+const CHAIN_TOKEN_ROOTS: &str = "i.root_id IN (SELECT m.root_id FROM interaction_observations m JOIN target_attempt_observations a ON a.interaction_id=m.id GROUP BY m.root_id HAVING SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0))>=";
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
 CAST(SUM(CASE
@@ -899,9 +902,9 @@ fn add_chain_token_filter_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQ
         return;
     };
     b.push(" AND ")
-        .push(CHAIN_TOKEN_SUM)
-        .push(">=")
-        .push_bind(min);
+        .push(CHAIN_TOKEN_ROOTS)
+        .push_bind(min)
+        .push(")");
 }
 
 fn add_chain_token_filter_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
@@ -909,9 +912,9 @@ fn add_chain_token_filter_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &For
         return;
     };
     b.push(" AND ")
-        .push(CHAIN_TOKEN_SUM)
-        .push(">=")
-        .push_bind(min);
+        .push(CHAIN_TOKEN_ROOTS)
+        .push_bind(min)
+        .push(")");
 }
 
 async fn forest_roots_sqlite(
@@ -1687,6 +1690,70 @@ mod tests {
             .await?
             .expect("small root still readable");
         assert!(snapshot.root.interactions.iter().all(|item| !item.matched));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forest_chain_token_filter_paginates_and_counts_over_all_matching_roots()
+    -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool);
+        for index in 0..3 {
+            let id = format!("root-{index}");
+            admit_chain_node(&store, &id, &id, None, 1).await?;
+            confirm_displayed_tokens(&store, &id, 20_000, 0, 0, 0, 2).await?;
+        }
+        admit_chain_node(&store, "root-tiny", "root-tiny", None, 1).await?;
+        confirm_displayed_tokens(&store, "root-tiny", 10, 0, 0, 0, 2).await?;
+        admit_chain_node(&store, "root-empty", "root-empty", None, 1).await?;
+
+        let base = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            min_tokens: Some(10_000),
+            ..Default::default()
+        };
+        let first = store
+            .query_forest(ForestQuery {
+                limit: Some(2),
+                ..base.clone()
+            })
+            .await?;
+        let first_ids: Vec<_> = first.roots.iter().map(|root| root.id.as_str()).collect();
+        assert_eq!(first_ids, ["root-0", "root-1"]);
+        assert_eq!(first.root_total, 3);
+        let cursor = first.next_cursor.clone().expect("more matching roots");
+
+        let second = store
+            .query_forest(ForestQuery {
+                limit: Some(2),
+                cursor: Some(cursor),
+                ..base.clone()
+            })
+            .await?;
+        let second_ids: Vec<_> = second.roots.iter().map(|root| root.id.as_str()).collect();
+        assert_eq!(second_ids, ["root-2"]);
+        assert_eq!(second.root_total, 3);
+        assert_eq!(second.next_cursor, None);
+
+        // min_tokens=0 不拼接聚合：没有任何 attempt 的 root-empty 必须仍在结果中。
+        let disabled = store
+            .query_forest(ForestQuery {
+                min_tokens: Some(0),
+                ..base
+            })
+            .await?;
+        assert_eq!(disabled.root_total, 5);
+        assert!(
+            disabled
+                .roots
+                .iter()
+                .any(|root| root.id == "root-empty" && root.interactions.len() == 1)
+        );
         Ok(())
     }
 }
