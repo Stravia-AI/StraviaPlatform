@@ -3,6 +3,8 @@ import { expect, test, type Page } from '@playwright/test'
 import { prepareApp } from './prepare-app'
 
 async function stubStats(page: Page): Promise<void> {
+  const now = new Date(2026, 8, 17, 8, 7).getTime()
+  await page.clock.setFixedTime(now)
   await page.route('**/api/v1/stats/overview**', async (route) => {
     await route.fulfill({
       json: {
@@ -25,7 +27,6 @@ async function stubStats(page: Page): Promise<void> {
     const bucketMs = Number(url.searchParams.get('bucket') ?? '3600') * 1000
     const tzOffsetMs = Number(url.searchParams.get('tz_offset') ?? '0') * 1000
     const align = (t: number) => Math.floor((t + tzOffsetMs) / bucketMs) * bucketMs - tzOffsetMs
-    const now = Date.now()
     const data = []
     for (let i = 0; i < 12; i++) {
       const start = align(now - i * bucketMs)
@@ -54,10 +55,10 @@ test('token activity grid fills the section width at each granularity', async ({
   await page.setViewportSize({ width: 1280, height: 900 })
 
   const ranges = [
-    { value: '6', label: 'Last 6h', rows: 4 },
-    { value: '24', label: 'Last 24h', rows: 6 },
-    { value: '72', label: 'Last 3d', rows: 4 },
-    { value: '168', label: 'Last 7d', rows: 7 },
+    { value: '6', label: 'Last 6h', rows: 4, currentRows: 1 },
+    { value: '24', label: 'Last 24h', rows: 6, currentRows: 3 },
+    { value: '72', label: 'Last 3d', rows: 4, currentRows: 2 },
+    { value: '168', label: 'Last 7d', rows: 7, currentRows: 4 },
   ]
   for (const range of ranges) {
     await page.goto('/stats')
@@ -82,7 +83,7 @@ test('token activity grid fills the section width at each granularity', async ({
       expect(metrics.scrolls).toBe(false)
       expect(metrics.leftover).toBeGreaterThanOrEqual(0)
       expect(metrics.leftover).toBeLessThan(metrics.pitch)
-      expect(metrics.cells).toBe(metrics.cols * range.rows)
+      expect(metrics.cells).toBe((metrics.cols - 1) * range.rows + range.currentRows)
     }).toPass()
   }
 })
@@ -94,7 +95,7 @@ test('token activity cell tooltip reports the bucket time and token total', asyn
 
   const grid = page.getByRole('group', { name: 'Token activity' })
   await expect(grid).toBeVisible()
-  // 最新格（末位）mock 了 190M 输入 + 其余维度，tooltip 汇总为 198M 级文案。
+  // 验证可见方格的悬浮提示包含用量。
   const newest = grid.locator('.token-activity-cell').last()
   await expect(newest).toHaveAttribute('aria-label', /tokens$/)
   await newest.hover()

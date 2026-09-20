@@ -28,6 +28,22 @@ describe('latency chart', () => {
 })
 
 describe('activity grid', () => {
+  test.each([900_000, HOUR_MS, 6 * HOUR_MS, DAY_MS])(
+    'omits future buckets while retaining current and past zero usage (%i ms)',
+    (bucketMs) => {
+      const end = new Date(2026, 8, 17, 8, 7).getTime()
+      const tzOffsetMs = -new Date(end).getTimezoneOffset() * 60_000
+      const current = Math.floor((end + tzOffsetMs) / bucketMs) * bucketMs - tzOffsetMs
+      const grid = buildActivityGrid([], { endMs: end, spanMs: 7 * DAY_MS, bucketMs, tzOffsetMs })
+      const starts = new Set(grid.cells.map((cell) => cell.start))
+
+      expect(grid.cells.every((cell) => cell.start <= current)).toBe(true)
+      expect(starts.has(current)).toBe(true)
+      expect(starts.has(current - bucketMs)).toBe(true)
+      expect(grid.cells.find((cell) => cell.start === current)?.tokens).toBe(0)
+    },
+  )
+
   test('fills every bucket in the window and distinguishes zero and unknown usage', () => {
     const end = Date.UTC(2026, 8, 17)
     const grid = buildActivityGrid(
@@ -50,9 +66,8 @@ describe('activity grid', () => {
       { endMs: end, spanMs: 3 * DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0 },
     )
 
-    // 窗口 [end-3d, end] 覆盖 4 个日格；窗口外边缘位置补 0 值方格，
-    // 矩阵始终是完整矩形。
-    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
+    // 窗口 [end-3d, end] 覆盖 4 个日格；仅过去的窗口边缘位置补 0 值方格。
+    expect(grid.cells.every((cell) => cell.start <= end)).toBe(true)
     const byStart = new Map(grid.cells.map((cell) => [cell.start, cell]))
     expect(byStart.get(end - 3 * DAY_MS)?.tokens).toBe(0)
     expect(byStart.get(end - 2 * DAY_MS)?.tokens).toBeNull()
@@ -83,10 +98,10 @@ describe('activity grid', () => {
       { endMs: end, spanMs: DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0, minCols: 4 },
     )
 
-    // spanMs 只有 1 天，minCols=4 把窗口向前延伸为 4 个完整周列；
-    // 延伸范围内的真实数据被取回，矩阵仍是完整矩形，最新列保持在右端。
+    // spanMs 只有 1 天，minCols=4 把窗口向前延伸为 4 个周列；
+    // 延伸范围内的真实数据被取回，最新列保持在右端且不补未来时段。
     expect(grid.colCount).toBe(4)
-    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
+    expect(grid.cells.every((cell) => cell.start <= end)).toBe(true)
     const byStart = new Map(grid.cells.map((cell) => [cell.start, cell]))
     expect(byStart.get(history)?.tokens).toBe(5)
     expect(byStart.get(history)?.col).toBe(0)
@@ -96,7 +111,7 @@ describe('activity grid', () => {
   test('sub-day buckets group into parent-period columns', () => {
     const end = Date.UTC(2026, 8, 17, 12)
     const grid = buildActivityGrid([], { endMs: end, spanMs: 6 * HOUR_MS, bucketMs: 900_000, tzOffsetMs: 0 })
-    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
+    expect(grid.cells.every((cell) => cell.start <= end)).toBe(true)
     expect(grid.rowCount).toBe(4)
     expect(grid.colCount).toBeGreaterThanOrEqual(6)
     expect(grid.colCount).toBeLessThanOrEqual(7)

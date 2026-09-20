@@ -162,13 +162,14 @@ export function buildActivityGrid(
     rawCells.push({ start, tokens, col, row })
   }
 
-  // 窗口边缘列未覆盖的位置也补齐方格，保证矩阵是完整矩形；
+  // 只补齐窗口边缘列中已开始的时段，不为未来 bucket 生成方格；
   // 列内 bucket 连续，起点 = 列起点 + 行号 × 粒度；有序列数据时取真实值。
   const occupied = new Set(rawCells.map((cell) => cell.col * rowCount + cell.row))
   for (let col = 0; col < colStarts.length; col++) {
     for (let row = 0; row < rowCount; row++) {
       if (occupied.has(col * rowCount + row)) continue
       const start = colStarts[col] + row * bucketMs
+      if (start > endStart) break
       rawCells.push({ start, tokens: totals.has(start) ? totals.get(start)! : 0, col, row })
     }
   }
