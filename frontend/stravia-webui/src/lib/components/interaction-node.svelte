@@ -4,7 +4,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/svelte'
 import InteractionPreview from './interaction-preview.svelte'
 
 import { formatCompactCount, formatLogTime } from '$lib/format'
-import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
+import { hasHistoricalFailure, interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationStatusLabel } from '$lib/observation-labels'
 import type { InteractionNodeData } from '$lib/types'
 
@@ -15,6 +15,12 @@ const interaction = $derived(data.interaction)
 const title = $derived(interaction.first_model_display_name?.trim() || interaction.first_route_id)
 const displayStatus = $derived(interactionDisplayStatus(interaction))
 const statusLabel = $derived(observationStatusLabel(displayStatus))
+const historicalFailure = $derived(hasHistoricalFailure(interaction))
+const cardLabel = $derived(
+  historicalFailure
+    ? m.observation_interaction_previous_failure_label({ title, status: statusLabel })
+    : m.observation_interaction_card_label({ title, status: statusLabel }),
+)
 const contextLabel = $derived.by(() => {
   const events = interaction.context_events ?? []
   if (events.some((event) => event.kind === 'compaction_operation')) return m.observation_compaction_operation()
@@ -37,7 +43,7 @@ const usage = $derived([
     data.onSelectedPath && 'node-spine',
     data.subdued && 'node-subdued',
   ]}
-  aria-label={m.observation_interaction_card_label({ title, status: statusLabel })}>
+  aria-label={cardLabel}>
   <header class="flex min-w-0 items-start justify-between gap-3">
     <div class="min-w-0">
       <time
@@ -47,9 +53,16 @@ const usage = $derived([
       </time>
       <h3 class="font-structural mt-1 truncate text-sm font-semibold">{title}</h3>
     </div>
-    <span class="status-label" data-status={displayStatus}>
-      <span class="status-dot" aria-hidden="true"></span>{statusLabel}
-    </span>
+    <div class="status-group">
+      <span class="status-label" data-status={displayStatus}>
+        <span class="status-dot" aria-hidden="true"></span>{statusLabel}
+      </span>
+      {#if historicalFailure}
+        <span class="historical-failure-label">
+          <span class="historical-failure-mark" aria-hidden="true"></span>{m.observation_previous_request_failed()}
+        </span>
+      {/if}
+    </div>
   </header>
 
   <InteractionPreview
@@ -70,7 +83,9 @@ const usage = $derived([
   <InteractionPreview
     text={interaction.visible_tail}
     label={m.observation_output_preview()}
-    emptyLabel={m.observation_no_visible_output()}
+    emptyLabel={interaction.client_output_delivered
+      ? m.observation_output_delivered_no_preview()
+      : m.observation_no_visible_output()}
     {contextLabel}
     tail />
 </article>
@@ -110,6 +125,14 @@ const usage = $derived([
 .node-subdued {
   opacity: 0.42;
 }
+.status-group {
+  display: flex;
+  min-width: 0;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+}
 .status-label {
   display: inline-flex;
   flex: none;
@@ -135,6 +158,22 @@ const usage = $derived([
   border-radius: 1px;
   transform: rotate(45deg);
   background: var(--destructive);
+}
+.historical-failure-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted-foreground);
+  font-size: 0.65rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.historical-failure-mark {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 1px;
+  background: var(--destructive);
+  transform: rotate(45deg);
 }
 .usage-grid {
   display: grid;

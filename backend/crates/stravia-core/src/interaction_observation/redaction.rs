@@ -1511,6 +1511,7 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
         "data",
         "url",
         "file_url",
+        "file_id",
         "audio",
         "delta",
         "partial_image_b64",
@@ -1519,9 +1520,17 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
         let Some(source) = object.get_mut(key) else {
             continue;
         };
+        if source.is_null() {
+            continue;
+        }
         let reference = source
             .as_str()
             .or_else(|| source.get("url").and_then(Value::as_str))
+            .or_else(|| source.get("file_id").and_then(Value::as_str))
+            .or_else(|| source.get("fileUri").and_then(Value::as_str))
+            .or_else(|| source.get("file_uri").and_then(Value::as_str))
+            .or_else(|| source.get("artifact_reference").and_then(Value::as_str))
+            .or_else(|| source.pointer("/reference/stravia").and_then(Value::as_str))
             .filter(|url| {
                 stravia_runtime_contract::artifact::ArtifactId::from_reference(url).is_ok()
             })
@@ -2425,5 +2434,80 @@ mod tests {
             report.kinds.into_iter().collect::<Vec<_>>(),
             vec![RedactionKind::CredentialField]
         );
+    }
+
+    #[test]
+    fn structured_artifact_sources_remain_recoverable_after_externalization() {
+        let reference = format!(
+            "sa:{}",
+            "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN)
+        );
+        let mut payload = serde_json::json!({
+            "items": [{
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "file_id",
+                        "file_id": reference,
+                        "detail": "high"
+                    }
+                }]
+            }],
+            "contents": [{
+                "parts": [{
+                    "fileData": {
+                        "mimeType": "image/png",
+                        "fileUri": reference
+                    }
+                }]
+            }],
+            "messages": [{
+                "content": [{
+                    "type": "file",
+                    "data": {
+                        "type": "reference",
+                        "reference": {"stravia": reference}
+                    }
+                }]
+            }]
+        });
+
+        let report = externalize_capture(&mut payload, false);
+
+        for source in [
+            payload.pointer("/items/0/content/0/source"),
+            payload.pointer("/contents/0/parts/0/fileData"),
+            payload.pointer("/messages/0/content/0/data"),
+        ] {
+            let source = source.expect("externalized media source");
+            assert_eq!(source["artifact_reference"], reference);
+            assert_eq!(source["content_capture"], "reference_only");
+            assert_eq!(source["media_externalized"], true);
+            assert!(source.get("reason").is_none());
+        }
+        assert_eq!(
+            payload["items"][0]["content"][0]["source"]["detail"],
+            "high"
+        );
+        assert_eq!(
+            payload["contents"][0]["parts"][0]["fileData"]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(
+            report.into_kinds().collect::<Vec<_>>(),
+            vec![RedactionKind::MediaExternalized]
+        );
+    }
+
+    #[test]
+    fn absent_structured_media_bytes_do_not_create_a_partial_capture() {
+        let original = r#"{"type":"image_generation_call","status":"in_progress","result":null}"#;
+        let mut payload = Value::String(original.to_owned());
+
+        let report = externalize_capture(&mut payload, true);
+
+        assert_eq!(payload, Value::String(original.to_owned()));
+        assert!(report.kinds.is_empty());
     }
 }

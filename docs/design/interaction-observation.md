@@ -50,6 +50,8 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 9. 根重试归并只改变 Observation 分组，不建立或伪造 Generation Chain parent。
 10. 工具续接与快速续接同样只改变 Observation 分组，保留独立 Run 与全部输入，不修改 Generation Chain 父边、权限或模型执行。诊断记录保留归并依据；缺少精确父关系或完整交付时间时，不猜测快速归并。
 
+Generation parent 存在但对应父观察不可用时，新准入记录 `generation_parent_observation_unavailable` gap，不伪造父关联。未捕获、已清理、过期或查询失败都可能造成这类缺失，不能仅据此断言历史存储故障。真正的交付后 Generation 提交失败保留 `settlement_generation_commit` 诊断，界面明确“响应已交付，历史未保存”，不把已交付响应改报为请求失败，也不自动重放。
+
 ### 3.2 Interaction 主状态
 
 主状态只表达当前最需要用户注意的活动，不显示分支计数：
@@ -59,6 +61,10 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 3. 无活动分支且至少有最终生成响应：`completed`；
 4. 既无活动分支，也无最终生成响应，且仍有因客户端连接关闭或等待超时结束等待的叶分支：`disconnected`，显示“已断开”；
 5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
+
+`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。`visible_tail` 为空而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。
+
+响应完成不等于后台工具完成。仅在最后一个 `RunObserver` 释放、确认不会再产生该 Run 的事件后，writer 才把残留运行中的 Model Turn／Target attempt 记为 `interrupted`，释放残留活动计数并追加 `unfinished_observation_activity` gap。后台执行持有的观察句柄继续保护真实活动；收口不改写 Run 的交付状态、Generation 关联或已确认 usage，不将缺失的结束事实推断为成功。
 
 等待客户端的常规解除只凭客户端回传证据，不使用会话级猜测超时。同一 Interaction 内，一个 Run 的全部公开工具交接都已收到其他 Run 中 sequence 严格更晚的同 ID `client_tool_result` 时，该分支不再参与活动等待聚合，即使结果来自 sibling、结构上仍是叶节点。错误工具结果同样证明客户端已回传，但不证明最终生成成功；没有最终生成响应时，不能因此把 Interaction 标为 `completed`。判定只读取工具 ID 与事件顺序，不读取参数、结果正文或 Debug 文件；缺失或空 ID、没有 handoff、先于 handoff 的结果、部分回传以及同 ID 多次 handoff 均保守保留等待，重复 result 幂等，不跨 Interaction 或 Principal 匹配。状态计算使用尚未物理清除的历史证据，不按事件各自的到期时间截断；Bundle 只使用导出快照内的事件，不能借未来结果解除过去的等待。原 RunOutcome、工具历史和 Generation Chain 父边不改写。
 
@@ -214,6 +220,10 @@ clear_history() -> ClearHistoryResult
 
 `client_visible_content_delta` 仍只保存 Client Projection 已交付的可见内容。writer 将同一 Run 中相邻且同作用域的正文或思考文本封装为不可变内容块：达到 16 KiB UTF-8 或首字节等待约两秒时封口，作用域变化、其他事件与终态也会封口；不切断 UTF-8 字符。内容块不是新的对话消息，Markdown 在同一语义消息内连续渲染。无关 Run 的准入和普通详情读取不强制封口。普通事件按同一 Run 批量提交，批次只更新一次 Run/Interaction 摘要，只有影响生命周期的事件重算活动状态。
 
+同一 Run 尚未被 writer 取走的相邻同作用域文本，在生产端先合并为不超过 16 KiB 的排队单元，避免大量细碎 delta 在消费端合并前先耗尽命令队列。writer 取走、非文本事件、作用域切换和完成边界都会停止向原单元追加；不跨 Run、Model Turn 或 Target attempt 合并。总队列仍为 2048 项，排队文本最多使用其中一半，生命周期事件仍按同一 FIFO 排序；Run 准入时另预留完成槽，防止完成事实被正文洪峰推迟到句柄析构之后。溢出提示不会随每个被丢弃的文本碎片重复占用控制空间。控制事件本身持续过载或存储不可用时仍可丢失诊断，不承诺恢复已丢失的准入、终态或历史关联。
+
+工具结果批次先对查询 ID 去重，再沿既有祖先与 handoff 边界比较。批内比较引用已接收事件的位置，不再次复制大正文；不按跨交互的相同 payload 全局去重，缺失调用证据、正文变化及 null 边界仍保留。
+
 未封口文本约每 100ms 发布完整易失内容块，由 `block_id` 与递增 `revision` 替换显示；持久事件携带同一 `block_id`，提交后移除对应易失预览。界面显示未保存状态。允许正常调度下约两秒未落盘窗口，进程崩溃可能丢失这些观察文本；这不是存储故障下的持久化时限保证。持久化失败与预览容量不足分别提示，不能把预览截断误报成已落盘历史丢失。
 
 只对新封口的 1–16 KiB 文本尝试 `zip-deflate-v1` 压缩，含容器、base64 与元数据仍有净收益时才采用；读取、SSE 和导出恢复普通 `text` 契约。旧 payload 不改写、不删除。思考和工具内容不进入 `visible_tail`，沿用既有凭据脱敏及 `log_retention_days`，不受 Debug 开关控制；业务敏感内容仍可能保留。普通事件不保存完整 canonical request/response。
@@ -239,6 +249,10 @@ Debug Run 将以下内容记录为 `layer=content`，保留内容而不为每个
 诊断检查点仅记录 `target_selected`；开始和结束使用已有 `target_attempt_started`、`target_attempt_finished`，包含重试、失败、取消与耗时，已确认 usage 沿用现有事件。降低诊断粒度不改变内容采集、流终态检测或凭据保护。
 
 `Wire`、`Content` 与 `TargetSelected` 直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、可见输出、工具结果及 Trace manifest 状态仍持久化并驱动 SSE。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减。manifest 按独立两秒维护周期或显式生命周期边界持久化；普通详情、summary 与事件分页均只读已提交状态，不触发 flush，也不叠加未提交 manifest。Interaction 导出票据只排空目标 Interaction 的待写文本与 Trace，再固定截止水位；既有 ZIP 截止水位不能包含之后的新采集内容。四方向 Wire、canonical 内容和 target 诊断仍由 ZIP 提供，Debug 关闭时不采集。
+
+结构化 JSON 分片先增量扫描消息边界，候选闭合后仍执行严格 JSON 校验和既有脱敏；不对每个未闭合对象碎片重复解析累计正文。Trace 的小记录按 64 KiB 批量写入，单条较大记录仍受既有消息边界约束；周期维护、分段切换、snapshot、finish 与关闭保持显式 flush。manifest 的字节及事件水位只公布已确认可读取的数据；写入失败停止该 Trace 并保留 `partial`，不能因后续 finish 成功而伪装成完整捕获。
+
+声明为 base64 的 body/SSE/NDJSON 分片先还原为原始字节，完整消息形成后再校验 UTF-8、结构和凭据脱敏；重组记录使用 JSON 载荷标记，避免再次解码。已有合法 `sa:` 引用的结构化媒体保持引用语义，进行中对象的 null 媒体字段不表示媒体丢失。真正缺失的媒体、无法安全脱敏的数据和不完整消息仍为 partial。文件写入失败时只公布已确认的完整编码记录边界，并尽可能截去半条记录，不让 manifest 宣称未完成的 JSONL 尾部可读取。
 
 ### 5.3 顺序与 SSE cursor
 

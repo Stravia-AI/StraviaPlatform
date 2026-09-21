@@ -61,7 +61,7 @@ Agent behavior is defined and versioned by the platform — Stravia is not a use
 
 **Desktop** — download the Windows (NSIS) or Linux (AppImage) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) and open it. The full platform runs locally with an integrated management UI. macOS builds are not currently provided.
 
-If startup fails, the desktop app keeps a recovery window with diagnostic details, a copy action, an available startup-log link, restart, and exit. Resolve the reported problem before restarting; Stravia does not automatically reset or repair the database. Failed silent launches also show this window, and closing it exits instead of hiding in the tray. Nonessential desktop integration failures appear as warnings without blocking the gateway. If the window itself cannot be created, a native error dialog reports the failure and available log location before exit.
+If startup fails, the desktop app provides diagnostics and recovery options; it does not automatically reset your database.
 
 **Server** — one container:
 
@@ -109,15 +109,9 @@ Cross-protocol tool calls, reasoning, and usage reporting are preserved; request
 
 OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
 
-Devin preserves distinct completion reasons and signed or redacted thinking for compatible-source replay, including signatures received after the answer. Multi-turn replay retains images in their original user messages and tool results, and keeps tool calls adjacent to their results even when a client returns thinking after the call. Custom tool text is carried as a JSON `input` string rather than discarded. For Anthropic requests, an explicit `output_config.effort` takes precedence over `thinking.type` and its token budget.
-
-Codex OAuth omits unsupported sampling and output controls (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `top_logprobs`, `truncation`, `max_output_tokens`, and `max_tool_calls`) from both HTTP and WebSocket requests, including HTTP fallback. Devin accepts zero `presence_penalty` and `frequency_penalty` as absent; nonzero penalties, `seed`, and `stop` remain explicit unsupported-parameter errors.
-
-Responses streams close each indexed reasoning item when its authoritative completion arrives, retaining late signatures without deferring the item to the end of the response or emitting duplicate completion events. Retained upstream Responses WebSocket connections continue handling Ping and Close frames between requests. Peer closure or unexpected idle data retires the connection and its continuation affinity before reuse; healthy connections remain reusable.
-
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
-Each upstream target keeps one consecutive-failure count shared by internal retries and later requests. A retry budget of N starts cooldown on failure N+1 (defaults: budget 5, so the sixth consecutive upstream failure starts a 120-second cooldown); a complete success resets the count. Quota and terminal upstream errors count while retaining their existing no-same-target-retry or stop behavior. Cancellation and local preparation, hook, or storage errors do not count. After output is committed, a failure stops the request rather than replaying it, but the commit itself does not start cooldown. After cooldown, one eligible request gets one probe attempt: complete success restores normal routing, while an upstream failure starts another cooldown. Set cooldown to `0` to disable only the scheduling cooldown; failures still count, the threshold still controls when to move on, and complete success still resets the count. The model editor refreshes destination status every 2 seconds while visible, showing cooling, waiting-to-retry, and retrying targets in amber.
+When an upstream service is temporarily unavailable, Stravia retries or switches services according to your route configuration. The management UI shows each target's availability.
 
 ![Editing a model — upstream targets in priority layers](docs/assets/model-routing.png)
 
@@ -131,19 +125,9 @@ Each upstream target keeps one consecutive-failure count shared by internal retr
 
 #### Image generation
 
-In **Advanced Features → Media Generation**, bind a saved image Route and enable the capability. Every enabled Target must use an enabled OpenAI Codex OAuth Provider with a GPT-5-or-later model and connected credentials; disabled Targets do not participate. Saving validates configuration without generating an image. Execution validates the binding again and uses the existing credential refresh, Route priority, retry, and failover policies. Actual account/model availability remains subject to upstream support.
+In **Advanced Features → Media Generation**, bind a Codex OAuth model route that supports image generation and enable the capability. Generate or edit images through MCP or compatible model requests, then reuse the results in later operations.
 
-The same `generate` tool is available through MCP and explicit compatible model requests. Automatic exposure additionally requires the API key's transparent-injection switch and **Media Generation** selection. That selection defaults to off for new and existing keys; it is not a separate permission.
-
-```json
-{"type":"image","input":{"prompt":"A small blue house","aspect_ratio":"4:3","resolution":"2K"}}
-```
-
-Only `prompt` is required inside `input`. Optional `aspect_ratio` accepts `1:1`, `3:4`, `4:3`, `9:16`, or `16:9`; `resolution` accepts `1K`, `2K`, or `4K`. These are preferences, not exact dimensions. The Codex adapter currently clamps all resolution tiers to its verified hosted-tool sizes: square `1024×1024`, portrait `1024×1536`, and landscape `1536×1024`. With neither preference specified, it omits `size`. No cropping, scaling, or upsampling is performed.
-
-For editing, add ordered `reference_images`: plain owned `sa:…` references **without read options**, or public HTTP(S) image URLs. Upload local files through the existing `/v1/artifacts/uploads` flow first. Public URLs are safely fetched and stored before generation; source URLs are not forwarded. The platform accepts at most five JPEG/PNG/WebP references, each at most 32 MiB, 8192 pixels per edge, and 25 megapixels. Invalid, missing, expired, or another Principal's files fail before generation.
-
-Success returns only `artifact_reference`, `mime_type`, `size`, and `media: {width,height}` measured from the decoded file. Reuse the reference for the next edit, or call `StraviaRead` with `{"path":"sa:…?download=1"}` for an authorized download. No image, invalid image, or failed storage is an error, not a successful empty result. Route retries can repeat generation and consume additional quota when execution is uncertain; cancellation, invalid input, and storage failures do not trigger regeneration. Usage is recorded only when reported upstream.
+Availability depends on upstream account and model support. Size preferences do not guarantee exact dimensions, and retries may consume additional quota. See the [Media Generation documentation](docs/design/media-generation.md) for configuration, examples, and limits.
 
 ### Keys, usage, and request history
 
@@ -151,9 +135,6 @@ Success returns only `artifact_reference`, `mime_type`, `size`, and `media: {wid
 - Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
 - See the token usage and provider quotas that services actually report.
 - Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
-- Transport failure diagnostics retain the failure stage and available underlying causes, with redaction and explicit length limits. Debug capture reassembles Command Code NDJSON records across network chunks, including split UTF-8, and marks incomplete tails rather than silently treating them as complete.
-
-History storage shares identical instructions, tool definitions, and response profiles within each Principal. Debug segments share repeated content and metadata without compression; target selection/start/end form the diagnostic sequence, while request and streamed content remain captured. Existing history stays readable. To optimize retained SQLite data, stop every host using the source and run `stravia-tools migrate-data --from <source-root> --to <new-root> --optimize-storage` to review the plan, then add `--apply --source-stopped`. The tool validates restored content and reclaims free SQLite pages only in the destination copy; the source remains available for rollback. Older binaries cannot read the new storage format.
 
 ### Credential protection
 
@@ -169,7 +150,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 ### Storage and deployment
 
 - SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3.
-- Everything a deployment owns sits under one data directory, protected by an instance lock; a migration tool upgrades older layouts.
+- Instance data lives in one directory for easier management. Before migrating or upgrading, review the [deployment and storage documentation](docs/design/architecture.md) for backup and version compatibility requirements.
 - One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
 
 ## Deployment modes

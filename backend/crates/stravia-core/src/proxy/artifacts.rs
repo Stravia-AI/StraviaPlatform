@@ -9,6 +9,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::Gateway;
+use crate::agent::artifact::artifact_error_mapping;
 use crate::proxy::security::{ClientCredential, Security};
 use stravia_runtime_contract::agent::ArtifactPolicy;
 use stravia_runtime_contract::artifact::ArtifactError;
@@ -238,12 +239,43 @@ fn unavailable() -> Response {
 }
 
 fn artifact_error(error: ArtifactError) -> Response {
-    let status = match error {
-        ArtifactError::Invalid(_) => StatusCode::BAD_REQUEST,
-        ArtifactError::NotFound => StatusCode::NOT_FOUND,
-        ArtifactError::Forbidden => StatusCode::FORBIDDEN,
-        ArtifactError::Unauthorized => StatusCode::UNAUTHORIZED,
-        ArtifactError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, error.to_string()).into_response()
+    let mapping = artifact_error_mapping(&error);
+    if matches!(error, ArtifactError::Storage(_)) {
+        tracing::warn!(reason = %mapping.diagnostic_message, "Artifact request failed");
+    }
+    (
+        StatusCode::from_u16(mapping.status).expect("Artifact error has a valid status"),
+        mapping.public_message,
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_error_mapping_preserves_classification_without_exposing_credentials() {
+        for (error, status) in [
+            (
+                ArtifactError::Invalid("bad input".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (ArtifactError::NotFound, StatusCode::NOT_FOUND),
+            (ArtifactError::Forbidden, StatusCode::FORBIDDEN),
+            (ArtifactError::Unauthorized, StatusCode::UNAUTHORIZED),
+        ] {
+            assert_eq!(artifact_error_mapping(&error).status, status.as_u16());
+        }
+
+        let secret = "artifact-error-secret";
+        let mapping = artifact_error_mapping(&ArtifactError::Storage(format!(
+            "database is locked at postgres://admin:{secret}@db.example/internal"
+        )));
+
+        assert_eq!(mapping.status, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        assert!(!mapping.public_message.contains(secret));
+        assert!(!mapping.diagnostic_message.contains(secret));
+        assert!(mapping.diagnostic_message.contains("database is locked"));
+    }
 }

@@ -359,11 +359,7 @@ pub(super) async fn orchestrate(
             &mut Some(ingress_observer),
             "attachments",
             "attachment_ingest_failed",
-            coded_error_response(
-                StatusCode::BAD_REQUEST,
-                "attachment_ingest_failed",
-                &error.to_string(),
-            ),
+            attachment_ingest_error_response(error),
         );
     }
     client_request.clone_from(&request);
@@ -552,11 +548,7 @@ pub(super) async fn orchestrate(
             &mut Some(ingress_observer),
             "attachments",
             "attachment_ingest_failed",
-            coded_error_response(
-                StatusCode::BAD_REQUEST,
-                "attachment_ingest_failed",
-                &error.to_string(),
-            ),
+            attachment_ingest_error_response(error),
         );
     }
     ingress_observer.record_debug(|| RunEvent::Content {

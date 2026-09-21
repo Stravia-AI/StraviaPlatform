@@ -69,7 +69,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 biased;
                 _ = input.cancellation.cancelled() => return Err(interruption_error(input.deadline)),
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
-                result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(|error| ModelTurnError::new("attachment_ingest_failed", error.to_string()))?,
+                result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
             }
         }
         let model_turn_id = stravia_runtime_contract::identifier::new_id();
@@ -2379,6 +2379,16 @@ fn interruption_error(deadline: Instant) -> ModelTurnError {
     } else {
         ModelTurnError::new("cancelled", "Model Turn cancelled")
     }
+}
+
+fn attachment_ingest_error(
+    error: stravia_runtime_contract::artifact::ArtifactError,
+) -> ModelTurnError {
+    let mapping = crate::agent::artifact::artifact_error_mapping(&error);
+    let mut error = ModelTurnError::new("attachment_ingest_failed", mapping.diagnostic_message);
+    // ModelTurnError has one status carrier; the response renderer keeps this code platform-owned.
+    error.upstream_status = Some(mapping.status);
+    error
 }
 
 fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {

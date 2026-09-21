@@ -314,6 +314,370 @@ async fn cancelled_s3_read_removes_partial_cache_without_blocking_configuration(
 }
 
 #[tokio::test]
+async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
+    let (delete_started_tx, delete_started_rx) = tokio::sync::oneshot::channel();
+    let delete_started = Arc::new(Mutex::new(Some(delete_started_tx)));
+    let (release_delete_tx, release_delete_rx) = tokio::sync::oneshot::channel();
+    let release_delete = Arc::new(Mutex::new(Some(release_delete_rx)));
+    let object_present = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let put_object_present = Arc::clone(&object_present);
+    let get_object_present = Arc::clone(&object_present);
+    let delete_object_present = Arc::clone(&object_present);
+    let router = axum::Router::new().route(
+        "/{bucket}/objects/{id}",
+        axum::routing::put(move |_body: Bytes| {
+            let object_present = Arc::clone(&put_object_present);
+            async move {
+                object_present.store(true, std::sync::atomic::Ordering::SeqCst);
+                axum::http::StatusCode::OK
+            }
+        })
+        .get(move || {
+            let object_present = Arc::clone(&get_object_present);
+            async move {
+                let present = object_present.load(std::sync::atomic::Ordering::SeqCst);
+                axum::response::Response::builder()
+                    .status(if present {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::NOT_FOUND
+                    })
+                    .body(axum::body::Body::from(if present {
+                        Bytes::from_static(b"reusable")
+                    } else {
+                        Bytes::new()
+                    }))
+                    .unwrap()
+            }
+        })
+        .delete(move || {
+            let delete_started = Arc::clone(&delete_started);
+            let release_delete = Arc::clone(&release_delete);
+            let object_present = Arc::clone(&delete_object_present);
+            async move {
+                if let Some(sender) = delete_started.lock().await.take() {
+                    let _ = sender.send(());
+                }
+                let receiver = release_delete.lock().await.take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+                object_present.store(false, std::sync::atomic::Ordering::SeqCst);
+                axum::http::StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let pool = crate::db::init_pool(directory.path()).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let root = directory.path().join("artifacts");
+    let store = LocalArtifactStore::sqlite(pool.clone(), &root);
+    let settings = ArtifactSettings {
+        s3: Some(ArtifactS3Settings {
+            endpoint,
+            region: "us-east-1".into(),
+            bucket: "test".into(),
+            access_key_id: "test".into(),
+            secret_access_key: "test".into(),
+            session_token: None,
+            credentials_expires_at: None,
+        }),
+        ..Default::default()
+    };
+    sqlx::query("INSERT INTO settings(name,value) VALUES('artifact_settings',?)")
+        .bind(serde_json::to_string(&settings).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner = Principal::new("reuse-owner");
+    let payload = Bytes::from_static(b"reusable");
+    let artifact = store
+        .ingest(
+            &owner,
+            "application/octet-stream",
+            Some(payload.len() as u64),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let backend_key: String = sqlx::query_scalar("SELECT backend_key FROM artifacts WHERE id=?")
+        .bind(artifact.id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let object_path = root.join(backend_key);
+    sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
+        .bind(artifact.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sweeping_store = store.clone();
+    let sweeping = tokio::spawn(async move { sweeping_store.sweep_expired().await });
+    delete_started_rx.await.unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        store.create_upload(
+            &Principal::new("unrelated-owner"),
+            ArtifactUploadRequest {
+                mime_type: "application/octet-stream".into(),
+                size: 1,
+                idle_ttl: Duration::from_secs(60),
+                retention_ttl: Duration::from_secs(60),
+                policy: ArtifactPolicy {
+                    max_artifacts: 1,
+                    max_bytes: MAX_ARTIFACT_BYTES,
+                    allowed_mime_types: vec!["*/*".into()],
+                },
+            },
+        ),
+    )
+    .await
+    .expect("delayed object deletion must not hold the SQLite writer lock")
+    .expect("unrelated upload metadata write");
+
+    let reuse_store = store.clone();
+    let reuse_owner = owner.clone();
+    let reuse_payload = payload.clone();
+    let reuse = tokio::spawn(async move {
+        reuse_store
+            .ingest(
+                &reuse_owner,
+                "application/octet-stream",
+                Some(reuse_payload.len() as u64),
+                bytes_stream(reuse_payload),
+                Duration::from_secs(60),
+            )
+            .await
+    });
+    let reuse_upload_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let upload_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM artifact_uploads WHERE principal=?")
+                    .bind(owner.continuation_key())
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            if let Some(upload_id) = upload_id {
+                break upload_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reuse upload metadata");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let assembled = root
+            .join("staging")
+            .join(reuse_upload_id)
+            .join("assembled.tmp");
+        loop {
+            match tokio::fs::metadata(&assembled).await {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("inspect assembled reuse fixture: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("reuse reaches the artifact deletion lock");
+    assert!(
+        !reuse.is_finished(),
+        "reuse must wait for the artifact deletion lock"
+    );
+
+    let mut blocker = pool.acquire().await.unwrap();
+    let mut blocker = blocker.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    release_delete_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match tokio::fs::metadata(&object_path).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(_) => tokio::task::yield_now().await,
+                Err(error) => panic!("inspect deleted object fixture: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("object deletion before blocked metadata delete");
+    sweeping.abort();
+    assert!(sweeping.await.unwrap_err().is_cancelled());
+    let record_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE id=?")
+        .bind(artifact.id.as_str())
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    assert_eq!(record_count, 1, "cancelled metadata delete keeps its row");
+    blocker.rollback().await.unwrap();
+
+    let reused = tokio::time::timeout(Duration::from_secs(5), reuse)
+        .await
+        .expect("reuse completion")
+        .expect("reuse task")
+        .expect("reuse result");
+    assert_eq!(reused.id, artifact.id);
+    let (_, bytes) = store
+        .read_bytes(&owner, &reused.id, Duration::from_secs(60))
+        .await
+        .expect("reused Artifact remains readable");
+    assert_eq!(bytes, payload);
+
+    // 真正失败的 metadata DELETE 必须保留过期状态；再次上传修复对象后才可复活。
+    sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
+        .bind(reused.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_ready_delete BEFORE DELETE ON artifacts WHEN OLD.state='ready' BEGIN SELECT RAISE(ABORT, 'isolated metadata delete failure'); END")
+        .execute(&pool).await.unwrap();
+    assert!(matches!(
+        store.sweep_expired().await,
+        Err(ArtifactError::Storage(_))
+    ));
+    assert!(!object_present.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        store.open(&owner, &reused.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+    sqlx::query("DROP TRIGGER fail_ready_delete")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repaired = store
+        .ingest(
+            &owner,
+            "application/octet-stream",
+            Some(payload.len() as u64),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repaired.id, artifact.id);
+    assert!(object_present.load(std::sync::atomic::Ordering::SeqCst));
+    let (_, bytes) = store
+        .read_bytes(&owner, &repaired.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(bytes, payload);
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn cancelled_retention_excludes_cleanup_until_its_sql_write_settles() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(2)
+        .max_connections(2)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("guard.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let time = Arc::new(std::sync::atomic::AtomicI64::new(1000));
+    let controlled = Arc::clone(&time);
+    let root = directory.path().join("artifacts");
+    let store = LocalArtifactStore::sqlite(pool.clone(), &root).with_clock(Arc::new(move || {
+        controlled.load(std::sync::atomic::Ordering::SeqCst)
+    }));
+    let owner = Principal::new("cancelled-retention");
+    let artifact = store
+        .ingest(
+            &owner,
+            "text/plain",
+            Some(4),
+            bytes_stream(Bytes::from_static(b"safe")),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let mut blocker_connection = pool.acquire().await.unwrap();
+    let blocker = blocker_connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pool.num_idle() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fixture returns its prior SQL connections before renewal");
+    let renewing_store = store.clone();
+    let renewing_owner = owner.clone();
+    let id = artifact.id.clone();
+    let renewal = tokio::spawn(async move {
+        ArtifactStore::extend_retention(
+            &renewing_store,
+            &renewing_owner,
+            &id,
+            Duration::from_secs(600),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pool.num_idle() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("renewal reaches the blocked SQLite writer");
+    renewal.abort();
+    assert!(renewal.await.unwrap_err().is_cancelled());
+    time.store(100_000, std::sync::atomic::Ordering::SeqCst);
+    // 独立进程的清理者也使用这把 OS 锁：取消等待者不能让其取得删除声明。
+    let claim = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("locks").join(artifact.id.as_str()))
+        .unwrap();
+    assert!(matches!(
+        claim.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    blocker.rollback().await.unwrap();
+    drop(blocker_connection);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let expiry: i64 = sqlx::query_scalar("SELECT expires_at FROM artifacts WHERE id=?")
+                .bind(artifact.id.as_str())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if expiry == 601_000 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled caller does not abandon its accepted renewal");
+    store.sweep_expired().await.unwrap();
+    let (_, bytes) = store
+        .read_bytes(&owner, &artifact.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(bytes, Bytes::from_static(b"safe"));
+    pool.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires an explicitly configured isolated PostgreSQL DB_URL"]
 async fn postgres_download_lifecycle_survives_reconstruction() {
     let url = std::env::var("DB_URL").expect("isolated PostgreSQL DB_URL");

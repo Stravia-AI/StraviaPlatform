@@ -554,3 +554,112 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     assert_eq!(unsupported_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(no_tools_calls.load(Ordering::SeqCst), 0);
 }
+
+fn attachment_request(model: &str, data: &str) -> AiRequest {
+    AiRequest::new(
+        model,
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+                stravia_runtime_contract::protocol::ir::ContentBlock::Image {
+                    source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: data.into(),
+                    },
+                    detail: None,
+                    cache_control: None,
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    )
+}
+
+#[tokio::test]
+async fn invalid_attachment_remains_a_client_error() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_id(
+        &gateway,
+        "invalid-attachment",
+        &["http://127.0.0.1:9/v1".into()],
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+
+    let response = execute_non_stream_request_with_headers(
+        gateway,
+        headers,
+        attachment_request("invalid-attachment", "not base64"),
+    )
+    .await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("attachment rejection body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON rejection");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "attachment_ingest_failed");
+}
+
+#[tokio::test]
+async fn attachment_storage_failure_is_a_sanitized_server_error() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_id(
+        &gateway,
+        "unavailable-attachment-storage",
+        &["http://127.0.0.1:9/v1".into()],
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+    sqlx::query("ALTER TABLE artifacts RENAME TO unavailable_artifacts")
+        .execute(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .await
+        .expect("make isolated Artifact storage unavailable");
+
+    let response = execute_non_stream_request_with_headers(
+        gateway,
+        headers,
+        attachment_request("unavailable-attachment-storage", "aGVsbG8="),
+    )
+    .await;
+    let status = response.status();
+    let diagnostic = response
+        .extensions()
+        .get::<crate::interaction_observation::FailureDiagnostic>()
+        .cloned()
+        .expect("attachment diagnostic");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("attachment rejection body");
+    let body_text = String::from_utf8_lossy(&body);
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON rejection");
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "attachment_ingest_failed");
+    assert!(!body_text.to_ascii_lowercase().contains("database"));
+    assert!(!body_text.to_ascii_lowercase().contains("sqlite"));
+    assert!(!body_text.to_ascii_lowercase().contains("no such table"));
+    assert_eq!(diagnostic.status_code, Some(500));
+    assert_eq!(diagnostic.code.as_deref(), Some("attachment_ingest_failed"));
+    assert!(
+        diagnostic
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Artifact storage failed: "))
+    );
+}

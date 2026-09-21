@@ -116,8 +116,8 @@ test('localized Request Records keep one local timestamp across canvas and detai
     started_at: startedAt,
     last_active_at: startedAt + 42,
     input_preview: '用户输入问题',
-    visible_tail: '客户端可见回答',
-    failed_request: false,
+    visible_tail: '',
+    failed_request: true,
     client_output_delivered: true,
     usage: {
       input_tokens: 1200,
@@ -162,7 +162,12 @@ test('localized Request Records keep one local timestamp across canvas and detai
 
   const localTimestamp = '2026/1/2 08:04:05'
   await expect(page.getByText(localTimestamp, { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'GPT 5.6, 已完成', exact: true }).click()
+  const interactionNode = page.getByRole('button', { name: 'GPT 5.6，已完成，先前请求失败', exact: true })
+  await expect(interactionNode.getByText('先前请求失败', { exact: true })).toBeVisible()
+  await expect(interactionNode.getByRole('button', { name: '模型输出预览', exact: true })).toContainText(
+    '已交付输出，暂无文本预览。',
+  )
+  await interactionNode.click()
   const inspector = page.getByRole('complementary', { name: '观测详情' })
   await expect(inspector).toBeVisible()
   await expect(inspector.getByRole('log', { name: '对话' }).locator('time').first()).toHaveText(localTimestamp)

@@ -95,6 +95,7 @@ const WAITING_CLIENT_IDLE_MS: i64 = 24 * 60 * 60 * 1000;
 struct Inner {
     store: ObservationStore,
     writer: mpsc::Sender<WriterCommand>,
+    text_slots: Arc<tokio::sync::Semaphore>,
     writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     updates: broadcast::Sender<ObservationUpdate>,
     live_content: Arc<live::LiveState>,
@@ -214,6 +215,7 @@ impl InteractionObservation {
             inner: Arc::new(Inner {
                 store,
                 writer,
+                text_slots: Arc::new(tokio::sync::Semaphore::new(writer::QUEUE_CAPACITY / 2)),
                 writer_task: Mutex::new(Some(task)),
                 updates,
                 live_content,
@@ -898,8 +900,18 @@ impl IngressObserver {
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
             gap: AtomicBool::new(false),
+            gap_reported: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
+            completion: Mutex::new(
+                self.observation
+                    .inner
+                    .writer
+                    .clone()
+                    .try_reserve_owned()
+                    .ok(),
+            ),
             pending_finish: Mutex::new(None),
+            queued_text: Mutex::new(None),
             failure: Mutex::new(None),
             generation_commit_fences: Mutex::new(Vec::new()),
             pending_input: Mutex::new(None),
@@ -995,8 +1007,11 @@ struct RunObserverInner {
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
     gap: AtomicBool,
+    gap_reported: AtomicBool,
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
+    completion: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
     pending_finish: Mutex<Option<(RunOutcome, i64)>>,
+    queued_text: Mutex<Option<Arc<Mutex<Option<RunEvent>>>>>,
     failure: Mutex<Option<FailureDiagnostic>>,
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
     // Canonical user text remains memory-only until Model Turn protection succeeds.
@@ -1074,6 +1089,7 @@ impl RunObserver {
             return;
         };
         let preview = redaction::input_preview(text, &self.inner.protected);
+        self.inner.queued_text.lock().take();
         if self
             .inner
             .observation
@@ -1101,6 +1117,7 @@ impl RunObserver {
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
         output: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
+        self.inner.queued_text.lock().take();
         let window = tail::Window::capture(input).and_then(|mut window| {
             window
                 .append(tail::Window::capture(output)?)
@@ -1251,6 +1268,7 @@ impl RunObserver {
         if events.is_empty() {
             return;
         }
+        self.inner.queued_text.lock().take();
         for event in &mut events {
             self.inner.protected.event(event);
             redaction::redact_run_event(event);
@@ -1308,8 +1326,11 @@ impl RunObserver {
             }
             return;
         }
-        if self.inner.gap.swap(false, Ordering::AcqRel) {
-            let _ = self
+        if self.inner.gap.load(Ordering::Acquire)
+            && !self.inner.gap_reported.swap(true, Ordering::AcqRel)
+        {
+            self.inner.queued_text.lock().take();
+            if self
                 .inner
                 .observation
                 .inner
@@ -1319,19 +1340,74 @@ impl RunObserver {
                     event: RunEvent::ObservationGap {
                         reason: "writer_overflow".into(),
                     },
-                });
+                })
+                .is_err()
+            {
+                self.inner.gap_reported.store(false, Ordering::Release);
+            }
         }
+        // 在入队前合并同一 Run 的相邻文本；入队后才合并会让细粒度 delta
+        // 先占满命令队列。写者取走后不可再追加，非文本事件保留顺序边界。
+        let mut queued = self.inner.queued_text.lock();
+        let text_len = writer::text_mut(&mut event).map(|text| text.len());
+        if let (Some(len), Some(pending)) = (text_len, queued.as_ref()) {
+            let mut pending = pending.lock();
+            if let Some(previous) = pending.as_mut()
+                && writer::same_scope(previous, &event)
+                && writer::text_mut(previous).is_some_and(|text| {
+                    text.len().saturating_add(len) <= codec::CONTENT_BLOCK_BYTES
+                })
+            {
+                let text = writer::text_mut(&mut event).expect("text delta");
+                writer::text_mut(previous)
+                    .expect("same text scope")
+                    .push_str(text);
+                return;
+            }
+        }
+        let command = if text_len.is_some() {
+            // 文本最多占队列一半；生命周期事件仍共用 FIFO，但不会被正文洪峰挤满。
+            let Ok(slot) = self
+                .inner
+                .observation
+                .inner
+                .text_slots
+                .clone()
+                .try_acquire_owned()
+            else {
+                *queued = None;
+                self.inner.gap.store(true, Ordering::Release);
+                self.inner
+                    .observation
+                    .inner
+                    .unpersisted_gaps
+                    .lock()
+                    .record(&self.inner.run_id, writer::now());
+                return;
+            };
+            let pending = Arc::new(Mutex::new(Some(event)));
+            *queued = Some(Arc::clone(&pending));
+            WriterCommand::Text {
+                run_id: self.inner.run_id.clone(),
+                event: pending,
+                _slot: slot,
+            }
+        } else {
+            *queued = None;
+            WriterCommand::Event {
+                run_id: self.inner.run_id.clone(),
+                event,
+            }
+        };
         if self
             .inner
             .observation
             .inner
             .writer
-            .try_send(WriterCommand::Event {
-                run_id: self.inner.run_id.clone(),
-                event,
-            })
+            .try_send(command)
             .is_err()
         {
+            *queued = None;
             self.inner.gap.store(true, Ordering::Release);
             let observation = &self.inner.observation.inner;
             observation
@@ -1350,6 +1426,7 @@ impl RunObserver {
         }
         self.flush_visible();
         self.finish_thinking();
+        self.inner.queued_text.lock().take();
         self.inner.protected.text(&mut outcome.status);
         if let Some(reason) = &mut outcome.terminal_reason {
             self.inner.protected.text(reason);
@@ -1357,17 +1434,18 @@ impl RunObserver {
         redaction::redact_run_outcome(&mut outcome);
         let mut generation_commit_fences = self.inner.generation_commit_fences.lock();
         if !self.inner.terminal.swap(true, Ordering::AcqRel) {
-            if let Err(error) =
-                self.inner
-                    .observation
-                    .inner
-                    .writer
-                    .try_send(WriterCommand::Finish {
-                        run_id: self.inner.run_id.clone(),
-                        outcome,
-                        finished_at,
-                    })
-            {
+            let command = WriterCommand::Finish {
+                run_id: self.inner.run_id.clone(),
+                outcome,
+                finished_at,
+            };
+            let result = if let Some(permit) = self.inner.completion.lock().take() {
+                permit.send(command);
+                Ok(())
+            } else {
+                self.inner.observation.inner.writer.try_send(command)
+            };
+            if let Err(error) = result {
                 if let WriterCommand::Finish {
                     outcome,
                     finished_at,
@@ -1845,6 +1923,316 @@ mod snapshot_tests {
             crate::generation_chain::test_chain().await,
         )
         .await
+    }
+
+    fn test_run(
+        observation: &InteractionObservation,
+        id: &str,
+        facts: AdmissionFacts,
+    ) -> RunObserver {
+        observation
+            .observe_ingress(IngressStart {
+                id: id.into(),
+                method: "POST".into(),
+                path: "/v1/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(
+                RunStart {
+                    id: id.into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                facts,
+            )
+    }
+
+    #[tokio::test]
+    async fn final_observer_closes_missing_activity_without_stopping_live_background()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let run = test_run(&observation, "missing-finish", facts(Vec::new()));
+        run.record(RunEvent::ModelTurnStarted {
+            model_turn_id: "turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+        });
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://localhost".into(),
+        });
+        run.record(RunEvent::PlatformToolStarted {
+            model_turn_id: "turn".into(),
+            tool_id: "background".into(),
+            name: "tool".into(),
+            input: None,
+        });
+        run.record(RunEvent::UsageConfirmed {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            usage: ConfirmedUsage {
+                input_tokens: Some(7),
+                ..Default::default()
+            },
+        });
+        let background = run.clone();
+        run.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+            delivery_completed_at: Some(writer::now()),
+        });
+        drop(run);
+        observation.flush().await?;
+        let active: (String, i64) = sqlx::query_as("SELECT i.status,r.background_active FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id='missing-finish'").fetch_one(&pool).await?;
+        assert_eq!(
+            active,
+            ("running".into(), 2),
+            "delivery cannot end live background work"
+        );
+        background.record(RunEvent::PlatformToolFinished {
+            model_turn_id: "turn".into(),
+            tool_id: "background".into(),
+            status: "completed".into(),
+            duration_ms: 1,
+            content: None,
+        });
+        drop(background);
+        observation.flush().await?;
+        let final_state: (String, String, i64, bool, String, String, Option<i64>) = sqlx::query_as("SELECT i.status,r.status,r.background_active,i.observation_gap,m.status,a.status,a.input_tokens FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id JOIN model_turn_observations m ON m.run_id=r.id JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.id='missing-finish'").fetch_one(&pool).await?;
+        assert_eq!(
+            final_state,
+            (
+                "completed".into(),
+                "completed".into(),
+                0,
+                true,
+                "interrupted".into(),
+                "interrupted".into(),
+                Some(7)
+            )
+        );
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmergeable_text_overflow_preserves_lifecycle_and_parent_mapping() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let parent = test_run(&observation, "protected-parent", facts(Vec::new()));
+        parent.record(RunEvent::ModelTurnStarted {
+            model_turn_id: "turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+        });
+        for index in 0..4096 {
+            parent.send_event(RunEvent::ModelThinkingDelta {
+                model_turn_id: "turn".into(),
+                attempt_id: (index % 2).to_string(),
+                text: "x".into(),
+            });
+        }
+        parent.record(RunEvent::ModelTurnFinished {
+            model_turn_id: "turn".into(),
+            status: "completed".into(),
+        });
+        parent.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: Some("generation".into()),
+            generation_root_id: Some("generation".into()),
+            delivery_completed_at: Some(writer::now()),
+        });
+        let mut continuation = facts(Vec::new());
+        continuation.has_new_user = false;
+        continuation.generation_parent_id = Some("generation".into());
+        continuation.generation_root_id = Some("generation".into());
+        let child = test_run(&observation, "protected-child", continuation);
+        child.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: Some("generation".into()),
+            delivery_completed_at: Some(writer::now()),
+        });
+        drop(parent);
+        drop(child);
+        observation.flush().await?;
+        let child_parent: Option<String> = sqlx::query_scalar(
+            "SELECT parent_run_id FROM inference_run_observations WHERE id='protected-child'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(child_parent.as_deref(), Some("protected-parent"));
+        let model_status: String =
+            sqlx::query_scalar("SELECT status FROM model_turn_observations WHERE id='turn'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            model_status, "completed",
+            "finish facts must survive text overflow"
+        );
+        let gap: bool =
+            sqlx::query_scalar("SELECT observation_gap FROM interaction_observations LIMIT 1")
+                .fetch_one(&pool)
+                .await?;
+        assert!(gap, "discarded text must remain explicit");
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unavailable_generation_parent_is_an_explicit_observation_gap() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let mut continuation = facts(Vec::new());
+        continuation.has_new_user = false;
+        continuation.generation_parent_id = Some("unobserved-generation".into());
+        let run = test_run(&observation, "orphan-continuation", continuation);
+        observation.flush().await?;
+        let state: (Option<String>, bool) = sqlx::query_as("SELECT r.parent_run_id,i.observation_gap FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id='orphan-continuation'").fetch_one(&pool).await?;
+        assert_eq!(
+            state,
+            (None, true),
+            "missing evidence must not fabricate a parent or appear complete"
+        );
+        drop(run);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_burst_preserves_admission_finish_and_continuation() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let admit = |id: &str, facts| {
+            observation
+                .observe_ingress(IngressStart {
+                    id: id.into(),
+                    method: "POST".into(),
+                    path: "/v1/responses".into(),
+                    protocol: "responses".into(),
+                })
+                .admit(
+                    RunStart {
+                        id: id.into(),
+                        principal: "owner".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    },
+                    facts,
+                )
+        };
+        let parent = admit("burst-parent", facts(Vec::new()));
+        // 同一调度片内的细粒度流输出不能耗尽生命周期消息的队列容量。
+        for index in 0..16384 {
+            if index == 8192 {
+                parent.send_event(RunEvent::ClientOutputCommitted);
+            }
+            parent.send_event(RunEvent::ClientVisibleContentDelta { text: "文".into() });
+        }
+        parent.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: Some("burst-generation".into()),
+            generation_root_id: Some("burst-generation".into()),
+            delivery_completed_at: Some(writer::now()),
+        });
+        let mut continuation = facts(Vec::new());
+        continuation.has_new_user = false;
+        continuation.generation_parent_id = Some("burst-generation".into());
+        continuation.generation_root_id = Some("burst-generation".into());
+        let child = admit("burst-child", continuation);
+        child.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: Some("child-generation".into()),
+            generation_root_id: Some("burst-generation".into()),
+            delivery_completed_at: Some(writer::now()),
+        });
+        drop(parent);
+        drop(child);
+        observation.flush().await?;
+        let rows: Vec<(String, String, Option<String>, String, Option<String>)> =
+            sqlx::query_as("SELECT id,interaction_id,parent_run_id,status,generation_node_id FROM inference_run_observations ORDER BY id")
+                .fetch_all(&pool).await?;
+        assert_eq!(rows.len(), 2, "text deltas must not displace admission");
+        assert_eq!(
+            rows[0].1, rows[1].1,
+            "continuation must retain its interaction"
+        );
+        assert_eq!(rows[0].2.as_deref(), Some("burst-parent"));
+        assert_eq!(rows[1].3, "completed");
+        assert_eq!(rows[1].4.as_deref(), Some("burst-generation"));
+        let text: Vec<String> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content_delta' ORDER BY sequence")
+            .fetch_all(&pool).await?;
+        let recovered = text
+            .into_iter()
+            .map(|payload| {
+                let payload = codec::decode_payload(serde_json::from_str(&payload)?)?;
+                Ok(payload["text"].as_str().unwrap_or_default().to_owned())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .concat();
+        assert_eq!(recovered, "文".repeat(16384));
+        let before_commit: Vec<String> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content_delta' AND sequence<(SELECT sequence FROM observation_events WHERE run_id='burst-parent' AND kind='client_output_committed') ORDER BY sequence",
+        ).fetch_all(&pool).await?;
+        let before_commit = before_commit
+            .into_iter()
+            .map(|payload| {
+                let payload = codec::decode_payload(serde_json::from_str(&payload)?)?;
+                Ok(payload["text"].as_str().unwrap_or_default().to_owned())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .concat();
+        assert_eq!(
+            before_commit,
+            "文".repeat(8192),
+            "commit must seal the prior text"
+        );
+        observation.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test]

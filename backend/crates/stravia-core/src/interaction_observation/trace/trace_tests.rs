@@ -41,6 +41,15 @@ fn bytes_value(bytes: &[u8]) -> Value {
         })
 }
 
+fn encoded_command_code_chunk(sequence: i64, bytes: &[u8]) -> TraceRecord {
+    let mut record = command_code_chunk(
+        sequence,
+        Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+    );
+    record.payload_encoding = "base64".to_owned();
+    record
+}
+
 async fn persisted_records(handle: &TraceHandle) -> Vec<TraceRecord> {
     let snapshot = handle.snapshot(i64::MAX).await.expect("trace snapshot");
     let mut records = Vec::new();
@@ -156,6 +165,80 @@ async fn command_code_ndjson_reassembles_base64_utf8_slices_before_redaction() {
 }
 
 #[tokio::test]
+async fn command_code_ndjson_decodes_declared_base64_before_reassembly() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let wire = b"{\"type\":\"text-delta\",\"text\":\"\xe9\x9b\xaa\"}\n";
+    let utf8 = wire
+        .windows("雪".len())
+        .position(|window| window == "雪".as_bytes())
+        .expect("UTF-8 value");
+
+    for (sequence, fragment) in [&wire[..utf8 + 1], &wire[utf8 + 1..]]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            handle.record(encoded_command_code_chunk(sequence as i64 + 1, fragment)),
+            TraceWriteOutcome::Queued
+        );
+    }
+
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "complete");
+    assert!(manifest.reasons.is_empty());
+    let records = persisted_records(&handle).await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(records[0].payload.as_str().expect("JSON payload"))
+            .expect("valid reassembled JSON")["text"],
+        "雪"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn structured_body_decodes_base64_utf8_slices_before_redaction() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let wire = b"{\"message\":\"\xe9\x9b\xaa\",\"api_key\":\"never-persist\"}";
+    let utf8 = wire
+        .windows("雪".len())
+        .position(|window| window == "雪".as_bytes())
+        .expect("UTF-8 value");
+
+    for (sequence, fragment) in [&wire[..utf8 + 1], &wire[utf8 + 1..]]
+        .into_iter()
+        .enumerate()
+    {
+        let mut record = encoded_command_code_chunk(sequence as i64 + 1, fragment);
+        record.protocol = Some("open-responses/responses/2026-04-24".to_owned());
+        record.message_type = Some("body_chunk".to_owned());
+        assert_eq!(handle.record(record), TraceWriteOutcome::Queued);
+    }
+
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "complete");
+    assert!(manifest.reasons.is_empty());
+    let records = persisted_records(&handle).await;
+    assert_eq!(records.len(), 1);
+    let payload: Value = serde_json::from_str(
+        records[0]
+            .payload
+            .as_str()
+            .expect("reassembled structured body"),
+    )
+    .expect("valid reassembled JSON");
+    assert_eq!(payload["message"], "雪");
+    assert_eq!(payload["api_key"], "***");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn command_code_ndjson_marks_incomplete_tail_partial_without_losing_prior_records() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
@@ -229,6 +312,118 @@ async fn non_command_code_chunks_keep_existing_structured_message_capture() {
     assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
     let manifest = handle.finish().await;
     assert_eq!(manifest.status, "partial");
+    assert!(persisted_records(&handle).await.is_empty());
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn flushed_manifest_matches_readable_trace() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+
+    assert_eq!(
+        handle.record(command_code_chunk(
+            1,
+            Value::String("{\"type\":\"start\"}\n".to_owned()),
+        )),
+        TraceWriteOutcome::Queued
+    );
+    handle.flush().await.expect("flush buffered trace record");
+    let after_flush = handle.manifest();
+    let snapshot = handle.snapshot(i64::MAX).await.expect("flushed snapshot");
+    assert_eq!(
+        after_flush.bytes_written,
+        snapshot
+            .segments
+            .iter()
+            .map(|segment| segment.bytes)
+            .sum::<u64>()
+    );
+    assert_eq!(after_flush.event_count, 1);
+    let records = persisted_records(&handle).await;
+    let payload: Value = serde_json::from_str(records[0].payload.as_str().expect("JSON text"))
+        .expect("valid trace JSON");
+    assert_eq!(payload, serde_json::json!({"type":"start"}));
+
+    handle.finish().await;
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn structured_json_boundary_handles_split_escapes_unicode_and_whitespace() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let fragments = [
+        " \t{\"text\":\"雪",
+        "\\\"quoted",
+        "\\\\tail\",\"nested\":[{\"ok\":true}]",
+        "}\r\n",
+    ];
+
+    for (index, fragment) in fragments.into_iter().enumerate() {
+        let mut chunk = command_code_chunk(index as i64 + 1, Value::String(fragment.to_owned()));
+        chunk.protocol = Some("open-responses/responses/2026-04-24".to_owned());
+        assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
+    }
+
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "complete");
+    let records = persisted_records(&handle).await;
+    assert_eq!(records.len(), 1);
+    let payload: Value = serde_json::from_str(
+        records[0]
+            .payload
+            .as_str()
+            .expect("reassembled JSON payload"),
+    )
+    .expect("strict JSON payload");
+    assert_eq!(payload["text"], "雪\"quoted\\tail");
+    assert_eq!(payload["nested"][0]["ok"], true);
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopped_capture_preserves_previously_queued_records() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    assert_eq!(
+        handle.record(command_code_chunk(
+            1,
+            Value::String("{\"type\":\"start\"}\n".to_owned()),
+        )),
+        TraceWriteOutcome::Queued
+    );
+    handle.mark_partial(STORAGE_ERROR, true);
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "partial");
+    let records = persisted_records(&handle).await;
+    assert_eq!(records.len(), 1);
+    let payload: Value = serde_json::from_str(records[0].payload.as_str().expect("JSON text"))
+        .expect("valid trace JSON");
+    assert_eq!(payload, serde_json::json!({"type":"start"}));
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn structured_json_boundary_does_not_accept_trailing_bytes() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let mut chunk = command_code_chunk(1, Value::String("{\"ok\":true}trailing".to_owned()));
+    chunk.protocol = Some("open-responses/responses/2026-04-24".to_owned());
+    assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
+
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "partial");
+    assert_eq!(
+        manifest.reasons,
+        ["incomplete_structured_wire_omitted".to_owned()]
+    );
     assert!(persisted_records(&handle).await.is_empty());
 
     manager.shutdown().await;

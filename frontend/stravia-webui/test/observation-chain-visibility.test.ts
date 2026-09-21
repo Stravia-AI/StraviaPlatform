@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { hiddenFailureNode, interactionDisplayStatus } from '../src/lib/observation-chain-visibility'
+import {
+  hasHistoricalFailure,
+  hiddenFailureNode,
+  interactionDisplayStatus,
+} from '../src/lib/observation-chain-visibility'
 import type { InteractionSummary } from '../src/lib/types/observation'
 
 const usage = {
@@ -40,8 +44,16 @@ describe('hiddenFailureNode', () => {
     expect(hiddenFailureNode(interaction({ failed_request: true }))).toBe(true)
   })
 
-  test('keeps nodes that delivered any client-visible byte', () => {
-    expect(hiddenFailureNode(interaction({ failed_request: true, client_output_delivered: true }))).toBe(false)
+  test('keeps completed nodes with failed history once client output was delivered', () => {
+    expect(
+      hiddenFailureNode(interaction({ status: 'completed', failed_request: true, client_output_delivered: true })),
+    ).toBe(false)
+  })
+
+  test('keeps the existing hidden rule for an anomalous completed failure with no delivered output', () => {
+    expect(
+      hiddenFailureNode(interaction({ status: 'completed', failed_request: true, client_output_delivered: false })),
+    ).toBe(true)
   })
 
   test('keeps live interactions even when a run already failed', () => {
@@ -56,9 +68,23 @@ describe('hiddenFailureNode', () => {
   })
 })
 
+describe('hasHistoricalFailure', () => {
+  test('marks failed history only when it is not already the primary failure state', () => {
+    expect(hasHistoricalFailure(interaction({ status: 'completed', failed_request: true }))).toBe(true)
+    expect(hasHistoricalFailure(interaction({ status: 'running', failed_request: true }))).toBe(true)
+    expect(hasHistoricalFailure(interaction({ status: 'waiting_client', failed_request: true }))).toBe(true)
+    expect(hasHistoricalFailure(interaction({ status: 'interrupted', failed_request: true }))).toBe(false)
+    expect(hasHistoricalFailure(interaction({ status: 'completed', failed_request: false }))).toBe(false)
+  })
+})
+
 describe('interactionDisplayStatus', () => {
-  test('surfaces terminal failure over the interrupted rollup', () => {
-    expect(interactionDisplayStatus(interaction({ failed_request: true }))).toBe('failed')
+  test('keeps a completed interaction primary even when an earlier request failed', () => {
+    expect(interactionDisplayStatus(interaction({ status: 'completed', failed_request: true }))).toBe('completed')
+  })
+
+  test('surfaces a failed interrupted interaction as failed', () => {
+    expect(interactionDisplayStatus(interaction({ status: 'interrupted', failed_request: true }))).toBe('failed')
   })
 
   test('keeps process statuses while the interaction is still advancing', () => {
@@ -68,7 +94,7 @@ describe('interactionDisplayStatus', () => {
     )
   })
 
-  test('leaves non-failing statuses untouched', () => {
+  test('leaves statuses without a failed request untouched', () => {
     expect(interactionDisplayStatus(interaction({ status: 'completed' }))).toBe('completed')
     expect(interactionDisplayStatus(interaction({ status: 'user_interrupted' }))).toBe('user_interrupted')
   })

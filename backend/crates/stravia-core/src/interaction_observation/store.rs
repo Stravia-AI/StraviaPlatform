@@ -666,7 +666,7 @@ impl ObservationStore {
         events: Vec<RunEvent>,
         now: i64,
     ) -> anyhow::Result<Vec<RunEvent>> {
-        let ids: Vec<&str> = events
+        let mut ids: Vec<&str> = events
             .iter()
             .filter_map(|event| match event {
                 RunEvent::ClientToolResult { tool_id, .. } if !tool_id.is_empty() => {
@@ -675,6 +675,8 @@ impl ObservationStore {
                 _ => None,
             })
             .collect();
+        ids.sort_unstable();
+        ids.dedup();
         let ids = serde_json::to_string(&ids)?;
         let rows: Vec<Value> = match self {
             Self::Sqlite(pool) => {
@@ -728,6 +730,10 @@ impl ObservationStore {
             )
                 .bind(run_id).bind(interaction_id).bind(now).bind(&ids).fetch_all(pool).await?,
         };
+        enum PreviousResult {
+            Stored(Value, bool),
+            Batch(usize),
+        }
         let mut latest = std::collections::HashMap::with_capacity(rows.len());
         let mut known_calls = std::collections::HashSet::with_capacity(rows.len());
         for mut row in rows {
@@ -738,10 +744,11 @@ impl ObservationStore {
                 && !row["content"].is_null()
             {
                 let id = id.to_owned();
-                latest.insert(id, (row["content"].take(), is_error));
+                latest.insert(id, PreviousResult::Stored(row["content"].take(), is_error));
             }
         }
-        let mut persisted = Vec::new();
+        let mut persisted: Vec<RunEvent> = Vec::new();
+        // 批内只保留已接收事件的位置，避免历史工具正文在逐项去重时再次复制。
         for event in events {
             let RunEvent::ClientToolResult {
                 tool_id,
@@ -752,16 +759,23 @@ impl ObservationStore {
                 anyhow::bail!("client tool result batch contains another event kind");
             };
             if !tool_id.is_empty()
-                && latest
-                    .get(tool_id)
-                    .is_some_and(|(previous, error)| previous == content && error == is_error)
+                && latest.get(tool_id).is_some_and(|previous| match previous {
+                    PreviousResult::Stored(previous, error) => {
+                        previous == content && error == is_error
+                    }
+                    PreviousResult::Batch(index) => matches!(
+                        &persisted[*index],
+                        RunEvent::ClientToolResult { content: previous, is_error: error, .. }
+                            if previous == content && error == is_error
+                    ),
+                })
             {
                 continue;
             }
             if content.is_null() {
                 latest.remove(tool_id);
             } else if known_calls.contains(tool_id) {
-                latest.insert(tool_id.clone(), (content.clone(), *is_error));
+                latest.insert(tool_id.clone(), PreviousResult::Batch(persisted.len()));
             }
             persisted.push(event);
         }
@@ -1191,6 +1205,96 @@ impl ObservationStore {
                 Ok(events)
             }
         }
+    }
+
+    /// 最后一个观察句柄释放后才收口残留活动，不能在响应结束时取消合法后台工具。
+    pub(super) async fn finalize_activity(
+        &self,
+        interaction_id: &str,
+        run_id: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> anyhow::Result<Option<ObservationEvent>> {
+        let previous: Option<i64> = match self {
+            Self::Sqlite(pool) => sqlx::query_scalar("SELECT last_active_at FROM inference_run_observations r WHERE r.id=? AND (r.background_active>0 OR EXISTS(SELECT 1 FROM model_turn_observations m WHERE m.run_id=r.id AND m.status='running') OR EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=r.id AND a.status='running'))").bind(run_id).fetch_optional(pool).await?,
+            Self::Postgres(pool) => sqlx::query_scalar("SELECT last_active_at FROM inference_run_observations r WHERE r.id=$1 AND (r.background_active>0 OR EXISTS(SELECT 1 FROM model_turn_observations m WHERE m.run_id=r.id AND m.status='running') OR EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=r.id AND a.status='running'))").bind(run_id).fetch_optional(pool).await?,
+        };
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let at = now.max(previous);
+        let payload = serde_json::to_value(RunEvent::ObservationGap {
+            reason: "unfinished_observation_activity".into(),
+        })?;
+        let seq = match self {
+            Self::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let seq = next_sqlite(&mut tx).await?;
+                sqlx::query("UPDATE target_attempt_observations SET status='interrupted',error_code=COALESCE(error_code,'observation_gap'),finished_at=MAX(started_at,?),last_event_sequence=? WHERE run_id=? AND status='running'").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE model_turn_observations SET status='interrupted',finished_at=MAX(started_at,?),last_event_sequence=? WHERE run_id=? AND status='running'").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE inference_run_observations SET background_active=0,last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET observation_gap=1 WHERE id=?")
+                    .bind(interaction_id)
+                    .execute(&mut *tx)
+                    .await?;
+                recompute_status_sqlite(&mut tx, interaction_id, at, seq).await?;
+                insert_event_sqlite(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "observation_gap",
+                        payload: &payload,
+                        expires_at,
+                    },
+                )
+                .await?;
+                tx.commit().await?;
+                seq
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                sqlx::query("UPDATE target_attempt_observations SET status='interrupted',error_code=COALESCE(error_code,'observation_gap'),finished_at=GREATEST(started_at,$1),last_event_sequence=$2 WHERE run_id=$3 AND status='running'").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE model_turn_observations SET status='interrupted',finished_at=GREATEST(started_at,$1),last_event_sequence=$2 WHERE run_id=$3 AND status='running'").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE inference_run_observations SET background_active=0,last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET observation_gap=TRUE WHERE id=$1")
+                    .bind(interaction_id)
+                    .execute(&mut *tx)
+                    .await?;
+                recompute_status_postgres(&mut tx, interaction_id, at, seq).await?;
+                insert_event_postgres(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "observation_gap",
+                        payload: &payload,
+                        expires_at,
+                    },
+                )
+                .await?;
+                tx.commit().await?;
+                seq
+            }
+        };
+        Ok(Some(event(
+            seq,
+            at,
+            Some(interaction_id),
+            Some(run_id),
+            None,
+            "observation_gap",
+            payload,
+        )))
     }
 
     pub async fn finish_run(

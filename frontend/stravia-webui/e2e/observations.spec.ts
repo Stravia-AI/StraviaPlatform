@@ -1485,6 +1485,55 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByRole('definition').filter({ hasText: 'Failed' })).toBeVisible()
   })
 
+  test('separates completed state from failed history and distinguishes delivered output without a text preview', async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    const opal = interaction(
+      'interaction-opal',
+      'root-a',
+      'interaction-atlas',
+      'Opal',
+      routeIds.delta,
+      'completed',
+      270_000,
+    )
+    opal.failed_request = true
+    opal.client_output_delivered = true
+    opal.visible_tail = ''
+    fixture.addInteraction(opal)
+    const quartz = interaction(
+      'interaction-quartz',
+      'root-a',
+      'interaction-atlas',
+      'Quartz',
+      routeIds.delta,
+      'running',
+      275_000,
+    )
+    quartz.client_output_delivered = false
+    quartz.visible_tail = ''
+    fixture.addInteraction(quartz)
+
+    await page.goto('/logs')
+    const opalNode = page.getByRole('button', { name: /^Opal, Completed, earlier request failed$/i })
+    await expect(opalNode).toBeVisible()
+    await expect(opalNode.getByText('Completed', { exact: true })).toBeVisible()
+    await expect(opalNode.getByText('Earlier request failed', { exact: true })).toBeVisible()
+    const deliveredPreview = opalNode.getByRole('button', { name: 'Model output preview', exact: true })
+    await expect(deliveredPreview).toContainText('Output delivered; no text preview is available.')
+    await deliveredPreview.click()
+    await expect(page.getByRole('tooltip')).toContainText('Output delivered; no text preview is available.')
+    await page.keyboard.press('Escape')
+
+    const undeliveredPreview = node(page, 'Quartz', 'running').getByRole('button', {
+      name: 'Model output preview',
+      exact: true,
+    })
+    await expect(undeliveredPreview).toContainText('No output sent to the client yet.')
+  })
+
   test('a zero-output terminal failure stays hidden when live events update it', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     const flint = interaction(
@@ -2087,6 +2136,35 @@ test.describe('Interaction Observation canvas', () => {
     await rowFor(15).focus()
     await page.keyboard.press('Enter')
     expect(JSON.parse(await diagnostics.locator('pre:visible').innerText())).toEqual(liveEvent.payload)
+  })
+
+  test('describes an unsaved delivered-response history as an observation warning, not a request failure', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs?interaction=interaction-cinder')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
+    const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
+    const reason = 'settlement_generation_commit:database busy'
+    fixture.emit({
+      sequence: 15,
+      occurred_at: startedAt + 299_400,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'observation_gap',
+      payload: { reason },
+    })
+
+    await expect(
+      diagnostics.getByText(
+        'The response was delivered to the client, but part of its interaction history could not be saved.',
+        { exact: true },
+      ),
+    ).toBeVisible()
+    await expect(diagnostics.getByText(reason, { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText('Request failed', { exact: true })).toHaveCount(0)
   })
 
   test('folds consecutive response updates without losing events or hiding intervening failures', async ({ page }) => {

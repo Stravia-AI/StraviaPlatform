@@ -919,7 +919,15 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
+旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+
+如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
+
+```bash
+stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storage
+```
+
+确认计划后，在同一命令末尾追加 `--apply --source-stopped`。工具只在目标副本中校验内容还原并回收 SQLite 空闲页，源数据保留用于回退；旧版程序不能读取新存储格式。历史数据在同一 Principal 内共享完全相同的 instructions、工具定义与响应 profile，Debug 分段通过内容和元数据引用去重，不使用压缩算法；去重不会补造已丢失的记录或交互关联。Debug 存储契约见[交互观察设计](interaction-observation.md)。
 
 > 首个 SQLx migration 直接创建基础表；后续版本在 SQLite 与 PostgreSQL 中等价演进，不通过删除数据库处理不兼容版本。
 

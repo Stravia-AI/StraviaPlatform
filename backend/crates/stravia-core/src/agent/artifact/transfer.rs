@@ -257,9 +257,20 @@ impl LocalArtifactStore {
         };
         let hash = sha256_hex(token.as_bytes());
         let affected = match &self.database {
-            ArtifactDatabase::Sqlite(pool) => sqlx::query("INSERT INTO artifact_download_grants(token_hash,artifact_id,expires_at) SELECT ?,id,? FROM artifacts WHERE id=? AND principal=? AND state='ready' AND expires_at>?").bind(&hash).bind(expires_at).bind(id.as_str()).bind(principal.continuation_key()).bind(self.now()).execute(pool).await.map(|result| result.rows_affected()),
-            ArtifactDatabase::Postgres(pool) => sqlx::query("INSERT INTO artifact_download_grants(token_hash,artifact_id,expires_at) SELECT $1,id,$2 FROM artifacts WHERE id=$3 AND principal=$4 AND state='ready' AND expires_at>$5").bind(&hash).bind(expires_at).bind(id.as_str()).bind(principal.continuation_key()).bind(self.now()).execute(pool).await.map(|result| result.rows_affected()),
-        }.map_err(storage_error)?;
+            ArtifactDatabase::Sqlite(pool) => {
+                let pool = pool.clone();
+                let id = id.clone();
+                let principal_key = principal.continuation_key();
+                let now = self.now();
+                Self::complete_guarded(async move {
+                    let _guard = _guard;
+                    sqlx::query("INSERT INTO artifact_download_grants(token_hash,artifact_id,expires_at) SELECT ?,id,? FROM artifacts WHERE id=? AND principal=? AND state='ready' AND expires_at>?")
+                        .bind(&hash).bind(expires_at).bind(id.as_str()).bind(principal_key).bind(now)
+                        .execute(&pool).await.map(|result| result.rows_affected()).map_err(storage_error)
+                }).await
+            }
+            ArtifactDatabase::Postgres(pool) => sqlx::query("INSERT INTO artifact_download_grants(token_hash,artifact_id,expires_at) SELECT $1,id,$2 FROM artifacts WHERE id=$3 AND principal=$4 AND state='ready' AND expires_at>$5").bind(&hash).bind(expires_at).bind(id.as_str()).bind(principal.continuation_key()).bind(self.now()).execute(pool).await.map(|result| result.rows_affected()).map_err(storage_error),
+        }?;
         if affected != 1 {
             return Err(ArtifactError::NotFound);
         }

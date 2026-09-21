@@ -61,7 +61,7 @@ Agent 行为由平台实现定义并进行版本管理 —— Stravia 不是用�
 
 **桌面应用** —— 从 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 Windows（NSIS）或 Linux（AppImage）安装包并运行，完整平台在本地启动并自带集成管理界面。暂不提供 macOS 产物。
 
-启动失败时，桌面应用会保留恢复窗口，提供诊断详情、复制、可用时打开启动日志、重启和退出操作。请先处理所报告的问题再重启；Stravia 不会自动重置或修复数据库。静默启动失败也会显示此窗口，关闭窗口会退出而非隐藏到托盘。非关键桌面集成失败以警告呈现，不阻断网关运行；如果窗口本身无法创建，则通过原生错误对话框说明失败原因及可用日志位置，确认后退出。
+启动遇到问题时，桌面应用会提供诊断信息和恢复入口；不会自动重置数据库。
 
 **服务端** —— 一个容器：
 
@@ -109,15 +109,9 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
 
-Devin 保留不同的完成原因，以及可在来源兼容时回放的签名或隐藏思考，包括晚于正文到达的签名。多轮回放保留原用户消息和工具结果中的图片；即使客户端把思考排到工具调用之后，也会保持调用与结果紧邻。Custom 工具的原始文本由 JSON `input` 字符串承载，不再丢弃。Anthropic 请求中显式的 `output_config.effort` 优先于 `thinking.type` 及其 token 预算。
-
-Codex OAuth 在 HTTP、WebSocket 及 HTTP 回退请求中统一省略不支持的采样与输出控制参数（`temperature`、`top_p`、`presence_penalty`、`frequency_penalty`、`top_logprobs`、`truncation`、`max_output_tokens`、`max_tool_calls`）。Devin 将零值 `presence_penalty`、`frequency_penalty` 视为未设置；非零 penalty、`seed` 和 `stop` 仍明确返回不支持参数的错误。
-
-Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭该项，保留晚到签名，不再拖到整轮结束，也不会重复发送完成事件。保留的上游 Responses WebSocket 连接在请求间空闲时继续处理 Ping 和 Close；发现对端关闭或意外的空闲数据后，先移除连接及其续接亲和，避免再次借出，健康连接仍可复用。
-
 客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
 
-每个上游请求目标都维护一份由内部重试和后续请求共享的连续失败计数。重试预算为 N 表示第 N+1 次失败时开始冷却；默认预算为 5，即第 6 次连续上游失败后冷却 120 秒，完整成功会清零。配额与终态上游错误计数，但仍沿用“不在同一请求目标重试”或终止请求的原有处置；取消及本地准备、Hook、存储错误不计数。客户端输出提交后，失败会终止当前请求而不会透明重放，但提交本身不会开始冷却。冷却结束后，仅放行一个符合调度条件的请求进行一次探测；完整成功恢复正常，探测的上游失败则重新冷却。冷却时间设为 `0` 只会关闭冷却调度门禁；失败仍会计数，达到阈值后仍按错误分类更换或停止请求目标，完整成功仍会清零。模型编辑器在页面可见时每 2 秒刷新目标状态，冷却中、等待重试和重试中的目标以黄色提示。
+上游服务暂时不可用时，Stravia 会按路由配置重试或切换服务；你可以在管理界面查看各目标的可用状态。
 
 ![编辑模型 —— 上游目标按优先级分层](docs/assets/model-routing.png)
 
@@ -131,19 +125,9 @@ Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭
 
 #### 图片生成
 
-在 **高级功能 → 媒体生成** 中绑定已保存的图片 Route，再开启能力。所有已启用 Target 必须使用已启用的 OpenAI Codex OAuth Provider、GPT-5 或更高代模型，以及已连接的凭据；已禁用 Target 不参与校验。保存配置不会触发生图。执行前再次校验绑定，并沿用凭据刷新、Route 优先级、重试与切换策略。具体账号和模型是否可用仍取决于上游支持。
+在 **高级功能 → 媒体生成** 中绑定支持图片生成的 Codex OAuth 模型路由并开启能力，即可通过 MCP 或兼容模型请求生成、编辑图片，并在后续操作中继续使用生成结果。
 
-MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自动暴露还要求 API Key 同时开启透明注入总开关并选择 **媒体生成**。新旧 Key 的该选项均默认关闭；它不是独立权限。
-
-```json
-{"type":"image","input":{"prompt":"A small blue house","aspect_ratio":"4:3","resolution":"2K"}}
-```
-
-`input` 内只有 `prompt` 必填。可选 `aspect_ratio` 接受 `1:1`、`3:4`、`4:3`、`9:16`、`16:9`；`resolution` 接受 `1K`、`2K`、`4K`。它们表达偏好，不保证精确尺寸。当前 Codex 适配将各分辨率档位均约束到已核实的 hosted-tool 尺寸：正方形 `1024×1024`、竖向 `1024×1536`、横向 `1536×1024`。两项偏好均省略时不发送 `size`。平台不裁剪、拉伸或超分辨率处理。
-
-编辑时添加有序的 `reference_images`：当前 Principal 拥有且**不附带读取选项**的纯 `sa:…` 引用，或公网 HTTP(S) 图片 URL。本地文件先走现有 `/v1/artifacts/uploads` 上传流程。公网来源在生图前安全抓取并收存，不透传源 URL。平台最多接受五张 JPEG/PNG/WebP 参考图，每张不超过 32 MiB、单边 8192 像素、总计 2500 万像素。非法、缺失、过期或其他 Principal 的文件在生图前即被拒绝。
-
-成功结果只包含 `artifact_reference`、`mime_type`、`size` 和从实际解码文件读取的 `media: {width,height}`。引用可用于下一次编辑；显式下载调用 `StraviaRead`，参数为 `{"path":"sa:…?download=1"}`。无图片、损坏图片或收存失败均返回错误，不产生空图成功结果。执行状态不明时，Route 重试可能重复生成并额外消耗额度；取消、输入错误、收存失败不会触发重新生图。用量仅记录上游实际报告的值。
+具体可用性取决于上游账号和模型支持；尺寸偏好不保证精确输出，重试可能额外消耗额度。配置、调用示例和限制见[媒体生成文档](docs/design/media-generation.md)。
 
 ### 密钥、用量与请求记录
 
@@ -151,9 +135,6 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 - 请求记录：在可缩放的画布上实时看到每次交互 —— 模型调用、重试、工具调用 —— 失败的请求单独成列，单次对话可逐条查看。
 - 查看服务商实际上报的 token 用量与配额。
 - 打开 Debug 可捕获 HTTP/SSE/WebSocket 流量，按交互下载诊断包；凭据字段永远先脱敏。
-- 传输失败诊断保留发生阶段和可用的底层原因，先脱敏并显式限制长度。Debug 捕获可跨网络分片重组 Command Code NDJSON 记录及 UTF-8 字节，不完整尾部会明确标记，不会当作完整记录。
-
-历史存储在同一 Principal 内共享完全相同的 instructions、工具定义与响应 profile。Debug 分段通过内容和元数据引用去重，不使用压缩算法；诊断主线收敛到 target 选择、开始、结束，请求及流式内容继续采集。旧历史保持可读。优化已保留的 SQLite 数据前，先停止所有使用源目录的实例，再运行 `stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storage` 查看计划，确认后追加 `--apply --source-stopped`。工具只在目标副本中校验内容还原并回收 SQLite 空闲页，源数据保留用于回退；旧版程序不能读取新存储格式。
 
 ### 凭据保护
 
@@ -169,7 +150,7 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 ### 存储与部署
 
 - 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。
-- 部署所拥有的全部数据收归单一实例锁保护的数据目录；旧布局有显式迁移工具。
+- 实例数据集中在一个目录，便于管理；迁移与升级前请阅读[部署与存储说明](docs/design/architecture.md)，确认备份和版本兼容要求。
 - 一个端口同时提供模型 API、MCP、Admin API、健康探针与内嵌 WebUI；反向代理下可用显式管理入口与受信代理。
 
 ## 部署形态

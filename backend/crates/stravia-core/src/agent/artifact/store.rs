@@ -44,6 +44,23 @@ struct PublicationGuard {
 }
 
 impl LocalArtifactStore {
+    // SQLx worker 与对象 I/O 可能在调用方取消后继续执行。操作持有自己的 guard，
+    // 直到提交或失败真正收口，不能仅把 guard 的寿命绑定到等待结果的调用方。
+    pub(super) async fn complete_guarded<T: Send + 'static>(
+        operation: impl std::future::Future<Output = Result<T, ArtifactError>> + Send + 'static,
+    ) -> Result<T, ArtifactError> {
+        tokio::spawn(async move {
+            let result = operation.await;
+            if let Err(error @ ArtifactError::Storage(_)) = &result {
+                let reason = crate::interaction_observation::redact_text(&error.to_string());
+                tracing::warn!(%reason, "Artifact storage operation failed");
+            }
+            result
+        })
+        .await
+        .map_err(storage_error)?
+    }
+
     fn now(&self) -> i64 {
         (self.clock)()
     }
@@ -653,21 +670,25 @@ impl ArtifactStore for LocalArtifactStore {
         let publication_guard = self
             .lock_publication(&mut upload_guard.1, &artifact_id)
             .await?;
-        if self.reuse_ready(&row, &artifact_id).await? {
+        let store = self.clone();
+        let principal = principal.clone();
+        let upload_id = upload_id.to_owned();
+        Self::complete_guarded(async move {
+        if store.reuse_ready(&row, &artifact_id, &temporary).await? {
             tokio::fs::remove_file(&temporary)
                 .await
                 .map_err(storage_error)?;
-            self.delete_ready(principal, &ArtifactId::new(&row.artifact_id))
+            store.delete_ready(&principal, &ArtifactId::new(&row.artifact_id))
                 .await?;
         } else {
             tokio::fs::rename(&temporary, &final_path)
                 .await
                 .map_err(storage_error)?;
             {
-                let settings = self.transfer_settings(None).await?;
+                let settings = store.transfer_settings(None).await?;
                 if let Some(s3) = &settings.s3 {
-                    self.persist_s3_location(&row.artifact_id, s3).await?;
-                    self.upload_s3(
+                    store.persist_s3_location(&row.artifact_id, s3).await?;
+                    store.upload_s3(
                         s3,
                         &ArtifactId::new(&row.artifact_id),
                         &final_path,
@@ -677,22 +698,23 @@ impl ArtifactStore for LocalArtifactStore {
                     .await?;
                 }
             }
-            self.mark_ready(&row.artifact_id, &artifact_id).await?;
+            store.mark_ready(&row.artifact_id, &artifact_id).await?;
         }
         drop(publication_guard);
-        self.upload_locks.lock().await.remove(artifact_id.as_str());
-        if let Err(error) = tokio::fs::remove_dir_all(self.staging_dir(upload_id)).await
+        store.upload_locks.lock().await.remove(artifact_id.as_str());
+        if let Err(error) = tokio::fs::remove_dir_all(store.staging_dir(&upload_id)).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(upload_id, error = %error, "completed Artifact staging cleanup failed");
         }
         drop(upload_guard);
-        self.upload_locks.lock().await.remove(upload_id);
+        store.upload_locks.lock().await.remove(&upload_id);
         Ok(ArtifactRef {
             id: artifact_id,
             mime_type: row.mime_type,
             size: total_size,
         })
+        }).await
     }
 
     async fn open(
@@ -711,20 +733,37 @@ impl ArtifactStore for LocalArtifactStore {
     ) -> Result<(), ArtifactError> {
         let retention_millis = i64::try_from(retention.as_millis()).unwrap_or(i64::MAX);
         let expires_at = self.now().saturating_add(retention_millis);
+        // SQLite renewal and deletion use the same per-artifact lock, independent
+        // of wall-clock movement between the sweeper's scan and eligibility check.
+        // PostgreSQL keeps the existing row-update serialization inside its sweep
+        // transaction and must not consume a second advisory-lock connection here.
+        let _guard = match &self.database {
+            ArtifactDatabase::Sqlite(_) => Some(self.read_guard(id).await?),
+            ArtifactDatabase::Postgres(_) => None,
+        };
         let principal_key = principal.continuation_key();
         let affected = match &self.database {
-            ArtifactDatabase::Sqlite(pool) => sqlx::query(
-                "UPDATE artifacts SET expires_at = MAX(expires_at, ?) \
+            ArtifactDatabase::Sqlite(pool) => {
+                let pool = pool.clone();
+                let id = id.clone();
+                let now = self.now();
+                Self::complete_guarded(async move {
+                    let _guard = _guard;
+                    sqlx::query(
+                        "UPDATE artifacts SET expires_at = MAX(expires_at, ?) \
                  WHERE id = ? AND principal = ? AND state = 'ready' AND expires_at > ?",
-            )
-            .bind(expires_at)
-            .bind(id.as_str())
-            .bind(&principal_key)
-            .bind(self.now())
-            .execute(pool)
-            .await
-            .map_err(storage_error)?
-            .rows_affected(),
+                    )
+                    .bind(expires_at)
+                    .bind(id.as_str())
+                    .bind(&principal_key)
+                    .bind(now)
+                    .execute(&pool)
+                    .await
+                    .map_err(storage_error)
+                    .map(|result| result.rows_affected())
+                })
+                .await?
+            }
             ArtifactDatabase::Postgres(pool) => sqlx::query(
                 "UPDATE artifacts SET expires_at = GREATEST(expires_at, $1) \
                  WHERE id = $2 AND principal = $3 AND state = 'ready' AND expires_at > $4",
@@ -913,35 +952,39 @@ impl LocalArtifactStore {
             Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
             Err(error) => return Err(storage_error(error)),
         }
-        let location = self.object_location(artifact_id).await?;
-        let mut transaction = pool.begin().await.map_err(storage_error)?;
-        let claimed = sqlx::query(
-            "UPDATE artifacts SET expires_at = expires_at WHERE id = ? AND state = 'ready' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>?)",
-        )
-        .bind(artifact_id)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage_error)?
-        .rows_affected();
-        if claimed == 0 {
-            return Ok(0);
-        }
-        self.remove_object_at(artifact_id, location, &settings)
-            .await?;
-        let deleted = sqlx::query(
-            "DELETE FROM artifacts WHERE id = ? AND state = 'ready' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>?)",
-        )
-        .bind(artifact_id)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage_error)?
-        .rows_affected();
-        transaction.commit().await.map_err(storage_error)?;
-        Ok(deleted)
+        // SQLite worker 和远端 DELETE 不会随调用 future 的取消而可靠停止。
+        // 独立任务持有删除声明直到 I/O 真正收口，避免取消后旧删除追上新的复用。
+        // 对象 I/O 不持有 SQLite 写事务；共享对象锁保护读取、grant、续期和发布。
+        let store = self.clone();
+        let pool = pool.clone();
+        let artifact_id = artifact_id.to_owned();
+        Self::complete_guarded(async move {
+            let _lock = lock;
+                let location = store.object_location(&artifact_id).await?;
+                let eligible: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ? AND state = 'ready' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>?))",
+                )
+                .bind(&artifact_id)
+                .bind(now)
+                .bind(now)
+                .fetch_one(&pool)
+                .await
+                .map_err(storage_error)?;
+                if !eligible {
+                    return Ok(0);
+                }
+                store.remove_object_at(&artifact_id, location, &settings).await?;
+                sqlx::query(
+                    "DELETE FROM artifacts WHERE id = ? AND state = 'ready' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>?)",
+                )
+                .bind(&artifact_id)
+                .bind(now)
+                .bind(now)
+                .execute(&pool)
+                .await
+                .map_err(storage_error)
+                .map(|result| result.rows_affected())
+        }).await
     }
 
     async fn sweep_ready_postgres(
@@ -1031,9 +1074,109 @@ impl LocalArtifactStore {
         &self,
         upload: &UploadRow,
         id: &ArtifactId,
+        verified_bytes: &std::path::Path,
     ) -> Result<bool, ArtifactError> {
         // 只有已重新上传并校验完整字节的调用可以重新保留过期内容。
-        // 普通引用和 extend_retention 仍不能复活过期 Artifact。
+        // 先识别可复用元数据，再用不可变的相同字节修复对象，最后才延长保留期。
+        // 这样对象删除后 metadata DELETE 失败/取消不会让复用暴露缺失的对象。
+        let existing_expires_at: Option<i64> = match &self.database {
+            ArtifactDatabase::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT expires_at FROM artifacts WHERE id = ? AND principal = ? AND mime_type = ? AND size = ? AND state = 'ready'",
+            )
+            .bind(id.as_str())
+            .bind(&upload.principal)
+            .bind(&upload.mime_type)
+            .bind(upload.declared_size)
+            .fetch_optional(pool)
+            .await
+            .map_err(storage_error)?,
+            ArtifactDatabase::Postgres(pool) => sqlx::query_scalar(
+                "SELECT expires_at FROM artifacts WHERE id = $1 AND principal = $2 AND mime_type = $3 AND size = $4 AND state = 'ready'",
+            )
+            .bind(id.as_str())
+            .bind(&upload.principal)
+            .bind(&upload.mime_type)
+            .bind(upload.declared_size)
+            .fetch_optional(pool)
+            .await
+            .map_err(storage_error)?,
+        };
+        let Some(existing_expires_at) = existing_expires_at else {
+            return Ok(false);
+        };
+
+        // An active immutable object cannot have passed the sweeper's exclusive
+        // eligibility check, so normal deduplication keeps its zero-object-I/O path.
+        // Only an expired row can be the recovery residue left after object deletion.
+        if existing_expires_at <= self.now() {
+            let size = u64::try_from(upload.declared_size)
+                .map_err(|_| ArtifactError::Storage("invalid reusable Artifact size".into()))?;
+            let (backend, endpoint, bucket, key) =
+                self.object_location(id.as_str()).await?.ok_or_else(|| {
+                    ArtifactError::Storage("reusable Artifact metadata disappeared".into())
+                })?;
+            let object_id = ArtifactId::new(object_id_for_key(&key)?);
+            if backend == "s3" {
+                let settings = self.transfer_settings(None).await?;
+                let s3 = settings.s3.as_ref().ok_or_else(|| {
+                    ArtifactError::Storage("S3 credentials are not configured".into())
+                })?;
+                if endpoint.as_deref() != Some(s3.endpoint.as_str())
+                    || bucket.as_deref() != Some(s3.bucket.as_str())
+                {
+                    return Err(ArtifactError::Storage(
+                        "Artifact belongs to a different S3 endpoint or bucket".into(),
+                    ));
+                }
+                self.upload_s3(s3, &object_id, verified_bytes, size, &upload.mime_type)
+                    .await?;
+            } else if backend != "internal" {
+                return Err(ArtifactError::Storage(
+                    "unknown Artifact storage backend".into(),
+                ));
+            }
+
+            let object_path = self.object_path(object_id.as_str());
+            let replace_existing = match tokio::fs::metadata(&object_path).await {
+                Ok(metadata) if metadata.is_file() && metadata.len() == size => None,
+                Ok(metadata) if metadata.is_file() => Some(true),
+                Ok(_) => {
+                    return Err(ArtifactError::Storage(
+                        "reusable Artifact object is not a regular file".into(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+                Err(error) => return Err(storage_error(error)),
+            };
+            if let Some(replace_existing) = replace_existing {
+                // Copy into the object directory first, then publish with rename. The
+                // TempPath removes a partial copy on error or cancellation; metadata
+                // remains expired until the complete object is atomically visible.
+                let repair = tempfile::Builder::new()
+                    .prefix(&format!("{}.repair-", object_id.as_str()))
+                    .tempfile_in(self.root.join("objects"))
+                    .map_err(storage_error)?
+                    .into_temp_path();
+                tokio::fs::copy(verified_bytes, &repair)
+                    .await
+                    .map_err(storage_error)?;
+                let repaired = tokio::fs::metadata(&repair).await.map_err(storage_error)?;
+                if repaired.len() != size {
+                    return Err(ArtifactError::Storage(
+                        "repaired Artifact object has an invalid size".into(),
+                    ));
+                }
+                if replace_existing {
+                    tokio::fs::remove_file(&object_path)
+                        .await
+                        .map_err(storage_error)?;
+                }
+                tokio::fs::rename(&repair, &object_path)
+                    .await
+                    .map_err(storage_error)?;
+            }
+        }
+
         let affected = match &self.database {
             ArtifactDatabase::Sqlite(pool) => sqlx::query(
                 "UPDATE artifacts SET expires_at = MAX(expires_at, ?) \
@@ -1188,12 +1331,27 @@ impl LocalArtifactStore {
         let mut ids = ids.iter().collect::<Vec<_>>();
         ids.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
         ids.dedup();
+        // Stable ordering prevents SQLite batch renewals from inverting artifact
+        // locks. Its sweep uses a non-blocking exclusive acquisition, so it never
+        // waits while holding a lock needed by this batch. PostgreSQL continues to
+        // serialize the updates through its database transaction.
+        let mut guards = Vec::with_capacity(ids.len());
+        if matches!(&self.database, ArtifactDatabase::Sqlite(_)) {
+            for id in &ids {
+                guards.push(self.read_guard(id).await?);
+            }
+        }
         let extension = self
             .now()
             .saturating_add(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
         let principal_key = principal.continuation_key();
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => {
+                let pool = pool.clone();
+                let store = self.clone();
+                let ids: Vec<_> = ids.into_iter().cloned().collect();
+                Self::complete_guarded(async move {
+                let _guards = guards;
                 let mut transaction = pool.begin().await.map_err(storage_error)?;
                 for id in &ids {
                     let rows_affected = sqlx::query(
@@ -1202,7 +1360,7 @@ impl LocalArtifactStore {
                     .bind(extension)
                     .bind(id.as_str())
                     .bind(&principal_key)
-                    .bind(self.now())
+                    .bind(store.now())
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?
@@ -1212,6 +1370,8 @@ impl LocalArtifactStore {
                     }
                 }
                 transaction.commit().await.map_err(storage_error)?;
+                Ok(())
+                }).await?;
             }
             ArtifactDatabase::Postgres(pool) => {
                 let mut transaction = pool.begin().await.map_err(storage_error)?;

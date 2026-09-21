@@ -28,6 +28,8 @@ pub(super) struct AdmitPayload {
     pub discarded_trace: Option<super::trace::TraceHandle>,
 }
 
+pub(super) const QUEUE_CAPACITY: usize = 2048;
+
 pub(super) enum WriterCommand {
     ClearTail,
     ClientDisconnected {
@@ -54,6 +56,11 @@ pub(super) enum WriterCommand {
     Event {
         run_id: String,
         event: RunEvent,
+    },
+    Text {
+        run_id: String,
+        event: Arc<Mutex<Option<RunEvent>>>,
+        _slot: tokio::sync::OwnedSemaphorePermit,
     },
     Finish {
         run_id: String,
@@ -118,7 +125,7 @@ pub(super) fn spawn(
         live,
         generation_chains,
     } = deps;
-    let (tx, mut rx) = mpsc::channel(2048);
+    let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
     let handle = tokio::spawn(async move {
         let mut attribution =
             RunAttribution::new(ObservationEvidence::new(store.clone(), generation_chains));
@@ -174,6 +181,15 @@ pub(super) fn spawn(
                     },
                     command = rx.recv() => command,
                 }
+            };
+            let command = match command {
+                Some(WriterCommand::Text { run_id, event, .. }) => {
+                    let Some(event) = event.lock().take() else {
+                        continue;
+                    };
+                    Some(WriterCommand::Event { run_id, event })
+                }
+                command => command,
             };
             attribution.sweep(now());
             match &command {
@@ -404,6 +420,31 @@ pub(super) fn spawn(
                                 }
                             }
                             publish(&updates, &trace_sequence, event);
+                            if decision.grouping_reason == "unmatched_parent"
+                                || decision.parent_evidence_error.is_some()
+                            {
+                                let gap = RunEvent::ObservationGap {
+                                    reason: "generation_parent_observation_unavailable".into(),
+                                };
+                                match store
+                                    .persist_run_event(
+                                        &decision.interaction_id,
+                                        &start.id,
+                                        &gap,
+                                        now,
+                                        expires,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(event)) => publish(&updates, &trace_sequence, event),
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        unpersisted_gaps.lock().record(&start.id, now);
+                                        pending_gaps.insert(decision.interaction_id.clone(), now);
+                                        tracing::warn!(run_id=%start.id, %error, "parent observation gap persistence failed");
+                                    }
+                                }
+                            }
                             if let Some(diagnostic_event) = decision.diagnostic_event {
                                 match store
                                     .persist_run_event(
@@ -657,6 +698,26 @@ pub(super) fn spawn(
                             )
                             .await;
                         }
+                        if let Some(interaction) = attribution.interaction_for_run(run_id) {
+                            let at = now();
+                            match store
+                                .finalize_activity(
+                                    interaction,
+                                    run_id,
+                                    at,
+                                    expires(at, retention_days.load(Ordering::Relaxed)),
+                                )
+                                .await
+                            {
+                                Ok(Some(event)) => publish(&updates, &trace_sequence, event),
+                                Ok(None) => {}
+                                Err(error) => {
+                                    unpersisted_gaps.lock().record(run_id, at);
+                                    pending_gaps.insert(interaction.to_owned(), at);
+                                    tracing::warn!(%run_id, %error, "observation activity finalization failed");
+                                }
+                            }
+                        }
                     }
                     let mut persisted_partial = false;
                     if let Some(trace) = trace {
@@ -766,6 +827,7 @@ pub(super) fn spawn(
                     flush_text(&context, &attribution, &mut pending_text).await;
                     break;
                 }
+                Some(WriterCommand::Text { .. }) => unreachable!("text command resolved above"),
             }
         }
     });
@@ -1094,14 +1156,14 @@ impl TextBuffer {
         });
     }
 }
-fn text_mut(event: &mut RunEvent) -> Option<&mut String> {
+pub(super) fn text_mut(event: &mut RunEvent) -> Option<&mut String> {
     match event {
         RunEvent::ClientVisibleContentDelta { text }
         | RunEvent::ModelThinkingDelta { text, .. } => Some(text),
         _ => None,
     }
 }
-fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
+pub(super) fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
     match (left, right) {
         (
             RunEvent::ClientVisibleContentDelta { .. },

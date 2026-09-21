@@ -44,12 +44,21 @@ pub(super) fn render_hook_control(
 }
 
 pub(super) fn coded_error_response(status: StatusCode, code: &str, message: &str) -> Response {
+    coded_error_response_with_diagnostic(status, code, message, message)
+}
+
+fn coded_error_response_with_diagnostic(
+    status: StatusCode,
+    code: &str,
+    public_message: &str,
+    diagnostic_message: &str,
+) -> Response {
     let mut response = (
         status,
         axum::Json(serde_json::json!({
             "error": {
                 "code": code,
-                "message": message,
+                "message": public_message,
             }
         })),
     )
@@ -58,10 +67,22 @@ pub(super) fn coded_error_response(status: StatusCode, code: &str, message: &str
         .extensions_mut()
         .insert(crate::interaction_observation::FailureDiagnostic::platform(
             code,
-            message,
+            diagnostic_message,
             status.as_u16(),
         ));
     response
+}
+
+pub(super) fn attachment_ingest_error_response(
+    error: stravia_runtime_contract::artifact::ArtifactError,
+) -> Response {
+    let mapping = crate::agent::artifact::artifact_error_mapping(&error);
+    coded_error_response_with_diagnostic(
+        StatusCode::from_u16(mapping.status).expect("Artifact error has a valid status"),
+        "attachment_ingest_failed",
+        &mapping.public_message,
+        &mapping.diagnostic_message,
+    )
 }
 
 pub(super) fn parameter_error_response(
@@ -217,6 +238,19 @@ pub(super) fn model_turn_error_response(
             .insert(crate::model_turn::UpstreamErrorResponse);
         return response;
     }
+    if error.code == "attachment_ingest_failed" {
+        let public_message = if status.is_server_error() {
+            crate::agent::artifact::ARTIFACT_STORAGE_FAILURE_MESSAGE
+        } else {
+            &error.message
+        };
+        return coded_error_response_with_diagnostic(
+            status,
+            &error.code,
+            public_message,
+            &error.message,
+        );
+    }
     if let Some(status) = error
         .upstream_status
         .and_then(|status| StatusCode::from_u16(status).ok())
@@ -254,4 +288,37 @@ pub(super) fn model_turn_execute_failure(
     error: stravia_runtime_contract::model_turn::ModelTurnError,
 ) -> RoundOutcome {
     model_turn_error_outcome(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attachment_model_turn_storage_error_is_platform_500_without_internal_detail() {
+        let secret = "attachment-model-turn-secret";
+        let mut error = stravia_runtime_contract::model_turn::ModelTurnError::new(
+            "attachment_ingest_failed",
+            format!("Artifact storage failed: database_url=sqlite:///{secret}"),
+        );
+        error.upstream_status = Some(500);
+
+        let response = model_turn_error_response(error);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            response
+                .extensions()
+                .get::<crate::model_turn::UpstreamErrorResponse>()
+                .is_none()
+        );
+        let diagnostic = response
+            .extensions()
+            .get::<crate::interaction_observation::FailureDiagnostic>()
+            .expect("platform diagnostic");
+        assert_eq!(diagnostic.source.as_deref(), Some("platform"));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("attachment error body");
+        assert!(!String::from_utf8_lossy(&body).contains(secret));
+    }
 }

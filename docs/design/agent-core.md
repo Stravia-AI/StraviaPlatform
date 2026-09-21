@@ -242,6 +242,10 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 `Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `sa:<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的查询参数，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
 
+SQLite 的 ready 对象清理以每个 Artifact 的独占对象锁作为删除声明，读取、grant 签发、续期及内容发布先持有共享侧；对象删除期间不持有 SQLite 写事务。删除任务拥有该锁直到对象 I/O 与最终元数据删除真正结束，调用方取消不能提前释放锁，因为 SQLite worker 和远端 DELETE 可能继续执行。对象删除失败保留元数据；元数据删除失败留下的过期对象不能直接复活，只有完整重新收存并校验字节后才修复底层对象并延长保留期。本地修复先写独立临时文件再发布；正常未过期复用不增加对象 I/O。PostgreSQL 沿用 advisory lock 与事务协调，保持相同可见性及保留语义。
+
+同样的取消边界适用于持锁的 SQLite 续期、grant 提交与完整上传的最终发布：已启动的持锁操作负责收口并持有自己的 guard，取消等待结果的调用方不能让清理者抢先取得对象。该边界不继续接收已经取消的上传 body，也不增加重试或改变授权、TTL 与内容校验规则。
+
 完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 是完整 256 bit 摘要按大端整数编码并左补齐的 55 位小写 base26 字母。28 位小写字母随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。系统按全新数据库契约运行，不接受或兼容旧随机 Artifact ID。
 
 `ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
@@ -709,6 +713,8 @@ POST /v1/artifacts/uploads/{upload_id}/complete
 - upload idle TTL 在每次成功 part 后刷新，Gateway sweeper 清理过期 staging 与 metadata。
 
 当前不提供 S3 presigned multipart、客户端 URL ingest 或 content-based MIME sniffing；这些能力必须在对应 backend/validator 实施后再开放。
+
+直接 Artifact HTTP 接口与模型请求的附件归一化共享错误分类：`Invalid`、`NotFound`、`Forbidden`、`Unauthorized`、`Storage` 分别对应 400、404、403、401、500。附件归一化保留 `attachment_ingest_failed` code；存储故障的客户端消息不含数据库或底层存储详情，内部诊断先脱敏后保留原因，不把平台存储故障归因为上游 Provider 或客户端输入。
 
 ---
 

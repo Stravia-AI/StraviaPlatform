@@ -76,6 +76,40 @@ describe('observation usage event summary', () => {
   })
 })
 
+describe('observation gap event summary', () => {
+  const gap = (reason: string) => observationEventSummary(event(18, 'observation_gap', { reason }))
+
+  test('explains a missing parent observation without claiming the request failed', () => {
+    const summary = gap('generation_parent_observation_unavailable')
+    expect(summary.tone).toBe('warning')
+    expect(summary.note).toBe(m.observation_gap_generation_parent_unavailable())
+    expect(summary.note).not.toContain(m.observation_status_failed())
+    expect(summary.facts).toContainEqual({
+      label: m.observation_event_reason(),
+      value: 'generation_parent_observation_unavailable',
+    })
+  })
+
+  test('explains unfinished observation activity without inventing an outcome', () => {
+    const summary = gap('unfinished_observation_activity')
+    expect(summary.tone).toBe('warning')
+    expect(summary.note).toBe(m.observation_gap_unfinished_activity())
+  })
+
+  test('distinguishes delivered output whose history could not be saved from a request failure', () => {
+    const reason = 'settlement_generation_commit:database busy'
+    const summary = gap(reason)
+    expect(summary.tone).toBe('warning')
+    expect(summary.note).toBe(m.observation_gap_delivered_history_not_saved())
+    expect(summary.note).not.toContain(m.observation_status_failed())
+    expect(summary.facts).toContainEqual({ label: m.observation_event_reason(), value: reason })
+  })
+
+  test('keeps the generic incomplete-observation explanation for unknown reasons', () => {
+    expect(gap('future_gap_reason').note).toBe(m.observation_event_gap_note())
+  })
+})
+
 describe('observation request failed event summary', () => {
   const requestFailed = (error: Record<string, unknown>) =>
     observationEventSummary(event(20, 'request_failed', { error }))

@@ -55,6 +55,17 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
 }
 
+function observationGapNote(reason: string | undefined): string {
+  if (reason === 'generation_parent_observation_unavailable') {
+    return m.observation_gap_generation_parent_unavailable()
+  }
+  if (reason === 'unfinished_observation_activity') return m.observation_gap_unfinished_activity()
+  if (reason?.startsWith('settlement_generation_commit:')) {
+    return m.observation_gap_delivered_history_not_saved()
+  }
+  return m.observation_event_gap_note()
+}
+
 function statusLabel(status: string): string {
   switch (status) {
     case 'completed':
@@ -254,7 +265,7 @@ export function observationEventSummary(
     }
     case 'observation_gap':
       summary.tone = 'warning'
-      summary.note = m.observation_event_gap_note()
+      summary.note = observationGapNote(text(payload.reason))
       add(m.observation_event_reason(), payload.reason)
       break
     case 'usage_confirmed': {
