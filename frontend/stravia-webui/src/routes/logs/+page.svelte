@@ -377,7 +377,7 @@ async function downloadBundle(): Promise<void> {
                     onclick={() => {
                       ws.clearFilters()
                       void ws.applyFilters()
-                    }}>{m.observation_clear_filters()}</Button>
+                    }}>{m.observation_clear_filters()}</Button
                   ></Empty.Content
                 >{/if}</Empty.Root>
           </div>
@@ -734,6 +734,8 @@ async function downloadBundle(): Promise<void> {
   padding: 2rem;
   text-align: center;
   color: var(--muted-foreground);
+  /* Windows Chromium 会在非滚动容器上残留 scrollbar-button 残影；此处无滚动语义，显式关闭 */
+  scrollbar-width: none;
 }
 .debug-toggle {
   display: inline-flex;
