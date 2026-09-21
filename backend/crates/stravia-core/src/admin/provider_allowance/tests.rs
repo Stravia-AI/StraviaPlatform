@@ -240,6 +240,34 @@ fn devin_parses_user_status_protobuf() {
 }
 
 #[test]
+fn devin_reports_negative_overage_balance() {
+    use crate::protocol::codec::devin_connect::proto::{
+        write_message_field, write_varint_field,
+    };
+
+    // 回归：余额为负的 Pro 账户线上返回 int64 -730000（-$0.73），按 u64
+    // 解读会得到 ~1.8e19 的幽灵余额。
+    let mut plan_status = Vec::new();
+    write_varint_field(&mut plan_status, 16, (-730_000i64) as u64);
+    let mut user_status = Vec::new();
+    write_message_field(&mut user_status, 13, &plan_status);
+    let mut body = Vec::new();
+    write_message_field(&mut body, 1, &user_status);
+
+    let parsed =
+        parse_monitor_response(MonitorKind::Devin, &body).expect("Devin user status should parse");
+    let balance = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "balance_usd")
+        .expect("balance allowance");
+    assert_eq!(
+        balance.remaining.as_ref().map(|amount| amount.value),
+        Some(-0.73)
+    );
+}
+
+#[test]
 fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
     let xai = decode_hex(include_str!("fixtures/xai-grok-success.hex"));
     let fixtures: [(MonitorKind, &[u8], &[u8], &str); 16] = [

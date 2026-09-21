@@ -1376,12 +1376,17 @@ fn parse_devin(body: &[u8]) -> Result<ParsedAllowance, InvalidResponse> {
                 }
             }
 
-            // PlanStatus #16 is micro-dollars (80000000 = $80 on a paid
-            // account); report the converted USD figure, never the raw wire
-            // value.
+            // PlanStatus #16 is a signed int64 micro-dollar balance
+            // (80000000 = $80; overdrawn accounts go negative, e.g. -730000
+            // = -$0.73). Reading it as u64 wraps negative balances into an
+            // ~1.8e19 phantom balance, so reinterpret before converting.
             if let Some(balance_micro) = varint(&plan_status, 16) {
                 let mut item = allowance("balance_usd", "Balance", AllowanceKind::Balance);
-                item.remaining = Some(amount(balance_micro as f64 / 1e6, "currency", Some("USD")));
+                item.remaining = Some(amount(
+                    balance_micro as i64 as f64 / 1e6,
+                    "currency",
+                    Some("USD"),
+                ));
                 allowances.push(item);
             }
         } else {
