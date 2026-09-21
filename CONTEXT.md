@@ -190,6 +190,11 @@ Agent Turn 是 Agent Run 成功完成或受预算约束完成后提交的不可�
 
 Turn Chain 是由持久化不可变历史节点组成、归属于一个认证主体的有向无环父链。调用方以节点 ID 选择精确前缀，平台据此恢复完整规范化历史；不存在内存事实源、可变 latest head 或独立 Session 身份。
 
+## Turn Reference
+
+Turn Reference 是供 Connect Client 与模型传递的稳定、不透明续接引用，精确选择 Principal 所属 Turn Chain 中的一个不可变节点；它不表示独立 Session 或可变 latest head，也不授予访问权限。
+_避免使用_：Session ID、latest head、访问凭据
+
 ## Artifact
 
 Artifact 是归属于一个认证主体的不可变媒体或大对象；同一主体下，声明媒体类型与完整内容完全相同的文件具有同一身份，而非按上传次数区分。外部以 opaque ArtifactId 引用它，保留期与内容身份相互独立。
@@ -625,7 +630,7 @@ Search Turn 是一次完整或有效 partial Web Search 提交的不可变续接
 
 ## Search Source
 
-Search Source 是 Search Report 实际引用、且可追溯到当前或历史已验证 Web evidence 的公网 URL。未被 Report 引用的 consulted URL 不是 Search Source。
+Search Source 是某个 Search Turn 已验证 Search Report 中实际引用、且可追溯到当前或历史已验证 Web evidence 的从属来源条目。它依附于所属 Search Turn，不是独立会话，也不授予访问权限；未被 Report 引用的 consulted URL 不是 Search Source。
 
 ## Web Access
 
