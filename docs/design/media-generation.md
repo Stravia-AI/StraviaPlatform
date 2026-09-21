@@ -40,26 +40,26 @@ type GenerateInput = {
     "prompt": "保留参考图中的小屋，将背景改为雪山，水彩风格",
     "aspect_ratio": "16:9",
     "resolution": "2K",
-    "reference_images": ["sa:<artifact_id>"]
+    "reference_images": ["stravia://artifacts/<artifact-id>"]
   }
 }
 ```
 
 ## 3. 文件输入与输出
 
-参考图接受所属 Principal 的 Artifact Reference（`sa:<id>`）或公网 HTTP(S) 图片 URL，不接受客户端本地路径。客户端本地文件先通过现有上传入口取得引用；工具不另设 base64 或上传参数。
+参考图接受所属 Principal 的 Artifact Reference（`stravia://artifacts/<artifact-id>`）或公网 HTTP(S) 图片 URL，不接受客户端本地路径。客户端本地文件先通过现有上传入口取得引用；工具不另设 base64 或上传参数。
 
 - Artifact Reference 必须校验当前 Principal 的归属、保留期及图片内容可用性，引用本身不授予访问权。
 - 公网图片 URL 必须沿用既有网络安全与大小限制，先收存为当前 Principal 的 Artifact，再开始上游生成；收存失败不透传原 URL、不忽略附件继续执行。
 - 输入是图片来源，不承载 `StraviaRead` 的 `question`、`download` 等操作选项。
-- 向 Provider 交付输入内容时复用现有媒体传输规则，不把 `sa:` 引用直接交给上游，也不将客户端或服务端本地路径作为上游可读地址。
+- 向 Provider 交付输入内容时复用现有媒体传输规则，不把 `stravia://` 引用直接交给上游，也不将客户端或服务端本地路径作为上游可读地址。
 - 上游返回的图片必须完整收存为当前 Principal 的 Artifact 后才能成功。上游 URL、base64 和本地存储路径不是工具的公开产物身份。
 
 成功结果：
 
 ```ts
 type ImageGenerateOutput = {
-  artifact_reference: string;
+  path: string; // stravia://artifacts/<artifact-id>
   mime_type: string;
   size: number; // 文件字节数
   media: {
@@ -71,7 +71,7 @@ type ImageGenerateOutput = {
 
 `media.width` 与 `media.height` 从实际生成文件读取，不以请求参数代填。结果不重复返回裸 Artifact ID，也不重复返回推算比例或分辨率档位。其他媒体类型的 `media` 字段随对应能力定义。
 
-下载使用既有 `StraviaRead({path: "sa:<id>?download=1"})` 获取限时下载授权，不将下载地址当作稳定身份。保留期、归属、上传与下载授权沿用 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md)、[ADR-0049](../adr/0049-snapshot-explicit-media-inputs-as-artifacts.md) 和 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+下载使用既有 `StraviaRead({path: "stravia://artifacts/<artifact-id>?download=1"})` 获取限时下载授权，不将下载地址当作稳定身份。保留期、归属、上传与下载授权沿用 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md)、[ADR-0049](../adr/0049-snapshot-explicit-media-inputs-as-artifacts.md) 和 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 ## 4. Route 与 Codex 接入
 

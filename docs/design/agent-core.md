@@ -240,7 +240,7 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 ### 5.6 Artifact
 
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `sa:<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的查询参数，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
+`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `stravia://artifacts/<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的查询参数，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
 
 SQLite 的 ready 对象清理以每个 Artifact 的独占对象锁作为删除声明，读取、grant 签发、续期及内容发布先持有共享侧；对象删除期间不持有 SQLite 写事务。删除任务拥有该锁直到对象 I/O 与最终元数据删除真正结束，调用方取消不能提前释放锁，因为 SQLite worker 和远端 DELETE 可能继续执行。对象删除失败保留元数据；元数据删除失败留下的过期对象不能直接复活，只有完整重新收存并校验字节后才修复底层对象并延长保留期。本地修复先写独立临时文件再发布；正常未过期复用不增加对象 I/O。PostgreSQL 沿用 advisory lock 与事务协调，保持相同可见性及保留语义。
 
@@ -709,7 +709,7 @@ POST /v1/artifacts/uploads/{upload_id}/complete
 - 单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy；
 - upload token 只授权同 principal、同 upload；part 流式写盘并计算 SHA-256 etag；
 - replacement delta、aggregate size、part manifest、owner 与完整内容 digest 在完成前校验；
-- 创建只返回 `upload_id`、`upload_token`、`expires_at`；完成才返回最终 `ArtifactRef.id` 与 `reference`，不接受客户端声明的最终内容摘要作为身份依据；
+- 创建只返回 `upload_id`、`upload_token`、`expires_at`；完成才返回最终 Artifact `path`、MIME 与 size，不接受客户端声明的最终内容摘要作为身份依据；
 - upload idle TTL 在每次成功 part 后刷新，Gateway sweeper 清理过期 staging 与 metadata。
 
 当前不提供 S3 presigned multipart、客户端 URL ingest 或 content-based MIME sniffing；这些能力必须在对应 backend/validator 实施后再开放。
@@ -730,19 +730,19 @@ Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提
 {
   "prompt": "继续核对结论中的时间线",
   "artifacts": [
-    { "artifact_id": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }
+    { "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }
   ],
-  "previous_turn_id": "abcdefghijklmnopqrstuvwxyzab"
+  "previous_path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab"
 }
 ```
 
-`previous_turn_id` 可省略。Runner 固定把输入追加为一条 user message；调用者不能伪造 assistant/tool/system history。
+`previous_path` 可省略。Runner 固定把输入追加为一条 user message；调用者不能伪造 assistant/tool/system history。
 
 统一 ToolResult：
 
 ```json
 {
-  "turn_id": "abcdefghijklmnopqrstuvwxyzab",
+  "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
   "completion": "complete",
   "output": {}
 }
@@ -755,7 +755,7 @@ Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提
 - 代码为每个已注册 Definition 建立 `agent_<slug>` capability PlatformTool。
 - `AgentDefinitionHook` 只对 enabled 且已绑定逻辑 Model 的 Definition 暴露工具。
 - 平台拦截调用，执行 AgentRunner，把统一 ToolResult 作为 hidden canonical ToolResult 送回父模型。
-- 父模型若要继续，必须在下一次调用时显式回传 `previous_turn_id`；Runner 不猜最近节点。
+- 父模型若要继续，必须在下一次调用时显式回传 `previous_path`；Runner 不猜最近节点。
 - 普通 PlatformTool contract 不改变：客户端看不到 call/result。
 
 ### 12.3 MCP adapter
@@ -772,10 +772,10 @@ Responses 与 Chat/Anthropic/Gemini 共用 `AgentDefinitionHook` 和 hidden Plat
 
 - 不输出 client-visible agent call activity；
 - 不伪装成 client-owned standard function call；
-- Responses final output 额外包含一个 `stravia_agent_result` item，公开 opaque `turn_id`；
-- SQL Response Chain 保存隐藏 tool state，`previous_response_id` materialize 后父模型仍可看到 TurnId。
+- Responses final output 额外包含一个 `stravia:agent_result` item，公开 Turn `path`；
+- SQL Response Chain 保存隐藏 tool state，`previous_response_id` materialize 后父模型仍可看到 Turn path。
 
-Chat/Anthropic/Gemini 不增加 metadata extension；只有父模型通过 canonical ToolResult 看见 TurnId。
+Chat/Anthropic/Gemini 不增加 metadata extension；只有父模型通过 canonical ToolResult 看见 Turn path。
 
 ---
 

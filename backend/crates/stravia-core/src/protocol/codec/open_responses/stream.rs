@@ -1666,7 +1666,7 @@ impl ResponsesStreamFormatter {
                         }
                         continue;
                     }
-                    if let Some("stravia:agent_result" | "stravia:media_result") =
+                    if let Some("stravia:agent_result") =
                         item.get("type").and_then(|value| value.as_str())
                     {
                         self.ensure_started(&mut events);

@@ -42,26 +42,27 @@ impl ModelTurnExecutor for SchemaRepairModel {
             .and_then(message_text)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .ok_or_else(|| ModelTurnError::new("invalid_test_input", "missing Search input"))?;
-        let search_turn_id = search_input["turn_id"]
+        let search_turn_path = search_input["path"]
             .as_str()
-            .map(SearchTurnId::new)
-            .ok_or_else(|| ModelTurnError::new("invalid_test_input", "missing Search Turn"))?;
-        let source_id_prefix = format!("{search_turn_id}:");
-        let marker_prefix = format!("[sc:{search_turn_id}:");
+            .ok_or_else(|| ModelTurnError::new("invalid_test_input", "missing Search path"))?;
+        let search_turn_id = SearchTurnId::from_reference(search_turn_path)
+            .map_err(|error| ModelTurnError::new("invalid_test_input", error.to_string()))?;
+        let source_path_prefix = format!("{}/sources/", search_turn_id.reference());
+        let marker_prefix = format!("[{source_path_prefix}");
         assert_eq!(
-            search_input["report_contract"]["source_id_prefix"].as_str(),
-            Some(source_id_prefix.as_str())
+            search_input["report_contract"]["source_path_prefix"].as_str(),
+            Some(source_path_prefix.as_str())
         );
         assert_eq!(
             search_input["report_contract"]["marker_prefix"].as_str(),
             Some(marker_prefix.as_str())
         );
         let turn = self.turns.fetch_add(1, Ordering::SeqCst);
-        let source_id = format!("{search_turn_id}:1");
+        let source_path = format!("{source_path_prefix}1");
         let invalid_report = serde_json::json!({
-            "answer": format!("Verified claim [sc:{source_id}]"),
+            "answer": format!("Verified claim [{source_path}]"),
             "sources": [{
-                "id": source_id,
+                "path": source_path,
                 "url": "https://8.8.8.8/source",
                 "title": "Verified"
             }]
@@ -227,12 +228,12 @@ async fn local_backend_repairs_schema_without_native_structured_outputs() {
     assert_eq!(output.completion, SearchCompletion::Complete);
     assert!(output.report.limitations.is_empty());
     assert_eq!(
-        output.report.sources[0].id,
-        "abcdefghijklmnopqrstuvwxyzab:1"
+        output.report.sources[0].path,
+        "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1"
     );
     assert_eq!(
         output.report.answer,
-        "Verified claim [sc:abcdefghijklmnopqrstuvwxyzab:1]"
+        "Verified claim [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]"
     );
     assert_eq!(output.report.sources[0].url, "https://8.8.8.8/source");
 }

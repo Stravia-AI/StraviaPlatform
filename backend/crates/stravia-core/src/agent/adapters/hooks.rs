@@ -66,8 +66,13 @@ impl HookSession for AgentDefinitionHookSession {
                 if self.expose_turn_ids
                     && result.tool_id.as_str().starts_with("agent-definition:") =>
             {
-                if let Some(turn_id) = result.content.get("turn_id").and_then(Value::as_str) {
-                    self.turn_ids.push(turn_id.to_owned());
+                if let Some(turn_id) = result
+                    .content
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .and_then(|path| AgentTurnId::from_reference(path).ok())
+                {
+                    self.turn_ids.push(turn_id.as_str().to_owned());
                 }
                 Ok(ActionBatch::default())
             }
@@ -76,11 +81,12 @@ impl HookSession for AgentDefinitionHookSession {
                 response
                     .items
                     .extend(self.turn_ids.drain(..).map(|turn_id| {
+                        let path = AgentTurnId::new(&turn_id).reference();
                         stravia_runtime_contract::protocol::ir::AiItem::unknown(serde_json::json!({
                             "id": turn_id,
                             "type": "stravia:agent_result",
                             "status": "completed",
-                            "turn_id": turn_id,
+                            "path": path,
                         }))
                     }));
                 Ok(ActionBatch::one(HookAction::PatchResponse(

@@ -183,7 +183,7 @@ fn codex_payload(input: &SearchBackendInput, model: &str) -> Value {
     }
     let context = json!({
         "ancestors": input.ancestors.iter().map(|ancestor| json!({
-            "turn_id": ancestor.turn_id,
+            "path": ancestor.turn_id.reference(),
             "query": ancestor.query,
             "completion": ancestor.completion,
             "report": ancestor.report,
@@ -426,10 +426,10 @@ fn normalize_response(
                     "Codex Search returned too many cited sources",
                 ));
             }
-            let id = format!("{}:{}", turn_id, sources.len() + 1);
-            source_ids.insert(annotation.url.clone(), id.clone());
+            let path = format!("{}/sources/{}", turn_id.reference(), sources.len() + 1);
+            source_ids.insert(annotation.url.clone(), path.clone());
             sources.push(SearchSource {
-                id,
+                path,
                 url: annotation.url.clone(),
                 title: annotation.title.clone(),
             });
@@ -440,7 +440,7 @@ fn normalize_response(
         .map(|annotation| {
             (
                 annotation.end,
-                format!(" [sc:{}]", source_ids[&annotation.url]),
+                format!(" [{}]", source_ids[&annotation.url]),
             )
         })
         .collect::<Vec<_>>();
@@ -543,13 +543,16 @@ mod tests {
         .expect("normalized report");
 
         assert_eq!(report.sources.len(), 1);
-        assert_eq!(report.sources[0].id, "abcdefghijklmnopqrstuvwxyzab:1");
+        assert_eq!(
+            report.sources[0].path,
+            "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1"
+        );
         assert_eq!(report.sources[0].url, "https://8.8.8.8/source");
         assert!(!report.answer.contains("consulted"));
         assert_eq!(
             report
                 .answer
-                .matches("[sc:abcdefghijklmnopqrstuvwxyzab:1]")
+                .matches("[stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]")
                 .count(),
             2
         );
@@ -638,7 +641,7 @@ mod tests {
 
         assert_eq!(
             report.answer,
-            "研究 [sc:bcdefghijklmnopqrstuvwxyzabc:1]结论"
+            "研究 [stravia://turns/bcdefghijklmnopqrstuvwxyzabc/sources/1]结论"
         );
     }
 }

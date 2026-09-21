@@ -18,11 +18,11 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ```json
 {
-  "path": "search://question%20or%20topic?allowed_domains=example.com&previous_turn_id=abcdefghijklmnopqrstuvwxyzab"
+  "path": "search://question%20or%20topic?allowed_domains=example.com&previous_path=stravia%3A%2F%2Fturns%2Fabcdefghijklmnopqrstuvwxyzab"
 }
 ```
 
-所有读取入口只接受必填字符串 `path`，禁止额外顶层字段。搜索文本严格 percent-decode 一次，文字中的 `+` 不变；首个未编码 `?` 后按 form query 解码。`previous_turn_id` 是单值续接参数，`allowed_domains` 可重复，原始列表最多 20 项，规范化后去重。新根省略允许域名即无限制，续接省略则继承父策略，显式非空列表替换；不支持空列表清空，改为启动新根。未知、重复单值和无效编码明确拒绝。
+所有读取入口只接受必填字符串 `path`，禁止额外顶层字段。搜索文本严格 percent-decode 一次，文字中的 `+` 不变；首个未编码 `?` 后按 form query 解码。`previous_path` 是单值续接参数，值必须是精确的 `stravia://turns/<turn-id>`，`allowed_domains` 可重复，原始列表最多 20 项，规范化后去重。新根省略允许域名即无限制，续接省略则继承父策略，显式非空列表替换；不支持空列表清空，改为启动新根。未知、重复单值和无效编码明确拒绝。
 
 `blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
 
@@ -30,13 +30,13 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ```json
 {
-  "turn_id": "abcdefghijklmnopqrstuvwxyzab",
+  "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
   "completion": "complete",
   "report": {
-    "answer": "Verified answer [sc:abcdefghijklmnopqrstuvwxyzab:1]",
+    "answer": "Verified answer [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]",
     "sources": [
       {
-        "id": "abcdefghijklmnopqrstuvwxyzab:1",
+        "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1",
         "url": "https://example.com/source",
         "title": "Source title"
       }
@@ -49,8 +49,8 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 `SearchReportValidator` 保证：
 
 - answer、sources、limitations 满足大小和数量边界；
-- 每个 source ID 为当前完整 `SearchTurnId`、冒号和十进制 ordinal（`{turn_id}:{ordinal}`）；
-- answer 以 `[sc:{turn_id}:{ordinal}]` 引用 source，且 marker 与 sources 一一对应；
+- 每个 source path 为当前 Turn URI 加 `/sources/` 和十进制 ordinal（`stravia://turns/<turn-id>/sources/<ordinal>`）；
+- answer 以 `[stravia://turns/<turn-id>/sources/<ordinal>]` 引用 source，且 marker 与 sources 一一对应；
 - URL 是规范化后的公网 HTTP(S) URL；
 - source 满足本次研究已解析的允许域名策略，越界报 `source_outside_allowed_domains`，不删来源后伪装完整报告；
 - source 必须来自当前或祖先 Turn 的已验证 evidence；
@@ -60,7 +60,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ### 统一资源读取与文本分页
 
-资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>#stravia?<options>`，源 query 不重排或重编码，平台问题不发送给源站。选项为 `question`、`raw=1`、`lines`、`download=1`、`previous_turn_id` 和平台生成的 `cursor`。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照。资源续接 ID 必须同时带媒体问题；HTML／文本不接受媒体续接。旧 `query://`、顶层 `url` 和 Artifact `?question=` 不再执行。
+资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>#stravia?<options>`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 query 不重排或重编码，平台问题不发送给源站。选项为 `question`、`raw=1`、`lines`、`download=1`、`previous_path` 和平台生成的 `cursor`。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照。资源续接 ID 必须同时带媒体问题；HTML／文本不接受媒体续接。旧 `query://`、顶层 `url` 和 Artifact `?question=` 不再执行。
 
 公网与所属 Artifact 按内容类型一致读取：JPEG/PNG/WebP 默认理解并提取文字；HTML 默认 Markdown，附问题只返回 `question_applied=false`；JSON/XML/text 类文件读取原文本。未知二进制返回未读取说明与下载信息，不能用下载冒充指定内容操作。显式下载不执行模型。公网默认 HTML 保留现有 Provider／渲染路径；raw 直接取得正文一次，再严格按 BOM、Content-Type charset、HTML meta、缺省 UTF-8 解码，支持既有 UTF-8、Latin1、Windows-1252、UTF-16LE/BE；未知或无效编码失败。raw 正文不加行号或提示。
 
@@ -186,7 +186,7 @@ core 保留输入修整、错误映射、准入与异步解析调度；adapter �
 
 - Admin API：配置读写、Local/Codex validation、旧字段拒绝；
 - Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；
-- Search contract：Search Report provenance、continuation、branch、28 位裸 Turn ID，以及 `{turn_id}:{ordinal}` / `[sc:{turn_id}:{ordinal}]` 的 Source 对应关系；
+- Search contract：Search Report provenance、continuation、branch、`stravia://turns/<turn-id>`，以及 `stravia://turns/<turn-id>/sources/<ordinal>` / `[stravia://turns/<turn-id>/sources/<ordinal>]` 的 Source 对应关系；
 - registry：三个 source Tool ID 不同，public composite 不进入 Agent registry，internal leaves 不进入 MCP；
 - migration：SQLite/PostgreSQL schema parity、settings 值迁移和旧 Turn 失效；
 - WebUI：Advanced Features 导航、独立页面、Codex 条件隐藏和 Local 值恢复。

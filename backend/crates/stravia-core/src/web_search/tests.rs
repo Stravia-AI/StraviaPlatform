@@ -29,9 +29,9 @@ use stravia_web_search::{
 async fn report_rejects_a_source_without_verified_evidence() {
     let turn_id = SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab");
     let report = SearchReport {
-        answer: "A claim [sc:abcdefghijklmnopqrstuvwxyzab:1]".into(),
+        answer: "A claim [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]".into(),
         sources: vec![SearchSource {
-            id: "abcdefghijklmnopqrstuvwxyzab:1".into(),
+            path: "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1".into(),
             url: "https://8.8.8.8/invented".into(),
             title: Some("Invented".into()),
         }],
@@ -67,26 +67,26 @@ async fn report_rejects_foreign_malformed_and_legacy_source_references() {
 
     for (source_id, answer) in [
         (
-            "bcdefghijklmnopqrstuvwxyzabc:1",
-            "A claim [sc:bcdefghijklmnopqrstuvwxyzabc:1]",
+            "stravia://turns/bcdefghijklmnopqrstuvwxyzabc/sources/1",
+            "A claim [stravia://turns/bcdefghijklmnopqrstuvwxyzabc/sources/1]",
         ),
         (
-            "abcdefghijklmnopqrstuvwxyzab:not-an-ordinal",
-            "A claim [sc:abcdefghijklmnopqrstuvwxyzab:not-an-ordinal]",
+            "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/not-an-ordinal",
+            "A claim [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/not-an-ordinal]",
         ),
         (
             "source-abcdefghijklmnopqrstuvwxyzab-1",
             "A claim [source-abcdefghijklmnopqrstuvwxyzab-1]",
         ),
         (
-            "abcdefghijklmnopqrstuvwxyzab:1",
-            "A claim [sc:abcdefghijklmnopqrstuvwxyzab:2]",
+            "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1",
+            "A claim [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/2]",
         ),
     ] {
         let report = SearchReport {
             answer: answer.into(),
             sources: vec![SearchSource {
-                id: source_id.into(),
+                path: source_id.into(),
                 url: "https://8.8.8.8/verified".into(),
                 title: Some("Verified".into()),
             }],
@@ -120,9 +120,9 @@ fn provenance_rejects_non_public_single_label_hosts() {
 async fn partial_report_accepts_a_localized_limitation() {
     let turn_id = SearchTurnId::new("bcdefghijklmnopqrstuvwxyzabc");
     let report = SearchReport {
-        answer: "検証済みの回答 [sc:bcdefghijklmnopqrstuvwxyzabc:1]".into(),
+        answer: "検証済みの回答 [stravia://turns/bcdefghijklmnopqrstuvwxyzabc/sources/1]".into(),
         sources: vec![SearchSource {
-            id: "bcdefghijklmnopqrstuvwxyzabc:1".into(),
+            path: "stravia://turns/bcdefghijklmnopqrstuvwxyzabc/sources/1".into(),
             url: "https://8.8.8.8/search".into(),
             title: Some("検証済み".into()),
         }],
@@ -152,9 +152,9 @@ async fn partial_report_accepts_a_localized_limitation() {
 async fn report_rejects_an_oversized_source_title() {
     let turn_id = SearchTurnId::new("cdefghijklmnopqrstuvwxyzabcd");
     let report = SearchReport {
-        answer: "A claim [sc:cdefghijklmnopqrstuvwxyzabcd:1]".into(),
+        answer: "A claim [stravia://turns/cdefghijklmnopqrstuvwxyzabcd/sources/1]".into(),
         sources: vec![SearchSource {
-            id: "cdefghijklmnopqrstuvwxyzabcd:1".into(),
+            path: "stravia://turns/cdefghijklmnopqrstuvwxyzabcd/sources/1".into(),
             url: "https://8.8.8.8/search".into(),
             title: Some("x".repeat(2 * 1024 + 1)),
         }],
@@ -184,9 +184,9 @@ async fn report_rejects_an_oversized_source_title() {
 async fn report_rejects_a_verified_source_outside_the_allowed_domains() {
     let turn_id = SearchTurnId::new("defghijklmnopqrstuvwxyzabcde");
     let report = SearchReport {
-        answer: "A claim [sc:defghijklmnopqrstuvwxyzabcde:1]".into(),
+        answer: "A claim [stravia://turns/defghijklmnopqrstuvwxyzabcde/sources/1]".into(),
         sources: vec![SearchSource {
-            id: "defghijklmnopqrstuvwxyzabcde:1".into(),
+            path: "stravia://turns/defghijklmnopqrstuvwxyzabcde/sources/1".into(),
             url: "https://8.8.8.8/search".into(),
             title: Some("Verified".into()),
         }],
@@ -216,9 +216,9 @@ async fn report_rejects_a_verified_source_outside_the_allowed_domains() {
 async fn report_accepts_verified_sources_matching_the_allowed_domains() {
     let turn_id = SearchTurnId::new("efghijklmnopqrstuvwxyzabcdef");
     let report = SearchReport {
-        answer: "A claim [sc:efghijklmnopqrstuvwxyzabcdef:1]".into(),
+        answer: "A claim [stravia://turns/efghijklmnopqrstuvwxyzabcdef/sources/1]".into(),
         sources: vec![SearchSource {
-            id: "efghijklmnopqrstuvwxyzabcdef:1".into(),
+            path: "stravia://turns/efghijklmnopqrstuvwxyzabcdef/sources/1".into(),
             url: "https://8.8.8.8/search".into(),
             title: Some("Verified".into()),
         }],
@@ -291,7 +291,7 @@ impl SearchBackend for CountingBackend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inputs.lock().push(input.clone());
         tokio::time::sleep(self.delay).await;
-        let id = format!("{}:1", input.turn_id);
+        let path = format!("stravia://turns/{}/sources/1", input.turn_id);
         // The fixture backend searches within the resolved policy, so its
         // reports must validate under the runner's allowed-domains check.
         let source_url = match input.policy.allowed_domains.first() {
@@ -302,9 +302,9 @@ impl SearchBackend for CountingBackend {
             completion: SearchCompletion::Complete,
             partial_cause: None,
             report: SearchReport {
-                answer: format!("Verified claim [sc:{id}]"),
+                answer: format!("Verified claim [{path}]"),
                 sources: vec![SearchSource {
-                    id,
+                    path,
                     url: source_url.clone(),
                     title: Some("Verified".into()),
                 }],
@@ -665,14 +665,14 @@ impl SearchBackend for RelaxingBackend {
         } else {
             "https://8.8.8.8/search".to_owned()
         };
-        let id = format!("{}:1", input.turn_id);
+        let path = format!("stravia://turns/{}/sources/1", input.turn_id);
         Ok(BackendOutput {
             completion: SearchCompletion::Complete,
             partial_cause: None,
             report: SearchReport {
-                answer: format!("Verified claim [sc:{id}]"),
+                answer: format!("Verified claim [{path}]"),
                 sources: vec![SearchSource {
-                    id,
+                    path,
                     url: source_url.clone(),
                     title: Some("Verified".into()),
                 }],

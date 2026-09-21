@@ -183,7 +183,7 @@ async fn run_agent_call(
         match event {
             AgentEvent::Completed(result) | AgentEvent::Partial(result) => {
                 return Ok(serde_json::json!({
-                    "turn_id": result.turn_id.as_str(),
+                    "path": result.turn_id.reference(),
                     "completion": result.completion,
                     "output": result.output,
                 }));
@@ -210,7 +210,7 @@ fn parse_agent_call_input(arguments: Value) -> Result<ParsedAgentCallInput, supe
     })?;
     if object
         .keys()
-        .any(|key| !matches!(key.as_str(), "prompt" | "previous_turn_id" | "artifacts"))
+        .any(|key| !matches!(key.as_str(), "prompt" | "previous_path" | "artifacts"))
     {
         return Err(super::AgentRunError::new(
             "invalid_agent_input",
@@ -225,7 +225,7 @@ fn parse_agent_call_input(arguments: Value) -> Result<ParsedAgentCallInput, supe
         .ok_or_else(|| {
             super::AgentRunError::new("invalid_agent_input", "prompt must be a non-empty string")
         })?;
-    let previous_turn_id = match object.get("previous_turn_id") {
+    let previous_path = match object.get("previous_path") {
         None => None,
         Some(value) => Some(
             value
@@ -234,7 +234,7 @@ fn parse_agent_call_input(arguments: Value) -> Result<ParsedAgentCallInput, supe
                 .ok_or_else(|| {
                     super::AgentRunError::new(
                         "invalid_agent_input",
-                        "previous_turn_id must be a non-empty string",
+                        "previous_path must be a non-empty string",
                     )
                 })?,
         ),
@@ -262,14 +262,22 @@ fn parse_agent_call_input(arguments: Value) -> Result<ParsedAgentCallInput, supe
         prompt,
         MAX_AGENT_CALL_PROMPT_BYTES,
     )?;
-    if let Some(previous_turn_id) = previous_turn_id {
+    let parent_turn_id = if let Some(previous_path) = previous_path {
         validate_agent_call_string(
             &mut total_bytes,
-            "previous_turn_id",
-            previous_turn_id,
+            "previous_path",
+            previous_path,
             MAX_AGENT_CALL_TURN_ID_BYTES,
         )?;
-    }
+        Some(AgentTurnId::from_reference(previous_path).map_err(|_| {
+            super::AgentRunError::new(
+                "invalid_agent_input",
+                "previous_path must be an exact Turn Reference",
+            )
+        })?)
+    } else {
+        None
+    };
 
     let mut artifact_ids = Vec::with_capacity(artifact_values.len());
     for (index, artifact) in artifact_values.iter().enumerate() {
@@ -279,38 +287,46 @@ fn parse_agent_call_input(arguments: Value) -> Result<ParsedAgentCallInput, supe
                 format!("artifacts[{index}] must be an object"),
             )
         })?;
-        if artifact.keys().any(|key| key.as_str() != "artifact_id") {
+        if artifact.keys().any(|key| key.as_str() != "path") {
             return Err(super::AgentRunError::new(
                 "invalid_agent_input",
                 format!("artifacts[{index}] contains an unsupported field"),
             ));
         }
-        let artifact_id = artifact
-            .get("artifact_id")
+        let path = artifact
+            .get("path")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
                 super::AgentRunError::new(
                     "invalid_agent_input",
-                    format!("artifacts[{index}].artifact_id must be a non-empty string"),
+                    format!("artifacts[{index}].path must be a non-empty string"),
                 )
             })?;
         validate_agent_call_string(
             &mut total_bytes,
-            &format!("artifacts[{index}].artifact_id"),
-            artifact_id,
+            &format!("artifacts[{index}].path"),
+            path,
             MAX_AGENT_CALL_ARTIFACT_ID_BYTES,
         )?;
-        artifact_ids.push(artifact_id);
+        if path.contains('?') || path.contains('#') {
+            return Err(super::AgentRunError::new(
+                "invalid_agent_input",
+                format!("artifacts[{index}].path must be a plain Artifact Reference"),
+            ));
+        }
+        artifact_ids.push(super::ArtifactId::from_reference(path).map_err(|_| {
+            super::AgentRunError::new(
+                "invalid_agent_input",
+                format!("artifacts[{index}].path must be an exact Artifact Reference"),
+            )
+        })?);
     }
 
     Ok(ParsedAgentCallInput {
         prompt: prompt.to_owned(),
-        parent_turn_id: previous_turn_id.map(AgentTurnId::new),
-        artifacts: artifact_ids
-            .into_iter()
-            .map(super::ArtifactId::new)
-            .collect(),
+        parent_turn_id,
+        artifacts: artifact_ids,
     })
 }
 
@@ -347,9 +363,9 @@ fn agent_call_input_schema() -> Value {
                 "minLength": 1,
                 "maxLength": MAX_AGENT_CALL_PROMPT_BYTES
             },
-            "previous_turn_id": {
+            "previous_path": {
                 "type": "string",
-                "minLength": 1,
+                "pattern": "^stravia://turns/[a-z]{28}$",
                 "maxLength": MAX_AGENT_CALL_TURN_ID_BYTES
             },
             "artifacts": {
@@ -358,13 +374,13 @@ fn agent_call_input_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "artifact_id": {
+                        "path": {
                             "type": "string",
-                            "minLength": 1,
+                            "pattern": "^stravia://artifacts/[a-z]{55}$",
                             "maxLength": MAX_AGENT_CALL_ARTIFACT_ID_BYTES
                         }
                     },
-                    "required": ["artifact_id"],
+                    "required": ["path"],
                     "additionalProperties": false
                 }
             }
@@ -378,20 +394,16 @@ fn agent_call_input_schema() -> Value {
 mod tests {
     use super::*;
 
-    fn arguments(
-        prompt: String,
-        previous_turn_id: Option<String>,
-        artifacts: Vec<String>,
-    ) -> Value {
+    fn arguments(prompt: String, previous_path: Option<String>, artifacts: Vec<String>) -> Value {
         let mut value = serde_json::json!({
             "prompt": prompt,
             "artifacts": artifacts
                 .into_iter()
-                .map(|artifact_id| serde_json::json!({"artifact_id": artifact_id}))
+                .map(|path| serde_json::json!({"path": path}))
                 .collect::<Vec<_>>()
         });
-        if let Some(previous_turn_id) = previous_turn_id {
-            value["previous_turn_id"] = Value::String(previous_turn_id);
+        if let Some(previous_path) = previous_path {
+            value["previous_path"] = Value::String(previous_path);
         }
         value
     }
@@ -405,7 +417,7 @@ mod tests {
             MAX_AGENT_CALL_PROMPT_BYTES
         );
         assert_eq!(
-            properties["previous_turn_id"]["maxLength"],
+            properties["previous_path"]["maxLength"],
             MAX_AGENT_CALL_TURN_ID_BYTES
         );
         assert_eq!(
@@ -413,9 +425,30 @@ mod tests {
             MAX_AGENT_CALL_ARTIFACTS
         );
         assert_eq!(
-            properties["artifacts"]["items"]["properties"]["artifact_id"]["maxLength"],
+            properties["artifacts"]["items"]["properties"]["path"]["maxLength"],
             MAX_AGENT_CALL_ARTIFACT_ID_BYTES
         );
+    }
+
+    #[test]
+    fn parse_accepts_exact_paths_and_rejects_legacy_identity_fields() {
+        let artifact_id = "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN);
+        let turn_id = "b".repeat(stravia_runtime_contract::identifier::ID_LEN);
+        let parsed = parse_agent_call_input(serde_json::json!({
+            "prompt": "question",
+            "previous_path": format!("stravia://turns/{turn_id}"),
+            "artifacts": [{"path": format!("stravia://artifacts/{artifact_id}")}],
+        }))
+        .expect("exact resource paths");
+        assert_eq!(parsed.parent_turn_id.unwrap().as_str(), turn_id);
+        assert_eq!(parsed.artifacts[0].as_str(), artifact_id);
+
+        for legacy in [
+            serde_json::json!({"prompt":"q","previous_turn_id":turn_id,"artifacts":[]}),
+            serde_json::json!({"prompt":"q","artifacts":[{"artifact_id":artifact_id}]}),
+        ] {
+            assert!(parse_agent_call_input(legacy).is_err());
+        }
     }
 
     #[test]
@@ -431,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_oversized_previous_turn_id() {
+    fn parse_rejects_oversized_previous_path() {
         let error = parse_agent_call_input(arguments(
             "question".into(),
             Some("t".repeat(MAX_AGENT_CALL_TURN_ID_BYTES + 1)),
@@ -470,10 +503,18 @@ mod tests {
 
     #[test]
     fn parse_rejects_prompt_and_ids_over_total_byte_limit() {
+        let previous_path = format!(
+            "stravia://turns/{}",
+            "t".repeat(stravia_runtime_contract::identifier::ID_LEN)
+        );
+        let artifact_path = format!(
+            "stravia://artifacts/{}",
+            "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN)
+        );
         let error = parse_agent_call_input(arguments(
-            "x".repeat(MAX_AGENT_CALL_INPUT_BYTES - MAX_AGENT_CALL_TURN_ID_BYTES),
-            Some("t".repeat(MAX_AGENT_CALL_TURN_ID_BYTES)),
-            vec!["artifact".to_string()],
+            "x".repeat(MAX_AGENT_CALL_INPUT_BYTES - previous_path.len()),
+            Some(previous_path),
+            vec![artifact_path],
         ))
         .err()
         .expect("input byte budget must be enforced");

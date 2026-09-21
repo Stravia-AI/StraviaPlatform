@@ -29,11 +29,101 @@ impl TurnNodeId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn from_reference(reference: &str) -> Result<Self, TurnReferenceError> {
+        let id = reference
+            .strip_prefix("stravia://turns/")
+            .filter(|id| crate::identifier::valid_id(id))
+            .ok_or(TurnReferenceError)?;
+        Ok(Self::new(id))
+    }
+
+    pub fn reference(&self) -> String {
+        format!("stravia://turns/{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+#[error("invalid Turn Reference")]
+pub struct TurnReferenceError;
+
+pub mod serde_path {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::TurnNodeId;
+
+    pub fn serialize<S>(id: &TurnNodeId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&id.reference())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<TurnNodeId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = String::deserialize(deserializer)?;
+        TurnNodeId::from_reference(&path).map_err(serde::de::Error::custom)
+    }
+}
+
+pub mod serde_option_path {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::TurnNodeId;
+
+    pub fn serialize<S>(id: &Option<TurnNodeId>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match id {
+            Some(id) => serializer.serialize_some(&id.reference()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<TurnNodeId>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = Option::<String>::deserialize(deserializer)?;
+        path.map(|path| TurnNodeId::from_reference(&path).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 impl std::fmt::Display for TurnNodeId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn turn_reference_uses_exact_stravia_uri() {
+        let id = "a".repeat(crate::identifier::ID_LEN);
+        let path = format!("stravia://turns/{id}");
+        assert_eq!(TurnNodeId::from_reference(&path).unwrap().as_str(), id);
+        assert_eq!(TurnNodeId::new(&id).reference(), path);
+
+        for invalid in [
+            id.clone(),
+            format!("stravia://artifacts/{id}"),
+            format!("stravia://turns/{id}/sources/1"),
+            format!("stravia://turns/{id}/extra"),
+            format!("stravia://turns/{id}?x=1"),
+            format!("stravia://turns/{id}#fragment"),
+            format!("stravia://turns/{}", "A".repeat(crate::identifier::ID_LEN)),
+        ] {
+            assert!(
+                TurnNodeId::from_reference(&invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }
 

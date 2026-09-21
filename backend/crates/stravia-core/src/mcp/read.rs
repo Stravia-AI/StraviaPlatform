@@ -31,9 +31,9 @@ use tokio::io::AsyncReadExt;
 
 pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
-const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned sa:<artifact-id> path. Add ?download=1 to obtain download information without model execution.";
-const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_turn_id are search query parameters. Public HTTP(S) resource options use #stravia?.";
-const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_turn_id for explicit continuation.";
+const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned stravia://artifacts/<artifact-id> path. Add ?download=1 to obtain download information without model execution.";
+const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_path are search query parameters. Public HTTP(S) resource options use #stravia?.";
+const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_path for explicit continuation.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -218,11 +218,11 @@ impl ReadTool {
                     .await?,
                     "Networking is unavailable",
                 )?;
-                return self.dispatch(StraviaReadDomain::Query, json!({"query":search.query,"previous_turn_id":search.previous_turn_id,"allowed_domains":search.allowed_domains}), context).await;
+                return self.dispatch(StraviaReadDomain::Query, json!({"query":search.query,"previous_path":search.previous_path,"allowed_domains":search.allowed_domains}), context).await;
             }
             ReadTarget::Resource(resource) => resource,
         };
-        if resource_path.url.starts_with("sa:") {
+        if resource_path.url.starts_with("stravia://artifacts/") {
             let id = ArtifactId::from_reference(&resource_path.url).map_err(artifact_error)?;
             return self.read_artifact(id, resource_path.options, context).await;
         }
@@ -247,7 +247,7 @@ impl ReadTool {
                     "Networking is unavailable in this run",
                 )?;
                 require(
-                    resource_path.options.previous_turn_id.is_none(),
+                    resource_path.options.previous_path.is_none(),
                     "HTML does not accept media continuation",
                 )?;
                 let result = if self.internal {
@@ -343,7 +343,7 @@ impl ReadTool {
         let artifact = reader.artifact.clone();
         if base_mime(&artifact.mime_type) == text::SNAPSHOT_MIME {
             require(
-                options.previous_turn_id.is_none(),
+                options.previous_path.is_none(),
                 "Text snapshots do not accept media continuation",
             )?;
             if options.download {
@@ -489,7 +489,7 @@ impl ReadTool {
         }
         if !options.download {
             require(
-                options.previous_turn_id.is_none(),
+                options.previous_path.is_none(),
                 "Text and binary files do not accept media continuation",
             )?;
             let base = source_url
@@ -554,7 +554,7 @@ impl ReadTool {
             options.question.unwrap_or_else(|| {
                 "Describe the image content and extract all readable text.".into()
             }),
-            options.previous_turn_id,
+            options.previous_path,
             context,
         )
         .await
@@ -579,11 +579,11 @@ impl ReadTool {
         require(options.cursor.is_none(), "Cursor requires a text snapshot")?;
         if let Some(question) = options.question {
             return self
-                .understand(artifact.id, question, options.previous_turn_id, context)
+                .understand(artifact.id, question, options.previous_path, context)
                 .await;
         }
         require(
-            options.previous_turn_id.is_none(),
+            options.previous_path.is_none(),
             "Media continuation requires a question",
         )?;
         let derivatives = crate::media::runtime(&self.gateway)
@@ -642,7 +642,7 @@ impl ReadTool {
         &self,
         id: ArtifactId,
         question: String,
-        previous_turn_id: Option<String>,
+        previous_path: Option<String>,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         require(
@@ -675,32 +675,19 @@ impl ReadTool {
                 .map_err(artifact_error)
         })
         .await??;
-        let artifact_reference = reader.artifact.reference();
         // Media preprocessing acquires its own guard for the actual byte read.
         // Do not hold a second store connection while awaiting that execution.
         drop(reader);
-        let mut output = self.dispatch(StraviaReadDomain::Media, json!({"prompt":question,"artifacts":[{"artifact_id":id.as_str()}],"previous_turn_id":previous_turn_id}), context).await?;
-        if !output.is_error {
-            let reference = json!(artifact_reference);
-            output
-                .metadata
-                .insert("artifact_reference".into(), reference.clone());
-            if let Some(media) = output
-                .metadata
-                .get_mut("stravia_media")
-                .and_then(Value::as_object_mut)
-            {
-                media.insert("artifact_reference".into(), reference.clone());
-            }
-            for block in &mut output.content {
-                if let ContentBlock::Unknown { raw } = block
-                    && let Some(result) = raw.as_object_mut()
-                {
-                    result.insert("artifact_reference".into(), reference.clone());
-                }
-            }
-        }
-        Ok(output)
+        self.dispatch(
+            StraviaReadDomain::Media,
+            json!({
+                "prompt": question,
+                "artifacts": [{"path": id.reference()}],
+                "previous_path": previous_path,
+            }),
+            context,
+        )
+        .await
     }
 }
 
@@ -809,9 +796,14 @@ async fn download(
         .download(principal, id, retention(gateway).await?, &settings)
         .await
         .map_err(artifact_error)?;
-    Ok(output(
-        json!({"artifact_reference":grant.artifact.reference(),"filename":filename.unwrap_or_else(||id.as_str().to_owned()),"artifact":grant.artifact,"download_url":grant.url,"expires_at":grant.expires_at}),
-    ))
+    Ok(output(json!({
+        "path": grant.artifact.reference(),
+        "mime_type": grant.artifact.mime_type,
+        "size": grant.artifact.size,
+        "filename": filename.unwrap_or_else(|| "artifact".to_owned()),
+        "download_url": grant.url,
+        "expires_at": grant.expires_at,
+    })))
 }
 fn output(value: Value) -> PlatformToolOutput {
     PlatformToolOutput {
@@ -940,13 +932,10 @@ impl McpTool for ReadTool {
         };
         match self.read(arguments, context).await {
             Ok(result) => {
-                let (mut value, _) =
+                let (value, _) =
                     crate::hook::tool::blocks_to_value(result.content).map_err(|error| {
                         McpToolError::new("result_encoding_failed", error.to_string())
                     })?;
-                if let Some(reference) = result.metadata.get("artifact_reference") {
-                    value["artifact_reference"] = reference.clone();
-                }
                 Ok(if result.is_error {
                     McpToolOutput::execution_error(value)
                 } else {

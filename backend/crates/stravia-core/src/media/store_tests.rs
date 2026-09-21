@@ -507,7 +507,7 @@ mod tests {
         let manifest = serde_json::json!({
             "version": 1,
             "format": "docx",
-            "markdown_artifact": format!("sa:{}", markdown.id.as_str()),
+            "markdown_artifact": markdown.id.reference(),
             "images": [{
                 "artifact_id": embedded.id.as_str(),
                 "ordinal": 1,

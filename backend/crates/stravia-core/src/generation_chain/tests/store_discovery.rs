@@ -624,7 +624,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Image {
                 source: MediaSource::FileId {
-                    file_id: format!("sa:{}", artifact_id.as_str()),
+                    file_id: format!("stravia://artifacts/{}", artifact_id.as_str()),
                     detail: None,
                 },
                 detail: None,
@@ -720,7 +720,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         role: Role::User,
         content: MessageContent::Blocks(vec![ContentBlock::Image {
             source: MediaSource::FileId {
-                file_id: format!("sa:{}", artifact_id.as_str()),
+                file_id: format!("stravia://artifacts/{}", artifact_id.as_str()),
                 detail: None,
             },
             detail: None,
@@ -836,12 +836,20 @@ async fn previous_response_materializes_history_and_supports_branching() {
     let owner = principal("owner");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    response.items = vec![AiItem::unknown(serde_json::json!({
-        "type": "stravia:media_result",
-        "turn_id": "aturn_media",
-        "completion": "complete"
-    }))];
-    response.trusted_media_turn_ids = vec!["aturn_media".into()];
+    response.items = vec![AiItem::function_call_output(
+        "media-call",
+        serde_json::json!({
+            "path": "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "completion": "complete",
+            "artifacts": [],
+            "report": {
+                "answer": "description",
+                "artifacts": [],
+                "limitations": []
+            }
+        }),
+    )];
+    response.trusted_media_turn_ids = vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()];
     store
         .save(GenerationChainCommit {
             principal: owner.clone(),
@@ -869,7 +877,7 @@ async fn previous_response_materializes_history_and_supports_branching() {
         assert_eq!(active.parent_id.as_deref(), Some("resp_root"));
         assert_eq!(
             active.media_turn_messages,
-            vec![(1, vec!["aturn_media".into()])]
+            vec![(1, vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()])]
         );
         assert_eq!(request.items.len(), 3);
         assert_eq!(request.items[2].content.to_text(), follow_up);

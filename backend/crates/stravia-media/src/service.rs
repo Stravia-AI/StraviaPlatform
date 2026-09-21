@@ -8,6 +8,7 @@ use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::agent::{AgentDefinitionId, AgentEvent, AgentInput};
 
 use super::store::MediaDerivativeStore;
+use super::types::MediaArtifactReference;
 use super::{
     MEDIA_DEFINITION_ID, MediaInputPreprocessor, MediaPreprocessError, MediaReport,
     MediaUnderstandingInput, MediaUnderstandingResult,
@@ -165,8 +166,8 @@ impl MediaUnderstandingService {
             "task": input.prompt,
             "media": media,
             "report_contract": {
-                "marker_format": "[sa:<full ArtifactId>]",
-                "source_artifact_ids_only": true,
+                "marker_format": "[stravia://artifacts/<artifact-id>]",
+                "source_artifact_paths_only": true,
             }
         })
         .to_string();
@@ -199,6 +200,10 @@ impl MediaUnderstandingService {
                     return Ok(MediaUnderstandingResult {
                         turn_id: result.turn_id,
                         completion: result.completion,
+                        artifacts: source_ids
+                            .into_iter()
+                            .map(|artifact_id| MediaArtifactReference { artifact_id })
+                            .collect(),
                         report,
                     });
                 }
@@ -294,7 +299,7 @@ fn media_attachments(
         match item {
             PreparedMedia::Image(image) => {
                 media.push(serde_json::json!({
-                    "artifact_id": image.source.id,
+                    "path": image.source.id.reference(),
                     "ordinal": ordinal,
                     "kind": "image",
                 }));
@@ -311,7 +316,7 @@ fn media_attachments(
                         .push("Document text was truncated to fit the prompt budget".to_owned());
                 }
                 let mut entry = serde_json::json!({
-                    "artifact_id": document.source.id,
+                    "path": document.source.id.reference(),
                     "ordinal": ordinal,
                     "kind": "document",
                     "format": document.format,
@@ -324,7 +329,7 @@ fn media_attachments(
                 for image in &document.images {
                     ordinal += 1;
                     media.push(serde_json::json!({
-                        "artifact_id": image.artifact_id,
+                        "path": image.artifact_id.reference(),
                         "ordinal": ordinal,
                         "kind": "image",
                     }));
@@ -519,9 +524,12 @@ mod tests {
         assert_eq!(
             media
                 .iter()
-                .map(|entry| entry["artifact_id"].as_str())
+                .map(|entry| entry["path"].as_str())
                 .collect::<Vec<_>>(),
-            [Some("source-a"), Some("source-c")]
+            [
+                Some("stravia://artifacts/source-a"),
+                Some("stravia://artifacts/source-c"),
+            ]
         );
         assert_eq!(
             media
@@ -546,9 +554,13 @@ mod tests {
         assert_eq!(
             media
                 .iter()
-                .map(|entry| entry["artifact_id"].as_str())
+                .map(|entry| entry["path"].as_str())
                 .collect::<Vec<_>>(),
-            [Some("source-a"), Some("source-b"), Some("source-c")]
+            [
+                Some("stravia://artifacts/source-a"),
+                Some("stravia://artifacts/source-b"),
+                Some("stravia://artifacts/source-c"),
+            ]
         );
         assert_eq!(appended, vec![ArtifactId::new("fresh")]);
     }
@@ -599,7 +611,7 @@ mod tests {
         let (media, appended, limitations) = media_attachments(
             &[prepared_document(
                 "doc-a",
-                "# Report\n\n![p](sa:emb-1)".into(),
+                "# Report\n\n![p](stravia://artifacts/emb-1)".into(),
                 vec![("emb-1", true), ("emb-2", false)],
             )],
             &[],
@@ -611,14 +623,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some("document"), Some("image"), Some("image")]
         );
-        assert_eq!(media[0]["artifact_id"], "doc-a");
+        assert_eq!(media[0]["path"], "stravia://artifacts/doc-a");
         assert_eq!(media[0]["format"], "docx");
-        assert_eq!(media[0]["text"], "# Report\n\n![p](sa:emb-1)");
+        assert_eq!(
+            media[0]["text"],
+            "# Report\n\n![p](stravia://artifacts/emb-1)"
+        );
         // Embedded images follow their document in order; only the normalized
         // one is physically attached.
-        assert_eq!(media[1]["artifact_id"], "emb-1");
+        assert_eq!(media[1]["path"], "stravia://artifacts/emb-1");
         assert_eq!(media[1]["ordinal"], 2);
-        assert_eq!(media[2]["artifact_id"], "emb-2");
+        assert_eq!(media[2]["path"], "stravia://artifacts/emb-2");
         assert_eq!(appended, vec![ArtifactId::new("emb-1")]);
         assert!(limitations.is_empty());
     }

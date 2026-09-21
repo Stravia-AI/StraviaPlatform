@@ -218,6 +218,8 @@ fn stabilize_media_generation_chain(
     if plan.mode != MediaRoutingMode::Bridge {
         return true;
     }
+    // Hook Request operates on the ingress delta. Historical Generation Chain items
+    // are materialized only after hooks, so compare the corresponding client shape.
     let client_delta = generation
         .write
         .as_ref()
@@ -243,26 +245,44 @@ fn stabilize_media_generation_chain(
     if image_count != plan.source_artifact_ids.len() {
         return false;
     }
-    plan.source_artifact_ids.iter().all(|source_id| {
-        let identity = format!("[sm:sa:{source_id} ");
-        rewritten
-            .items
-            .iter()
-            .filter_map(|message| match &message.content {
-                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
-                    Some(blocks)
-                }
-                _ => None,
-            })
-            .flatten()
-            .any(|block| {
-                matches!(
-                    block,
-                    stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                        if text.starts_with(&identity)
-                )
-            })
-    })
+    // Hidden tool legs append Assistant/Tool items after the rewritten ingress
+    // delta. The original client items must remain an exact positional prefix.
+    if rewritten.items.len() < client_delta.items.len() {
+        return false;
+    }
+    let mut sources = plan.source_artifact_ids.iter().enumerate();
+    for (client_message, rewritten_message) in client_delta.items.iter().zip(&rewritten.items) {
+        let (
+            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(client_blocks),
+            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(rewritten_blocks),
+        ) = (&client_message.content, &rewritten_message.content)
+        else {
+            continue;
+        };
+        if client_blocks.len() != rewritten_blocks.len() {
+            return false;
+        }
+        for (client_block, rewritten_block) in client_blocks.iter().zip(rewritten_blocks) {
+            if !matches!(
+                client_block,
+                stravia_runtime_contract::protocol::ir::ContentBlock::Image { .. }
+            ) {
+                continue;
+            }
+            let Some((index, source_id)) = sources.next() else {
+                return false;
+            };
+            let expected = format!("Image {}: [stravia://artifacts/{source_id}]", index + 1);
+            if !matches!(
+                rewritten_block,
+                stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
+                    if text == &expected
+            ) {
+                return false;
+            }
+        }
+    }
+    sources.next().is_none()
 }
 
 pub(super) async fn orchestrate(

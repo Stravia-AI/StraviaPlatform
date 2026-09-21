@@ -325,14 +325,21 @@ async fn normalize_source(
 ) -> Result<(), ArtifactError> {
     let (mime, bytes) = match source {
         MediaSource::Url(url) => {
-            if let Ok(id) = ArtifactId::from_reference(url) {
+            if url.starts_with("stravia://artifacts/") {
+                if url.contains(['?', '#']) {
+                    return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
+                }
+                let id = ArtifactId::from_reference(url)?;
                 store(gateway)?
                     .extend_retention(principal, &id, retention)
                     .await?;
-                *url = format!("sa:{}", id.as_str());
+                *url = id.reference();
                 return Ok(());
             }
-            if url.starts_with("sa:") || url.starts_with("https://stravia/") {
+            if url.starts_with("stravia://")
+                || url.starts_with("sa:")
+                || url.starts_with("https://stravia/artifact/")
+            {
                 return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
             }
             fetch_public_file(url, cancellation)
@@ -487,6 +494,9 @@ async fn materialize_source(
     let MediaSource::Url(reference) = source else {
         return Ok(());
     };
+    if reference.contains(['?', '#']) {
+        return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
+    }
     let id = ArtifactId::from_reference(reference)?;
     let (url, inline) = match protocol.protocol {
         Protocol::BedrockConverse => (false, kind == "image"),

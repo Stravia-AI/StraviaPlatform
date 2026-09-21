@@ -27,7 +27,7 @@ fn preserves_platform_owned_response_items() {
     response.items = vec![
         stravia_runtime_contract::protocol::ir::AiItem::unknown(serde_json::json!({
             "type": "stravia:agent_result",
-            "turn_id": "aturn_1",
+            "path": "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         })),
         stravia_runtime_contract::protocol::ir::AiItem::output_text("done"),
     ];
@@ -35,7 +35,10 @@ fn preserves_platform_owned_response_items() {
     let formatted = ResponsesResponseFormatter.format_response(&response);
 
     assert_eq!(formatted["output"][0]["type"], "stravia:agent_result");
-    assert_eq!(formatted["output"][0]["turn_id"], "aturn_1");
+    assert_eq!(
+        formatted["output"][0]["path"],
+        "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
     assert_eq!(formatted["output"][1]["content"][0]["text"], "done");
 }
 

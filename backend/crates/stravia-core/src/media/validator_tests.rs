@@ -30,7 +30,22 @@ mod tests {
     use stravia_runtime_contract::protocol::ir::Role;
 
     fn id(value: &str) -> ArtifactId {
-        ArtifactId::new(value)
+        if value.len() == 55 && value.bytes().all(|byte| byte.is_ascii_lowercase()) {
+            return ArtifactId::new(value);
+        }
+        let mut state = value.bytes().fold(0_u64, |state, byte| {
+            state.wrapping_mul(131).wrapping_add(byte as u64 + 1)
+        });
+        let mut encoded = String::with_capacity(55);
+        for _ in 0..55 {
+            encoded.push((b'a' + (state % 26) as u8) as char);
+            state = state / 26 + 1;
+        }
+        ArtifactId::new(encoded)
+    }
+
+    fn path(value: &str) -> String {
+        format!("stravia://artifacts/{}", id(value).as_str())
     }
 
     fn jpeg() -> Bytes {
@@ -63,13 +78,21 @@ mod tests {
     fn report_allows_repeated_citations_and_requires_marker_list_evidence_bijection() {
         let evidence = HashSet::from([id("artifact_a"), id("artifact_b")]);
         let valid = report(
-            "Compare [sa:artifact_a] with [sa:artifact_b].".into(),
+            format!(
+                "Compare [{}] with [{}].",
+                path("artifact_a"),
+                path("artifact_b")
+            ),
             &["artifact_a", "artifact_b"],
             &[],
         );
         assert!(validate_media_report(valid, &evidence, AgentCompletion::Completed).is_ok());
         let repeated = report(
-            "First [sa:artifact_a], then again [sa:artifact_a].".into(),
+            format!(
+                "First [{}], then again [{}].",
+                path("artifact_a"),
+                path("artifact_a")
+            ),
             &["artifact_a"],
             &[],
         );
@@ -77,16 +100,20 @@ mod tests {
 
         for invalid in [
             report(
-                "Only [sa:artifact_a].".into(),
+                format!("Only [{}].", path("artifact_a")),
                 &["artifact_a", "artifact_b"],
                 &[],
             ),
             report(
-                "Forged [sa:artifact_foreign].".into(),
+                format!("Forged [{}].", path("artifact_foreign")),
                 &["artifact_foreign"],
                 &[],
             ),
-            report("Broken [sa:artifact_a".into(), &["artifact_a"], &[]),
+            report(
+                format!("Broken [{}", path("artifact_a")),
+                &["artifact_a"],
+                &[],
+            ),
         ] {
             assert!(validate_media_report(invalid, &evidence, AgentCompletion::Completed).is_err());
         }
@@ -95,10 +122,14 @@ mod tests {
     #[test]
     fn partial_and_size_limits_are_enforced_without_reference_count_limit() {
         let evidence = HashSet::from([id("artifact_a")]);
-        let partial = report("Observed [sa:artifact_a].".into(), &["artifact_a"], &[]);
+        let partial = report(
+            format!("Observed [{}].", path("artifact_a")),
+            &["artifact_a"],
+            &[],
+        );
         assert!(validate_media_report(partial, &evidence, AgentCompletion::Partial).is_err());
 
-        let marker = "[sa:artifact_a]";
+        let marker = format!("[{}]", path("artifact_a"));
         let at_limit = report(
             format!(
                 "{marker}{}",
@@ -118,14 +149,18 @@ mod tests {
         );
         assert!(validate_media_report(over_limit, &evidence, AgentCompletion::Completed).is_err());
 
-        let ids = (0..1000)
+        // Full URI markers are longer than the retired `sa:` syntax, so 600
+        // citations exercises the former high-count case while fitting both
+        // serialized report limits.
+        let ids = (0..600)
             .map(|index| format!("artifact_{index}"))
             .collect::<Vec<_>>();
         let answer = ids
             .iter()
-            .map(|value| format!("[sa:{value}]"))
+            .map(|value| format!("[{}]", path(value)))
             .collect::<Vec<_>>()
             .join(" ");
+        assert!(answer.len() <= MAX_MEDIA_ANSWER_BYTES);
         let many = MediaReport {
             answer,
             artifacts: ids
@@ -136,6 +171,7 @@ mod tests {
                 .collect(),
             limitations: vec![],
         };
+        assert!(serde_json::to_vec(&many).unwrap().len() <= MAX_MEDIA_REPORT_BYTES);
         let evidence = ids.iter().map(|value| id(value)).collect();
         assert!(validate_media_report(many, &evidence, AgentCompletion::Completed).is_ok());
     }
@@ -144,12 +180,12 @@ mod tests {
         serde_json::json!({
             "task": "describe",
             "media": source_ids.iter().enumerate().map(|(index, id)| serde_json::json!({
-                "artifact_id": id.as_str(),
+                "path": id.reference(),
                 "ordinal": index + 1,
             })).collect::<Vec<_>>(),
             "report_contract": {
-                "marker_format": "[sa:<full ArtifactId>]",
-                "source_artifact_ids_only": true,
+                "marker_format": "[stravia://artifacts/<artifact-id>]",
+                "source_artifact_paths_only": true,
             }
         })
         .to_string()
@@ -175,7 +211,7 @@ mod tests {
     fn derivative_block(derivative_id: &ArtifactId) -> ContentBlock {
         ContentBlock::Image {
             source: MediaSource::FileId {
-                file_id: format!("sa:{}", derivative_id.as_str()),
+                file_id: derivative_id.reference(),
                 detail: None,
             },
             detail: None,
@@ -237,7 +273,7 @@ mod tests {
         let context = validation_context(principal);
         let validator = MediaReportValidator::new(store);
         let valid = report(
-            format!("Observed [sa:{}].", source.id.as_str()),
+            format!("Observed [{}].", source.id.reference()),
             &[source.id.as_str()],
             &[],
         );
@@ -248,7 +284,7 @@ mod tests {
 
         // The shown derivative itself is not a declared source.
         let derivative = report(
-            format!("Observed [sa:{}].", media.derivative.id.as_str()),
+            format!("Observed [{}].", media.derivative.id.reference()),
             &[media.derivative.id.as_str()],
             &[],
         );
@@ -331,7 +367,7 @@ mod tests {
             derivative_block(&declared_media.derivative.id),
         ])];
         let citing_declared = report(
-            format!("Observed [sa:{}].", declared.id.as_str()),
+            format!("Observed [{}].", declared.id.reference()),
             &[declared.id.as_str()],
             &[],
         );
@@ -344,7 +380,7 @@ mod tests {
             .await
             .expect("declared source is evidence");
         let citing_undeclared = report(
-            format!("Observed [sa:{}].", undeclared.id.as_str()),
+            format!("Observed [{}].", undeclared.id.reference()),
             &[undeclared.id.as_str()],
             &[],
         );
@@ -376,7 +412,7 @@ mod tests {
 
     fn document_prompt(document: &ArtifactId, embedded: &[&ArtifactId], with_text: bool) -> String {
         let mut media = vec![serde_json::json!({
-            "artifact_id": document.as_str(),
+            "path": document.reference(),
             "ordinal": 1,
             "kind": "document",
             "format": "docx",
@@ -386,7 +422,7 @@ mod tests {
         }
         for (index, id) in embedded.iter().enumerate() {
             media.push(serde_json::json!({
-                "artifact_id": id.as_str(),
+                "path": id.reference(),
                 "ordinal": index + 2,
                 "kind": "image",
             }));
@@ -395,8 +431,8 @@ mod tests {
             "task": "describe",
             "media": media,
             "report_contract": {
-                "marker_format": "[sa:<full ArtifactId>]",
-                "source_artifact_ids_only": true,
+                "marker_format": "[stravia://artifacts/<artifact-id>]",
+                "source_artifact_paths_only": true,
             }
         })
         .to_string()
@@ -452,7 +488,7 @@ mod tests {
         let manifest = serde_json::json!({
             "version": 1,
             "format": "docx",
-            "markdown_artifact": format!("sa:{}", markdown.id.as_str()),
+            "markdown_artifact": markdown.id.reference(),
             "images": [{
                 "artifact_id": embedded.id.as_str(),
                 "ordinal": 1,
@@ -483,7 +519,7 @@ mod tests {
             derivative_block(&embedded.id),
         ])];
         let citing_document = report(
-            format!("Read [sa:{}].", document.id.as_str()),
+            format!("Read [{}].", document.id.reference()),
             &[document.id.as_str()],
             &[],
         );
@@ -496,7 +532,7 @@ mod tests {
             .await
             .expect("document source is evidence");
         let citing_embedded = report(
-            format!("Figure [sa:{}].", embedded.id.as_str()),
+            format!("Figure [{}].", embedded.id.reference()),
             &[embedded.id.as_str()],
             &[],
         );
@@ -510,7 +546,7 @@ mod tests {
             .expect("embedded image is evidence");
         // The manifest derivative itself is never citable.
         let citing_manifest = report(
-            format!("Forged [sa:{}].", media.derivative.id.as_str()),
+            format!("Forged [{}].", media.derivative.id.reference()),
             &[media.derivative.id.as_str()],
             &[],
         );
@@ -537,7 +573,7 @@ mod tests {
                     &context,
                     &no_text,
                     serde_json::to_value(report(
-                        format!("Read [sa:{}].", document.id.as_str()),
+                        format!("Read [{}].", document.id.reference()),
                         &[document.id.as_str()],
                         &[],
                     ))

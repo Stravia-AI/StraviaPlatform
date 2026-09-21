@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use stravia_runtime_contract::Principal;
 
@@ -6,7 +8,6 @@ use stravia_runtime_contract::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
     HookSession, ReadExposureScope, RequestKind, RequestPatch, ResponsePatch, SessionContext,
 };
-use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::request::{MediaRoutingMode, MediaRoutingPlan};
 
 pub fn hook(gateway: &crate::host::MediaRuntime) -> std::sync::Arc<dyn Hook> {
@@ -44,9 +45,6 @@ impl Hook for MediaPlanningHook {
             inherited_media_turns: context.inherited_media_turns.clone(),
             internal_agent: context.tools_fixed,
             planned: false,
-            bridge_active: false,
-            project_results: context.ingress
-                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             media_results: Vec::new(),
         })
     }
@@ -60,8 +58,6 @@ struct MediaPlanningSession {
     inherited_media_turns: Vec<(usize, Vec<String>)>,
     internal_agent: bool,
     planned: bool,
-    bridge_active: bool,
-    project_results: bool,
     media_results: Vec<serde_json::Value>,
 }
 
@@ -84,10 +80,10 @@ impl HookSession for MediaPlanningSession {
             return Ok(ActionBatch::default());
         }
         if let HookEvent::ClientOutput { response, .. } = &event {
-            if self.media_results.is_empty() || !self.project_results {
+            if self.media_results.is_empty() {
                 return Ok(ActionBatch::default());
             }
-            let response = project_media_results(response, &self.media_results);
+            let response = record_trusted_media_results(response, &self.media_results);
             return Ok(ActionBatch::one(HookAction::PatchResponse(
                 ResponsePatch::ReplaceCanonical(Box::new(response)),
             )));
@@ -150,7 +146,6 @@ impl HookSession for MediaPlanningSession {
                     "Media Understanding is unavailable",
                 ));
             }
-            self.bridge_active = true;
             super::ingest::apply_bridge_instructions(&mut request);
             request.meta.media_routing = Some(MediaRoutingPlan {
                 mode: MediaRoutingMode::Bridge,
@@ -237,7 +232,6 @@ impl HookSession for MediaPlanningSession {
                 }
             },
         };
-        self.bridge_active = true;
         request.meta.media_routing = Some(MediaRoutingPlan {
             mode: MediaRoutingMode::Bridge,
             target_keys: bridge_targets,
@@ -262,7 +256,7 @@ impl HookSession for MediaPlanningSession {
     }
 
     fn requires_terminal_buffering(&self) -> bool {
-        self.project_results && self.bridge_active
+        false
     }
 }
 
@@ -279,51 +273,23 @@ fn materialize_media_turns(
     request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
     inherited_media_turns: &[(usize, Vec<String>)],
 ) -> Vec<stravia_runtime_contract::agent::AgentTurnId> {
+    let read_call_ids = request
+        .items
+        .iter()
+        .filter(|item| {
+            item.meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|meta| meta.get("__stravia_history_marker_restored"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|item| item.tool_calls.as_ref())
+        .flatten()
+        .filter(|call| call.name == "StraviaRead")
+        .map(|call| call.id.as_str())
+        .collect::<HashSet<_>>();
     let mut turn_ids = Vec::new();
-    for (index, allowed_turn_ids) in inherited_media_turns {
-        let Some(message) = request.items.get_mut(*index) else {
-            continue;
-        };
-        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
-            &mut message.content
-        else {
-            continue;
-        };
-        for block in blocks {
-            let stravia_runtime_contract::protocol::ir::ContentBlock::Unknown { raw } = block
-            else {
-                continue;
-            };
-            if raw.get("type").and_then(serde_json::Value::as_str) != Some("stravia:media_result") {
-                continue;
-            }
-            let Some(turn_id) = raw.get("turn_id").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            if !allowed_turn_ids.iter().any(|allowed| allowed == turn_id) {
-                continue;
-            }
-            let Some(completion) = raw.get("completion").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            turn_ids.push(stravia_runtime_contract::agent::AgentTurnId::new(turn_id));
-            let reference = raw
-                .get("artifact_reference")
-                .and_then(serde_json::Value::as_str)
-                .filter(|reference| {
-                    stravia_runtime_contract::artifact::ArtifactId::from_reference(reference)
-                        .is_ok()
-                });
-            let text = match reference {
-                Some(reference) => format!("[st:{turn_id} {completion} {reference}]"),
-                None => format!("[st:{turn_id} {completion}]"),
-            };
-            *block = stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text,
-                cache_control: None,
-            };
-        }
-    }
     for item in &request.items {
         if item.role != stravia_runtime_contract::protocol::ir::Role::Tool
             || item
@@ -342,6 +308,7 @@ fn materialize_media_turns(
         };
         for block in blocks {
             let stravia_runtime_contract::protocol::ir::ContentBlock::ToolResult {
+                tool_use_id,
                 content,
                 is_error: Some(false) | None,
                 ..
@@ -349,50 +316,48 @@ fn materialize_media_turns(
             else {
                 continue;
             };
-            let Some(turn_id) = content
-                .get("turn_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|turn_id| {
-                    inherited_media_turns
-                        .iter()
-                        .any(|(_, allowed)| allowed.iter().any(|allowed| allowed == turn_id))
-                })
+            if !read_call_ids.contains(tool_use_id.as_str()) {
+                continue;
+            }
+            let Some(turn_path) = content.get("path").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Ok(turn_id) =
+                stravia_runtime_contract::agent::AgentTurnId::from_reference(turn_path)
             else {
                 continue;
             };
+            if !inherited_media_turns
+                .iter()
+                .any(|(_, allowed)| allowed.iter().any(|allowed| allowed == turn_id.as_str()))
+            {
+                continue;
+            }
             if !turn_ids
                 .iter()
-                .any(|existing: &stravia_runtime_contract::agent::AgentTurnId| {
-                    existing.as_str() == turn_id
-                })
+                .any(|existing: &stravia_runtime_contract::agent::AgentTurnId| existing == &turn_id)
             {
-                turn_ids.push(stravia_runtime_contract::agent::AgentTurnId::new(turn_id));
+                turn_ids.push(turn_id);
             }
         }
     }
     turn_ids
 }
 
-fn project_media_results(
+fn record_trusted_media_results(
     response: &stravia_runtime_contract::protocol::ir::AiResponse,
     media_results: &[serde_json::Value],
 ) -> stravia_runtime_contract::protocol::ir::AiResponse {
     let mut response = response.clone();
     response.trusted_media_turn_ids = media_results
         .iter()
-        .filter_map(|result| result.get("turn_id")?.as_str().map(str::to_owned))
+        .filter_map(|result| {
+            let path = result.get("path")?.as_str()?;
+            stravia_runtime_contract::agent::AgentTurnId::from_reference(path)
+                .ok()
+                .map(|turn_id| turn_id.as_str().to_owned())
+        })
         .collect();
-    let projected = media_results.iter().filter_map(|result| {
-        Some(AiItem::unknown(serde_json::json!({
-            "id": result.get("turn_id")?.as_str()?,
-            "type": "stravia:media_result",
-            "status": "completed",
-            "turn_id": result.get("turn_id")?.as_str()?,
-            "completion": result.get("completion")?.as_str()?,
-            "artifact_reference": result.get("artifact_reference"),
-        })))
-    });
-    response.items.splice(0..0, projected);
     response
 }
 
@@ -460,15 +425,16 @@ mod tests {
     }
 
     #[test]
-    fn media_result_projection_preserves_answer_and_adds_typed_item() {
+    fn media_result_records_trusted_turn_without_client_extension() {
         let mut response =
             stravia_runtime_contract::protocol::ir::AiResponse::new("response", "model");
         response.push_output_text("answer");
-        let projected = project_media_results(
+        let projected = record_trusted_media_results(
             &response,
             &[serde_json::json!({
-                "turn_id": "abcdefghijklmnopqrstuvwxyzab",
+                "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
                 "completion": "complete",
+                "artifacts": [],
                 "report": {
                     "answer": "details",
                     "artifacts": [],
@@ -480,92 +446,8 @@ mod tests {
             projected.trusted_media_turn_ids,
             vec!["abcdefghijklmnopqrstuvwxyzab"]
         );
-
-        let items = &projected.items;
-        let raw = items[0].unknown_ref().expect("media result");
-        assert_eq!(raw["id"], "abcdefghijklmnopqrstuvwxyzab");
-        assert_eq!(raw["type"], "stravia:media_result");
-        assert_eq!(raw["turn_id"], "abcdefghijklmnopqrstuvwxyzab");
-        assert_eq!(items[1].output_text_ref(), Some("answer"));
-    }
-
-    #[test]
-    fn media_turn_materialization_is_limited_to_inherited_response_chain_messages() {
-        let marker = |turn_id: &str| stravia_runtime_contract::protocol::ir::AiItem {
-            role: stravia_runtime_contract::protocol::ir::Role::Assistant,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
-                stravia_runtime_contract::protocol::ir::ContentBlock::Unknown {
-                    raw: serde_json::json!({
-                        "type": "stravia:media_result",
-                        "turn_id": turn_id,
-                        "completion": "complete",
-                    }),
-                },
-            ]),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        };
-        let mut request = stravia_runtime_contract::protocol::ir::AiRequest::new(
-            "model",
-            vec![
-                marker("bcdefghijklmnopqrstuvwxyzabc"),
-                marker("cdefghijklmnopqrstuvwxyzabcd"),
-            ],
-        );
-        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(parent_blocks) =
-            &mut request.items[0].content
-        else {
-            unreachable!();
-        };
-        parent_blocks.push(
-            stravia_runtime_contract::protocol::ir::ContentBlock::Unknown {
-                raw: serde_json::json!({
-                    "type": "stravia:media_result",
-                    "turn_id": "defghijklmnopqrstuvwxyzabcde",
-                    "completion": "complete",
-                }),
-            },
-        );
-
-        let turns = materialize_media_turns(
-            &mut request,
-            &[(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])],
-        );
-
-        assert_eq!(
-            turns,
-            vec![stravia_runtime_contract::agent::AgentTurnId::new(
-                "bcdefghijklmnopqrstuvwxyzabc"
-            )]
-        );
-        assert!(matches!(
-            &request.items[0].content,
-            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
-                if matches!(
-                    &blocks[0],
-                    stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                        if text.contains("bcdefghijklmnopqrstuvwxyzabc")
-                )
-        ));
-        assert!(matches!(
-            &request.items[0].content,
-            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
-                if matches!(
-                    &blocks[1],
-                    stravia_runtime_contract::protocol::ir::ContentBlock::Unknown { raw }
-                        if raw["turn_id"] == "defghijklmnopqrstuvwxyzabcde"
-                )
-        ));
-        assert!(matches!(
-            &request.items[1].content,
-            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
-                if matches!(
-                    &blocks[0],
-                    stravia_runtime_contract::protocol::ir::ContentBlock::Unknown { raw }
-                        if raw["turn_id"] == "cdefghijklmnopqrstuvwxyzabcd"
-                )
-        ));
+        assert_eq!(projected.items.len(), 1);
+        assert_eq!(projected.items[0].output_text_ref(), Some("answer"));
     }
 
     #[test]
@@ -579,8 +461,9 @@ mod tests {
                     ),
                     tool_use_id: "media-call".into(),
                     content: serde_json::json!({
-                        "turn_id": "bcdefghijklmnopqrstuvwxyzabc",
+                        "path": "stravia://turns/bcdefghijklmnopqrstuvwxyzabc",
                         "completion": "complete",
+                        "artifacts": [],
                         "report": {
                             "answer": "understood",
                             "artifacts": [],
@@ -610,13 +493,36 @@ mod tests {
                 "__stravia_history_marker_restored".into(),
                 serde_json::Value::Bool(true),
             );
-        let mut request =
-            stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![result]);
-
-        let turns = materialize_media_turns(
-            &mut request,
-            &[(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])],
+        let mut call = stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::Assistant,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(String::new()),
+            tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "media-call".into(),
+                name: "StraviaRead".into(),
+                arguments: String::new(),
+            }]),
+            tool_call_id: None,
+            meta: None,
+        };
+        call.set_graph_metadata(
+            None,
+            None,
+            stravia_runtime_contract::protocol::ir::AiItemProvenance::Platform,
+            stravia_runtime_contract::protocol::ir::AiItemAudience::Internal,
         );
+        call.meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("graph metadata")
+            .insert(
+                "__stravia_history_marker_restored".into(),
+                serde_json::Value::Bool(true),
+            );
+        let mut request =
+            stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![call, result]);
+
+        let allowed = [(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])];
+        let turns = materialize_media_turns(&mut request, &allowed);
 
         assert_eq!(
             turns,
@@ -624,5 +530,8 @@ mod tests {
                 "bcdefghijklmnopqrstuvwxyzabc"
             )]
         );
+
+        request.items[0].tool_calls.as_mut().unwrap()[0].name = "ThirdParty".into();
+        assert!(materialize_media_turns(&mut request, &allowed).is_empty());
     }
 }

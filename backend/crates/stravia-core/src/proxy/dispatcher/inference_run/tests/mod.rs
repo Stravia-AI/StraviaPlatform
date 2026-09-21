@@ -1128,11 +1128,10 @@ fn marker_artifact_id(request: &str) -> Option<String> {
     fn visit(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::String(text) => {
-                let marker = text.split_once("[sm:")?.1;
-                let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(
-                    marker.split_once(' ')?.0,
-                )
-                .ok()?;
+                let marker = text.split_once("[stravia://artifacts/")?.1;
+                let path = format!("stravia://artifacts/{}", marker.split_once(']')?.0);
+                let id =
+                    stravia_runtime_contract::artifact::ArtifactId::from_reference(&path).ok()?;
                 Some(id.as_str().to_owned())
             }
             serde_json::Value::Array(values) => values.iter().find_map(visit),
@@ -1144,22 +1143,26 @@ fn marker_artifact_id(request: &str) -> Option<String> {
 }
 
 fn media_turn_id(request: &str) -> Option<String> {
+    fn parse_path(path: &str) -> Option<String> {
+        stravia_runtime_contract::turn_chain::TurnNodeId::from_reference(path)
+            .ok()
+            .map(|id| id.as_str().to_owned())
+    }
+
     fn visit(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::String(text) => {
-                if let Some((_, marker)) = text.split_once("[st:") {
-                    let id = marker.split_once(' ')?.0;
-                    return stravia_runtime_contract::identifier::valid_id(id)
-                        .then(|| id.to_owned());
+                if let Some((_, suffix)) = text.split_once("stravia://turns/") {
+                    let tail = suffix.split([']', '"', '?', '#']).next()?;
+                    return parse_path(&format!("stravia://turns/{tail}"));
                 }
                 serde_json::from_str(text).ok().as_ref().and_then(visit)
             }
             serde_json::Value::Array(values) => values.iter().find_map(visit),
             serde_json::Value::Object(values) => values
-                .get("turn_id")
+                .get("path")
                 .and_then(serde_json::Value::as_str)
-                .filter(|id| stravia_runtime_contract::identifier::valid_id(id))
-                .map(str::to_owned)
+                .and_then(parse_path)
                 .or_else(|| values.values().find_map(visit)),
             _ => None,
         }
@@ -1170,21 +1173,29 @@ fn media_turn_id(request: &str) -> Option<String> {
 
 async fn serve_media_parent(
     source_id: Arc<parking_lot::Mutex<Option<String>>>,
-) -> (String, Arc<AtomicUsize>) {
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<parking_lot::Mutex<Vec<String>>>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind parent provider");
     let address = listener.local_addr().expect("parent provider address");
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = requests.clone();
     tokio::spawn(async move {
         for ordinal in 0..4 {
             let (mut socket, _) = listener.accept().await.expect("accept parent request");
             let request = read_test_http_request(&mut socket).await;
+            captured.lock().push(request.clone());
             observed.fetch_add(1, Ordering::SeqCst);
             let body = match ordinal {
                 0 => {
-                    let id = marker_artifact_id(&request).expect("bridge Artifact marker");
+                    let id = marker_artifact_id(&request)
+                        .unwrap_or_else(|| panic!("bridge Artifact marker missing: {request}"));
                     *source_id.lock() = Some(id.clone());
                     serde_json::json!({
                         "id": "chatcmpl-media-tool",
@@ -1202,7 +1213,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("sa:{id}?question=Describe%20the%20image")
+                                            "path": format!("stravia://artifacts/{id}?question=Describe%20the%20image")
                                         }).to_string()
                                     }
                                 }]
@@ -1226,6 +1237,14 @@ async fn serve_media_parent(
                         request.contains(r#""name":"StraviaRead""#),
                         "continued request must expose StraviaRead: {request}"
                     );
+                    assert!(
+                        request.contains("stravia://turns/"),
+                        "continued request must carry the persisted Media Turn path: {request}"
+                    );
+                    assert!(
+                        !request.contains("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+                        "continued request must not resend raw image bytes: {request}"
+                    );
                     let id = source_id.lock().clone().expect("source Artifact");
                     serde_json::json!({
                         "id": "chatcmpl-media-continuation",
@@ -1243,7 +1262,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("sa:{id}?question=Identify%20the%20subject&previous_turn_id={turn_id}")
+                                            "path": format!("stravia://artifacts/{id}?question=Identify%20the%20subject&previous_path=stravia%3A%2F%2Fturns%2F{turn_id}")
                                         }).to_string()
                                     }
                                 }]
@@ -1265,7 +1284,7 @@ async fn serve_media_parent(
             write_test_openai_response(&mut socket, &request, body).await;
         }
     });
-    (format!("http://{address}/v1"), calls)
+    (format!("http://{address}/v1"), calls, requests)
 }
 
 async fn serve_media_model(
@@ -1296,14 +1315,15 @@ async fn serve_media_model(
                     "continued Media request must append the new task: {request}"
                 );
             }
+            let source_path = format!("stravia://artifacts/{id}");
             let answer = if ordinal == 0 {
-                format!("The image is understood [sa:{id}]")
+                format!("The image is understood [{source_path}]")
             } else {
-                format!("The same image is understood [sa:{id}]")
+                format!("The same image is understood [{source_path}]")
             };
             let report = serde_json::json!({
                 "answer": answer,
-                "artifacts": [{"artifact_id": id}],
+                "artifacts": [{"path": source_path}],
                 "limitations": []
             })
             .to_string();

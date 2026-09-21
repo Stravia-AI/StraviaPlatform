@@ -8,6 +8,7 @@
 
 ### Changed
 
+- **Breaking:** Public resource references now use `stravia://artifacts/<artifact-id>`, `stravia://turns/<turn-id>`, and `stravia://turns/<turn-id>/sources/<ordinal>`. `StraviaRead`, Web Search, Media Understanding, Media Generation, bridge markers, and reports use `path` / `previous_path` and complete URI citations; `sa:`, `[sc:...]`, `[sm:...]`, `[st:...]`, raw Turn IDs, and the Open Responses `stravia:media_result` extension are removed without compatibility aliases. Persisted Artifact IDs, TurnNode IDs, upload/download grants, tool call IDs, and existing history bytes are not rewritten; callers must migrate to the new public shapes, and old history references may fail rather than being silently rewritten. Standard Responses `id` / `previous_response_id` and agent-result protocol `id` remain unchanged.
 - History storage now deduplicates repeated instructions, tool definitions, and response profiles within each Principal, without compression or changing replay semantics. SQLite and PostgreSQL keep explicit content references with branch-safe retention. Debug segments independently deduplicate metadata and payloads; exports restore complete records, while diagnostic checkpoints focus on target selection/start/end instead of individual deltas. `stravia-tools migrate-data --optimize-storage` verifies and optimizes an offline SQLite destination copy, preserving source data for rollback and reclaiming free pages only in the copy. Older binaries cannot read the new storage representation.
 
 ### Fixed

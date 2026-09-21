@@ -585,7 +585,7 @@ fn tool_call_complete_emits_arguments_done_before_terminal() {
 }
 
 #[test]
-fn streams_platform_owned_result_as_indexed_output_item() {
+fn streams_agent_result_and_drops_deleted_media_result() {
     let mut formatter = ResponsesStreamFormatter::new();
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
@@ -593,11 +593,11 @@ fn streams_platform_owned_result_as_indexed_output_item() {
             model: "model-1".into(),
         },
         AiStreamDelta::Unknown {
-            raw: r#"{"type":"stravia:agent_result","turn_id":"aturn_1"}"#.into(),
+            raw: r#"{"type":"stravia:agent_result","path":"stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#.into(),
         },
         AiStreamDelta::Unknown {
             raw:
-                r#"{"type":"stravia:media_result","turn_id":"aturn_media","completion":"complete"}"#
+                r#"{"type":"stravia:media_result","path":"stravia://turns/bbbbbbbbbbbbbbbbbbbbbbbbbbbb","completion":"complete"}"#
                     .into(),
         },
         AiStreamDelta::Done {
@@ -620,23 +620,20 @@ fn streams_platform_owned_result_as_indexed_output_item() {
     assert_eq!(item_events.len(), 2);
     assert_eq!(item_events[0]["output_index"], 0);
     assert_eq!(item_events[1]["output_index"], 0);
-    assert_eq!(item_events[0]["item"]["turn_id"], "aturn_1");
-    assert_eq!(item_events[1]["item"]["turn_id"], "aturn_1");
-    let media_events = events
-        .iter()
-        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
-        .filter(|body| {
-            matches!(
-                body["type"].as_str(),
-                Some("response.output_item.added" | "response.output_item.done")
-            ) && body["item"]["type"] == "stravia:media_result"
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(media_events.len(), 2);
-    assert_eq!(media_events[0]["output_index"], 1);
-    assert_eq!(media_events[1]["output_index"], 1);
-    assert_eq!(media_events[0]["item"]["turn_id"], "aturn_media");
-    assert_eq!(media_events[0]["item"]["completion"], "complete");
+    assert_eq!(
+        item_events[0]["item"]["path"],
+        "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        item_events[1]["item"]["path"],
+        "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert!(
+        !events
+            .iter()
+            .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+            .any(|body| { body["item"]["type"] == "stravia:media_result" })
+    );
 
     let completed = events
         .iter()
@@ -648,16 +645,17 @@ fn streams_platform_owned_result_as_indexed_output_item() {
             .as_array()
             .expect("response output")
             .iter()
-            .any(|item| item["type"] == "stravia:agent_result" && item["turn_id"] == "aturn_1")
+            .any(|item| {
+                item["type"] == "stravia:agent_result"
+                    && item["path"] == "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            })
     );
     assert!(
-        completed["response"]["output"]
+        !completed["response"]["output"]
             .as_array()
             .expect("response output")
             .iter()
-            .any(|item| item["type"] == "stravia:media_result"
-                && item["turn_id"] == "aturn_media"
-                && item["completion"] == "complete")
+            .any(|item| item["type"] == "stravia:media_result")
     );
 }
 

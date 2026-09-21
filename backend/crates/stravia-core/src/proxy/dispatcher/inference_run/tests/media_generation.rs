@@ -473,13 +473,20 @@ async fn explicit_generate_executes_without_injection_permission_and_stays_platf
         "reference_images":["https://example.com/image.png"]
     }})));
     assert!(!schema.is_valid(&json!({"type":"image","input":{"prompt":"A square","seed":42}})));
+    let generated_result = parent_requests[1]["input"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item["type"] == "function_call_output" && item["call_id"] == "call_generate"
+            })
+        })
+        .and_then(|item| item["output"].as_str())
+        .and_then(|output| serde_json::from_str::<Value>(output).ok())
+        .expect("generated function output");
     assert!(
-        parent_requests[1]
-            .to_string()
-            .contains("function_call_output")
-            && parent_requests[1]
-                .to_string()
-                .contains("artifact_reference"),
+        generated_result["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("stravia://artifacts/")),
         "the generated Artifact result must return to the model: {}",
         parent_requests[1]
     );

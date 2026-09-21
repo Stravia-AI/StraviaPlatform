@@ -348,7 +348,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         let reference = payloads
             .iter()
             .find_map(|payload| {
-                let start = payload.find("sa:")?;
+                let start = payload.find("stravia://artifacts/")?;
                 let suffix = &payload[start..];
                 Some(suffix.split('"').next().unwrap().to_owned())
             })

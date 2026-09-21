@@ -174,7 +174,7 @@ pub struct DocumentManifest {
     pub format: DocumentFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// `sa:<id>` reference to the extracted-Markdown Artifact.
+    /// `stravia://artifacts/<id>` reference to the extracted-Markdown Artifact.
     pub markdown_artifact: String,
     #[serde(default)]
     pub images: Vec<ManifestImage>,
@@ -204,8 +204,11 @@ impl DocumentManifest {
         Ok(manifest)
     }
 
-    /// The Markdown snapshot ArtifactId (`sa:<id>` form, digest-validated).
+    /// The Markdown snapshot ArtifactId (`stravia://artifacts/<id>` form, digest-validated).
     pub fn markdown_artifact_id(&self) -> Result<ArtifactId, MediaStoreError> {
+        if self.markdown_artifact.contains(['?', '#']) {
+            return Err(MediaStoreError::Corrupt);
+        }
         ArtifactId::from_reference(&self.markdown_artifact).map_err(|_| MediaStoreError::Corrupt)
     }
 
@@ -689,14 +692,14 @@ fn bound_alt(alt: &str) -> String {
 }
 
 enum MarkerTarget {
-    /// Stored Artifact link `![alt](sa:<id>)`.
+    /// Stored Artifact link `![alt](stravia://artifacts/<id>)`.
     Artifact(ArtifactId, Option<String>),
     /// Image deliberately not stored (limit hit): degrade to italic alt text,
     /// matching `office_oxide`'s non-embed rendering.
     Alt(Option<String>),
 }
 
-/// Replaces `[image-base64:<data>]` markers with `![alt](sa:<id>)` links.
+/// Replaces `[image-base64:<data>]` markers with `![alt](stravia://artifacts/<id>)` links.
 /// Markers not present in `links` are left untouched.
 fn substitute_image_markers(template: &str, links: &HashMap<String, MarkerTarget>) -> String {
     let mut output = String::with_capacity(template.len().min(MAX_DOCUMENT_MARKDOWN_BYTES * 2));
@@ -715,8 +718,8 @@ fn substitute_image_markers(template: &str, links: &HashMap<String, MarkerTarget
                 if let Some(alt) = alt {
                     output.push_str(&escape_alt(alt));
                 }
-                output.push_str("](sa:");
-                output.push_str(id.as_str());
+                output.push_str("](");
+                output.push_str(&id.reference());
                 output.push(')');
             }
             Some(MarkerTarget::Alt(alt)) => {
@@ -1073,7 +1076,7 @@ mod tests {
             version: MANIFEST_VERSION,
             format: DocumentFormat::Docx,
             title: Some("Quarterly report".to_owned()),
-            markdown_artifact: format!("sa:{}", test_id('m')),
+            markdown_artifact: format!("stravia://artifacts/{}", test_id('m')),
             images: vec![ManifestImage {
                 artifact_id: ArtifactId::new(test_id('i')),
                 alt: Some("chart".to_owned()),
@@ -1110,7 +1113,7 @@ mod tests {
             version: 99,
             format: DocumentFormat::Xlsx,
             title: None,
-            markdown_artifact: "sa:m".to_owned(),
+            markdown_artifact: "stravia://artifacts/m".to_owned(),
             images: vec![],
             truncated: false,
             limitations: vec![],
@@ -1159,7 +1162,10 @@ mod tests {
             MarkerTarget::Artifact(id, Some("pie chart".into())),
         );
         let out = substitute_image_markers(&template, &links);
-        assert_eq!(out, "intro\n\n![pie chart](sa:art-9)\n\noutro");
+        assert_eq!(
+            out,
+            "intro\n\n![pie chart](stravia://artifacts/art-9)\n\noutro"
+        );
     }
 
     #[test]
@@ -1175,11 +1181,14 @@ mod tests {
             ),
         );
         let out = substitute_image_markers(&template, &links);
-        assert_eq!(out, "![weird \\] \\[ \\\\ alt line](sa:a)");
+        assert_eq!(out, "![weird \\] \\[ \\\\ alt line](stravia://artifacts/a)");
 
         // Empty alt stays empty.
         links.insert(b64(img), MarkerTarget::Artifact(ArtifactId::new("b"), None));
-        assert_eq!(substitute_image_markers(&template, &links), "![](sa:b)");
+        assert_eq!(
+            substitute_image_markers(&template, &links),
+            "![](stravia://artifacts/b)"
+        );
     }
 
     #[test]

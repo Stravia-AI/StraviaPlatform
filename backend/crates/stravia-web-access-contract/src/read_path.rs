@@ -6,13 +6,13 @@
 //! 不再各自拼接字符串。
 //!
 //! 语法概览：
-//! - 搜索：`search://<percent-encoded-text>?allowed_domains=a&allowed_domains=b&previous_turn_id=<id>`。
+//! - 搜索：`search://<percent-encoded-text>?allowed_domains=a&allowed_domains=b&previous_path=<percent-encoded-turn-uri>`。
 //!   首个未编码 `?` 分隔文本与参数；文本严格 percent-decode（`+` 不转换为空格），
 //!   参数按 form 解码（`+` 视为空格）；所有 `%` 转义与 UTF-8 均先验证。
 //! - 资源：HTTP(S) URL 的工具选项使用 `#stravia?<options>`；Artifact Reference
-//!   使用 `sa:<digest>?<options>`。HTTP(S) 的普通 fragment 保留源 URL 语义，
+//!   使用 `stravia://artifacts/<digest>?<options>`。HTTP(S) 的普通 fragment 保留源 URL 语义，
 //!   Artifact fragment 一律拒绝；不支持旧 Artifact wrapper。
-//! - 选项为 `question`、`raw`、`lines`、`download`、`previous_turn_id`、`cursor`，
+//! - 选项为 `question`、`raw`、`lines`、`download`、`previous_path`、`cursor`，
 //!   互斥规则见 [`parse_read_path`]。
 //!
 //! 错误（[`ReadPathError`]）区分无效 scheme、选项、编码与范围，且不在消息中
@@ -31,7 +31,9 @@ pub const MAX_LINE_SELECTIONS: usize = 16;
 
 /// Artifact Reference 前缀与 digest 长度；镜像 runtime-contract 的语法，
 /// 本 crate 不引入对该 crate 的依赖。
-const ARTIFACT_REFERENCE_PREFIX: &str = "sa:";
+const ARTIFACT_REFERENCE_PREFIX: &str = "stravia://artifacts/";
+const TURN_REFERENCE_PREFIX: &str = "stravia://turns/";
+const TURN_ID_LEN: usize = 28;
 const ARTIFACT_DIGEST_LEN: usize = 55;
 
 /// StraviaRead 工具的唯一输入：单个必填 `path`。
@@ -62,13 +64,13 @@ pub struct SearchPath {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_turn_id: Option<String>,
+    pub previous_path: Option<String>,
 }
 
 /// 一次资源读取：HTTP(S) URL 或 Artifact Reference，附工具选项。
 ///
 /// `url` 保留 HTTP(S) 源站 path/query 与普通 fragment；工具选项已剥离。
-/// Artifact 的 `url` 是不含查询选项的裸 `sa:<digest>`。
+/// Artifact 的 `url` 是不含查询选项的裸 `stravia://artifacts/<digest>`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourcePath {
     pub url: String,
@@ -88,7 +90,7 @@ pub struct ReadOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_turn_id: Option<String>,
+    pub previous_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -164,6 +166,9 @@ pub enum ReadPathError {
     /// Artifact 引用不是裸身份或身份字符非法。
     #[error("invalid Artifact Reference: {reason}")]
     InvalidArtifactReference { reason: &'static str },
+    /// Turn 引用不是精确的稳定 URI。
+    #[error("invalid Turn Reference")]
+    InvalidTurnReference,
     /// 行选择语法或数值非法。
     #[error("invalid lines selection: {reason}")]
     InvalidLineSelection { reason: &'static str },
@@ -223,10 +228,10 @@ pub fn pagination_schema() -> serde_json::Value {
 ///   [`MAX_ALLOWED_DOMAINS`] 个原始条目；域名经 [`crate::normalize_domains`]
 ///   规范化去重。
 /// - HTTP(S) 资源从 `#stravia?` 读取工具选项；Artifact 从 `?` 读取工具选项；
-///   Artifact 必须是 `sa:` 加 55 位小写 digest，并拒绝所有 fragment。
-/// - 选项约束：`question` 与 `previous_turn_id` 非空；`raw`/`download` 只接受
+///   Artifact 必须是 `stravia://artifacts/` 加 55 位小写 digest，并拒绝所有 fragment。
+/// - 选项约束：`question` 与 `previous_path` 非空；`raw`/`download` 只接受
 ///   `1`；`raw` 与 `question` 互斥；`download` 与其他所有选项互斥；
-///   `previous_turn_id` 仅媒体问题（资源侧需伴随 `question`）或搜索允许；
+///   `previous_path` 仅媒体问题（资源侧需伴随 `question`）或搜索允许；
 ///   `cursor` 仅对 Artifact 有效且与其他所有选项互斥。
 pub fn parse_read_path(path: &str) -> Result<ReadTarget, ReadPathError> {
     if path.trim().is_empty() {
@@ -264,10 +269,10 @@ pub fn format_search_path(search: &SearchPath) -> String {
             }
         }
     }
-    if let Some(previous_turn_id) = &search.previous_turn_id {
+    if let Some(previous_path) = &search.previous_path {
         path.push(separator);
-        path.push_str("previous_turn_id=");
-        encode_component(&mut path, previous_turn_id);
+        path.push_str("previous_path=");
+        encode_component(&mut path, previous_path);
     }
     path
 }
@@ -285,7 +290,7 @@ fn parse_search(rest: &str) -> Result<ReadTarget, ReadPathError> {
         return Err(ReadPathError::SearchTextTooLarge);
     }
     let mut domains_raw: Vec<String> = Vec::new();
-    let mut previous_turn_id: Option<String> = None;
+    let mut previous_path: Option<String> = None;
     if let Some(parameters) = query_raw {
         if parameters.is_empty() {
             return Err(ReadPathError::MalformedParameter {
@@ -318,23 +323,24 @@ fn parse_search(rest: &str) -> Result<ReadTarget, ReadPathError> {
                     }
                     domains_raw.push(value);
                 }
-                "previous_turn_id" => {
-                    if previous_turn_id.is_some() {
+                "previous_path" => {
+                    if previous_path.is_some() {
                         return Err(ReadPathError::DuplicateParameter {
-                            parameter: "previous_turn_id",
+                            parameter: "previous_path",
                         });
                     }
                     if value.trim().is_empty() {
                         return Err(ReadPathError::EmptyParameter {
-                            parameter: "previous_turn_id",
+                            parameter: "previous_path",
                         });
                     }
-                    previous_turn_id = Some(value);
+                    validate_turn_reference(&value)?;
+                    previous_path = Some(value);
                 }
                 _ => {
                     return Err(ReadPathError::UnknownParameter {
                         parameter: printable_parameter(&key),
-                    })
+                    });
                 }
             }
         }
@@ -357,7 +363,7 @@ fn parse_search(rest: &str) -> Result<ReadTarget, ReadPathError> {
     Ok(ReadTarget::Search(SearchPath {
         query,
         allowed_domains,
-        previous_turn_id,
+        previous_path,
     }))
 }
 
@@ -418,9 +424,9 @@ fn parse_resource(path: &str) -> Result<ReadTarget, ReadPathError> {
             reason: "cursor is only valid on an Artifact Reference",
         });
     }
-    if options.previous_turn_id.is_some() && options.question.is_none() {
+    if options.previous_path.is_some() && options.question.is_none() {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "previous_turn_id requires a media question",
+            reason: "previous_path requires a media question",
         });
     }
     Ok(ReadTarget::Resource(ResourcePath {
@@ -442,12 +448,24 @@ fn validate_artifact_reference(url: &str) -> Result<(), ReadPathError> {
     })
 }
 
+fn validate_turn_reference(path: &str) -> Result<(), ReadPathError> {
+    let id = path
+        .strip_prefix(TURN_REFERENCE_PREFIX)
+        .ok_or(ReadPathError::InvalidTurnReference)?;
+    if id.len() == TURN_ID_LEN && id.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        Ok(())
+    } else {
+        Err(ReadPathError::InvalidTurnReference)
+    }
+}
+
 fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
     let parsed = url::Url::parse(url).map_err(|_| ReadPathError::InvalidScheme)?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(ReadPathError::InvalidScheme);
     }
-    if parsed.host_str().is_none_or(|host| host.is_empty()) || parsed.host_str() == Some("stravia")
+    if parsed.host_str().is_none_or(|host| host.is_empty())
+        || (parsed.host_str() == Some("stravia") && parsed.path().starts_with("/artifact/"))
     {
         return Err(ReadPathError::InvalidScheme);
     }
@@ -459,7 +477,7 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
     let mut raw_flag = false;
     let mut download = false;
     let mut lines: Option<Vec<LineSelection>> = None;
-    let mut previous_turn_id: Option<String> = None;
+    let mut previous_path: Option<String> = None;
     let mut cursor: Option<String> = None;
     for segment in raw.split('&') {
         if segment.is_empty() {
@@ -516,18 +534,19 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
                 }
                 lines = Some(parse_line_selections(&value)?);
             }
-            "previous_turn_id" => {
-                if previous_turn_id.is_some() {
+            "previous_path" => {
+                if previous_path.is_some() {
                     return Err(ReadPathError::DuplicateParameter {
-                        parameter: "previous_turn_id",
+                        parameter: "previous_path",
                     });
                 }
                 if value.trim().is_empty() {
                     return Err(ReadPathError::EmptyParameter {
-                        parameter: "previous_turn_id",
+                        parameter: "previous_path",
                     });
                 }
-                previous_turn_id = Some(value);
+                validate_turn_reference(&value)?;
+                previous_path = Some(value);
             }
             "cursor" => {
                 if cursor.is_some() {
@@ -545,7 +564,7 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
             _ => {
                 return Err(ReadPathError::UnknownParameter {
                     parameter: printable_parameter(&key),
-                })
+                });
             }
         }
     }
@@ -558,7 +577,7 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
         && (question.is_some()
             || raw_flag
             || lines.is_some()
-            || previous_turn_id.is_some()
+            || previous_path.is_some()
             || cursor.is_some())
     {
         return Err(ReadPathError::ConflictingOptions {
@@ -566,15 +585,15 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
         });
     }
     if cursor.is_some()
-        && (question.is_some() || raw_flag || lines.is_some() || previous_turn_id.is_some())
+        && (question.is_some() || raw_flag || lines.is_some() || previous_path.is_some())
     {
         return Err(ReadPathError::ConflictingOptions {
             reason: "cursor cannot be combined with other options",
         });
     }
-    if previous_turn_id.is_some() && question.is_none() {
+    if previous_path.is_some() && question.is_none() {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "previous_turn_id requires a media question",
+            reason: "previous_path requires a media question",
         });
     }
     Ok(ReadOptions {
@@ -582,7 +601,7 @@ fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
         raw: raw_flag,
         download,
         lines,
-        previous_turn_id,
+        previous_path,
         cursor,
     })
 }
@@ -708,7 +727,7 @@ fn decode_percent(
                     return Err(ReadPathError::InvalidEncoding {
                         component,
                         reason: "percent escapes must be two hexadecimal digits",
-                    })
+                    });
                 }
             }
         } else {
@@ -772,33 +791,40 @@ mod tests {
 
     #[test]
     fn search_encoding_round_trips_without_form_decoding_the_text() {
+        let previous_path = format!("stravia://turns/{}", "a".repeat(TURN_ID_LEN));
         let search = SearchPath {
             query: "中文 C++ & ? # %3F".into(),
             allowed_domains: Some(vec!["docs.rs".into(), "example.com".into()]),
-            previous_turn_id: Some("turn+1".into()),
+            previous_path: Some(previous_path.clone()),
         };
         assert_eq!(
             parse_read_path(&format_search_path(&search)).unwrap(),
             ReadTarget::Search(search)
         );
-        let ReadTarget::Search(search) =
-            parse_read_path("search://C++%2520?previous_turn_id=turn+1").unwrap()
-        else {
+        let encoded = format!(
+            "search://C++%2520?previous_path={}",
+            previous_path.replace(':', "%3A").replace('/', "%2F")
+        );
+        let ReadTarget::Search(search) = parse_read_path(&encoded).unwrap() else {
             panic!("search")
         };
         assert_eq!(search.query, "C++%20");
-        assert_eq!(search.previous_turn_id.as_deref(), Some("turn 1"));
+        assert_eq!(
+            search.previous_path.as_deref(),
+            Some(previous_path.as_str())
+        );
     }
 
     #[test]
     fn invalid_legacy_and_ambiguous_inputs_fail_closed() {
         let digest = "a".repeat(ARTIFACT_DIGEST_LEN);
+        let artifact_path = format!("stravia://artifacts/{digest}");
         let ReadTarget::Resource(resource) =
-            parse_read_path(&format!("sa:{digest}?question=Private%20question")).unwrap()
+            parse_read_path(&format!("{artifact_path}?question=Private%20question")).unwrap()
         else {
             panic!("Artifact resource")
         };
-        assert_eq!(resource.url, format!("sa:{digest}"));
+        assert_eq!(resource.url, artifact_path);
         assert_eq!(
             resource.options.question.as_deref(),
             Some("Private question")
@@ -818,8 +844,8 @@ mod tests {
             "search://q?allowed_domains=",
             "search://q?allowed_domains=+",
             "search://q?allowed_domains=docs.rs&allowed_domains=+",
-            "search://q?previous_turn_id=a&previous_turn_id=b",
-            "search://q?previous_turn_id=+",
+            "search://q?previous_path=a&previous_path=b",
+            "search://q?previous_path=+",
             "search://q?allowed_domains=%FF",
             "search://q?unknown=x",
             "https://stravia/artifact/a?question=legacy",
@@ -834,7 +860,7 @@ mod tests {
             "https://example.com#stravia?question=+",
             "https://example.com#stravia?question=%FF",
             "https://example.com#stravia?download=1&lines=1",
-            "https://example.com#stravia?previous_turn_id=t",
+            "https://example.com#stravia?previous_path=t",
             "https://example.com#stravia?cursor=abc",
             "https://stravia/artifact/a#stravia?cursor=abc&raw=1",
         ] {

@@ -405,14 +405,16 @@ fn media_turn_id(segment: &crate::history_marker::HiddenHistorySegment) -> Optio
     else {
         return None;
     };
+    content.get("artifacts")?.as_array()?;
     let report = content.get("report")?.as_object()?;
     report.get("answer")?.as_str()?;
     report.get("artifacts")?.as_array()?;
     report.get("limitations")?.as_array()?;
     content.get("completion")?.as_str()?;
     content
-        .get("turn_id")?
-        .as_str()
+        .get("path")?
+        .as_str()?
+        .strip_prefix("stravia://turns/")
         .filter(|turn_id| stravia_runtime_contract::identifier::valid_id(turn_id))
 }
 
@@ -430,8 +432,9 @@ mod media_turn_tests {
             result: ContentBlock::ToolResult {
                 tool_use_id: "external-call".into(),
                 content: serde_json::json!({
-                    "turn_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "path": "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "completion": "complete",
+                    "artifacts": [],
                     "report": report,
                 }),
                 content_kind: Some(

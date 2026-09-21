@@ -2439,7 +2439,7 @@ mod tests {
     #[test]
     fn structured_artifact_sources_remain_recoverable_after_externalization() {
         let reference = format!(
-            "sa:{}",
+            "stravia://artifacts/{}",
             "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN)
         );
         let mut payload = serde_json::json!({

@@ -50,27 +50,27 @@ pub fn input_schema() -> Value {
                 "type": "array",
                 "maxItems": 8,
                 "default": [],
-                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_turn_id; duplicate IDs within one call are rejected.",
+                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_path; duplicate paths within one call are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "artifact_id": { "type": "string", "minLength": 1 }
+                        "path": { "type": "string", "pattern": "^stravia://artifacts/[a-z]{55}$" }
                     },
-                    "required": ["artifact_id"],
+                    "required": ["path"],
                     "additionalProperties": false
                 }
             },
-            "previous_turn_id": {
+            "previous_path": {
                 "type": "string",
-                "minLength": 1,
+                "pattern": "^stravia://turns/[a-z]{28}$",
                 "maxLength": 128,
-                "description": "An explicit prior Media Understanding Turn to continue or branch from."
+                "description": "An exact prior stravia://turns/<turn-id> path to continue or branch from."
             }
         },
         "required": ["prompt"],
         "anyOf": [
             {
-                "required": ["previous_turn_id"]
+                "required": ["previous_path"]
             },
             {
                 "properties": {
@@ -89,13 +89,21 @@ pub fn output_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "turn_id": { "type": "string" },
+            "path": { "type": "string", "pattern": "^stravia://turns/[a-z]{28}$" },
             "completion": { "type": "string", "enum": ["complete", "partial"] },
+            "artifacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "pattern": "^stravia://artifacts/[a-z]{55}$" } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            },
             "report": super::definition::media_report_schema(),
-            "artifact_reference": {"type":"string"},
             "pagination": stravia_web_access::read_path::pagination_schema()
         },
-        "required": ["turn_id", "completion", "report"],
+        "required": ["path", "completion", "artifacts", "report"],
         "additionalProperties": false
     })
 }
