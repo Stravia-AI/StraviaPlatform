@@ -28,10 +28,13 @@ fn main() -> anyhow::Result<()> {
     let records: Vec<ComponentRecord> = serde_json::from_slice(&fs::read(&manifest).context(
         "builtin components are missing; run `task build:vendors` before invoking Cargo directly",
     )?)?;
-    ensure!(!records.is_empty(), "builtin component manifest is empty");
     let mut seen = BTreeSet::new();
     let mut source = String::from("pub(crate) const COMPONENTS: &[(&str, &[u8])] = &[\n");
-    for record in records {
+    // 即使旧构建清单仍含其他组件，程序也只随附基础包。
+    for record in records
+        .into_iter()
+        .filter(|record| record.vendor_id == "base")
+    {
         ensure!(
             seen.insert(record.vendor_id.clone()),
             "duplicate builtin vendor id"
@@ -69,6 +72,7 @@ fn main() -> anyhow::Result<()> {
             path.to_string_lossy()
         ));
     }
+    ensure!(seen.contains("base"), "builtin base component is missing");
     source.push_str("];\n");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").context("missing OUT_DIR")?);
     fs::write(output.join("vendor_components.rs"), source)?;

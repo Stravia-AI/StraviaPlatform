@@ -131,6 +131,65 @@ jobs:
                   output.write(f"{key}={value}\n")
           PY
 
+  build-vendor-plugins:
+    name: Standalone vendor plugins
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache: 'false'
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
+      - name: Build standalone plugins
+        run: task build:vendors:all
+
+      - name: Package dedicated plugins
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          directory = Path("target/vendor-plugins-all")
+          records = json.loads((directory / "manifest.json").read_text())
+          dedicated = [record for record in records if record["vendor_id"] != "base"]
+          expected = {"openai-codex", "xai-grok", "command-code", "devin"}
+          if len(dedicated) != len(expected) or {record["vendor_id"] for record in dedicated} != expected:
+              raise SystemExit("Dedicated plugin release inventory is incomplete")
+          output = Path("dist")
+          output.mkdir(exist_ok=True)
+          for record in dedicated:
+              if record["version"] != os.environ["RELEASE_VERSION"]:
+                  raise SystemExit("Plugin version does not match the release")
+              source = directory / record["file"]
+              if hashlib.sha256(source.read_bytes()).hexdigest() != record["sha256"]:
+                  raise SystemExit(f"Plugin digest mismatch: {record['vendor_id']}")
+              name = f"stravia-vendor-{record['vendor_id']}-v{record['version']}.wasm"
+              shutil.copyfile(source, output / name)
+          PY
+
+      - name: Upload dedicated plugin assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: vendor-plugins
+          path: dist/*.wasm
+          if-no-files-found: error
+          retention-days: 7
+
   build-server:
     name: Server (${{ matrix.suffix }})
     needs: prepare
@@ -598,6 +657,7 @@ jobs:
       - prepare
       - build-server
       - build-desktop
+      - build-vendor-plugins
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout manifest generator
@@ -616,6 +676,12 @@ jobs:
           pattern: desktop-*
           path: release-assets
           merge-multiple: true
+
+      - name: Download dedicated plugin assets
+        uses: actions/download-artifact@v8
+        with:
+          name: vendor-plugins
+          path: release-assets
 
       - name: Generate SHA256SUMS
         shell: bash

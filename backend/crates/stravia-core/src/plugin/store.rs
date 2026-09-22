@@ -53,7 +53,7 @@ pub(crate) struct InstalledPlugin {
     pub version: String,
     pub source: String,
     pub descriptor: String,
-    /// 仅在导入与内存存储中保留字节；SQL 安装记录只引用实例目录中的 digest。
+    /// 仅在导入与内存存储中保留字节；SQL 只存摘要，随附包从程序内存读取，本地包从实例目录读取。
     #[sqlx(skip)]
     pub component: Bytes,
     pub digest: String,

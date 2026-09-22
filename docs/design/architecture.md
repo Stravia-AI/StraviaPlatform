@@ -131,7 +131,7 @@ stravia/
 │           │           └── gemini/
 │           ├── plugin/           # Wasm Vendor host：安装、权限、网络、状态与调度
 │           │   ├── mod.rs        # 对外类型与执行接口导出；无编译期 Vendor inventory
-│           │   ├── builtin.rs    # 随产品发布的 Wasm 组件装载与 descriptor 身份核对
+│           │   ├── builtin.rs    # 内嵌 base 的内存装载与 descriptor 身份核对（不写 artifact）
 │           │   ├── execution.rs  # execute_vendor / typed OperationInput / publication fence
 │           │   ├── manager.rs    # 安装版本、更新切换与运行中 operation 管理
 │           │   ├── lifecycle.rs  # 更新写栅栏与结果发布读栅栏
@@ -654,14 +654,14 @@ Request/response encode 和 stream delta encode 在跨协议时执行 per-value 
 
 Vendor 的身份、channel、认证、发现、allowance、请求构造与响应语义全部由可安装 Wasm 组件实现。Core 不再包含原生 `Vendor` / `VendorExtension` trait、`VendorRegistry`、编译期 inventory，或由宿主按品牌、协议猜测的 native fallback；基础回退与专属接管都由已安装组件的 descriptor 声明，descriptor 是唯一运行时事实来源。
 
-随产品交付的 Vendor 恰好拆为五个 Component 包：
+Vendor 实现恰好拆为五个 Component 包，但主程序默认只内嵌 `base`；四个专属 Component 仅作为独立 Release 附件发布，由管理员通过本地包导入：
 
 ```text
-stravia-vendor-base/         ← vendor_id=base 的单一 fallback Vendor；承接四个专属身份之外的全部既有接入
-stravia-vendor-codex/        ← vendor_id=openai-codex；完整拥有 Codex
-stravia-vendor-grok/         ← vendor_id=xai-grok；完整拥有 Grok
-stravia-vendor-command-code/ ← vendor_id=command-code；完整拥有 Command Code
-stravia-vendor-devin/        ← vendor_id=devin；完整拥有 Devin
+stravia-vendor-base/         ← 默认内嵌；vendor_id=base 的单一 fallback Vendor；承接四个专属身份之外的全部既有接入
+stravia-vendor-codex/        ← Release 附件；vendor_id=openai-codex；完整拥有 Codex
+stravia-vendor-grok/         ← Release 附件；vendor_id=xai-grok；完整拥有 Grok
+stravia-vendor-command-code/ ← Release 附件；vendor_id=command-code；完整拥有 Command Code
+stravia-vendor-devin/        ← Release 附件；vendor_id=devin；完整拥有 Devin
 stravia-vendor-common/       ← 多个 guest 共用的 Rust rlib，不是 Vendor
 stravia-protocol-codec/      ← OpenAI-compatible（含 embeddings）、Anthropic、Gemini、Open Responses 四个标准 family
 stravia-core/plugin/         ← 安装、版本、权限、网络、状态、调度与发布栅栏
@@ -672,7 +672,7 @@ model_turn/                  ← 路由与尝试策略；只调用 Gateway::exec
 
 这是对 ADR-0069、ADR-0070 中“四个通用协议 Vendor/插件”表述的后续取代性澄清：保留全量 Wasm 与自包含锁定 codec 的决策，但四个标准协议 family 现在是共享 codec，而不是四个 Vendor 包。它与 ADR-0067 的独立 Vendor 身份一致；基础包仍是一个 Vendor，而不是一个包导出多个 Vendor。Command Code 与 Devin 的专有 codec 分别归其 guest，Bedrock、Cohere、Gateway、Watsonx 的专有实现归基础 guest，host 不链接这些专有 codec。
 
-`task build:vendors` 一次构建五个 Component，并在 `target/vendor-plugins/manifest.json` 输出完整 manifest；不得单独构建一部分后把不完整集合当作内置 inventory。
+默认 builder 与 `task build:vendors` 只构建 `base`，并在 `target/vendor-plugins/manifest.json` 输出供 Core 内嵌的单项 manifest。Core 直接从程序内存加载内嵌 `base`，不将其 Wasm 字节写入实例 `plugins/artifacts/`；只有管理员本地导入的专属插件或 `base` 替代包使用内容寻址的磁盘产物。Release 使用 builder 的 `--all` 模式（`task build:vendors:all`），在独立的 `target/vendor-plugins-all/manifest.json` 输出五个 Component 的完整构建 manifest；只将四个非 `base` Wasm 以 `stravia-vendor-{vendor_id}-v{version}.wasm` 作为独立附件发布，并纳入统一 `SHA256SUMS`。完整构建 manifest 不发布，避免引用未发布的 `base` 及内容摘要文件名与附件名不一致；普通构建与测试准备不会互相覆盖 manifest。缩减内嵌集合不会自动删除实例中已安装的专属插件或其数据，但专属插件没有随附版本可恢复或随宿主自动升级，必须继续通过本地包更新。该分发策略取代 ADR-0067 中五包均随程序交付的历史描述，不改变其中的 Vendor 身份与协议边界。
 
 这条边界禁止长期 native bypass：未知 vendor/channel 不回落到协议家族适配器，未知 wire protocol 也不按品牌猜测。Provider 保存的 channel 必须命中已安装 descriptor；descriptor 未声明协议时保持 `None`，调用方不能擅自补成 Open Responses 或其他协议。
 
@@ -849,11 +849,11 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。插件 Component 是不可变、按内容寻址的实例文件；SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。校验后的文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的 Component 均随源数据根复制；插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含插件 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的本地导入 Component 均随源数据根复制；内嵌 `base` 由程序二进制提供，不形成待迁移文件。插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。存在本地导入插件时，数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含这些 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 

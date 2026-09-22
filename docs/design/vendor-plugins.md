@@ -5,13 +5,14 @@
 ## 已确认的身份与信任
 
 - 一个 Vendor Plugin 软件包实现一个稳定的 Vendor 实现身份；Vendor 身份不由 npm package、Provider Catalog 或协议决定，见 [ADR-0067](../adr/0067-separate-vendor-identity-from-package-and-protocol.md)。
-- 最终随程序交付恰好五个 Vendor：`base` 回退 Vendor，以及 `openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属 Vendor。`base` 是一个软件包和一个 Vendor 身份，通过多个 Provider Profile 覆盖四个专属接入之外的全部现有供应商，不是“一个包导出多个 Vendor”。
+- Vendor 实现恰好拆为五个包：`base` 回退 Vendor，以及 `openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属 Vendor。程序默认只内嵌 `base`；四个专属包仅作为独立 Release 附件发布，由管理员通过本地包导入。`base` 是一个软件包和一个 Vendor 身份，通过多个 Provider Profile 覆盖四个专属接入之外的全部现有供应商，不是“一个包导出多个 Vendor”。
 - Provider Profile 的 `provider_id` 标识供应商接入，`catalog_id` 仅关联目录；两者都不等于已保存 Provider 连接的数据库 UUID。普通 OpenAI 与 xAI API Profile 归 `base`，Codex 与 Grok 分别使用 `openai-codex` 与 `xai-grok` 专属 Profile。
 - 既有 `openai/codex` 与 `xai/grok` 连接只迁移供应商 Profile 归属，分别指向 `openai-codex` 与 `xai-grok`；连接 UUID、channel、凭据、Route 和历史保持不变。
 - 专属 Profile 对匹配身份下的全部连接、channel 和操作进行整体接管。专属包不存在、缺少能力或 channel、加载失败或执行失败时明确失败；不得按单次能力、channel 或操作回退到 `base`，也不得把两边的声明、网络 origin 或行为合并。
 - 管理员为所选插件的连接登录或填写凭据，即授权插件处理该连接的上游秘密；宿主拥有凭据持久化与跨连接隔离，见 [ADR-0068](../adr/0068-trust-vendor-plugins-with-connection-credentials.md)。
+- 本文“仅 `base` 默认内嵌”的分发策略取代 [ADR-0067](../adr/0067-separate-vendor-identity-from-package-and-protocol.md) 中五个包均随程序交付的历史描述；ADR 所确定的 Vendor 身份与协议边界不变。
 
-### 随附身份映射
+### 组件身份映射
 
 | crate | Vendor ID / kind | Provider Profile |
 | --- | --- | --- |
@@ -43,16 +44,17 @@
 - 外部完整搜索后端按单次独立调用处理，不提供续接，不跨请求保存可用于续接的上游研究会话；即使供应商具有会话能力，本次也不使用。此决定不取消既有 Local 搜索的续接能力。
 - 外部搜索沿用 Route 的选择、重试与 Target 切换策略，由插件提供上游错误分类，宿主决定执行。明确可重试的上游错误可在结果提交前重试或切换；用户取消、参数错误及权限错误不触发。接受可能重复执行与重复消耗额度，不承诺恰好执行一次。
 - 更新允许移除已被使用的能力，必须明确展示受影响绑定。保留原绑定并标记能力不可用，执行时明确失败，不自动换账号、改绑或降级为普通推理；数据兼容时已开始的调用仍由旧版本完成。
-- 内置自动更新即使移除正在使用的能力，也继续更新，不新增暂停确认步骤；更新后展示受影响绑定及能力不可用状态。这不豁免既有的数据丢弃确认，也不允许跳过宿主契约兼容性检查。
+- 内嵌 `base` 的自动更新即使移除正在使用的能力，也继续更新，不新增暂停确认步骤；更新后展示受影响绑定及能力不可用状态。这不豁免既有的数据丢弃确认，也不允许跳过宿主契约兼容性检查。
 - 宿主保留公开工具、平台能力开关、报告及引用校验、Artifact 收存与归属、历史和用量；插件提供类型明确的供应商能力，不注册新的公开搜索或生成工具。Codex 同连接的推理、hosted search 和托管图片生成纳入统一插件验收。
 - 本轮多能力扩展已整体确认，实施与验收以本文及对应能力设计中的契约为准。
 
 ## 已确认的统一运行机制
 
 - 最终所有模型 Vendor 均通过同一套 Wasm 插件机制加载与执行，不长期保留原生 Vendor 通道或供应商专属宿主执行分支。
-- `base` 与四个专属 Vendor 共五个自包含 Wasm 包随程序交付，首次使用不要求管理员逐个手动安装；它们同样显示在插件管理页面，并支持本地包替换和恢复内置。
+- 程序默认只内嵌 `base` 自包含 Wasm 包；全新 Gateway 因而只预装 `base`。`openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属包不内嵌，必须从本地分发包手动导入后才可用。
+- 缩减默认内嵌集合不会自动删除实例中已经安装的专属插件及其数据；但不再内嵌的专属插件没有程序随附版本可供恢复或随宿主自动升级，后续更新仍通过本地包导入。
 - 宿主仍拥有通用网络、存储、授权、调度及客户端协议处理，不将整个网关移入 Wasm；供应商拆分不改变这些平台职责。
-- 预置与本地安装是分发来源的差异，不构成两套供应商能力契约，见 [ADR-0070](../adr/0070-run-all-model-vendors-as-wasm-plugins.md)。
+- 内嵌与本地安装是分发来源的差异，不构成两套供应商能力契约，见 [ADR-0070](../adr/0070-run-all-model-vendors-as-wasm-plugins.md)。
 
 ## 已确认的自定义协议范围
 
@@ -82,24 +84,24 @@
 
 - `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.2.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
-- `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/` 是五个随附 guest 实现来源。
+- `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/` 是五个 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。
 - `backend/crates/stravia-vendor-common/` 是只提供多个 guest 实际共用辅助代码的 `rlib`。标准 codec 由 guest 在 Rust 源码层链接 `stravia-protocol-codec` 并编入 Component，而非采用 Component composition；Command Code 与 Devin 私有 codec 留在各自 crate，Bedrock、Cohere、Gateway、WatsonX 等私有实现留在 `base`。
-- `task build:vendors` 一次构建五个 Component，并生成 `target/vendor-plugins/manifest.json`，安装时不下载依赖。`task build:vendor-fixtures` 构建真实测试组件。Core 的 `vendor_*` 契约与生命周期检查通过 Gateway 和本地上游验证行为；浏览器、Desktop 与双数据库验收仍分别使用根 `Taskfile.yml` 中的对应入口。
+- 默认 builder 与 `task build:vendors` 只构建 `base`，在 `target/vendor-plugins/manifest.json` 生成仅含 `base` 的 manifest，供 Core 内嵌。发布流程通过 `task build:vendors:all`（builder 的 `--all` 模式）在独立的 `target/vendor-plugins-all/manifest.json` 生成五个 Component 的完整构建 manifest，并将其中四个专属 Wasm 以 `stravia-vendor-{vendor_id}-v{version}.wasm` 独立 Release 附件发布，统一由 `SHA256SUMS` 覆盖，供本地导入；`base` 不作为专属附件重复发布，完整构建 manifest 也不发布。`task build:vendor-fixtures` 依赖完整构建并生成真实测试组件。Core 的 `vendor_*` 契约与生命周期检查通过 Gateway 和本地上游验证行为；浏览器、Desktop 与双数据库验收仍分别使用根 `Taskfile.yml` 中的对应入口。
 
 ## 已确认的管理与分发范围
 
 - 提供插件管理页面，在其中展示已加载的插件。
-- 插件管理页面提供本地包安装与更新入口，并展示更新结果，包括随宿主升级发生的内置插件自动更新。
-- 除随程序交付的内置插件外，当前仅允许管理员提供本地插件包安装或更新。
+- 插件管理页面提供本地包安装与更新入口，并展示更新结果；只有内嵌的 `base` 可随宿主升级发生内置插件自动更新。
+- `base` 由程序内嵌；四个专属插件当前仅允许管理员通过本地插件包安装或更新。
 - 当前不做插件市场，不提供在线插件获取流程。
 
 ## 已确认的产物存储与备份边界
 
-- 已验证的 Wasm Component 作为不可变、内容寻址文件保存在实例 `<data_dir>/plugins/artifacts/<sha256>.wasm`；不把 Component 字节存入 SQLite 或 PostgreSQL，也不在持久化记录中保存任意外部文件路径。
+- 程序内嵌的 `base` Component 直接从进程内存加载，不把其 Wasm 字节写入 `<data_dir>/plugins/artifacts/`。本地导入的专属插件或 `base` 替代包则作为不可变、内容寻址文件保存在 `<data_dir>/plugins/artifacts/<sha256>.wasm`；任何 Component 字节都不存入 SQLite 或 PostgreSQL，也不在持久化记录中保存任意外部文件路径。
 - SQL 只保存摘要、来源、版本、revision、epoch 等安装元数据以及业务数据和插件私有状态。供应商 Profile ID 与连接 UUID 分列保存，不能用 `base` 包身份替代 Profile 归属或把两者误设为同一外键。
-- 安装与更新必须先校验、写入并同步产物文件，再提交使新 revision 生效的数据库元数据；任一步失败都保留旧产物与旧安装记录，失败的新 revision 不生效，不能先覆盖旧版本。旧插件若与当前宿主契约不兼容，仍不得继续执行。
-- 完整备份与恢复必须同时包含数据库和 `<data_dir>/plugins/artifacts/`。这对 SQLite 与 PostgreSQL 同样成立：只复制 SQLite 数据库文件或只备份远程 PostgreSQL 都不构成完整实例备份。
-- 数据目录迁移工具随现有数据目录一起复制 `plugins/artifacts/`，不另增独立插件路径参数；迁移完成前不能把仅有 SQL 元数据的目标实例视为可运行恢复。
+- 本地包安装与更新必须先校验、写入并同步产物文件，再提交使新 revision 生效的数据库元数据；任一步失败都保留旧产物与旧安装记录，失败的新 revision 不生效，不能先覆盖旧版本。内嵌 `base` 的发布直接使用程序内字节，但仍须先完成同等校验与加载准备。旧插件若与当前宿主契约不兼容，仍不得继续执行。
+- 完整备份与恢复必须同时包含数据库和本地导入产物所在的 `<data_dir>/plugins/artifacts/`；内嵌 `base` 由程序二进制提供，无需写入或备份为实例产物。这对 SQLite 与 PostgreSQL 同样成立：存在本地导入插件时，只复制 SQLite 数据库文件或只备份远程 PostgreSQL 都不构成完整实例备份。
+- 数据目录迁移工具随现有数据目录一起复制 `plugins/artifacts/`，不另增独立插件路径参数；存在本地导入记录时，迁移完成前不能把仅有 SQL 元数据的目标实例视为可运行恢复。
 
 ## 已确认的配置表单与认证交互
 
@@ -156,7 +158,7 @@
 - 管理员可以显式将当前连接配置为本机或局域网服务，不一刀切禁止私网目标；这一配置不授权访问其他本机或私网地址。
 - 安装或更新页面展示插件声明的附属服务地址。每次重定向后的目标也必须重新检查，不自动将原目标的认证头转发到另一 origin。
 - 使用出站代理不扩大允许访问的目标范围。允许访问目标与向目标发送凭据是不同的授权，不得根据网络白名单自动注入其他目标的凭据。
-- 内置插件随宿主自动更新时，新增声明的网络 origin 无需单独确认，由宿主随受信内置版本更新生效白名单；这不授予插件在运行期间自行修改声明或访问任意目标的权力。
+- 内嵌 `base` 随宿主自动更新时，新增声明的网络 origin 无需单独确认，由宿主随受信内置版本更新生效白名单；这不授予插件在运行期间自行修改声明或访问任意目标的权力。
 - 本地包手动更新在已有确认界面展示网络范围变化，沿用一次更新确认，不额外增加网络授权步骤。
 
 ## 已确认的本地包导入方式
@@ -170,7 +172,7 @@
 - OpenAI-compatible（包括 embeddings）、Anthropic、Gemini、Open Responses 四类标准 codec 由 `stravia-protocol-codec` 共享维护，供应商插件不复制源码维护平行实现。
 - 需要标准 codec 的 guest crate 在 Rust 源码层直接链接该库并锁定依赖，构建时静态编入最终交付的一个自包含 Wasm Component；不采用运行时宿主 codec，也不再把 Component composition 保留为未决定路径。
 - Command Code 与 Devin 的私有 codec 分别由 `stravia-vendor-command-code` 与 `stravia-vendor-devin` 所有；Bedrock、Cohere、Gateway、WatsonX 等私有 codec 由 `stravia-vendor-base` 所有。`stravia-protocol-codec` 与宿主构建不得反向依赖这些供应商私有实现。
-- 安装时无需另行获取 codec 包，运行时不由宿主替换插件内部 codec。每个插件产物携带的 codec 保持固定；随宿主升级自动更新内置插件时，替换的是整个插件产物及其锁定依赖，宿主契约兼容性仍需独立校验。
+- 安装时无需另行获取 codec 包，运行时不由宿主替换插件内部 codec。每个插件产物携带的 codec 保持固定；随宿主升级自动更新内嵌的 `base` 时，替换的是整个插件产物及其锁定依赖，宿主契约兼容性仍需独立校验。专属插件的 codec 更新随其本地包更新交付。
 - codec 修复通过重新构建、发布并更新相关插件交付，接受不同插件产物包含重复 codec 代码的代价，见 [ADR-0069](../adr/0069-bundle-pinned-codecs-in-vendor-plugins.md)。
 
 ## 已确认的本地包手动更新流程
@@ -185,20 +187,21 @@
 
 ## 已确认的内置插件自动更新
 
-- 允许内置插件随宿主升级，自动更新为新版程序携带的更高版本，无需管理员逐个确认插件更新；这是本地包手动确认规则的明确例外。
-- 随附版本较低或相同时，不因宿主升级自动覆盖当前版本。
-- 自动更新使用程序随附的本地插件产物，不引入插件市场、远程包获取或依赖下载。
+- 自动更新仅适用于程序默认内嵌的 `base`：宿主升级时可自动更新为新版程序携带的更高版本，无需管理员确认；这是本地包手动确认规则的明确例外。
+- `base` 的随附版本较低或相同时，不因宿主升级自动覆盖当前版本。
+- 自动更新使用程序随附的 `base` 本地插件产物，不引入插件市场、远程包获取或依赖下载。
 - 自动更新同样需要校验与准备加载；失败不先破坏原插件产物，也不代表不兼容的旧插件仍可在新宿主上执行。
-- 插件管理页面展示自动更新后的实际版本与结果。该例外不扩展为第三方插件的自动更新授权。
-- 自动更新可以同时增加内置插件声明的网络 origin，无需额外确认；管理员对内置更新来源的信任包含其网络声明变化。数据丢弃仍必须按不兼容更新规则手动确认，不因网络扩权免确认而放宽。
+- 插件管理页面展示自动更新后的实际版本与结果。该例外不扩展到四个专属插件；它们没有随附版本，只能通过本地包更新。
+- 自动更新可以同时增加 `base` 声明的网络 origin，无需额外确认；管理员对内置更新来源的信任包含其网络声明变化。数据丢弃仍必须按不兼容更新规则手动确认，不因网络扩权免确认而放宽。
 
 ## 已确认的本地替换与恢复内置
 
-- 管理员通过本地包替换内置 Vendor 的实现后，该 Vendor 转为手动管理，不再被宿主随附的更高版本自动覆盖。
+- 管理员通过本地包替换内嵌 `base` 的实现后，`base` 转为手动管理，不再被宿主随附的更高版本自动覆盖。
 - 自动更新资格由宿主记录的实际安装来源决定，不采信包自报的“官方”身份，也不因 Vendor ID 相同而恢复。
-- 插件管理页面提供“恢复内置版本”操作，展示当前版本、程序随附版本及受影响连接；管理员确认后，使用随附实现并恢复随宿主自动更新。
-- 内置来源的插件加载失败或与随附版本不同时，也提供同一恢复入口，无需先导入本地替代包；已有待确认更新时，保留单一的更新审阅入口。
+- 插件管理页面为 `base` 提供“恢复内置版本”操作，展示当前版本、程序随附版本及受影响连接；管理员确认后，使用随附实现并恢复随宿主自动更新。
+- 内置来源的 `base` 加载失败或与随附版本不同时，也提供同一恢复入口，无需先导入本地替代包；已有待确认更新时，保留单一的更新审阅入口。
 - 恢复内置可能替换为较低版本，必须明确展示；这一显式操作不改变内置自动更新只升级、不降级的规则。数据不兼容时同样需要丢弃数据的明确确认。
+- 四个专属插件没有程序随附版本，不能执行“恢复内置”或随宿主自动升级；已经安装的版本及其数据不会因默认内嵌集合缩减而自动删除。
 
 ## 已确认的不兼容更新原则
 
