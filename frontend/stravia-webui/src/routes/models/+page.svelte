@@ -146,9 +146,11 @@ const deletesMediaUnderstandingRoute = $derived(
 function associatedServicesLabel(model: Route): string {
   return [
     ...new Set(
-      model.targets.map(
-        (target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id,
-      ),
+      model.targets
+        .filter((target) => target.enabled)
+        .map(
+          (target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id,
+        ),
     ),
   ].join(', ')
 }
