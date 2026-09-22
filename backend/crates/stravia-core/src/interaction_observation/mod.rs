@@ -1947,6 +1947,8 @@ mod snapshot_tests {
         }
     }
 
+    type RunRow = (String, String, Option<String>, String, Option<String>);
+
     async fn test_observation(
         pool: &sqlx::SqlitePool,
         directory: &std::path::Path,
@@ -2231,8 +2233,7 @@ mod snapshot_tests {
         drop(parent);
         drop(child);
         observation.flush().await?;
-        let rows: Vec<(String, String, Option<String>, String, Option<String>)> =
-            sqlx::query_as("SELECT id,interaction_id,parent_run_id,status,generation_node_id FROM inference_run_observations ORDER BY id")
+        let rows: Vec<RunRow> = sqlx::query_as("SELECT id,interaction_id,parent_run_id,status,generation_node_id FROM inference_run_observations ORDER BY id")
                 .fetch_all(&pool).await?;
         assert_eq!(rows.len(), 2, "text deltas must not displace admission");
         assert_eq!(

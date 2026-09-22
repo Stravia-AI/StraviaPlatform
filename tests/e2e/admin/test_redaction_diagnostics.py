@@ -193,7 +193,6 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
             _, _, archive = download_observation_bundle(env, detail)
             events = observation_bundle_events(archive)
             wire_records = [event for event in events if event.get("layer") == "wire"]
-            encoded = json.dumps(wire_records)
             assert wire_records
             response_bytes = bytearray()
             for event in wire_records:
@@ -205,8 +204,29 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
                 elif isinstance(payload, dict) and payload.get("encoding") == "base64":
                     response_bytes.extend(base64.b64decode(payload["data"]))
             response_wire = bytes(response_bytes).decode("utf-8")
-            assert "ordinary-before" in response_wire and "ordinary-after" in response_wire
+            # The raw capture keeps the plaintext secret contiguous inside the restored delta.
             assert SECRET in response_wire
+            if stream:
+                # Wire chunks preserve transport framing; ordinary text can arrive as
+                # single-grapheme deltas, so compare the reassembled semantic content.
+                wire_parts: list[str] = []
+                for line in response_wire.splitlines():
+                    if not line.startswith("data:") or line.strip() == "data: [DONE]":
+                        continue
+                    event = json.loads(line[5:])
+                    for choice in event.get("choices", []):
+                        delta = choice.get("delta", {})
+                        if tool:
+                            wire_parts.extend(
+                                call.get("function", {}).get("arguments", "")
+                                for call in delta.get("tool_calls", [])
+                            )
+                        else:
+                            wire_parts.append(delta.get("content") or "")
+                wire_text = "".join(wire_parts)
+                assert (json.loads(wire_text)["value"] if tool else wire_text) == expected
+            else:
+                assert "ordinary-before" in response_wire and "ordinary-after" in response_wire
 
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
                 manifest = json.loads(bundle.read("manifest.json"))

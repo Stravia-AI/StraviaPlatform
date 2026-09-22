@@ -169,19 +169,7 @@ impl ProtectedSecrets {
                     self.value(value);
                 }
             }
-            RunEvent::Wire {
-                direction,
-                payload,
-                headers,
-                url,
-                ..
-            } if direction != "client_to_platform" => {
-                self.value(payload);
-                self.value(headers);
-                if let Some(url) = url {
-                    self.text(url);
-                }
-            }
+            // Wire 事件按入队契约只替换 Authorization 请求头值，其余内容原样保留。
             RunEvent::TargetAttemptStarted { upstream_url, .. } => self.text(upstream_url),
             RunEvent::CompactionOperation {
                 error_code: Some(reason),

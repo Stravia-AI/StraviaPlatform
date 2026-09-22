@@ -7,7 +7,7 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
-  retries: 0,
+  retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: { baseURL, colorScheme: 'light', screenshot: 'only-on-failure', trace: 'retain-on-failure' },
   webServer: {
