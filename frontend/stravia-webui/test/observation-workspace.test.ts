@@ -104,7 +104,12 @@ function failureDetail(id: string): FailedRequestDetail {
   return { request: failureSummary(id), events: [], trace: null, snapshot_sequence: 0 }
 }
 
-function streamEvent(sequence: number, interactionId: string | null, occurred_at: number): ObservationStreamUpdate {
+function streamEvent(
+  sequence: number,
+  interactionId: string | null,
+  occurred_at: number,
+  kind = 'run_finished',
+): ObservationStreamUpdate {
   return {
     type: 'event',
     event: {
@@ -113,7 +118,7 @@ function streamEvent(sequence: number, interactionId: string | null, occurred_at
       interaction_id: interactionId,
       run_id: 'r1',
       rejection_id: null,
-      kind: 'run_finished',
+      kind,
       payload: {},
     },
   }
@@ -338,6 +343,25 @@ describe('stream updates', () => {
     await h.controller.selectInteraction(summary('i1'))
     await h.emit({ type: 'live_content', block: block('b2', 'i1') })
     expect(h.snap().selectedLiveBlocks.map((b) => b.block_id)).toEqual(['b1', 'b2'])
+  })
+
+  test('follow only reacts to events that extend the output preview', async () => {
+    const h = harness()
+    await h.controller.start()
+    // 跟随中：思考增量与工具调用不移动视口，只有输出预览追加触发 focusLatest。
+    const focused = h.focusLatestCalls.length
+    await h.emit(streamEvent(6, 'i1', 999_500, 'model_thinking_delta'))
+    await h.emit(streamEvent(7, 'i1', 999_501, 'platform_tool_finished'))
+    expect(h.focusLatestCalls).toHaveLength(focused)
+    await h.emit(streamEvent(8, 'i1', 999_502, 'client_visible_content_delta'))
+    expect(h.focusLatestCalls).toHaveLength(focused + 1)
+    // 暂停后同理：非预览事件不点亮「新活动·跟随」。
+    h.controller.pauseFollow()
+    await h.emit(streamEvent(9, 'i1', 999_503, 'model_thinking_delta'))
+    await h.emit(streamEvent(10, 'i1', 999_504, 'client_tool_result'))
+    expect(h.snap().hasNewActivity).toBe(false)
+    await h.emit(streamEvent(11, 'i1', 999_505, 'client_visible_content_delta'))
+    expect(h.snap().hasNewActivity).toBe(true)
   })
 
   test('live_gap routes capacity gaps away from save-failure gaps', async () => {
