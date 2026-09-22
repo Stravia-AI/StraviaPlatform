@@ -138,11 +138,9 @@ pub struct DevinConnectStreamParser {
     tools: BTreeMap<usize, OpenToolCall>,
     open_tool: Option<usize>,
     next_output_index: usize,
-    text_items: BTreeMap<usize, String>,
-    thinking_items: BTreeMap<usize, OpenThinking>,
-    current_text: Option<usize>,
-    current_thinking: Option<usize>,
-    last_thinking: Option<usize>,
+    text_item: Option<(usize, String)>,
+    // 仅在出现 thinking 时分配，避免放大所有协议共用的 WireStreamDecoder。
+    thinking_item: Option<(usize, Box<OpenThinking>)>,
     output_id: String,
 }
 
@@ -163,11 +161,8 @@ impl DevinConnectStreamParser {
             tools: BTreeMap::new(),
             open_tool: None,
             next_output_index: 0,
-            text_items: BTreeMap::new(),
-            thinking_items: BTreeMap::new(),
-            current_text: None,
-            current_thinking: None,
-            last_thinking: None,
+            text_item: None,
+            thinking_item: None,
             output_id: String::new(),
         }
     }
@@ -249,22 +244,17 @@ impl DevinConnectStreamParser {
                     self.ensure_started(deltas);
                     match self.content.push(field.bytes) {
                         Ok(text) if !text.is_empty() => {
-                            self.current_thinking = None;
-                            let index = match self.current_text {
-                                Some(index) => index,
-                                None => {
-                                    let index = self.next_output_index;
-                                    self.next_output_index += 1;
-                                    self.current_text = Some(index);
-                                    index
-                                }
-                            };
-                            self.text_items.entry(index).or_default().push_str(&text);
+                            let (index, content) = self.text_item.get_or_insert_with(|| {
+                                let index = self.next_output_index;
+                                self.next_output_index += 1;
+                                (index, String::new())
+                            });
+                            content.push_str(&text);
                             deltas.push(AiStreamDelta::TextDeltaWithMetadata {
                                 text,
                                 logprobs: Vec::new(),
                                 obfuscation: None,
-                                output_index: Some(index),
+                                output_index: Some(*index),
                                 content_index: Some(0),
                             });
                         }
@@ -313,27 +303,18 @@ impl DevinConnectStreamParser {
         {
             return;
         }
-        let index = if text.is_some() || redacted {
-            match self.current_thinking {
-                Some(index) => index,
-                None => {
-                    self.ensure_started(deltas);
-                    let index = self.next_output_index;
-                    self.next_output_index += 1;
-                    self.current_thinking = Some(index);
-                    self.current_text = None;
-                    self.last_thinking = Some(index);
-                    deltas.push(AiStreamDelta::ProtectedThinkingStart { index });
-                    index
-                }
-            }
-        } else if let Some(index) = self.last_thinking {
-            // 签名可在正文之后到达，归属仍是最后一个思考项，不能新建空思考块。
-            index
-        } else {
+        // Devin 的 thinking/signature 是整个响应的增量字段；正文和工具调用
+        // 不构成新的签名边界。不同响应由不同 parser 实例隔离。
+        if self.thinking_item.is_none() && (text.is_some() || redacted) {
+            self.ensure_started(deltas);
+            let index = self.next_output_index;
+            self.next_output_index += 1;
+            self.thinking_item = Some((index, Box::default()));
+            deltas.push(AiStreamDelta::ProtectedThinkingStart { index });
+        }
+        let Some((index, thinking)) = self.thinking_item.as_mut() else {
             return;
         };
-        let thinking = self.thinking_items.entry(index).or_default();
         thinking.redacted |= redacted;
         if let Some(bytes) = signature {
             thinking
@@ -357,7 +338,7 @@ impl DevinConnectStreamParser {
                 deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
                     text,
                     obfuscation: None,
-                    output_index: Some(index),
+                    output_index: Some(*index),
                     content_index: Some(0),
                 });
             }
@@ -367,11 +348,12 @@ impl DevinConnectStreamParser {
     fn finish_items(&mut self, deltas: &mut Vec<AiStreamDelta>) {
         // 签名可能晚于正文；公开增量立即发送，权威项在 trailer 后封口，
         // 交由现有 indexed projection / accumulator 保持身份与回放状态。
-        let mut items: BTreeMap<usize, AiItem> = std::mem::take(&mut self.text_items)
-            .into_iter()
-            .map(|(index, text)| (index, AiItem::output_text(text)))
-            .collect();
-        for (index, mut thinking) in std::mem::take(&mut self.thinking_items) {
+        let text = self
+            .text_item
+            .take()
+            .map(|(index, text)| (index, AiItem::output_text(text)));
+        let thinking = self.thinking_item.take().map(|(index, thinking)| {
+            let mut thinking = *thinking;
             let item = if thinking.redacted {
                 thinking.replay.redacted_text = thinking.text;
                 AiItem {
@@ -388,11 +370,14 @@ impl DevinConnectStreamParser {
                     (!thinking.replay.signature.is_empty()).then(|| thinking.replay.encode());
                 AiItem::reasoning(Vec::new(), vec![thinking.text], signature)
             };
-            items.insert(index, item);
-        }
+            (index, item)
+        });
+        let mut items = [text, thinking];
+        items.sort_unstable_by_key(|item| item.as_ref().map(|(index, _)| *index));
         deltas.extend(
             items
                 .into_iter()
+                .flatten()
                 .map(|(index, item)| AiStreamDelta::ItemDone { index, item }),
         );
     }
@@ -574,8 +559,6 @@ impl DevinConnectStreamParser {
 
     fn parse_tool_call(&mut self, field: &ProtoField<'_>, deltas: &mut Vec<AiStreamDelta>) {
         self.ensure_started(deltas);
-        self.current_text = None;
-        self.current_thinking = None;
         let sub = match parse_fields(field.bytes) {
             Ok(sub) => sub,
             Err(error) => {
@@ -1173,12 +1156,12 @@ mod tests {
             .expect("thinking replay");
         assert_eq!(field_text(replay, 12), "sig-tail");
         assert_eq!(field_text(replay, 18), "sealed");
-        assert_eq!(field_text(replay, 15), "output-1");
+        assert!(!parse_fields(replay).unwrap().iter().any(|f| f.number == 15));
         assert!(prompts.iter().any(|p| field_text(p, 3) == "answer"));
     }
 
     #[test]
-    fn devin_semantics_responses_roundtrip_keeps_signed_turns_and_parallel_calls() {
+    fn devin_semantics_responses_roundtrip_aggregates_response_fragments_and_parallel_calls() {
         let pair = crate::protocol::transform::ProtocolTransform::global()
             .bind(
                 stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
@@ -1187,16 +1170,22 @@ mod tests {
             .unwrap();
         let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
         let mut frames = Vec::new();
-        for (thought, signature, text) in [
-            ("First thought.", "signature-first", "First observation."),
+        for (output_id, thought, signature, text) in [
             (
+                "first-output",
+                "First thought.",
+                "signature-first",
+                "First observation.",
+            ),
+            (
+                "second-output",
                 "Second thought.",
                 "signature-",
                 "I will read both fixtures.",
             ),
         ] {
             let mut payload = Vec::new();
-            write_string_field(&mut payload, 15, "shared-output");
+            write_string_field(&mut payload, 15, output_id);
             write_string_field(&mut payload, 9, thought);
             write_string_field(&mut payload, 10, signature);
             write_string_field(&mut payload, 21, "sealed");
@@ -1213,6 +1202,9 @@ mod tests {
             frames.push(data_frame(&payload));
         }
         let mut late = Vec::new();
+        write_string_field(&mut late, 9, "Final thought.");
+        write_string_field(&mut late, 3, " Done.");
+        write_string_field(&mut late, 15, "late-output");
         write_string_field(&mut late, 10, "second");
         write_varint_field(&mut late, 5, 10);
         frames.push(data_frame(&late));
@@ -1271,24 +1263,18 @@ mod tests {
         .unwrap();
         let fields = parse_fields(&body).unwrap();
         let prompts: Vec<_> = fields.iter().filter(|field| field.number == 3).collect();
-        assert_eq!(prompts.len(), 5);
-        for (index, thought, signature, text) in [
-            (1, "First thought.", "signature-first", "First observation."),
-            (
-                2,
-                "Second thought.",
-                "signature-second",
-                "I will read both fixtures.",
-            ),
+        assert_eq!(prompts.len(), 4);
+        let prompt = prompts[1].bytes;
+        for (number, value) in [
+            (3, "First observation.I will read both fixtures. Done."),
+            (11, "First thought.Second thought.Final thought."),
+            (12, "signature-firstsignature-second"),
+            (18, "sealed"),
         ] {
-            let prompt = prompts[index].bytes;
-            assert_eq!(field_text(prompt, 3), text);
-            assert_eq!(field_text(prompt, 11), thought);
-            assert_eq!(field_text(prompt, 12), signature);
-            assert_eq!(field_text(prompt, 15), "shared-output");
-            assert_eq!(field_text(prompt, 18), "sealed");
+            assert_eq!(field_text(prompt, number), value);
         }
-        let call_fields = parse_fields(prompts[2].bytes).unwrap();
+        let call_fields = parse_fields(prompt).unwrap();
+        assert!(!call_fields.iter().any(|field| field.number == 15));
         let calls: Vec<_> = call_fields
             .iter()
             .filter(|field| field.number == 6)
@@ -1300,7 +1286,7 @@ mod tests {
         ] {
             assert_eq!(field_text(calls[index].bytes, 1), id);
             assert_eq!(field_text(calls[index].bytes, 3), arguments);
-            assert_eq!(field_text(prompts[index + 3].bytes, 7), id);
+            assert_eq!(field_text(prompts[index + 2].bytes, 7), id);
         }
     }
 

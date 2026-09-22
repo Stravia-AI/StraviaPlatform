@@ -2280,7 +2280,7 @@ mod tests {
         let fields: &[&[(u32, &str)]] = &[
             &[(9, "first"), (10, "sig-first"), (21, "sealed")],
             &[(3, "answer")],
-            &[(9, "second"), (10, "sig-"), (21, "anthropic")],
+            &[(9, "second"), (10, "sig-"), (21, "sealed")],
             &[(3, "tail")],
             &[(10, "second")],
         ];
@@ -2351,7 +2351,7 @@ mod tests {
             .filter(|f| f.number == 12)
             .map(|f| String::from_utf8(f.bytes.to_vec()).unwrap())
             .collect();
-        assert_eq!(signatures, ["sig-first", "sig-second"]);
+        assert_eq!(signatures, ["sig-firstsig-second"]);
         let mut foreign = original;
         prepare_thinking_replay(&mut foreign, DEVIN_CONNECT_GET_CHAT_MESSAGE_V1, |_| false);
         let body = encode_get_chat_message_request(

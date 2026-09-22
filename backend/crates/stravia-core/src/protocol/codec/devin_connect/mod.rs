@@ -28,8 +28,8 @@ pub(crate) use request::encode_get_chat_message_request;
 pub(crate) use request::session_shape;
 pub(crate) use stream::DevinConnectStreamParser;
 
-/// 签名类型与输出身份必须一起回放；使用现有 opaque signature carrier，
-/// 避免在跨协议历史中把 Devin 私有字段伪装成通用推理参数。
+/// 使用现有 opaque signature carrier 保留 Devin 响应状态；
+/// output_id 仅随历史保留，不回填到原生请求的 prompt。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct ThinkingReplay {
     pub signature: String,

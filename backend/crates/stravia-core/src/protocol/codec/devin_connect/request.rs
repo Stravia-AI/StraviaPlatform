@@ -13,7 +13,7 @@
 //!                              #6 ChatToolCall{#1 id,#2 name,#3 args_json},
 //!                              #7 tool_call_id, #10 ImageData{#1 b64,#2 mime},
 //!                              #11 thinking, #12 signature, #13 redacted,
-//!                              #15 output_id, #18 signature_type }
+//!                              #18 signature_type }
 //!   #7  request source enum (5)
 //!   #8  CompletionConfig { #1 enabled, #2 max_tokens, #3 max_newlines,
 //!                          #5 f64 temperature, #7 top_k, #8 f64 top_p }
@@ -671,9 +671,7 @@ impl ChatMsg {
             if !replay.signature.is_empty() {
                 write_string_field(&mut out, 12, &replay.signature);
             }
-            if !replay.output_id.is_empty() {
-                write_string_field(&mut out, 15, &replay.output_id);
-            }
+            // 原生 CLI 不把响应的 output_id 回填到历史 prompt。
             if !replay.signature_type.is_empty() {
                 write_string_field(&mut out, 18, &replay.signature_type);
             }
@@ -687,7 +685,8 @@ impl ChatMsg {
 
 fn push_message(out: &mut Vec<ChatMsg>, mut message: ChatMsg) {
     // Responses 把正文、reasoning 和每个 call 拆成独立项；这里只恢复上游回合，
-    // 不修改 canonical 历史。原生签名为单值，两个思考块不能拼接或相互覆盖。
+    // 不修改 canonical 历史。同一响应的签名增量已由 decoder 聚合，
+    // 这里不能再拼接或覆盖历史中的独立思考块。
     if let Some(last) = out.last_mut()
         && last.source == message.source
         && match message.source {
@@ -1627,7 +1626,6 @@ mod tests {
             (3, "I will read both fixtures."),
             (11, "Compare both fixtures."),
             (12, "signed-thought"),
-            (15, "output-1"),
             (18, "sealed"),
         ] {
             assert!(
@@ -1636,6 +1634,7 @@ mod tests {
                     .any(|field| { field.number == number && field.bytes == value.as_bytes() })
             );
         }
+        assert!(!assistant.iter().any(|field| field.number == 15));
         assert_eq!(
             assistant.iter().filter(|field| field.number == 6).count(),
             2
@@ -1714,19 +1713,14 @@ mod tests {
             ),
         ] {
             let prompt = signed[index];
-            for (number, value) in [
-                (3, text),
-                (11, thought),
-                (12, signature),
-                (15, "shared-output"),
-                (18, "sealed"),
-            ] {
+            for (number, value) in [(3, text), (11, thought), (12, signature), (18, "sealed")] {
                 assert!(
                     prompt
                         .iter()
                         .any(|field| field.number == number && field.bytes == value.as_bytes())
                 );
             }
+            assert!(!prompt.iter().any(|field| field.number == 15));
             let call = sub_message(prompt, 6, 0);
             assert!(
                 call.iter()
@@ -1904,7 +1898,6 @@ mod tests {
         for (number, value) in [
             (11, b"Inspect the fixture.".as_slice()),
             (12, b"signed-thought".as_slice()),
-            (15, b"output-1".as_slice()),
             (18, b"native".as_slice()),
         ] {
             assert!(
@@ -1913,6 +1906,7 @@ mod tests {
                     .any(|field| field.number == number && field.bytes == value)
             );
         }
+        assert!(!prompts[call_index].iter().any(|field| field.number == 15));
     }
 
     /// The upstream rejects "all calls, then all results" groupings and
