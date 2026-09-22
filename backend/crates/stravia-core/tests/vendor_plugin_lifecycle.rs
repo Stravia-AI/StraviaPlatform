@@ -1298,9 +1298,13 @@ async fn local_builtin_replacement_survives_restart_until_explicit_restore() -> 
         .await?;
     assert_eq!(local.source, PluginSource::Local);
     assert_eq!(local.version, "999.0.0");
+    let artifacts = directory.path().join("plugins/artifacts");
+    let local_files = std::fs::read_dir(&artifacts)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     drop(gateway);
 
-    let gateway = Gateway::new(config).await?;
+    let gateway = Gateway::new(config.clone()).await?;
     let still_local = gateway
         .admin()
         .list_vendor_plugins()
@@ -1326,6 +1330,25 @@ async fn local_builtin_replacement_survives_restart_until_explicit_restore() -> 
         .await?;
     assert_eq!(restored.source, PluginSource::Builtin);
     assert_ne!(restored.version, "999.0.0");
+    assert_eq!(
+        std::fs::read_dir(&artifacts)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?,
+        local_files,
+        "restoring the embedded base must not write a Wasm artifact"
+    );
+    drop(gateway);
+    let gateway = Gateway::new(config).await?;
+    let base = gateway
+        .admin()
+        .list_vendor_plugins()
+        .await?
+        .into_iter()
+        .find(|plugin| plugin.vendor_id == "base")
+        .expect("restored base plugin");
+    assert_eq!(base.source, PluginSource::Builtin);
+    assert_eq!(base.status, "ready");
+    assert_eq!(base.version, restored.version);
     Ok(())
 }
 

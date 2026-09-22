@@ -17,7 +17,7 @@ tasks:
       - bun --bun run bun ci
 
   build:vendors:
-    desc: Build all self-contained builtin Wasm vendor components.
+    desc: Build the bundled Stravia Base Providers Wasm component.
     sources:
       - Cargo.toml
       - Cargo.lock
@@ -26,14 +26,6 @@ tasks:
       - backend/crates/stravia-vendor-base/build.rs
       - backend/crates/stravia-vendor-base/src/**/*.rs
       - backend/crates/stravia-core/assets/providers.stravia.json
-      - backend/crates/stravia-vendor-codex/Cargo.toml
-      - backend/crates/stravia-vendor-codex/src/**/*.rs
-      - backend/crates/stravia-vendor-grok/Cargo.toml
-      - backend/crates/stravia-vendor-grok/src/**/*.rs
-      - backend/crates/stravia-vendor-command-code/Cargo.toml
-      - backend/crates/stravia-vendor-command-code/src/**/*.rs
-      - backend/crates/stravia-vendor-devin/Cargo.toml
-      - backend/crates/stravia-vendor-devin/src/**/*.rs
       - backend/crates/stravia-vendor-common/Cargo.toml
       - backend/crates/stravia-vendor-common/src/**/*.rs
       - backend/crates/stravia-vendor-sdk/Cargo.toml
@@ -49,9 +41,15 @@ tasks:
       - rustup target add wasm32-wasip2
       - cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors
 
+  build:vendors:all:
+    desc: Build standalone Wasm plugins for release assets and explicit integration tests.
+    deps: [build:vendors]
+    cmds:
+      - cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors -- --all
+
   build:vendor-fixtures:
     desc: Build real Wasm components for Gateway lifecycle and capability regressions.
-    deps: [build:vendors]
+    deps: [build:vendors:all]
     sources:
       - Cargo.toml
       - rust-toolchain.toml

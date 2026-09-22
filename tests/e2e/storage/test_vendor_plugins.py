@@ -358,7 +358,14 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
             vendor_id
             for vendor_id, plugin in initial_plugins.items()
             if plugin["source"] == "builtin"
-        } == {"base", "openai-codex", "xai-grok", "command-code", "devin"}
+        } == {"base"}
+        assert initial_plugins["base"]["status"] == "ready"
+        assert not list((data_dir / "plugins").rglob("*.wasm"))
+        stop_stravia_server(process, logs)
+        process = None
+        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        assert _plugins(session)["base"]["status"] == "ready"
+        assert not list((data_dir / "plugins").rglob("*.wasm"))
         installed = _install_plugin(session, fixtures, "lifecycle-v1.wasm")
         assert (installed["vendor_id"], installed["version"]) == (
             LIFECYCLE_VENDOR,
@@ -373,7 +380,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         )
         artifact_dir = data_dir / "plugins" / "artifacts"
         artifact_files = list(artifact_dir.iterdir())
-        assert len(artifact_files) >= 7
+        assert len(artifact_files) == 2
         assert all(
             artifact.is_file()
             and artifact.suffix == ".wasm"

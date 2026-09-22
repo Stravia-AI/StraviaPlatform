@@ -40,6 +40,9 @@ use stravia_web_search::{
 use tokio::sync::{Mutex, oneshot};
 use tower::ServiceExt;
 
+mod vendor_plugin_artifacts;
+use vendor_plugin_artifacts::install_distributed_vendor_plugin;
+
 const SOURCE_URL: &str = "https://93.184.216.34/verified";
 const PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -2620,9 +2623,10 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
 }
 
 #[tokio::test]
-async fn bundled_codex_component_reuses_one_connection_for_search_and_image() -> anyhow::Result<()>
-{
+async fn manually_installed_codex_component_reuses_one_connection_for_search_and_image()
+-> anyhow::Result<()> {
     let harness = TestHarness::new().await?;
+    install_distributed_vendor_plugin(&harness.gateway, "openai-codex").await?;
     let descriptor = harness
         .gateway
         .admin()
@@ -2630,7 +2634,7 @@ async fn bundled_codex_component_reuses_one_connection_for_search_and_image() ->
         .await?
         .into_iter()
         .find(|descriptor| descriptor.provider_id == "openai-codex")
-        .expect("bundled OpenAI Codex provider profile");
+        .expect("manually installed OpenAI Codex provider profile");
     let codex = descriptor
         .channels
         .iter()

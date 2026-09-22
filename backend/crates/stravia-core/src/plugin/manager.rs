@@ -76,9 +76,27 @@ impl VendorPlugins {
             .then(|| PluginArtifacts::new(plugin_directory));
         let mut entries = HashMap::new();
         for mut record in store.list().await? {
-            let component = match &artifacts {
-                Some(artifacts) => artifacts.read(&record.digest).await,
-                None => Ok(record.component.clone()),
+            let component = match bundled
+                .plugins
+                .get(&record.vendor_id)
+                .filter(|_| record.source == PluginSource::Builtin.as_str())
+            {
+                Some(bundle) => {
+                    let digest = stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                        &Sha256::digest(bundle.component).into(),
+                    );
+                    if digest == record.digest {
+                        Ok(Bytes::from_static(bundle.component))
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "bundled plugin digest differs from installed version"
+                        ))
+                    }
+                }
+                None => match &artifacts {
+                    Some(artifacts) => artifacts.read(&record.digest).await,
+                    None => Ok(record.component.clone()),
+                },
             };
             let package = match component {
                 Ok(component) => match bundled.plugins.get(&record.vendor_id) {
@@ -587,7 +605,9 @@ impl VendorPlugins {
                 == pending.provider_fingerprint,
             "provider configuration or plugin data changed; review the update again"
         );
-        if let Some(artifacts) = &self.artifacts {
+        if pending.preview.target_source == PluginSource::Local
+            && let Some(artifacts) = &self.artifacts
+        {
             artifacts
                 .store(&pending.record.digest, pending.record.component.clone())
                 .await?;

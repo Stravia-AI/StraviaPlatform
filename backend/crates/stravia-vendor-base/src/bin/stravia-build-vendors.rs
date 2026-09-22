@@ -24,11 +24,23 @@ struct ComponentRecord<'a> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let all = match args.next().as_deref() {
+        None => false,
+        Some("--all") => true,
+        Some(argument) => anyhow::bail!("unknown argument: {argument}; expected --all"),
+    };
+    ensure!(args.next().is_none(), "expected at most one --all argument");
+    let components = if all { COMPONENTS } else { &COMPONENTS[..1] };
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
         .context("vendor crate is outside the expected workspace layout")?;
-    let output = root.join("target/vendor-plugins");
+    let output = root.join(if all {
+        "target/vendor-plugins-all"
+    } else {
+        "target/vendor-plugins"
+    });
     // 不使用父 cargo run 的 target 锁；guest 构建也不能继承本机链接器参数。
     let guest_target = root.join("target/vendor-guest-build");
     fs::create_dir_all(&output)?;
@@ -48,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         .arg(&guest_target)
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS");
-    for &(_, package) in COMPONENTS {
+    for &(_, package) in components {
         command.args(["--package", package]);
     }
     let status = command
@@ -56,8 +68,8 @@ fn main() -> anyhow::Result<()> {
         .context("cannot start vendor component build")?;
     ensure!(status.success(), "vendor component build failed");
 
-    let mut records = Vec::with_capacity(COMPONENTS.len());
-    for &(vendor_id, package) in COMPONENTS {
+    let mut records = Vec::with_capacity(components.len());
+    for &(vendor_id, package) in components {
         let source = guest_target
             .join("wasm32-wasip2/release")
             .join(format!("{}.wasm", package.replace('-', "_")));

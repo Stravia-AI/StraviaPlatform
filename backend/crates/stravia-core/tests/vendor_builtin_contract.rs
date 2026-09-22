@@ -25,7 +25,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 
 mod vendor_observation;
+mod vendor_plugin_artifacts;
 use vendor_observation::{finished_observation, observation_bundle_records, wire_payload_bytes};
+use vendor_plugin_artifacts::install_distributed_vendor_plugin;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -717,25 +719,48 @@ fn assert_gemini_standard_request(body: &Value) {
 }
 
 #[tokio::test]
-async fn bundled_inventory_is_exactly_base_plus_four_dedicated_packages_with_complete_profiles()
--> anyhow::Result<()> {
-    let (_directory, gateway) = gateway().await?;
+async fn fresh_inventory_is_exactly_base_and_persists_no_wasm_artifact() -> anyhow::Result<()> {
+    let (directory, gateway) = gateway().await?;
     let packages = gateway.admin().list_vendor_plugins().await?;
-    let package_ids = packages
-        .iter()
-        .map(|plugin| plugin.vendor_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        package_ids,
-        std::collections::BTreeSet::from([
-            "base",
-            "command-code",
-            "devin",
-            "openai-codex",
-            "xai-grok",
-        ])
-    );
-    assert!(packages.iter().all(|plugin| plugin.status == "ready"));
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0].vendor_id, "base");
+    assert_eq!(packages[0].status, "ready");
+    let artifact_directory = stravia_core::data_paths::DataPaths::new(directory.path())
+        .plugins()
+        .join("artifacts");
+    if artifact_directory.is_dir() {
+        for entry in std::fs::read_dir(&artifact_directory)? {
+            assert_ne!(
+                entry?
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("wasm"),
+                "fresh Gateway must load the bundled base component from memory without persisting Wasm"
+            );
+        }
+    }
+    let profiles = gateway.admin().list_vendor_metadata().await?;
+    for provider_id in ["command-code", "devin", "openai-codex", "xai-grok"] {
+        assert!(
+            profiles
+                .iter()
+                .all(|profile| profile.provider_id != provider_id),
+            "fresh Gateway unexpectedly exposes dedicated provider profile {provider_id}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn manually_installed_dedicated_packages_keep_complete_profiles() -> anyhow::Result<()> {
+    let (_directory, gateway) = gateway().await?;
+    for vendor_id in ["command-code", "devin", "openai-codex", "xai-grok"] {
+        let installed = install_distributed_vendor_plugin(&gateway, vendor_id).await?;
+        assert_eq!(installed.vendor_id, vendor_id);
+        assert_eq!(installed.source, stravia_core::plugin::PluginSource::Local);
+        assert_eq!(installed.status, "ready");
+    }
 
     let profiles = gateway.admin().list_vendor_metadata().await?;
     let profile = |provider_id: &str| {
@@ -791,7 +816,7 @@ async fn bundled_inventory_is_exactly_base_plus_four_dedicated_packages_with_com
             Capability::Allowance,
             Capability::ConfigValidation,
         ]),
-        "the split packages must keep every previously public capability observable"
+        "the manually installed dedicated packages must keep every previously public capability observable"
     );
 
     let serialized = serde_json::to_value(profile("openai-codex"))?;
@@ -1772,6 +1797,7 @@ async fn assert_native_compaction_rejected(
 async fn native_compaction_is_rejected_before_network_by_non_responses_plugins()
 -> anyhow::Result<()> {
     let (_directory, gateway) = gateway().await?;
+    install_distributed_vendor_plugin(&gateway, "command-code").await?;
     for (vendor, protocol) in [
         ("custom", "openai-compatible"),
         ("cohere", "cohere-chat"),
@@ -1903,6 +1929,7 @@ async fn command_code_legacy_catalog_marker_still_discovers_from_the_connection_
     })
     .await?;
     let (_directory, gateway) = gateway().await?;
+    install_distributed_vendor_plugin(&gateway, "command-code").await?;
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
@@ -1954,6 +1981,7 @@ async fn command_code_admin_option_reaches_initialization_and_inference_headers(
     })
     .await?;
     let (_directory, gateway) = gateway().await?;
+    install_distributed_vendor_plugin(&gateway, "command-code").await?;
     let (route, token) = provider_route_and_key(&gateway, "command-code", ProviderSourceInput::Custom { vendor: "command-code".to_string(), channel: "default".to_string(), protocol: Some("command-code".to_string()), base_url, models_source: None, static_models: None }, "command-r-plus", ProviderCredentialInput::Fields {
         values: BTreeMap::from([("apiKey".into(), json!("command-test-key"))]),
     }, serde_json::Map::from_iter([("zdr".into(), json!(true))]), json!({"id": "command-r-plus", "name": "command-r-plus", "reasoning": true, "tool_call": true}))
@@ -2178,7 +2206,7 @@ fn devin_chat_fixture() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn devin_builtin_discovers_families_assigns_a_router_and_streams_real_protobuf()
+async fn manually_installed_devin_discovers_families_assigns_a_router_and_streams_real_protobuf()
 -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(3, |request| {
         if request.path.ends_with("/GetCliModelConfigs") {
@@ -2197,6 +2225,7 @@ async fn devin_builtin_discovers_families_assigns_a_router_and_streams_real_prot
     })
     .await?;
     let (_directory, gateway) = gateway().await?;
+    install_distributed_vendor_plugin(&gateway, "devin").await?;
     let authorization = gateway
         .admin()
         .init_oauth_session(
@@ -2362,7 +2391,7 @@ async fn devin_builtin_discovers_families_assigns_a_router_and_streams_real_prot
 }
 
 #[tokio::test]
-async fn devin_oauth_start_is_owned_by_the_builtin_component_without_contacting_production()
+async fn devin_oauth_start_is_owned_by_the_manually_installed_component_without_contacting_production()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let gateway = Gateway::from_storage(
@@ -2373,6 +2402,7 @@ async fn devin_oauth_start_is_owned_by_the_builtin_component_without_contacting_
         Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
     )
     .await?;
+    install_distributed_vendor_plugin(&gateway, "devin").await?;
     let started = gateway
         .admin()
         .init_oauth_session(
