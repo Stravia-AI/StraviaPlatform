@@ -12,8 +12,9 @@ tasks:
 
   install:web:
     desc: Install the locked Bun workspace dependencies.
+    # The run launcher also routes dependency lifecycle scripts through Bun.
     cmds:
-      - bun ci
+      - bun --bun run bun ci
 
   build:vendors:
     desc: Build all self-contained builtin Wasm vendor components.
@@ -87,7 +88,7 @@ tasks:
     deps: [install:web, build:vendors]
     dir: "{{.DESKTOP_DIR}}"
     cmds:
-      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} dev
+      - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} dev
 
   build:web:
     desc: Build the Stravia WebUI distribution assets.
@@ -124,7 +125,7 @@ tasks:
     deps: [install:web, build:vendors]
     dir: "{{.DESKTOP_DIR}}"
     cmds:
-      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
+      - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
 
   build:desktop:installer:
     desc: Build the Windows NSIS desktop installer for production.
@@ -138,7 +139,7 @@ tasks:
     deps: [install:web, build:vendors]
     dir: "{{.DESKTOP_DIR}}"
     cmds:
-      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build --ci --debug --no-bundle --config tauri.e2e.conf.json
+      - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build --ci --debug --no-bundle --config tauri.e2e.conf.json
 
   test:e2e:desktop:
     desc: Run the Windows Tauri desktop smoke test.

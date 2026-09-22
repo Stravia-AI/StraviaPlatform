@@ -13,6 +13,7 @@ await copyFile(
 const compiler = Bun.spawn(
   [
     process.execPath,
+    '--bun',
     'run',
     'paraglide-js',
     'compile',

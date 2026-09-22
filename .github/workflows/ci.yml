@@ -28,7 +28,7 @@ concurrency:
 
 env:
   RUST_VERSION: "1.98.1"
-  BUN_VERSION: "1.4.0"
+  BUN_VERSION: "1.4.2"
   TASK_VERSION: "3.52.0"
   UV_VERSION: "0.11.28"
   CACHE_WRITE_ALLOWED: ${{ github.repository == 'Stravia-AI/StraviaPlatform' && github.ref == 'refs/heads/main' && github.workflow_ref == 'Stravia-AI/StraviaPlatform/.github/workflows/ci.yml@refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
@@ -423,7 +423,7 @@ jobs:
           version: ${{ env.TASK_VERSION }}
 
       - name: Install locked WebUI dependencies
-        run: bun ci
+        run: task install:web
 
       - name: Install Linux system dependencies
         run: |

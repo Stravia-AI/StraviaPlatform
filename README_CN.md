@@ -177,7 +177,9 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 
 ## 开发
 
-Rust `1.98.1` · Bun `1.4.0` · Task `3.52.0` · Python E2E 需要 uv。
+Rust `1.98.1` · Bun `1.4.2` · Task `3.52.0` · Python E2E 需要 uv。
+
+项目的 JavaScript 开发、构建与测试命令统一使用 Bun。Rust 和 Python 测试保留各自的原生运行器。
 
 | 命令                     | 用途                                                 |
 | ------------------------ | ---------------------------------------------------- |

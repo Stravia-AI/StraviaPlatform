@@ -34,7 +34,7 @@ try {
   const version = taskfile.match(/TAURI_CLI_VERSION:\s*([^\s]+)/)?.[1]
   if (!version) throw new Error('Taskfile.yml must pin TAURI_CLI_VERSION')
   const generate = (input: string, output: string) =>
-    execFileSync('bunx', [`@tauri-apps/cli@${version}`, 'icon', input, '--output', output], {
+    execFileSync('bunx', ['--bun', `@tauri-apps/cli@${version}`, 'icon', input, '--output', output], {
       cwd: repositoryRoot,
       stdio: 'inherit',
     })

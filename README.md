@@ -177,7 +177,9 @@ The same Rust core powers both; the management surface is the same WebUI.
 
 ## Development
 
-Rust `1.98.1` · Bun `1.4.0` · Task `3.52.0` · uv for Python E2E.
+Rust `1.98.1` · Bun `1.4.2` · Task `3.52.0` · uv for Python E2E.
+
+Project JavaScript development, build, and test commands use Bun. Rust and Python tests retain their native runners.
 
 | Command                  | Purpose                                                     |
 | ------------------------ | ----------------------------------------------------------- |

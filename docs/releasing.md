@@ -7,7 +7,7 @@ Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 是�
 在受控的离线工作站生成密钥，不要在 CI runner、共享终端或仓库目录中生成：
 
 ```bash
-bunx tauri signer generate -- -w /secure/offline/stravia-updater.key
+bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 ```
 
 将以下值写入 GitHub Actions repository secrets：

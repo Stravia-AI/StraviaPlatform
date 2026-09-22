@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.2
 ARG RUST_VERSION=1.98.1
 ARG GO_VERSION=1.26
 
@@ -13,7 +13,7 @@ WORKDIR /src
 COPY package.json bun.lock ./
 COPY frontend/stravia-webui/package.json frontend/stravia-webui/package.json
 RUN --mount=type=cache,id=stravia-bun,target=/root/.bun/install/cache,sharing=locked \
-    bun ci
+    bun --bun run bun ci
 
 COPY frontend/stravia-webui frontend/stravia-webui
 RUN bun run build:web
