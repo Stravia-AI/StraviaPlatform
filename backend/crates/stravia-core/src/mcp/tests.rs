@@ -257,7 +257,7 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
     assert!(validator.is_valid(&arguments));
     assert!(!validator.is_valid(&json!({"path": 42})));
     assert!(
-        !validator.is_valid(&json!({"path": "search://Rust", "previous_turn_id": "wst_turn"})),
+        !validator.is_valid(&json!({"path": "search://Rust", "previous_path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab"})),
         "StraviaRead must expose only the single required path property"
     );
     let mcp_validator = jsonschema::validator_for(&mcp_schema).expect("valid MCP schema");
@@ -358,9 +358,10 @@ async fn serve_media_report(
                 String::from_utf8_lossy(&request[..read]).contains("data:image/jpeg;base64"),
                 "Media Model must receive the JPEG derivative"
             );
+            let source_path = format!("stravia://artifacts/{}", source_id.as_str());
             let report = json!({
-                "answer": format!("{answer_prefix} [sa:{}]", source_id.as_str()),
-                "artifacts": [{"artifact_id": source_id}],
+                "answer": format!("{answer_prefix} [{source_path}]"),
+                "artifacts": [{"path": source_path}],
                 "limitations": []
             })
             .to_string();
@@ -806,8 +807,9 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
                 if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
         ));
     }
+    let source_path = format!("stravia://artifacts/{}", source_id.as_str());
     let arguments = json!({
-        "path": format!("sa:{}", source_id.as_str())
+        "path": &source_path
     })
     .as_object()
     .expect("Media arguments")
@@ -825,9 +827,18 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
         result.structured_content
     );
     let structured = result.structured_content.expect("structured Media result");
-    assert_eq!(
-        structured["report"]["artifacts"][0]["artifact_id"],
-        source_id.as_str()
+    assert!(structured.get("turn_id").is_none());
+    assert_eq!(structured["report"]["artifacts"][0]["path"], source_path);
+    assert!(
+        structured["report"]["artifacts"][0]
+            .get("artifact_id")
+            .is_none()
+    );
+    assert!(
+        !structured["report"]["answer"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[sa:")
     );
     assert!(
         structured["report"]["answer"]
@@ -836,11 +847,31 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
     );
     assert_eq!(media_calls.load(Ordering::SeqCst), 1);
 
-    let previous_turn_id = structured["turn_id"].as_str().expect("first Media Turn");
+    let mut second_bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut second_bytes, image::ImageFormat::Png)
+        .expect("second PNG fixture");
+    let second_source = app
+        .gateway
+        .artifact_store()
+        .expect("Artifact store")
+        .ingest(
+            &stravia_runtime_contract::Principal::new(app.key_id.clone()),
+            "image/png",
+            None,
+            stravia_runtime_contract::artifact::bytes_stream(Bytes::from(
+                second_bytes.into_inner(),
+            )),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("second input Artifact");
+    let second_source_path = format!("stravia://artifacts/{}", second_source.id.as_str());
+    let previous_path = structured["path"].as_str().expect("first Media Turn");
     let continued = client
         .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(
             json!({
-                "path": format!("sa:{}?question=What%20else%20is%20visible&previous_turn_id={previous_turn_id}", source_id.as_str()),
+                "path": format!("{second_source_path}?question=What%20else%20is%20visible&previous_path=stravia%3A%2F%2Fturns%2F{}", previous_path.rsplit('/').next().unwrap()),
             }).as_object().expect("continuation arguments").clone(),
         ))
         .await
@@ -855,17 +886,15 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
         .structured_content
         .expect("continued Media result");
     assert_ne!(
-        continued["turn_id"].as_str().expect("next Media Turn"),
-        previous_turn_id
+        continued["path"].as_str().expect("next Media Turn"),
+        previous_path
     );
-    assert_eq!(
-        continued["report"]["artifacts"][0]["artifact_id"],
-        source_id.as_str()
-    );
+    assert_eq!(continued["artifacts"][0]["path"], second_source_path);
+    assert_eq!(continued["report"]["artifacts"][0]["path"], source_path);
     assert!(
         continued["report"]["answer"]
             .as_str()
-            .is_some_and(|answer| { answer.contains(&format!("[sa:{}]", source_id.as_str())) })
+            .is_some_and(|answer| { answer.contains(&format!("[{source_path}]")) })
     );
     assert_eq!(media_calls.load(Ordering::SeqCst), 2);
 }
@@ -990,7 +1019,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         .expect("disable Media Understanding");
 
     let client = connect(&app).await;
-    let reference = format!("sa:{}", source_id.as_str());
+    let reference = format!("stravia://artifacts/{}", source_id.as_str());
     let read_arguments = json!({"path": format!("{reference}?download=1")})
         .as_object()
         .expect("read arguments")
@@ -1006,7 +1035,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         result.structured_content
     );
     let download = result.structured_content.expect("download information");
-    assert_eq!(download["artifact_reference"], reference);
+    assert_eq!(download["path"], reference);
     let response = reqwest::get(download["download_url"].as_str().expect("download URL"))
         .await
         .expect("signed file download");

@@ -125,7 +125,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
 #[tokio::test]
 async fn non_vision_parent_uses_capability_owned_media_model() {
     let source_id = Arc::new(parking_lot::Mutex::new(None));
-    let (parent_url, parent_calls) = serve_media_parent(source_id.clone()).await;
+    let (parent_url, parent_calls, parent_requests) = serve_media_parent(source_id.clone()).await;
     let (media_url, media_calls) = serve_media_model(source_id).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
@@ -245,29 +245,47 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         })
         .await
         .expect("API key");
+    let repeated_image = || {
+        stravia_runtime_contract::protocol::ir::ContentBlock::Image {
+        source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
+        },
+        detail: None,
+        cache_control: None,
+    }
+    };
     let mut request = AiRequest::new(
-            "text-parent",
-            vec![stravia_runtime_contract::protocol::ir::AiItem {
+        "text-parent",
+        vec![
+            stravia_runtime_contract::protocol::ir::AiItem {
                 role: stravia_runtime_contract::protocol::ir::Role::User,
                 content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
                     stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                        text: "What is in this image?".into(),
+                        text: "Image prose should remain ordinary text.".into(),
                         cache_control: None,
                     },
-                    stravia_runtime_contract::protocol::ir::ContentBlock::Image {
-                        source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
-                            media_type: "image/png".into(),
-                            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
-                        },
-                        detail: None,
-                        cache_control: None,
-                    },
+                    repeated_image(),
                 ]),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
-            }],
-        );
+            },
+            stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Text {
+                        text: "What is in this image again?".into(),
+                        cache_control: None,
+                    },
+                    repeated_image(),
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
     request.stream.enabled = false;
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -284,6 +302,52 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .await
         .expect("bridge response body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let first_parent_request = parent_requests
+        .lock()
+        .first()
+        .cloned()
+        .expect("first parent provider request");
+    assert!(
+        first_parent_request.contains("Image 1: [stravia://artifacts/"),
+        "bridge must preserve first image position and full Artifact URI: {first_parent_request}"
+    );
+    assert!(
+        first_parent_request.contains("Image 2: [stravia://artifacts/"),
+        "bridge must preserve repeated image position and full Artifact URI: {first_parent_request}"
+    );
+    assert!(
+        first_parent_request.contains("Image prose should remain ordinary text."),
+        "ordinary text beginning with Image must not become a marker: {first_parent_request}"
+    );
+    assert!(
+        !first_parent_request.contains("[sm:"),
+        "legacy media markers must be gone"
+    );
+    let prose = first_parent_request
+        .find("Image prose should remain ordinary text.")
+        .expect("ordinary Image prose");
+    let first_marker = first_parent_request
+        .find("Image 1: [stravia://artifacts/")
+        .expect("first Image marker");
+    let second_text = first_parent_request
+        .find("What is in this image again?")
+        .expect("second user message");
+    let second_marker = first_parent_request
+        .find("Image 2: [stravia://artifacts/")
+        .expect("second Image marker");
+    assert!(
+        prose < first_marker && first_marker < second_text && second_text < second_marker,
+        "provider content must preserve message/block order: {first_parent_request}"
+    );
+    let source_marker_id =
+        marker_artifact_id(&first_parent_request).expect("bridge Artifact marker");
+    assert!(
+        first_parent_request
+            .matches(&format!("[stravia://artifacts/{source_marker_id}]"))
+            .count()
+            >= 2,
+        "repeated source must preserve one stable Artifact identity: {first_parent_request}"
+    );
     assert!(
         String::from_utf8_lossy(&body).contains("parent used Media Report"),
         "{}",
@@ -299,13 +363,17 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .as_str()
         .expect("first assistant reasoning")
         .to_owned();
+    let mut prior_user = request.items[0].clone();
+    prior_user.content = stravia_runtime_contract::protocol::ir::MessageContent::Text(
+        "Image prose should remain ordinary text.".into(),
+    );
     let mut second_user =
         stravia_runtime_contract::protocol::ir::AiItem::output_text("What is its subject?");
     second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second_request = AiRequest::new(
         "text-parent",
         vec![
-            request.items[0].clone(),
+            prior_user,
             stravia_runtime_contract::protocol::ir::AiItem::thinking(
                 first_assistant_reasoning,
                 None,

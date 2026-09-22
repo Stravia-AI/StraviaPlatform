@@ -622,26 +622,19 @@ fn test_parse_response_preserves_registered_items() {
             "id": "agent_1",
             "type": "stravia:agent_result",
             "status": "completed",
-            "turn_id": "aturn_1"
-        }, {
-            "id": "media_1",
-            "type": "stravia:media_result",
-            "status": "completed",
-            "turn_id": "aturn_media",
-            "completion": "complete"
+            "path": "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }]
     }));
 
     let response = ResponsesResponseParser.parse_response(resp).unwrap();
     let items = &response.items;
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1);
     let agent = items[0].unknown_ref().expect("agent result");
     assert_eq!(agent["type"], "stravia:agent_result");
-    assert_eq!(agent["turn_id"], "aturn_1");
-    let media = items[1].unknown_ref().expect("media result");
-    assert_eq!(media["type"], "stravia:media_result");
-    assert_eq!(media["turn_id"], "aturn_media");
-    assert_eq!(media["completion"], "complete");
+    assert_eq!(
+        agent["path"],
+        "stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
 }
 
 #[test]
@@ -658,6 +651,27 @@ fn test_parse_response_rejects_unregistered_namespaced_items() {
     let error = ResponsesResponseParser
         .parse_response(resp)
         .expect_err("unregistered output extension");
+    assert!(
+        error
+            .to_string()
+            .contains("unregistered Open Responses output extension")
+    );
+}
+
+#[test]
+fn test_parse_response_rejects_deleted_media_result_extension() {
+    let resp = dated_response(serde_json::json!({
+        "output": [{
+            "id": "media_1",
+            "type": "stravia:media_result",
+            "status": "completed",
+            "path": "stravia://turns/bbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }]
+    }));
+
+    let error = ResponsesResponseParser
+        .parse_response(resp)
+        .expect_err("deleted media result extension");
     assert!(
         error
             .to_string()
@@ -1160,32 +1174,26 @@ fn test_stream_function_call_done_emits_arguments_when_no_deltas() {
         ));
 }
 #[test]
-fn test_stream_registered_items_round_trip_once_on_done() {
-    let sse = [
+fn test_stream_emits_agent_result_once_and_rejects_deleted_media_result() {
+    let agent_sse = [
             sse_event(
                 "response.created",
                 r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","model":"model","status":"in_progress"}}"#,
             ),
             sse_event(
                 "response.output_item.added",
-                r#"{"type":"response.output_item.added","sequence_number":1,"output_index":1,"item":{"id":"agent_1","type":"stravia:agent_result","status":"in_progress","turn_id":"aturn_1"}}"#,
+                r#"{"type":"response.output_item.added","sequence_number":1,"output_index":1,"item":{"id":"agent_1","type":"stravia:agent_result","status":"in_progress","path":"stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
             ),
             sse_event(
                 "response.output_item.done",
-                r#"{"type":"response.output_item.done","sequence_number":2,"output_index":1,"item":{"id":"agent_1","type":"stravia:agent_result","status":"completed","turn_id":"aturn_1"}}"#,
-            ),
-            sse_event(
-                "response.output_item.added",
-                r#"{"type":"response.output_item.added","sequence_number":3,"output_index":2,"item":{"id":"media_1","type":"stravia:media_result","status":"in_progress","turn_id":"aturn_media","completion":"complete"}}"#,
-            ),
-            sse_event(
-                "response.output_item.done",
-                r#"{"type":"response.output_item.done","sequence_number":4,"output_index":2,"item":{"id":"media_1","type":"stravia:media_result","status":"completed","turn_id":"aturn_media","completion":"complete"}}"#,
+                r#"{"type":"response.output_item.done","sequence_number":2,"output_index":1,"item":{"id":"agent_1","type":"stravia:agent_result","status":"completed","path":"stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
             ),
         ]
         .concat();
 
-    let deltas = ResponsesStreamParser::new().parse_chunk(&sse).unwrap();
+    let deltas = ResponsesStreamParser::new()
+        .parse_chunk(&agent_sse)
+        .unwrap();
     let results = deltas
         .iter()
         .filter_map(|delta| match delta {
@@ -1193,9 +1201,25 @@ fn test_stream_registered_items_round_trip_once_on_done() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 1);
     assert!(results[0].contains(r#""type":"stravia:agent_result""#));
-    assert!(results[1].contains(r#""type":"stravia:media_result""#));
+    assert!(results[0].contains(r#""path":"stravia://turns/aaaaaaaaaaaaaaaaaaaaaaaaaaaa""#));
+
+    let deleted_media_sse = [
+        sse_event(
+            "response.created",
+            r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_2","model":"model","status":"in_progress"}}"#,
+        ),
+        sse_event(
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","sequence_number":1,"output_index":1,"item":{"id":"media_1","type":"stravia:media_result","status":"in_progress","path":"stravia://turns/bbbbbbbbbbbbbbbbbbbbbbbbbbbb","completion":"complete"}}"#,
+        ),
+    ]
+    .concat();
+    let error = ResponsesStreamParser::new()
+        .parse_chunk(&deleted_media_sse)
+        .expect_err("deleted media result extension");
+    assert!(error.to_string().contains("stravia:media_result"));
 }
 
 #[test]

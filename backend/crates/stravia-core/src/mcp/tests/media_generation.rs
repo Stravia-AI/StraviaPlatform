@@ -288,7 +288,11 @@ async fn upload_image(app: &TestApp, bytes: Vec<u8>, mime: &str) -> String {
         .json()
         .await
         .unwrap();
-    completed["reference"].as_str().unwrap().to_owned()
+    assert!(completed.get("id").is_none());
+    assert!(completed.get("reference").is_none());
+    let path = completed["path"].as_str().expect("Artifact path");
+    assert!(path.starts_with("stravia://artifacts/"));
+    path.to_owned()
 }
 
 fn png_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -352,13 +356,7 @@ async fn invalid_arguments_and_unsafe_references_never_start_generation() {
     ] {
         let result = call_generate(&client, arguments.clone()).await;
         assert_eq!(result.is_error, Some(true), "{arguments}: {result:?}");
-        assert!(
-            result
-                .structured_content
-                .unwrap()
-                .get("artifact_reference")
-                .is_none()
-        );
+        assert!(result.structured_content.unwrap().get("path").is_none());
     }
     assert!(fixture.requests.lock().is_empty());
 }
@@ -438,13 +436,7 @@ async fn unusable_completed_outputs_are_errors_not_regeneration_requests() {
         )
         .await;
         assert_eq!(result.is_error, Some(true), "{result:?}");
-        assert!(
-            result
-                .structured_content
-                .unwrap()
-                .get("artifact_reference")
-                .is_none()
-        );
+        assert!(result.structured_content.unwrap().get("path").is_none());
     }
     assert_eq!(fixture.requests.lock().len(), 3);
 }
@@ -625,8 +617,9 @@ async fn generated_image_downloads_real_bytes_and_can_be_edited() {
     let image = result.structured_content.unwrap();
     assert_eq!(image["mime_type"], "image/png");
     assert_eq!(image["media"], json!({"width":1,"height":1}));
-    let reference = image["artifact_reference"].as_str().unwrap();
-    assert!(reference.starts_with("sa:"));
+    let reference = image["path"].as_str().unwrap();
+    assert!(reference.starts_with("stravia://artifacts/"));
+    assert!(image.get("artifact_reference").is_none());
     assert_eq!(
         image.as_object().unwrap().len(),
         4,
@@ -679,6 +672,7 @@ async fn generated_image_downloads_real_bytes_and_can_be_edited() {
             .contains(&format!("data:image/png;base64,{PNG}"))
     );
     assert!(!requests[1].to_string().contains("sa:"));
+    assert!(!requests[1].to_string().contains("stravia://artifacts/"));
 }
 
 #[tokio::test]

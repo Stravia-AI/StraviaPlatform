@@ -929,12 +929,15 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
     .await;
 
     assert_eq!(
-        first["id"], second["id"],
+        first["path"], second["path"],
         "identical uploads must complete to one final Artifact identity: first={first} second={second}"
     );
-    assert_eq!(
-        first["reference"], second["reference"],
-        "the shared identity must also serve one Artifact Reference"
+    assert!(first.get("id").is_none());
+    assert!(first.get("reference").is_none());
+    assert!(
+        first["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("stravia://artifacts/"))
     );
     assert_eq!(first["mime_type"], "image/png");
     assert_eq!(first["size"], serde_json::json!(bytes.len()));
@@ -948,7 +951,8 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
         client_base_url: "http://127.0.0.1:9".into(),
         ..Default::default()
     };
-    let id = ArtifactId::new(first["id"].as_str().expect("Artifact id"));
+    let id = ArtifactId::from_reference(first["path"].as_str().expect("Artifact path"))
+        .expect("Artifact path identity");
     let download = store
         .download(
             &principal,

@@ -77,11 +77,16 @@ pub(crate) async fn hydrate_response_artifact_references(
                     source: MediaSource::FileId { file_id, .. },
                     detail,
                     ..
-                } if file_id.starts_with("sa:") => Some((
-                    stravia_runtime_contract::artifact::ArtifactId::from_reference(file_id)
-                        .map_err(|_| "item_reference_not_found".to_string())?,
-                    detail.clone(),
-                )),
+                } if file_id.starts_with("stravia://artifacts/") => {
+                    if file_id.contains(['?', '#']) {
+                        return Err("item_reference_not_found".to_string());
+                    }
+                    Some((
+                        stravia_runtime_contract::artifact::ArtifactId::from_reference(file_id)
+                            .map_err(|_| "item_reference_not_found".to_string())?,
+                        detail.clone(),
+                    ))
+                }
                 _ => None,
             };
             let Some((artifact_id, detail)) = artifact else {

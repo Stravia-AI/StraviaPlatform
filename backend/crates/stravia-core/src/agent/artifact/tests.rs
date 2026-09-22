@@ -3,15 +3,17 @@ use super::*;
 #[test]
 fn artifact_reference_identity_ignores_question_and_rejects_non_digest_identities() {
     let digest = "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN);
-    let id = ArtifactId::from_reference(&format!("sa:{digest}?question=what%3F")).unwrap();
+    let id = ArtifactId::from_reference(&format!("stravia://artifacts/{digest}?question=what%3F"))
+        .unwrap();
     assert_eq!(id.as_str(), digest);
     for reference in [
         format!("https://stravia/artifact/{digest}"),
-        format!("sa:{}", "a".repeat(54)),
-        format!("sa:{}", "a".repeat(56)),
-        format!("sa:{}", "A".repeat(55)),
-        format!("sa:{}", "0".repeat(55)),
-        format!("sa:{digest}#fragment"),
+        format!("sa:{digest}"),
+        format!("stravia://artifacts/{}", "a".repeat(54)),
+        format!("stravia://artifacts/{}", "a".repeat(56)),
+        format!("stravia://artifacts/{}", "A".repeat(55)),
+        format!("stravia://artifacts/{}", "0".repeat(55)),
+        format!("stravia://artifacts/{digest}#fragment"),
     ] {
         assert!(ArtifactId::from_reference(&reference).is_err());
     }
@@ -1317,7 +1319,10 @@ async fn stable_artifact_id_is_shared_by_ingest_chunkings_and_store_reconstructi
     assert!(stravia_runtime_contract::identifier::valid_digest_id(
         direct.id.as_str()
     ));
-    assert_eq!(direct.reference(), format!("sa:{}", direct.id.as_str()));
+    assert_eq!(
+        direct.reference(),
+        format!("stravia://artifacts/{}", direct.id.as_str())
+    );
     let repeated = store
         .ingest(
             &owner,

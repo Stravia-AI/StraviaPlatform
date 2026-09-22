@@ -104,7 +104,7 @@ async fn office_document_reads_as_extracted_markdown() {
     let (_dir, reader, context, artifact) = document_fixture().await;
     let result = reader
         .read(
-            json!({"path": format!("sa:{}", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}", artifact.id.as_str())}),
             context,
         )
         .await
@@ -141,7 +141,7 @@ async fn office_document_lines_select_from_extracted_markdown() {
         .unwrap();
     let result = reader
         .read(
-            json!({"path": format!("sa:{}?lines=1-1", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}?lines=1-1", artifact.id.as_str())}),
             context,
         )
         .await
@@ -163,7 +163,7 @@ async fn office_document_download_skips_extraction() {
     let corrupt = gateway_corrupt_docx(&reader, &context).await;
     let result = reader
         .read(
-            json!({"path": format!("sa:{}?download=1", corrupt.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}?download=1", corrupt.id.as_str())}),
             context.clone(),
         )
         .await
@@ -178,7 +178,7 @@ async fn office_document_download_skips_extraction() {
     // The same corrupt Artifact without ?download fails as a document error.
     let result = reader
         .read(
-            json!({"path": format!("sa:{}", corrupt.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}", corrupt.id.as_str())}),
             context,
         )
         .await
@@ -211,7 +211,7 @@ async fn office_document_rejects_raw() {
     let (_dir, reader, context, artifact) = document_fixture().await;
     let error = reader
         .read(
-            json!({"path": format!("sa:{}?raw=1", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}?raw=1", artifact.id.as_str())}),
             context,
         )
         .await
@@ -227,7 +227,7 @@ async fn office_document_question_routes_to_media_understanding() {
     // availability error.
     let error = reader
         .read(
-            json!({"path": format!("sa:{}?question=summary", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}?question=summary", artifact.id.as_str())}),
             context,
         )
         .await
@@ -254,13 +254,14 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
         progress: None,
     };
     let turn_id = "abcdefghijklmnopqrstuvwxyzab";
-    let source_id = format!("{turn_id}:1");
-    let answer = format!("{} [sc:{source_id}]", "verified fact\n".repeat(220));
+    let source_path = format!("stravia://turns/{turn_id}/sources/1");
+    let turn_path = format!("stravia://turns/{turn_id}");
+    let answer = format!("{} [{source_path}]", "verified fact\n".repeat(220));
     let complete = json!({
-        "turn_id":turn_id, "completion":"complete",
+        "path":turn_path, "completion":"complete",
         "report":{
             "answer":answer,
-            "sources":[{"id":source_id,"url":"https://8.8.8.8/article","title":"Source"}],
+            "sources":[{"path":source_path,"url":"https://8.8.8.8/article","title":"Source"}],
             "limitations":["The source describes only the current version."]
         }
     });
@@ -273,7 +274,7 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
         .unwrap()
         .validate(&first)
         .unwrap();
-    assert_eq!(first["turn_id"], complete["turn_id"]);
+    assert_eq!(first["path"], complete["path"]);
     assert_eq!(first["report"]["sources"], complete["report"]["sources"]);
     assert_eq!(
         first["report"]["limitations"],

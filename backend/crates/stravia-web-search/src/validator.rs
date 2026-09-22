@@ -74,15 +74,21 @@ impl SearchReportValidator {
             ));
         }
 
-        let expected_prefix = format!("{}:", turn_id.as_str());
+        let expected_prefix = format!("{}/sources/", turn_id.reference());
         let mut sources = HashMap::with_capacity(report.sources.len());
         for source in &mut report.sources {
-            if !source.id.starts_with(&expected_prefix)
-                || source.id[expected_prefix.len()..].parse::<u32>().is_err()
+            let ordinal = source
+                .path
+                .strip_prefix(&expected_prefix)
+                .unwrap_or_default();
+            if ordinal.is_empty()
+                || ordinal.as_bytes()[0] == b'0'
+                || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
+                || ordinal.parse::<u32>().is_err()
             {
                 return Err(WebSearchError::new(
                     "invalid_marker",
-                    "Search Source marker is not scoped to the current Turn",
+                    "Search Source path is not scoped to the current Turn",
                 ));
             }
             if source.url.len() > MAX_SOURCE_URL_BYTES
@@ -123,12 +129,12 @@ impl SearchReportValidator {
             }
             source.url = normalized;
             if sources
-                .insert(source.id.clone(), source.url.clone())
+                .insert(source.path.clone(), source.url.clone())
                 .is_some()
             {
                 return Err(WebSearchError::new(
                     "invalid_marker",
-                    "Search Source IDs must be unique",
+                    "Search Source paths must be unique",
                 ));
             }
         }
@@ -161,11 +167,17 @@ impl SearchReportValidator {
 }
 
 fn answer_markers(answer: &str) -> Result<Vec<&str>, WebSearchError> {
+    const PREFIX: &str = "[stravia://turns/";
+    if answer.contains("[sc:") {
+        return Err(WebSearchError::new(
+            "invalid_marker",
+            "Search Report contains a legacy source marker",
+        ));
+    }
     let mut markers = Vec::new();
     let mut rest = answer;
-    while let Some(start) = rest.find("[sc:") {
-        let marker_start = start + "[sc:".len();
-        let tail = &rest[marker_start..];
+    while let Some(start) = rest.find(PREFIX) {
+        let tail = &rest[start + 1..];
         let Some(end) = tail.find(']') else {
             return Err(WebSearchError::new(
                 "invalid_marker",

@@ -110,8 +110,13 @@ pub(crate) async fn generate(
         ));
     }
     if references.iter().any(|reference| {
-        if reference.starts_with("sa:") {
+        if reference.starts_with("stravia://artifacts/") {
             reference.contains(['?', '#']) || ArtifactId::from_reference(reference).is_err()
+        } else if reference.starts_with("stravia://")
+            || reference.starts_with("sa:")
+            || reference.starts_with("https://stravia/artifact/")
+        {
+            true
         } else {
             !url::Url::parse(reference).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
         }
@@ -273,7 +278,7 @@ async fn generate_image(
     };
 
     Ok(json!({
-        "artifact_reference": artifact.reference(),
+        "path": artifact.reference(),
         "mime_type": artifact.mime_type,
         "size": artifact.size,
         "media": {

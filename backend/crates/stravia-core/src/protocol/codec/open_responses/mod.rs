@@ -53,7 +53,7 @@ pub(super) fn stream_error_kind(error: &AiError) -> AiErrorKind {
     AiErrorKind::Unknown
 }
 
-const REGISTERED_EXTENSION_ITEM_TYPES: &[&str] = &["stravia:agent_result", "stravia:media_result"];
+const REGISTERED_EXTENSION_ITEM_TYPES: &[&str] = &["stravia:agent_result"];
 
 pub(crate) fn is_registered_extension_item(item_type: &str) -> bool {
     REGISTERED_EXTENSION_ITEM_TYPES.contains(&item_type)
@@ -135,8 +135,12 @@ pub(super) fn validate_extension_item(
         anyhow::bail!("unregistered Open Responses output extension: {item_type}");
     }
     let required = match item_type {
-        "stravia:agent_result" => &["id", "type", "status", "turn_id"][..],
-        "stravia:media_result" => &["id", "type", "status", "turn_id", "completion"][..],
+        "stravia:agent_result" => {
+            if object.contains_key("turn_id") {
+                anyhow::bail!("stravia:agent_result uses removed field 'turn_id'");
+            }
+            &["id", "type", "status", "path"][..]
+        }
         _ => unreachable!("registered extension item lacks a schema"),
     };
     for field in required {
@@ -151,12 +155,21 @@ pub(super) fn validate_extension_item(
     if !matches!(status, Some("in_progress" | "completed")) {
         anyhow::bail!("{item_type} has an invalid status");
     }
-    for field in ["id", "turn_id", "completion", "data", "media_type"] {
+    for field in ["id", "path", "completion", "data", "media_type"] {
         if let Some(value) = object.get(field)
             && value.as_str().is_none_or(str::is_empty)
         {
             anyhow::bail!("{item_type} field '{field}' must be a non-empty string");
         }
+    }
+    if stravia_runtime_contract::turn_chain::TurnNodeId::from_reference(
+        object["path"]
+            .as_str()
+            .expect("required path checked above"),
+    )
+    .is_err()
+    {
+        anyhow::bail!("{item_type} field 'path' must be an exact Turn Reference");
     }
     Ok(())
 }

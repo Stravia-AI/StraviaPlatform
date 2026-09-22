@@ -32,10 +32,40 @@ impl ArtifactId {
             .split_once('?')
             .map_or(reference, |(identity, _)| identity);
         let id = identity
-            .strip_prefix("sa:")
+            .strip_prefix("stravia://artifacts/")
             .filter(|id| valid_digest_id(id))
             .ok_or_else(|| ArtifactError::Invalid("invalid Artifact Reference".into()))?;
         Ok(Self::new(id))
+    }
+
+    pub fn reference(&self) -> String {
+        format!("stravia://artifacts/{}", self.as_str())
+    }
+}
+
+pub mod serde_path {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::ArtifactId;
+
+    pub fn serialize<S>(id: &ArtifactId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&id.reference())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ArtifactId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = String::deserialize(deserializer)?;
+        if path.contains('?') || path.contains('#') {
+            return Err(serde::de::Error::custom(
+                "Artifact path must not contain options",
+            ));
+        }
+        ArtifactId::from_reference(&path).map_err(serde::de::Error::custom)
     }
 }
 
@@ -48,7 +78,7 @@ pub struct ArtifactRef {
 
 impl ArtifactRef {
     pub fn reference(&self) -> String {
-        format!("sa:{}", self.id.as_str())
+        self.id.reference()
     }
 }
 
@@ -279,4 +309,39 @@ pub trait ArtifactStore: Send + Sync {
 
 pub fn bytes_stream(bytes: Bytes) -> ArtifactByteStream {
     Box::pin(futures::stream::once(async move { Ok(bytes) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_reference_uses_exact_stravia_uri() {
+        let id = "a".repeat(crate::identifier::DIGEST_ID_LEN);
+        let path = format!("stravia://artifacts/{id}");
+        assert_eq!(ArtifactId::from_reference(&path).unwrap().as_str(), id);
+        assert_eq!(
+            ArtifactId::from_reference(&format!("{path}?question=read%20this"))
+                .unwrap()
+                .as_str(),
+            id
+        );
+        assert_eq!(ArtifactId::new(&id).reference(), path);
+
+        for invalid in [
+            format!("sa:{id}"),
+            format!("https://stravia/artifact/{id}"),
+            format!("stravia://artifacts/{id}/extra"),
+            format!("stravia://artifacts/{id}#fragment"),
+            format!(
+                "stravia://artifacts/{}",
+                "A".repeat(crate::identifier::DIGEST_ID_LEN)
+            ),
+        ] {
+            assert!(
+                ArtifactId::from_reference(&invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
 }

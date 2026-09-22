@@ -74,7 +74,7 @@ pub struct SearchReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchSource {
-    pub id: String,
+    pub path: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -122,6 +122,10 @@ impl FromIterator<SearchEvidence> for SearchEvidenceSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebSearchResult {
+    #[serde(
+        rename = "path",
+        with = "stravia_runtime_contract::turn_chain::serde_path"
+    )]
     pub turn_id: SearchTurnId,
     pub completion: SearchCompletion,
     pub report: SearchReport,

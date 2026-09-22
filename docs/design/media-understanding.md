@@ -1,8 +1,8 @@
 # Media Understanding 设计
 
 > 状态：已实施
-> 更新：2026-09-15
-> 相关决策：[ADR-0009](../adr/0009-add-media-understanding-as-capability-tool.md)、[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)
+> 更新：2026-09-19
+> 相关决策：[ADR-0009](../adr/0009-add-media-understanding-as-capability-tool.md)、[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)、[ADR-0064](../adr/0064-use-stravia-uri-references-without-sessions.md)
 
 ## 1. 结论
 
@@ -26,23 +26,26 @@ StraviaRead
 
 ```json
 {
-  "path": "sa:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc?question=Describe%20the%20image&previous_turn_id=abcdefghijklmnopqrstuvwxyzab"
+  "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc?question=Describe%20the%20image&previous_path=stravia%3A%2F%2Fturns%2Fabcdefghijklmnopqrstuvwxyzab"
 }
 ```
 
-唯一顶层输入是 `path`。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；Artifact Reference 的 `question` 和 `previous_turn_id` 位于 `?` 查询中，公网 URL 的工具选项仍位于 `#stravia?` fragment，源 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，必须重新指定图片及问题；已在祖先中保留的 source 复用，不重复附加。图片不支持 raw、lines 或文本 cursor。Office 文档不带 `question` 时直接读取为提取的 Markdown 文本快照，支持既有的分页与 lines 选项；带 `question` 时进入 Media Understanding，`?download=1` 在任何解析或模型执行之前返回下载信息，不支持 `raw`。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper 和 Artifact fragment 不再执行。
+唯一顶层输入是 `path`。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；Artifact Reference 的 `question` 和 `previous_path` 位于 `?` 查询中，公网 URL 的工具选项仍位于 `#stravia?` fragment，源 query 完整保留。`previous_path` 必须是精确的 `stravia://turns/<turn-id>`，保留同 Principal 的续接与分支，必须重新指定图片及问题；已在祖先中保留的 source 复用，不重复附加。图片不支持 raw、lines 或文本 cursor。Office 文档不带 `question` 时直接读取为提取的 Markdown 文本快照，支持既有的分页与 lines 选项；带 `question` 时进入 Media Understanding，`?download=1` 在任何解析或模型执行之前返回下载信息，不支持 `raw`。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper、裸 Artifact ID 与 Artifact fragment 不再执行。
 
-长答案的工具交付在完整报告校验与落盘之后分页：首包保留 artifacts、limitations、turn_id、completion，顶层 pagination 给出 next_path；续页只读取不可变文本快照，不增加模型 Turn。完整契约见 [Web Search 设计的统一资源读取与文本分页](web-search.md#统一资源读取与文本分页)。
+长答案的工具交付在完整报告校验与落盘之后分页：首包保留自身 `path`、输入 `artifacts`、`report.artifacts`、limitations 和 completion，顶层 pagination 给出 next_path；续页只读取不可变文本快照，不增加模型 Turn。完整契约见 [Web Search 设计的统一资源读取与文本分页](web-search.md#统一资源读取与文本分页)。
 
 结果：
 
+顶层 `artifacts` 是本次调用实际收到并保存的输入 Artifact 列表，包含未被报告引用的输入；`report.artifacts` 是经证据校验后实际引用的 Artifact 列表，可以来自当前或可信祖先 Media Turn。两者是不同的 provenance 集合，不可互换；报告正文只引用 `report.artifacts` 中的完整 URI。
+
 ```json
 {
-  "turn_id": "abcdefghijklmnopqrstuvwxyzab",
+  "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
   "completion": "complete",
+  "artifacts": [{ "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }],
   "report": {
-    "answer": "The image contains ... [sa:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc]",
-    "artifacts": [{ "artifact_id": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }],
+    "answer": "The image contains ... [stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc]",
+    "artifacts": [{ "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }],
     "limitations": []
   }
 }
@@ -85,7 +88,7 @@ bridge 会：
 - 注入 code-owned 安全说明，并把媒体能力并入 `StraviaRead`；
 - 让父模型使用 marker 中的稳定 Artifact Reference 与 URL 编码的问题。
 
-图片位置的模型可见提示采用 `[sm:sa:<artifact_id> <mime_type> <ordinal>]`；继承的媒体结果提示采用 `[st:<turn_id> <completion>]`，有结果文件时在 completion 后附加 `sa:<artifact_id>`。这些短外壳只呈现已授权的引用与元数据，不充当权限凭据，也不从客户端文本反向授予媒体证据。报告正文引用统一为 `[sa:<artifact_id>]`。
+图片位置的模型可见提示采用 `Image N: [stravia://artifacts/<artifact-id>]`，按本次 bridge request 中的完整历史图像块顺序编号，重复 Artifact 仍为独立位置；继承的媒体结果继续携带 `stravia://turns/<turn-id>` 与 completion。恢复的 History Marker 只有在关联的 Assistant `StraviaRead` ToolCall 与成功 ToolResult 都可信且匹配时才恢复媒体结果；受保护的第三方 ToolResult、失配或已删除的历史不会触发 bridge，也不会以 `[st:...]` 或 `stravia:media_result` 作为 fallback。完整 URI 只呈现已授权的引用与元数据，不充当权限凭据，也不从客户端文本反向授予媒体证据。报告正文 Artifact 证据引用统一为 `[stravia://artifacts/<artifact-id>]`，不再接受 `[sa:...]`、`[sm:...]` 或 `[st:...]`。
 
 ## 5. 内部执行
 
@@ -114,7 +117,7 @@ Media Understanding 使用 `id = "media-understanding"`、Revision 3 的 interna
 
 每个图片 source Artifact 首次使用时生成 write-once JPEG derivative：应用 orientation、白底合成 alpha、限制尺寸、移除 metadata，并把 mapping 持久化。公开 contract 和 Media Report 始终引用 source Artifact，不暴露 derivative ID。
 
-文档 source 首次使用时生成 write-once 提取 manifest derivative：提取的 Markdown 与每个内嵌图片都存为独立 Artifact，manifest 记录其引用、顺序与归一化结果；Markdown 中的图片位置替换为 `![alt](sa:<artifact_id>)`。manifest derivative 在读取回校验时解析并逐个确认引用 Artifact 对该 Principal 可读。Media prompt 中文档以 `kind: "document"` entry 声明提取文本（受每个文档与每 Turn 的文本预算截断），内嵌图片以随后的 `kind: "image"` entry 声明，只有归一化 JPEG 才实际附加，且与祖先 Turn 去重；文档 source 与内嵌图片 Artifact 都可被报告引用，manifest derivative ID 不可引用。
+文档 source 首次使用时生成 write-once 提取 manifest derivative：提取的 Markdown 与每个内嵌图片都存为独立 Artifact，manifest 记录其引用、顺序与归一化结果；Markdown 中的图片位置替换为 `![alt](stravia://artifacts/<artifact-id>)`。manifest derivative 在读取回校验时解析并逐个确认引用 Artifact 对该 Principal 可读。Media prompt 中文档以 `kind: "document"` entry 声明提取文本（受每个文档与每 Turn 的文本预算截断），内嵌图片以随后的 `kind: "image"` entry 声明，只有归一化 JPEG 才实际附加，且与祖先 Turn 去重；文档 source 与内嵌图片 Artifact 都可被报告引用，manifest derivative ID 不可引用。
 
 这些限制属于运行时错误 contract，不属于管理员配置项。未来增加新媒体类型时必须使用新的 Definition Revision，并保持旧 Turn 的 Revision 语义。
 

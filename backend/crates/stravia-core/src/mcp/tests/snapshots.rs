@@ -276,14 +276,19 @@ async fn media_answer_pagination_preserves_full_history_without_another_model_tu
     let prefix = "图像内容🙂".repeat(3000);
     let (app, source, calls) = media_test_app_with_answer(&prefix).await;
     let client = connect(&app).await;
-    let first = page(&client, &format!("sa:{}", source.as_str())).await;
-    let original = format!("{prefix} [sa:{}]", source.as_str());
+    let source_path = format!("stravia://artifacts/{}", source.as_str());
+    let first = page(&client, &source_path).await;
+    let original = format!("{prefix} [{source_path}]");
     let mut assembled = first["report"]["answer"].as_str().unwrap().to_owned();
     assert!(assembled.len() <= 32 * 1024);
-    assert_eq!(
-        first["report"]["artifacts"][0]["artifact_id"],
-        source.as_str()
+    assert!(
+        first["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("stravia://turns/"))
     );
+    assert_eq!(first["completion"], "complete");
+    assert_eq!(first["artifacts"][0]["path"], source_path);
+    assert_eq!(first["report"]["artifacts"][0]["path"], source_path);
     jsonschema::validator_for(&stravia_media::platform::output_schema())
         .unwrap()
         .validate(&first)
@@ -302,14 +307,14 @@ async fn media_answer_pagination_preserves_full_history_without_another_model_tu
         .materialize(
             &Principal::new(app.key_id.clone()),
             TurnNodeKind::Agent,
-            &TurnNodeId::new(first["turn_id"].as_str().unwrap()),
+            &TurnNodeId::from_reference(first["path"].as_str().unwrap()).expect("Media Turn path"),
         )
         .await
         .expect("full media history");
     assert_eq!(nodes.last().unwrap().payload["output"]["answer"], original);
     assert_eq!(
-        nodes.last().unwrap().payload["output"]["artifacts"][0]["artifact_id"],
-        source.as_str()
+        nodes.last().unwrap().payload["output"]["artifacts"][0]["path"],
+        source_path
     );
 }
 

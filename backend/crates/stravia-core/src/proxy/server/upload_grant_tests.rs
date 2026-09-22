@@ -106,10 +106,17 @@ async fn upload_grant_is_multifile_fixed_lifetime_and_upload_only() {
     let first = upload(&router, &grant.key, "first file").await;
     now.fetch_add(14 * 60 * 1000, Ordering::SeqCst);
     let second = upload(&router, &grant.key, "second file").await;
-    assert_ne!(first["reference"], second["reference"]);
+    assert_ne!(first["path"], second["path"]);
+    assert!(first.get("id").is_none());
+    assert!(first.get("reference").is_none());
+    assert!(
+        first["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("stravia://artifacts/"))
+    );
     let store = gateway.artifact_store().unwrap();
     let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(
-        first["reference"].as_str().unwrap(),
+        first["path"].as_str().unwrap(),
     )
     .unwrap();
     let (_, bytes) = store
@@ -190,8 +197,11 @@ async fn signed_download_reads_the_completed_file_without_an_api_key() {
     let key = create_key(&gateway).await;
     let router = create_router(gateway.clone());
     let completed = upload(&router, &key.token, "complete file bytes").await;
-    let reference = completed["reference"].as_str().unwrap();
-    let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(reference).unwrap();
+    assert!(completed.get("id").is_none());
+    assert!(completed.get("reference").is_none());
+    let path = completed["path"].as_str().unwrap();
+    assert!(path.starts_with("stravia://artifacts/"));
+    let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(path).unwrap();
     let store = gateway.artifact_store().unwrap();
     let principal = stravia_runtime_contract::Principal::new(&key.id);
     let settings = stravia_runtime_contract::artifact::ArtifactSettings {

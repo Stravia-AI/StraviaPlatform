@@ -118,10 +118,9 @@ pub async fn complete_upload(
         .await
     {
         Ok(artifact) => Json(serde_json::json!({
-            "id": artifact.id,
             "mime_type": artifact.mime_type,
             "size": artifact.size,
-            "reference": artifact.reference(),
+            "path": artifact.reference(),
         }))
         .into_response(),
         Err(error) => artifact_error(error),

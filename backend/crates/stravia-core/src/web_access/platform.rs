@@ -77,9 +77,9 @@ impl PlatformTool for InternalReadTool {
             return crate::mcp::read::execute_internal_read(&self.gateway, request.path, context)
                 .await;
         };
-        if search.previous_turn_id.is_some() {
+        if search.previous_path.is_some() {
             return Err(PlatformToolError::new(
-                "Internal retrieval does not accept previous_turn_id",
+                "Internal retrieval does not accept previous_path",
             ));
         }
         if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {

@@ -40,7 +40,7 @@ pub fn builtin_extensions(gateway: Arc<dyn crate::host::PublicSearchHost>) -> Bu
 struct PublicSearchInput {
     query: String,
     #[serde(default)]
-    previous_turn_id: Option<String>,
+    previous_path: Option<String>,
     #[serde(default)]
     allowed_domains: Option<Vec<String>>,
 }
@@ -54,11 +54,11 @@ pub fn input_schema() -> Value {
                 "minLength": 1,
                 "description": "The question or topic to search. UTF-8 encoding must not exceed 64 KiB."
             },
-            "previous_turn_id": {
+            "previous_path": {
                 "type": ["string", "null"],
-                "minLength": 1,
+                "pattern": "^stravia://turns/[a-z]{28}$",
                 "maxLength": 128,
-                "description": "A prior Search Turn to continue or branch from."
+                "description": "An exact prior stravia://turns/<turn-id> path to continue or branch from."
             },
             "allowed_domains": {
                 "type": ["array", "null"],
@@ -66,7 +66,7 @@ pub fn input_schema() -> Value {
                 "items": { "type": "string" }
             }
         },
-        "required": ["query", "previous_turn_id", "allowed_domains"],
+        "required": ["query", "previous_path", "allowed_domains"],
         "additionalProperties": false
     })
 }
@@ -108,13 +108,23 @@ pub async fn execute(
         })
     })?;
     let runner: WebSearchRunner = gateway.runner().await.map_err(|_| unavailable_error())?;
+    let previous_turn_id = request
+        .previous_path
+        .as_deref()
+        .map(SearchTurnId::from_reference)
+        .transpose()
+        .map_err(|error| {
+            serde_json::json!({
+                "error": { "code": "invalid_input", "message": error.to_string() }
+            })
+        })?;
     let policy = request
         .allowed_domains
         .map(|allowed_domains| WebSearchRunPolicy { allowed_domains });
     let mut stream = runner.run(WebSearchInput {
         principal,
         query: request.query,
-        previous_turn_id: request.previous_turn_id.map(SearchTurnId::new),
+        previous_turn_id,
         policy,
         cancellation,
         deadline: Instant::now() + MAX_PUBLIC_DEADLINE,
@@ -522,12 +532,12 @@ pub fn output_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "turn_id": { "type": "string" },
+            "path": { "type": "string", "pattern": "^stravia://turns/[a-z]{28}$" },
             "completion": { "type": "string", "enum": ["complete", "partial"] },
             "report": crate::local::search_report_schema(),
             "pagination": stravia_web_access_contract::read_path::pagination_schema()
         },
-        "required": ["turn_id", "completion", "report"],
+        "required": ["path", "completion", "report"],
         "additionalProperties": false
     })
 }
@@ -546,10 +556,10 @@ mod tests {
 
         assert_eq!(
             schema["required"],
-            serde_json::json!(["query", "previous_turn_id", "allowed_domains"])
+            serde_json::json!(["query", "previous_path", "allowed_domains"])
         );
         assert_eq!(
-            properties["previous_turn_id"]["type"],
+            properties["previous_path"]["type"],
             serde_json::json!(["string", "null"])
         );
         assert_eq!(
@@ -564,7 +574,7 @@ mod tests {
         assert!(
             serde_json::from_value::<PublicSearchInput>(serde_json::json!({
                 "query": "Search the claim",
-                "previous_turn_id": None::<String>,
+                "previous_path": None::<String>,
                 "allowed_domains": None::<Vec<String>>,
                 "blocked_domains": []
             }))
@@ -605,8 +615,9 @@ mod tests {
             "filters": {"allowed_domains": ["Example.COM", "example.com"]}
         }))
         .expect("native allowed domains");
+        let previous_path = "stravia://turns/abcdefghijklmnopqrstuvwxyzab";
         let rewritten = rewritten_search_path(
-            "search://climate%20policy?allowed_domains=other.org&previous_turn_id=wst_turn",
+            "search://climate%20policy?allowed_domains=other.org&previous_path=stravia%3A%2F%2Fturns%2Fabcdefghijklmnopqrstuvwxyzab",
             &filters,
         )
         .expect("search path override");
@@ -617,7 +628,7 @@ mod tests {
         };
         assert_eq!(search.query, "climate policy");
         assert_eq!(search.allowed_domains, Some(vec!["example.com".to_owned()]));
-        assert_eq!(search.previous_turn_id.as_deref(), Some("wst_turn"));
+        assert_eq!(search.previous_path.as_deref(), Some(previous_path));
 
         // Without a native override the model path is left untouched.
         assert_eq!(

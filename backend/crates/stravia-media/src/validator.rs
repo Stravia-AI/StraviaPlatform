@@ -19,6 +19,13 @@ use stravia_runtime_contract::artifact::ArtifactId;
 pub const MAX_MEDIA_ANSWER_BYTES: usize = 64 * 1024;
 pub const MAX_MEDIA_REPORT_BYTES: usize = 128 * 1024;
 
+fn plain_artifact_id(path: &str) -> Option<ArtifactId> {
+    if path.contains(['?', '#']) {
+        return None;
+    }
+    ArtifactId::from_reference(path).ok()
+}
+
 pub fn validate_media_report(
     report: MediaReport,
     evidence: &HashSet<ArtifactId>,
@@ -41,7 +48,11 @@ pub fn validate_media_report(
     let marker_ids = answer_markers(&report.answer)?;
     let mut marker_set = HashSet::with_capacity(marker_ids.len());
     for marker in marker_ids {
-        let id = ArtifactId::new(marker);
+        if marker.contains(['?', '#']) {
+            return Err("Media Report contains an invalid Artifact path".to_owned());
+        }
+        let id = ArtifactId::from_reference(marker)
+            .map_err(|_| "Media Report contains an invalid Artifact path".to_owned())?;
         marker_set.insert(id);
     }
     let mut listed = HashSet::with_capacity(report.artifacts.len());
@@ -92,7 +103,11 @@ fn declared_sources(text: &str, declared: &mut Vec<DeclaredSource>) {
         return;
     };
     for entry in media {
-        let Some(id) = entry.get("artifact_id").and_then(|id| id.as_str()) else {
+        let Some(id) = entry
+            .get("path")
+            .and_then(|path| path.as_str())
+            .and_then(plain_artifact_id)
+        else {
             continue;
         };
         let kind = match entry.get("kind").and_then(|kind| kind.as_str()) {
@@ -100,7 +115,7 @@ fn declared_sources(text: &str, declared: &mut Vec<DeclaredSource>) {
             _ => DeclaredKind::Image,
         };
         declared.push(DeclaredSource {
-            id: ArtifactId::new(id),
+            id,
             kind,
             has_text: entry.get("text").is_some_and(|text| text.is_string()),
         });
@@ -108,23 +123,18 @@ fn declared_sources(text: &str, declared: &mut Vec<DeclaredSource>) {
 }
 
 fn answer_markers(answer: &str) -> Result<Vec<&str>, String> {
+    const PREFIX: &str = "[stravia://artifacts/";
+    if answer.contains("[sa:") {
+        return Err("Media Report contains a legacy Artifact marker".into());
+    }
     let mut markers = Vec::new();
     let mut rest = answer;
-    while let Some(start) = rest.find("[sa:") {
-        let marker = &rest[start + "[sa:".len()..];
+    while let Some(start) = rest.find(PREFIX) {
+        let marker = &rest[start + 1..];
         let end = marker
             .find(']')
             .ok_or_else(|| "Media Report contains a malformed Artifact marker".to_owned())?;
-        let artifact_id = &marker[..end];
-        if artifact_id.is_empty()
-            || artifact_id.len() > 128
-            || !artifact_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            return Err("Media Report contains an invalid Artifact ID".into());
-        }
-        markers.push(artifact_id);
+        markers.push(&marker[..end]);
         rest = &marker[end + 1..];
     }
     Ok(markers)
@@ -169,8 +179,8 @@ impl MediaReportValidator {
                     continue;
                 };
                 let derivative_id = match source {
-                    MediaSource::Url(reference) => ArtifactId::from_reference(reference).ok(),
-                    MediaSource::FileId { file_id, .. } => ArtifactId::from_reference(file_id).ok(),
+                    MediaSource::Url(reference) => plain_artifact_id(reference),
+                    MediaSource::FileId { file_id, .. } => plain_artifact_id(file_id),
                     _ => None,
                 }
                 .ok_or_else(|| {

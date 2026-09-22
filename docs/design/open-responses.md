@@ -360,8 +360,8 @@ Stravia extension 只暴露最终结果，不暴露私有 progress events：
 | 能力 | 最终 wire output |
 |---|---|
 | Web Search | 标准 assistant message；文本内保留 inline citations；只有 offsets 可靠时生成 annotations |
-| Agent | `stravia:agent_result` final item |
-| Media Understanding | `stravia:media_result` final item |
+| Agent | `stravia:agent_result` final item with `path: "stravia://turns/<turn-id>"` |
+| Media Understanding | `StraviaRead` tool result; no dedicated `stravia:media_result` extension item |
 
 Extension final item 仍使用标准 `response.output_item.added` / `response.output_item.done` 生命周期。
 
