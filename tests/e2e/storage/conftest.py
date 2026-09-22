@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -11,6 +12,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import Empty, Queue
+from typing import Any
 
 import pytest
 
@@ -82,6 +85,70 @@ def start_mock(port: int) -> ThreadingHTTPServer:
     return server
 
 
+class LifecycleUpstream(ThreadingHTTPServer):
+    """Local upstream that exposes each real vendor-component request to a test."""
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _LifecycleHandler)
+        self.requests: Queue[dict[str, Any]] = Queue()
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.server_address
+        return f"http://{host}:{port}"
+
+    def next_request(self) -> dict[str, Any]:
+        try:
+            return self.requests.get(timeout=10)
+        except Empty as error:
+            raise AssertionError("vendor component did not reach the local upstream") from error
+
+
+class _LifecycleHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("content-length", "0"))
+        body = self.rfile.read(length) if length else b""
+        server = self.server
+        assert isinstance(server, LifecycleUpstream)
+        server.requests.put(
+            {
+                "method": "POST",
+                "path": self.path,
+                "headers": {key.lower(): value for key, value in self.headers.items()},
+                "body": body,
+            }
+        )
+        payload = json.dumps(
+            {
+                "id": "fixture-response",
+                "model": "fixture-model",
+                "items": [{"role": "assistant", "content": "fixture-ok"}],
+                "stop_reason": "stop",
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "required_components_known": True,
+                },
+                "embedding_output": None,
+                "error": None,
+                "vendor": {"ingress": {}, "egress": {}, "passthrough_safe": {}},
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+        self.wfile.flush()
+
+
 def build_harness(work_dir: Path) -> None:
     core_path = (REPO_ROOT / "backend" / "crates" / "stravia-core").as_posix()
     server_path = (REPO_ROOT / "backend" / "apps" / "stravia-server").as_posix()
@@ -91,6 +158,9 @@ def build_harness(work_dir: Path) -> None:
         name = "stravia-storage-e2e-harness"
         version = "0.1.0"
         edition = "2024"
+
+        [workspace]
+        resolver = "2"
 
         [dependencies]
         anyhow = "1"
@@ -104,6 +174,21 @@ def build_harness(work_dir: Path) -> None:
         sha2 = "0.10"
         sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }}
         tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "time"] }}
+
+        [profile.dev]
+        opt-level = 0
+        debug = true
+        split-debuginfo = "unpacked"
+        incremental = true
+
+        [profile.dev.package."*"]
+        opt-level = 3
+
+        [profile.dev.package."bitflags@2"]
+        debug = true
+
+        [profile.dev.package.glob]
+        debug = true
         """
     ).strip() + "\n"
 
@@ -270,8 +355,9 @@ def build_harness(work_dir: Path) -> None:
             let provider = admin.create_provider(CreateProvider {
                 name: Some(format!("{backend}-e2e-provider")),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("custom".to_string()),
-                    protocol: "openai".to_string(),
+                    vendor: "custom".to_string(),
+                    channel: "default".to_string(),
+                    protocol: Some("openai".to_string()),
                     base_url: format!("{upstream}/v1"),
                     models_source: None,
                     static_models: None,
@@ -279,6 +365,7 @@ def build_harness(work_dir: Path) -> None:
                 credential: ProviderCredentialInput::ApiKey {
                     value: "dummy".to_string(),
                 },
+                vendor_options: Default::default(),
                 use_proxy: false,
             }).await?;
             admin.create_manual_provider_model(
@@ -297,7 +384,7 @@ def build_harness(work_dir: Path) -> None:
                 display_name: Some(format!("{backend} Model")),
                 balance: None,
                 target_provider: provider.id.clone(),
-                target_model: "gpt-4o-mini".to_string(),
+                target_model: Some("gpt-4o-mini".to_string()),
                 targets: vec![],
                 default_thinking_level: None,
             }).await?;
@@ -345,7 +432,7 @@ def build_harness(work_dir: Path) -> None:
                 default_thinking_level: None,
                 targets: vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
-                    model: "missing-model".to_string(),
+                    model: Some("missing-model".to_string()),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: Some(60_000),
@@ -427,6 +514,8 @@ def build_harness(work_dir: Path) -> None:
     ).strip() + "\n"
 
     (work_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+    # 独立工作区沿用产品的锁定依赖，避免验收时升级依赖并重复构建另一套产物。
+    shutil.copyfile(REPO_ROOT / "Cargo.lock", work_dir / "Cargo.lock")
     src_dir = work_dir / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
     (src_dir / "main.rs").write_text(main_rs, encoding="utf-8")
@@ -440,6 +529,7 @@ def run_harness(
     pg_url: str | None = None,
 ) -> str:
     env = os.environ.copy()
+    env.setdefault("CARGO_TARGET_DIR", str(REPO_ROOT / "target" / "storage-e2e"))
     env["STRAVIA_STORAGE_BACKEND"] = backend
     env["STRAVIA_STORAGE_UPSTREAM"] = f"http://127.0.0.1:{upstream_port}"
     env["STRAVIA_STORAGE_SERVER_PORT"] = str(find_free_port())
@@ -475,6 +565,7 @@ def postgres_dsn_for_schema(pg_url: str, schema: str) -> str:
 
 def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) -> str:
     env = os.environ.copy()
+    env.setdefault("CARGO_TARGET_DIR", str(REPO_ROOT / "target" / "storage-e2e"))
     env["STRAVIA_STORAGE_SCHEMA_ACTION"] = action
     env["STRAVIA_STORAGE_PG_URL"] = pg_url
     env["STRAVIA_STORAGE_PG_SCHEMA"] = schema
@@ -496,6 +587,17 @@ def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) 
             f"schema action={action} failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
     return proc.stdout
+
+
+@pytest.fixture
+def lifecycle_upstream() -> LifecycleUpstream:
+    server = LifecycleUpstream()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.fixture(scope="module")

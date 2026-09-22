@@ -2661,7 +2661,7 @@ test.describe('Interaction Observation canvas', () => {
           interaction_id: 'interaction-cinder',
           run_id: 'run-interaction-cinder',
           rejection_id: null,
-          kind: 'client_projection_delta',
+          kind: 'client_visible_content_delta',
           payload: { text: tail },
         },
         tail,
@@ -2886,7 +2886,7 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_projection_delta',
+      kind: 'client_visible_content_delta',
       payload: { text: 'new visible activity' },
     })
     const follow = page.getByRole('button', { name: 'New activity · Follow' })

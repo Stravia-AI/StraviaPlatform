@@ -51,13 +51,15 @@ async fn protected_responses_router_with_hook(
         .create_provider(CreateProvider {
             name: Some("Open Responses auth target".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "open-responses".into(),
+                vendor: "protocol-open-responses".into(),
+                channel: "default".into(),
+                protocol: Some("open-responses".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -86,7 +88,7 @@ async fn protected_responses_router_with_hook(
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "auth-model".into(),
+            target_model: Some("auth-model".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -562,13 +564,15 @@ async fn responses_rejects_removed_platform_web_search_extension() {
         .create_provider(CreateProvider {
             name: Some("No tools".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "https://example.invalid".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -593,7 +597,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "no-tools".into(),
+            target_model: Some("no-tools".into()),
             targets: vec![],
             default_thinking_level: None,
         })

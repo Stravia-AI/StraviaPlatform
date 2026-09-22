@@ -10,7 +10,7 @@ Stravia 定位为本地运行、可自托管的 **Agent infra（智能体基础�
 
 Stravia 可作为**桌面应用**在本地运行，也可作为**独立服务端**自托管，管理与配置由部署者控制。自托管不代表请求数据始终留在本机：模型调用和外部工具访问仍会发送至配置的上游服务。
 
-平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳各自独立：Artifact 引用为 `sa:<55 位 ID>`，可带 query、禁止 fragment；History Marker 为 `<!--sh:<28 位 ID>-->`；Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`；可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。外壳不授予访问权；外部 Provider／客户端 ID、Codex UUID 请求／连接元数据和真实凭据 token 保持其协议格式。协议修复保留请求内确定性定位符，不额外为临时序号计算内容摘要。Open Responses item 保留 `<type>_<原样 response ID>_<ordinal>` 的可逆定位结构；搜索正文为 `[sc:<turn ID>:<ordinal>]`，媒体正文为 `[sa:<Artifact ID>]`，媒体 bridge 使用 `sm`／`st` 短提示（详见媒体设计），不另创建实体身份。该契约面向新部署和全新数据库，不迁移或兼容读取旧平台 ID，也不回写不可变历史或外部历史。旧数据库与用户数据应另外保留，不得通过删除数据完成切换；新会话使用全新数据库。
+平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳各自独立：Artifact Reference 为 `stravia://artifacts/<55 位 ID>`，Turn Reference 为 `stravia://turns/<28 位 ID>`，Search Source 为 `stravia://turns/<28 位 ID>/sources/<ordinal>`；History Marker 为 `<!--sh:<28 位 ID>-->`，Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`，可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。平台资源自身统一以 `path` 输出，续接统一使用 `previous_path` 和完整 Turn URI；报告正文以方括号包裹完整 Artifact 或 Search Source URI，媒体 bridge 不再使用 `sm`／`st` 短提示。外壳不授予访问权；外部 Provider／客户端 ID、Codex UUID 请求／连接元数据和真实凭据 token 保持其协议格式。协议修复保留请求内确定性定位符，不额外为临时序号计算内容摘要。Open Responses item 保留 `<type>_<原样 response ID>_<ordinal>` 的可逆定位结构。旧 `sa:`、裸 Turn ID 与 `[sc:...]`／`[sm:...]`／`[st:...]` 不提供兼容解析；已有历史不批量重写或删除，旧历史引用可能明确失败。
 
 ```
 Claude Code · Codex CLI · Gemini CLI · OpenCode
@@ -52,13 +52,9 @@ stravia/
 │           │   └── extensions.rs · history_marker_executions.rs
 │           ├── model_turn/       # Model Turn Executor deep module（crate-private）
 │           │   ├── mod.rs            # execute(TurnInput) interface / Live + InMemory adapters
-│           │   ├── live.rs           # 授权、router::selection 驱动的 Target 尝试循环、transport
-│           │   ├── provider/         # Provider Turn transport deep module
-│           │   │   ├── mod.rs            # 选择 transport 与公共执行流程
-│           │   │   ├── reasoning.rs      # reasoning normalizer
-│           │   │   ├── transport_http.rs
-│           │   │   └── transport_responses_websocket.rs
-│           │   ├── accumulator.rs
+│           │   ├── live.rs           # 授权、router::selection 与 Wasm Vendor 尝试循环
+│           │   ├── capability.rs     # Vendor capability 执行与 canonical event bridge
+│           │   ├── provider/mod.rs   # 通用尝试观测；无 native Provider transport
 │           │   ├── support.rs
 │           │   └── tests.rs
 │           ├── reversible_redaction/ # 凭据保护的设置/观测 Host Adapter 与 SQL 集成回归
@@ -72,9 +68,6 @@ stravia/
 │           ├── proxy/            # 代理面
 │           │   ├── mod.rs
 │           │   ├── auth.rs
-│           │   ├── client/       # ProxyClient HTTP + Responses WebSocket transport
-│           │   │   ├── mod.rs
-│           │   │   └── websocket.rs
 │           │   ├── context.rs    # RequestContext / ContextBag
 │           │   ├── handler.rs    # models_list 只读端点（≤110 行）
 │           │   ├── artifacts.rs  # multipart upload / signed download adapters
@@ -136,27 +129,15 @@ stravia/
 │           │       │   └── messages/
 │           │       └── google/
 │           │           └── gemini/
-│           ├── provider/         # 厂商扩展层
-│           │   ├── mod.rs
-│           │   ├── vendor.rs     # inference Vendor trait / ProviderCtx
-│           │   ├── vendor_ext.rs # VendorExtension trait / VendorCtx
-│           │   ├── registry.rs   # VendorRegistry；inference、extension 与 metadata-only 注册
-│           │   ├── metadata.rs   # VendorMetadata / Label / AuthMode
-│           │   ├── outbound.rs   # OutboundRequest
-│           │   ├── inbound.rs    # InboundResponse
-│           │   ├── common/
-│           │   │   ├── openai_compat.rs # OpenAI 兼容共用逻辑（唯一名称）
-│           │   │   └── pipeline.rs   # 7 步 build_request / parse_response 自由函数
-│           │   ├── openai/           # OpenAiVendor + OpenAIFamilyExt
-│           │   │   └── codex/        # OpenAiCodexChannel（OAuth channel）
-│           │   ├── anthropic/        # AnthropicVendor + AnthropicFamilyExt
-│           │   │   └── claude_code/  # AnthropicClaudeCodeChannel
-│           │   ├── google/ · google_vertex/ · amazon_bedrock/ · azure/
-│           │   ├── sap_ai_core/ · cloudflare_ai_gateway/ · merge_gateway/ · gateway/
-│           │   ├── openai_compatible/ · openrouter/ · ollama/ · custom/
-│           │   └── aihubmix/ · cerebras/ · cohere/ · deepinfra/ · gitlab/ · groq/ · mistral/
-│           │       · perplexity/ · qvac/ · salad_cloud/ · togetherai/ · venice/
-│           │       · vercel/ · watsonx/ · xai/        # xAI API Key + Grok OAuth channel
+│           ├── plugin/           # Wasm Vendor host：安装、权限、网络、状态与调度
+│           │   ├── mod.rs        # 对外类型与执行接口导出；无编译期 Vendor inventory
+│           │   ├── builtin.rs    # 随产品发布的 Wasm 组件装载与 descriptor 身份核对
+│           │   ├── execution.rs  # execute_vendor / typed OperationInput / publication fence
+│           │   ├── manager.rs    # 安装版本、更新切换与运行中 operation 管理
+│           │   ├── lifecycle.rs  # 更新写栅栏与结果发布读栅栏
+│           │   ├── network.rs    # descriptor 授权下的 HTTP/WebSocket host transport
+│           │   ├── permissions.rs# descriptor origin 与配置字段权限解析
+│           │   └── store.rs      # 组件、私有状态与 data epoch 持久化
 │           ├── admin/            # AdminService 管理面（按职责拆分）
 │           │   ├── mod.rs
 │           │   ├── extensions.rs # list_loaded_extensions（provider/protocol 只读清单）
@@ -313,9 +294,9 @@ stravia-server::start_http_server() → 绑定 listener 并提供优雅关闭
 - **确定性协议协商**：`negotiate()`（`proxy/planner/negotiator.rs`）实现三级 egress 解析（Exact → Same-family → Provider Default），`ProtocolRegistry` 只暴露 endpoint identity、capabilities、alias 与 ingress route 查询。
 - **Pair-bound Protocol Conversion**：crate-private `ProtocolTransform::bind(ingress, egress)` 返回 `ProtocolPair`；调用方只通过 `decode_request` / `encode_request`、`decode_response` / `encode_response` 和有状态 stream session 转换 wire 与 canonical IR，不能直接取得 codec。
 - **Fail-closed representability**：跨协议 encode 前按实际 `AiRequest`、`AiResponse` 或 delta 检查语义损失并返回 typed `ProtocolLossyRejected`；同 endpoint 路径不套用跨协议 loss policy。
-- **Canonical-only 推理**：所有推理请求都经过 ingress decode、canonical IR、Vendor canonical mutation 与 ingress encode；不提供以 wire raw request/response 绕过 HookRuntime 的路径。
+- **Canonical-only 推理**：所有推理请求都经过 ingress decode、canonical IR、Vendor Plugin canonical execution 与 ingress encode；不提供以 wire raw request/response 绕过 HookRuntime 的路径。
 - **显式字段映射**：每个 codec 明确处理已知字段；允许的 vendor-specific 字段走 ExtensionBag，不隐式丢弃或把原始字节暴露给 hook。
-- **唯一推理 seam**：`GatewayBuilder` 显式注入固定顺序的 `HookRuntime` hooks 与 `PlatformTool`，dispatcher 只通过 `HookRuntime` 处理推理扩展；`Vendor` 仍是 provider-specific adapter seam。
+- **唯一推理 seam**：`GatewayBuilder` 显式注入固定顺序的 `HookRuntime` hooks 与 `PlatformTool`，dispatcher 只通过 `HookRuntime` 处理推理扩展；`Gateway::execute_vendor` 是唯一供应商执行 seam，且只调用已安装的 Wasm Vendor Plugin，不保留 native adapter。
 - **固定事件面**：`Request`、`UpstreamResponse`、`ToolResult`、`ClientOutput` 四个规范化事件，以及每个 HookSession 内的 `StreamTransformer` 流式事件。
 
 ### 3.2 完整调用流程
@@ -349,9 +330,9 @@ inference_run::execute(RunInput)（一次性 crate-private interface）
     └─ model_turn::execute(TurnInput)
          ├─ 可逆脱敏：按 Principal 加载有效映射；开启时全请求检测、持久化、精确替换
          ├─ 按 RouteBinding 或 CapabilityGrant 授权
-         ├─ 健康感知 Target iteration / negotiate() / Vendor / ProtocolPair
+         ├─ 健康感知 Target iteration / negotiate() / Vendor Plugin descriptor / ProtocolPair
          ├─ ContinuationLookup 在锁定 Target 后准备上游前缀
-         ├─ Provider Transport（HTTP/SSE 或 Responses WebSocket）
+         ├─ Vendor Plugin 经受控 host transport 执行（HTTP/SSE 或 Responses WebSocket）
               ├─ 两种 transport 均归一为 canonical AiResponse / AiStreamDelta
               ├─ 按原始 Provider 视图记录引用与续接证明，再还原回答及工具参数
               └─ 仅 retryable provider 失败且尚无客户端可见输出时切换 Target
@@ -361,7 +342,7 @@ inference_run::execute(RunInput)（一次性 crate-private interface）
     │
     ▼
 Inference Run module（同一 run 持有 HookRuntime run state 与跨 round 状态）
-    ├─ Provider adapter 只产出 canonical AiResponse / AiStreamDelta
+    ├─ Vendor Plugin 只向宿主产出 canonical AiResponse / AiStreamDelta
     ├─ 共同语义完成 implementation（四条交付路径共用）
     │    ├─ 统一补全 response ID / model / stop reason 并合并隐藏 round
     │    ├─ UpstreamResponse Hook → Platform Tool 分类 → ClientOutput Hook
@@ -533,18 +514,18 @@ Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生
 
 历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或过期历史撤销不可用索引，不重写原始节点或父边。
 
-Hook、Vendor canonical mutation 与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。
+Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。
 
-OpenAI direct 与 Codex OAuth 的 generation Target 通过同一个 Provider Transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace 与 upstream response ID 维护 affinity，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须命中同 socket；排队 sibling 发现 tip 已前移、重启或过期时改用新 socket 发送完整历史。`previous_response_not_found` 只在没有客户端可见输出时于同 socket 全量重放一次。握手不支持或短暂连接失败可在请求尚未接受时回退同 Target HTTP/SSE；401/403/429、发送后的不确定失败、malformed/binary event、取消和 Client Output Commit 后错误不重放。
+OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace 与 upstream response ID 维护 affinity，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须命中同 socket；排队 sibling 发现 tip 已前移、重启或过期时改用新 socket 发送完整历史。`previous_response_not_found` 只在没有客户端可见输出时于同 socket 全量重放一次。握手不支持或短暂连接失败可在请求尚未接受时回退同 Target HTTP/SSE；401/403/429、发送后的不确定失败、malformed/binary event、取消和 Client Output Commit 后错误不重放。
 
 连接管理不设置本地数量上限，也不做 idle 回收；无 affinity 的 root socket 在终态关闭，保留 affinity 的连接最迟由 60 分钟 max-age 淘汰。高并发且存在大量活跃 continuation 时，文件描述符、内存和上游连接数会随 Target/branch 增长。结构化日志只记录 transport、Target namespace、response/connection ID、连接年龄、fallback/replay 与 close reason，不记录 prompt、content、tool arguments、媒体或 credential。
 
 ### 4.9 安全、观测与边界
 
 - Hook 运行在受信 in-process Rust 环境，不获得可变 `Gateway`、任意存储、原始 `Authorization`、API key、provider credential 或 raw request/response。
-- Runtime 仅提供 canonical IR、稳定主体/路由标识、受限 ContextSnapshot 和受控 PlatformTool；凭据始终由 dispatcher/Vendor adapter 持有。
-- 普通 Interaction Observation 持久化拓扑、生命周期、时间、路由/Target、错误分类、凭据脱敏后的用户输入预览、Client Projection 可见内容、模型可读思考、客户端及平台工具输入/返回和 Confirmed Upstream Usage。思考按 Model Turn / Target attempt 隔离增量脱敏和合并，不采集其签名、密文或保护元数据，也不混入可见输出预览。输入预览及收到的客户端工具返回在既有凭据保护成功后发布；输入预览最多保留前 4,096 Unicode 字符，工具续跑不覆盖原始输入。普通内容沿用请求记录保留期，仍可能包含业务敏感数据。完整 canonical payload 与应用协议消息仍由进程级 Debug 控制；开关默认关闭，启用必须确认，只影响后续准入 Run。
-- 管理面、非推理路由和 provider adapter 不通过 HookRuntime 的事件面；Vendor 是独立 adapter seam，而不是 hook 的凭据出口。
+- Runtime 仅提供 canonical IR、稳定主体/路由标识、受限 ContextSnapshot 和受控 PlatformTool；凭据由宿主持久化并只授予当前 Provider 的 Vendor Plugin operation。
+- 普通 Interaction Observation 持久化拓扑、生命周期、时间、路由/Target、错误分类、凭据脱敏后的用户输入预览、Client Projection 可见内容、模型可读思考、客户端及平台工具输入/返回和 Confirmed Upstream Usage。思考按 Model Turn / Target attempt 隔离增量脱敏和合并，不采集其签名、密文或保护元数据，也不混入可见输出预览。输入预览及收到的客户端工具返回在既有凭据保护成功后发布；输入预览最多保留前 4,096 Unicode 字符，工具续跑不覆盖原始输入。普通内容沿用请求记录保留期，仍可能包含业务敏感数据。原始应用协议 Wire 仅由进程级 Debug 控制，canonical payload 不进入 Debug Trace；开关默认关闭，启用必须确认，只影响后续准入 Run。
+- 管理面、非推理路由和 Vendor Plugin 不通过 HookRuntime 的事件面；供应商行为只经统一 Wasm execution seam，不是 hook 的凭据出口。
 
 ### 4.10 Interaction Observation
 
@@ -554,13 +535,13 @@ OpenAI direct 与 Codex OAuth 的 generation Target 通过同一个 Provider Tra
 
 普通 Observation 使用有界非阻塞事件 seam，writer 在数据库事务中先提交 event 与 projection，再广播同一单调 sequence。forest snapshot 返回 `snapshot_sequence`，authenticated fetch SSE 从 `after` 续接；游标已超出保留范围时发送明确 `reset_required`。记录失败产生 `observation_gap`，Debug 写入失败产生带稳定 reason 的 `partial`，两者均不能改变 inference、Target retry/selection、Client Output Commit、Delivery 或 Generation Chain。
 
-Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest、Rejected Requests 与 Failed Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 与应用协议 payload 仅在 Debug Run inspector 中出现。
+Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest、Rejected Requests 与 Failed Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 不进入 Debug Trace；原始应用协议 payload 只通过 Debug Bundle 提供，不在 Run inspector 中展开。
 
 失败的请求列表是同一核心的查询投影，不建立第二套执行记录：合并准入前 `rejected_request_observations` 与终态 `failed` 且已结束的 `inference_run_observations`，按 `started_at` DESC、`kind`、`id` 排序并以不透明 keyset 游标分批加载；排除单纯取消、断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）与内部重试或切换模型服务后最终成功的请求。失败 Run 的开始时间取 ingress 接收时间，结束在终止方截取，不使用 writer 入队时间；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 的失败 Run 仍保留在原链路，详情提供对应节点跳转；准入前失败不伪造 Principal、Interaction 或 Generation Chain 关联。查询由 `GET /api/v1/observations/failed-requests` 与 `GET /api/v1/observations/failed-requests/{kind}/{id}` 提供，详情的 `trace` 只是既有 Debug manifest 元数据，诊断包沿用既有 ticket 与下载入口，不新增 Debug 捕获。0045 之前的记录缺少开始时间、耗时与来源快照，按 `occurred_at` 回退排序并报告 `observation_gap`；缺失诊断保持未知，不能补回。
 
-Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度与保留期。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 保存 canonical checkpoint 及 client↔platform↔upstream 四方向适用的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层顺序；它不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。凭据 header、URL userinfo、credential-like query value 以及结构化 JSON/form 中显式 credential 字段在进入队列或磁盘前永久替换，但 prompt、业务内容和工具输入/结果仍可能保留。
+Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度与保留期。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 只保存 client↔platform↔upstream 四方向观察到的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层原始 Wire 顺序及必要关联元数据，不保存 canonical、Hook 或 Client Projection 中间阶段，也不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。只有 HTTP `Authorization` header 值在进入队列前永久替换；其他 header、URL、query、body、prompt、工具参数、工具结果与媒体可能原样保留。
 
-Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug` 目录；落盘不设 Run 级或全局容量上限，`retained_bytes` 只统计实际落盘字节，请求体捕获与单条 wire 消息重组仍有内存缓冲上限。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；Debug 开启时 Clear Debug Data 可删除全部已保留 Trace 而不动请求记录与开关，活动 Run 的 Trace 标记 `debug_data_cleared` partial。manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
+Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug` 目录；落盘不设 Run 级或全局容量上限，`retained_bytes` 只统计实际落盘字节，原始分块捕获与单条 Wire message 的既有缓冲仍有内存上限，但 Debug 不为 JSON、SSE、NDJSON 或媒体重组正文。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；Debug 开启时 Clear Debug Data 可删除全部已保留 Trace 而不动请求记录与开关，活动 Run 的 Trace 标记 `debug_data_cleared` partial。manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
 
 已认证 POST 可为 Interaction 或 Rejected Request 固定 through-sequence 的 snapshot，并签发 60 秒、单次使用、高熵 opaque ticket；普通 GET 消费 ticket 并流式生成 versioned ZIP，URL 不携带 Admin credential。manifest 记录 export time、through-sequence、resource status、每 Run capture state/bytes/reason 及整体 `complete|partial|none`；运行中导出只能是 point-in-time partial。过期、重放、跨资源或进程重启后的 ticket 统一失效。当前 realtime、Debug switch、Trace storage 与 ticket 都仅保证单 Gateway instance，不提供 cluster fanout、共享 Trace 或跨实例 ticket。
 
@@ -631,7 +612,7 @@ pair.encode_response(&response) -> Value
 pair.stream()                   -> StreamSession
 ```
 
-Request/response encode 和 stream delta encode 在跨协议时执行 per-value representability 检查；不可表示语义返回 typed `ProtocolLossyRejected`。同 endpoint 路径仍经过同一 canonical IR 和 adapter，但不套用跨协议 loss policy。`StreamSession` 拆成同一 pair 绑定的 decoder/encoder state，流式解析继续位于 protocol module，Vendor adapter 只接收 canonical delta。
+Request/response encode 和 stream delta encode 在跨协议时执行 per-value representability 检查；不可表示语义返回 typed `ProtocolLossyRejected`。同 endpoint 路径仍经过同一 canonical IR 和 adapter，但不套用跨协议 loss policy。`StreamSession` 拆成同一 pair 绑定的 decoder/encoder state，流式解析继续位于 protocol module，Vendor guest 只接收 canonical 语义并通过版本化 WIT 返回 canonical delta。
 
 ### 5.3 EndpointCapabilities 矩阵
 
@@ -669,117 +650,62 @@ Request/response encode 和 stream delta encode 在跨协议时执行 per-value 
 
 ---
 
-## 6. 厂商扩展层（provider/）
+## 6. Wasm Vendor 组件层（plugin/）
 
-三层职责分离：
+Vendor 的身份、channel、认证、发现、allowance、请求构造与响应语义全部由可安装 Wasm 组件实现。Core 不再包含原生 `Vendor` / `VendorExtension` trait、`VendorRegistry`、编译期 inventory，或由宿主按品牌、协议猜测的 native fallback；基础回退与专属接管都由已安装组件的 descriptor 声明，descriptor 是唯一运行时事实来源。
 
-```
-protocol/codec/   ← 序列化层：AiRequest/AiResponse ↔ wire-format JSON
-provider/         ← 编排层：Vendor trait（build_request / parse_response）+ VendorExtension hooks
-```
+随产品交付的 Vendor 恰好拆为五个 Component 包：
 
-`VendorExtension` 的 hook 仅是 adapter 内部的 provider-specific 编解码/流式适配，不属于 HookRuntime 的推理事件面；它们不能绕过 canonical IR，也不能取得 HookRuntime 未授权的凭据或状态。
-
-
-### 6.1 Vendor trait（原 ProviderAdapter）
-
-`dispatcher` 的唯一接触点（`provider/vendor.rs`）：
-
-```rust
-#[async_trait]
-pub trait Vendor: Send + Sync + 'static {
-    // 标识 / 元数据
-    fn scope(&self) -> VendorScope;              // Vendor | Channel
-    fn vendor_id(&self) -> &'static str;
-    fn supported_protocols(&self) -> &'static [ProtocolId];
-    fn metadata(&self) -> &'static VendorMetadata;
-
-    // 推理与 Models 的共同认证 / URL 构造契约
-    fn construct_request(&self, ctx: &RequestContext, purpose: RequestPurpose)
-        -> anyhow::Result<ConstructedRequest>;
-
-    // 编解码 hook（可选，默认 no-op）
-    async fn pre_request(&self, ctx, req: &mut AiRequest, gw: &Gateway);
-    async fn pre_encode(&self, ctx, req: &mut AiRequest);
-    async fn post_encode(&self, ctx, body: &mut Value, headers: &mut HeaderMap);
-    async fn pre_parse(&self, ctx, body: &mut Value);
-    async fn post_parse(&self, ctx, resp: &mut AiResponse);
-
-    // 流式 hook
-    async fn on_stream_raw_chunk(&self, ctx, chunk: &str);
-    async fn on_stream_delta(&self, ctx, delta: &mut AiStreamDelta);
-
-    // 编排（required）
-    async fn build_request(&self, req: &mut AiRequest, ctx: &ProviderCtx)
-        -> Result<OutboundRequest, GatewayError>;
-    async fn parse_response(&self, resp: InboundResponse, ctx: &ProviderCtx)
-        -> Result<AiResponse, GatewayError>;
-    fn map_error(&self, status: u16, body: Value) -> GatewayError;
-    fn validate_environment(&self, provider: &Provider) -> Result<(), GatewayError>;
-
-    // Vendor-specific pre/post encode/parse and stream adaptation stay here.
-    // Inference traffic always traverses canonical IR; no raw bypass is exposed.
-}
+```text
+stravia-vendor-base/         ← vendor_id=base 的单一 fallback Vendor；承接四个专属身份之外的全部既有接入
+stravia-vendor-codex/        ← vendor_id=openai-codex；完整拥有 Codex
+stravia-vendor-grok/         ← vendor_id=xai-grok；完整拥有 Grok
+stravia-vendor-command-code/ ← vendor_id=command-code；完整拥有 Command Code
+stravia-vendor-devin/        ← vendor_id=devin；完整拥有 Devin
+stravia-vendor-common/       ← 多个 guest 共用的 Rust rlib，不是 Vendor
+stravia-protocol-codec/      ← OpenAI-compatible（含 embeddings）、Anthropic、Gemini、Open Responses 四个标准 family
+stravia-core/plugin/         ← 安装、版本、权限、网络、状态、调度与发布栅栏
+model_turn/                  ← 路由与尝试策略；只调用 Gateway::execute_vendor
 ```
 
-**build_request pipeline**（`provider/common/pipeline.rs`）：
-`pre_request` → `normalize_tool_results` → `pre_encode` → `codec_encode` → `post_encode` → `construct_request`。codec / post-encode headers 覆盖构造默认值，明确 runtime binding headers 保持最终覆盖优先级。
+基础包只有一个 Vendor 身份；其中各供应商 profile 是配置与行为声明，不是多个 Vendor。普通 OpenAI 与 xAI API channel 留在基础包，Anthropic OAuth、Google/Vertex、Bedrock、DeepSeek 及其他非专属接入的既有认证、云协议、发现、allowance 与推理能力也完整保留。Codex、Grok、Command Code、Devin 的专属包按供应商身份整体接管所有 channel 和操作；专属包未安装、不可用、缺少某项 channel/能力或执行失败时都不回退基础包。
 
-`RequestPurpose::Inference` 携带实际 egress 协议、base URL、codec 相对路径与实际模型；`Models` 只携带调用方选定的完整端点，不执行推理模型或 deployment 路径改写。`RequestContext` 携带解析后的凭据与默认认证抑制，构造返回最终 URL 和 headers。认证抑制同时覆盖默认 header 和 query 凭据；协议别名经 ProtocolRegistry，凭据 query 使用结构化编码。已知 Models 约定优先，自定义端点继承所解析 Vendor 的 Models 约定，不猜任意 URL。
+这是对 ADR-0069、ADR-0070 中“四个通用协议 Vendor/插件”表述的后续取代性澄清：保留全量 Wasm 与自包含锁定 codec 的决策，但四个标准协议 family 现在是共享 codec，而不是四个 Vendor 包。它与 ADR-0067 的独立 Vendor 身份一致；基础包仍是一个 Vendor，而不是一个包导出多个 Vendor。Command Code 与 Devin 的专有 codec 分别归其 guest，Bedrock、Cohere、Gateway、Watsonx 的专有实现归基础 guest，host 不链接这些专有 codec。
 
-Provider 查询与 Route 同步分别拥有来源优先级、发送、解析、原有超时及错误；查询保留原有静态回退，同步失败明确报错。两者都用 `http_client_for_provider(use_proxy)` 遵循既有全局出站策略，不另选代理或在配置失败后绕过。Provider write 与 Route bind 仍为独立 module。
+`task build:vendors` 一次构建五个 Component，并在 `target/vendor-plugins/manifest.json` 输出完整 manifest；不得单独构建一部分后把不完整集合当作内置 inventory。
 
-**ProviderCtx**（`provider/vendor.rs`）：
+这条边界禁止长期 native bypass：未知 vendor/channel 不回落到协议家族适配器，未知 wire protocol 也不按品牌猜测。Provider 保存的 channel 必须命中已安装 descriptor；descriptor 未声明协议时保持 `None`，调用方不能擅自补成 Open Responses 或其他协议。
 
-```rust
-pub struct ProviderCtx<'a> {
-    pub provider:             &'a Provider,
-    pub protocol:             ProtocolId,        // 即 ProtocolEndpoint
-    pub egress_base_url:      &'a str,
-    pub api_key:              &'a str,
-    pub actual_model:         &'a str,
-    pub credential:           Option<&'a StoredCredential>,
-    pub gw:                   &'a Gateway,
-    pub disable_default_auth: bool,
-}
-```
+### 6.1 Descriptor 与操作入口
 
-### 6.2 VendorExtension（channel / family ext）
+WIT 契约为 `stravia:vendor@0.2.0`。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
 
-`VendorExtension`（`provider/vendor_ext.rs`）保留用途化 `construct_request`、编解码与流式 hook，以及 Target capability / Responses WebSocket 契约；不再暴露分离认证与 URL 钩子。
+这里的 `provider_id` 是供应商 profile 身份，不是已保存 Provider 连接的数据库 UUID。SDK 与 WIT 的 `ProviderSnapshot.provider_id` 为必填；准入、channel 校验、网络 origin 与 guest 分派都只使用当前 profile，不能合并其他 profile 的声明。基础 guest 按该身份分派，专属 guest 拒绝其他身份。
 
-**关系：**
-- `Vendor` 通过 blanket `impl<T: Vendor> VendorExtension for T` 自动实现 `VendorExtension`
-- Channel-only 类型（`OpenAiCodexChannel`、`AnthropicClaudeCodeChannel`）仅 impl `VendorExtension`
+Core 的通用执行入口是 `Gateway::execute_vendor`。它按 Provider 绑定取得已安装组件，校验 descriptor 身份和 channel，构造 `ProviderSnapshot`，再将 typed `OperationInput` 交给 guest：
 
-**两套注册（均通过 `inventory::submit!`）：**
+- `Infer`：canonical `AiRequest` 进入 guest；guest 使用共享 codec 构造 wire 请求并发出 canonical runtime event。
+- `Discover` / `Allowance` / `Auth` / `ConfigValidation`：由声明对应 capability 的 guest 处理；host 不保留同厂商原生实现。
+- 运行中的 session 固定已加载组件与 data epoch；组件更新不兼容时，旧 session 不能继续发布结果。
 
-```rust
-// 完整 vendor
-inventory::submit! { VendorRegistration { make: || Box::new(XxxVendor) } }
-// Channel / family ext
-inventory::submit! { ExtensionRegistration { make: || Box::new(XxxChannel) } }
-```
+操作结束返回 `VendorExecution { output, publication }`，流事件携带同一 `VendorPublicationFence`。普通完成后 fence 仍可用于最终历史/compaction 写入；caller 取消、deadline 或不兼容插件更新后 fence 失效。最终异步写入在真实写入期间持有读栅栏，插件更新通过写栅栏等待这些发布完成；不得为了方便长期持有 `VendorOperation` lease。
 
-`VendorRegistry::resolve(provider, protocol_id)` 返回 `Arc<dyn VendorExtension>`，内部通过 `VendorAsExt` 包装统一两类注册。
+### 6.2 受控宿主能力
 
-### 6.3 共用 helpers（provider/common/openai_compat.rs）
+Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提供通用能力：
 
-OpenAI 兼容厂商复用 `construct_openai_request`、`openai_map_error`、`openai_build_request`、`openai_parse_response` 和 `GenericOpenAICompatibleAdapter`；用途化构造内部统一处理 Bearer 与路径规则。
+- 根据 descriptor 的固定 origin、base URL 字段与显式配置解析最小网络授权；guest 输出不能扩大 origin。
+- HTTP / WebSocket 统一经过 host transport，遵循代理设置、取消、deadline、响应大小与消息大小限制。
+- Provider credentials 以 typed snapshot 交给当前操作；私有状态按供应商 profile 身份、已保存 Provider 连接 UUID 和 data epoch 隔离。
+- protocol codec 保持跨厂商通用，只负责 canonical IR 与 wire 表示能力；厂商 URL、headers、认证刷新、模型发现和错误解释留在 guest。
 
-### 6.4 厂商列表
+内置 Vendor 与第三方 Vendor 走同一 `LoadedPlugin` / Wasm runtime 路径。`plugin/builtin.rs` 只负责装载随产品发布的组件并核对 descriptor 身份，不是另一套原生实现。
 
-| 厂商 | vendor_id | 特殊处理 |
-|---|---|---|
-| OpenAI | `openai` | 含 `codex` channel（OAuth） |
-| Anthropic | `anthropic` | `x-api-key` + `anthropic-version`；含 `claude-code` channel |
-| Google | `google` | URL 追加 `?key=<api_key>`；`override_model_in_body=true` |
-| Vertex AI | `vertexai` | Service account auth + 区域 endpoint |
-| DeepSeek / Moonshot / Zhipu / MiniMax / ZAI / OpenRouter / Nvidia / Ollama | 各自 vendor_id | 委托 `GenericOpenAICompatibleAdapter` / openai_compat_* |
-| xAI | `xai` | API Key 默认 channel；`grok` channel 使用 device-code OAuth、Grok Build identity headers 与 Responses upstream |
-| custom | `custom` | 用户自定义 vendor preset |
+### 6.3 维护约束
 
----
+新增或修改 Vendor 行为时必须修改对应 guest，并在真实 Wasm 测试面验证；不得在 Core 按 vendor id、model 名称或 protocol family 增加特殊分支。Core 可保留的只有平台通用 codec、权限、网络、调度、观测和持久化职责。若 guest 需要新的宿主能力，应先扩展通用 typed SDK/WIT 契约，并证明它不依赖单一厂商品牌；不能以临时 native fallback 绕过组件边界。
+
+内置组件当前覆盖 OpenAI/Codex、Anthropic/Claude Code、Google、Vertex AI、Amazon Bedrock、Devin、Command Code、xAI、GitLab、SAP AI Core、Watsonx 及通用 OpenAI-compatible 系列。实际可用列表始终以运行时已安装 descriptor 为准，而不是本文静态清单。
 
 ## 7. 错误处理
 
@@ -794,7 +720,7 @@ OpenAI 兼容厂商复用 `construct_openai_request`、`openai_map_error`、`ope
 | `RouteNotFound` | 404 | 无匹配模型/路由 |
 | `ProtocolUnsupported` | 400 | 协议不支持 |
 | `ProtocolLossyRejected` | 422 | lossy 转换被拒绝 |
-| `ProviderUnavailable` | 503 | 无可用 vendor extension |
+| `ProviderUnavailable` | 503 | 无可用的已安装 Vendor 组件 |
 | `UpstreamStatus` | 上游 status | 上游返回错误 |
 | `UpstreamTimeout` | 504 | 上游超时 |
 | `StreamParseError` | 502 | SSE chunk 解析失败 |
@@ -923,11 +849,11 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。插件 Component 是不可变、按内容寻址的实例文件；SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。校验后的文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的 Component 均随源数据根复制；插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含插件 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 
@@ -944,7 +870,7 @@ stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storag
 CREATE TABLE providers (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    vendor          TEXT,             -- canonical vendor_id
+    vendor          TEXT,             -- supplier profile identity, not saved connection UUID
     protocol        TEXT NOT NULL,
     base_url        TEXT NOT NULL,
     api_key         TEXT NOT NULL,    -- static api key
@@ -1176,7 +1102,7 @@ tests/stream/
 
 ### 12.5 Observation Debug Bundle 边界
 
-产品诊断出口是管理员按 Interaction 或 Rejected Request 创建的 point-in-time Debug Bundle；不提供环境变量驱动的 wire replay、旧 JSONL 文件路径或把 capture 自动转成测试 fixture 的 CLI。Bundle 保留应用协议与 canonical checkpoint 证据，并通过 manifest 明示边界、脱敏声明和缺口，不能充当网络 packet capture 或自动重放输入。
+产品诊断出口是管理员按 Interaction 或 Rejected Request 创建的 point-in-time Debug Bundle；不提供环境变量驱动的 wire replay、旧 JSONL 文件路径或把 capture 自动转成测试 fixture 的 CLI。Bundle 保留四方向应用协议原始 Wire 与必要关联元数据，不包含 canonical checkpoint；它通过 manifest 明示捕获边界、仅遮蔽 HTTP `Authorization` 值的敏感数据声明及缺口，不能充当网络 packet capture 或自动重放输入。
 
 ### 12.6 可观测性 Exporter（后续适配）
 

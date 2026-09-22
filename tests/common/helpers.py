@@ -20,6 +20,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 
+# A cold Gateway compiles all bundled Wasm components before becoming ready.
+# Keep this budget separate from ordinary HTTP requests and model deadlines.
+SERVER_STARTUP_TIMEOUT = 180.0
+
+
 # ── Port utilities ──────────────────────────────────────────────────────────
 
 
@@ -218,7 +223,7 @@ def initialize_server(
         "POST",
         "/api/v1/setup/complete",
         {"database": database, "username": username, "password": password, "client_base_url": base_url},
-        timeout=40.0,
+        timeout=SERVER_STARTUP_TIMEOUT,
     )
     assert status == 200, f"complete setup failed: {status} {body}"
     status, body = session.request(
@@ -230,7 +235,7 @@ def initialize_server(
 
 def wait_until_ready(
     url: str,
-    timeout: float = 30.0,
+    timeout: float = SERVER_STARTUP_TIMEOUT,
     headers: dict[str, str] | None = None,
 ) -> None:
     """Poll <url> until any non-connection-error response arrives (< 500)."""
@@ -377,7 +382,11 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             if self.server.stream_error_release.wait(timeout=15):
                 code = "cancelled" if "observation-final-stream-error-cancelled" in scenario else "stream_failed"
-                error = {"error": {"type": "server_error", "code": code, "message": "upstream failed after output"}}
+                error = {"error": {"type": "server_error", "code": code, "message": (
+                    "upstream failed after output; "
+                    "https://upstream.invalid/?api_key=wire%2Bsecret "
+                    "Authorization: Bearer stream-wire-token"
+                )}}
                 self.wfile.write(b"data: " + json.dumps(error).encode() + b"\n\n")
                 self.wfile.flush()
             self.close_connection = True

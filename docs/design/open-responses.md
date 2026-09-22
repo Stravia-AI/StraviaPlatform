@@ -4,7 +4,7 @@
 > 决策记录：[`ADR-0011`](../adr/0011-own-open-responses-as-a-dated-protocol.md)  
 > 规范调研：[`Open Responses 开放标准研究`](../research/open-responses-standard.md)  
 > 规范快照：2026-04-24  
-> 范围：`stravia-core` canonical IR、protocol codecs、proxy ingress、Provider adapters、Response Chain、Server/Desktop transport、devtools 与协议文档  
+> 范围：`stravia-core` canonical IR、protocol codecs、proxy ingress、Wasm Vendor Plugins、Response Chain、Server/Desktop transport、devtools 与协议文档
 > 非目标：完整复制 OpenAI rolling Responses product semantics、`background` execution、平台级自动上下文压缩、动态 extension plugins、旧协议身份兼容迁移
 
 ---
@@ -27,7 +27,7 @@ Stravia 将以 **Open Responses Protocol** 作为唯一 Responses-shaped canonic
 
 - 为 Responses-shaped traffic 提供一个日期固定、可测试、vendor-neutral 的协议身份。
 - 同一 canonical IR 支撑同步、SSE、WebSocket、continuation、工具调用和多模态。
-- OpenAI、Anthropic、Google 与未来 Provider adapters 只拥有 provider-specific transport 和 wire mapping，不拥有 canonical 语义。
+- OpenAI、Anthropic、Google 与未来 Vendor Plugin 只拥有 provider-specific transport 编排和 wire mapping，不拥有 canonical 语义。
 - 以明确的 hard-semantics gate 约束兼容性省略。
 - 让 Stravia 自有能力通过可验证的 Namespaced Extension 扩展，而不是伪装成标准字段。
 - 以 vendored 官方 OpenAPI、永久 contract tests 和一次性官方 acceptance run 证明 pinned profile。
@@ -97,10 +97,12 @@ proxy/ingress/
 ├── anthropic/
 └── google/
 
-provider/
-├── openai/                   # auth, URL, Codex quirks, Target capabilities
-├── anthropic/
-└── google/
+vendor plugins/
+├── base/                     # OpenAI、Anthropic、Google 等基础 Profile
+├── codex/                    # Codex 专属 auth、URL 与能力
+├── grok/
+├── command-code/
+└── devin/                    # 五个 guest 均经统一 Wasm runtime 执行
 ```
 
 所有权规则：
@@ -110,11 +112,11 @@ provider/
 | Open Responses codec | dated request/response/item/event wire types、schema validation、event lifecycle | OpenAI auth/URL、routing、quota |
 | canonical IR | message/content/tool/reasoning/refusal/reference/usage/error 的语义 | HTTP headers、SSE framing、wire indices、provider extensions |
 | pair-bound transform | decode/encode、representability、stream session | provider transport、Target selection |
-| vendor adapter | auth、base URL、HTTP quirks、Resolved Target capabilities | 第二套 Responses canonical model |
+| Vendor Plugin guest | auth、base URL、HTTP quirks、Resolved Target capabilities | 第二套 Responses canonical model、宿主调度与网络策略 |
 | dispatcher | Inference Run、Hook、Target selection、retry、tool continuation、delivery | provider-specific JSON |
 | Response Chain | durable canonical history、branch、principal scope | live Inference Run mutable state |
 
-`stream_only` 是 Resolved Target execution capability，由具体 vendor adapter 声明。Codex 等 adapter 可声明 `true`；普通 Open Responses adapter 默认 `false`。不新增 DB/admin 开关，也不通过运行时 probe 推断。
+`stream_only` 是 Resolved Target execution capability，由具体 Vendor Plugin 的 Provider descriptor 声明。Codex 等 Profile 可声明 `true`；普通 Open Responses Profile 默认 `false`。不新增 DB/admin 开关，也不通过运行时 probe 推断。
 
 ---
 
@@ -279,7 +281,7 @@ WebSocket 不在 `response.create` body 中重复传 token。所谓“每轮重�
 
 ### 7.3 上游 Responses WebSocket
 
-下游 WebSocket ingress 与上游 Provider transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run，Embeddings 仍走 HTTP。URL 从 Vendor adapter 生成的 Responses HTTP URL 映射为 `ws:`/`wss:`，握手复用同一 `reqwest::Client` 的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers。Codex adapter 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
+下游 WebSocket ingress 与 Vendor Plugin 使用的上游受控 host transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Wasm Vendor Plugin 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run，Embeddings 仍走 HTTP。插件从 Responses HTTP URL 选择对应的 `ws:`/`wss:` 目标，宿主 transport 复用同一网络栈的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers，并执行 origin 授权。Codex guest 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
 
 连接池按精确 Target namespace 和 upstream response ID 建立 affinity；每个连接同一时刻只执行一个 response。连接 60 分钟后不再复用；当前不设置本地连接数上限，也不回收仍有 affinity 的 idle 连接，因此高并发分支会增加文件描述符、内存与上游连接占用。`store=false` 只允许同 socket 最近 tip 续接；排队 sibling、重启、断线或 max-age 失去 affinity 后在新 socket 发送完整 Effective Model Request。取消关闭所属 socket。
 

@@ -82,55 +82,18 @@ async fn validate_targets(gateway: &Gateway, route: &Route) -> Result<(), Genera
     if !route.targets.iter().any(|target| target.enabled) {
         return Err(GenerationError::new(
             "media_generation_targets_missing",
-            "The selected Route needs an enabled Codex Target",
+            "The selected Route needs an enabled Target",
         ));
     }
-    for target in &route.targets {
-        if !target.enabled {
-            continue;
-        }
-        let provider = gateway
-            .storage
-            .providers()
-            .get(&target.provider_id)
-            .await?
-            .ok_or_else(|| {
-                GenerationError::new(
-                    "media_generation_provider_missing",
-                    "A Target's model service no longer exists",
-                )
-            })?;
-        if !crate::provider::openai::codex::media_generation::eligible(&provider, &target.model) {
-            return Err(GenerationError::new(
+    gateway
+        .validate_vendor_route_capability(route, stravia_vendor_sdk::Capability::MediaImage)
+        .await
+        .map_err(|_| {
+            GenerationError::new(
                 "media_generation_target_incompatible",
-                format!(
-                    "Target {} requires a supported Codex model and enabled Codex OAuth service",
-                    target.id
-                ),
-            ));
-        }
-        let credential = gateway
-            .storage
-            .oauth_credentials()
-            .get(&provider.id)
-            .await?;
-        if !credential.is_some_and(|credential| {
-            credential.status == "connected"
-                && !credential.access_token.trim().is_empty()
-                && (credential.expires_at.as_deref().is_none_or(|expiry| {
-                    crate::proxy::security::is_key_expired(expiry) == Ok(false)
-                }) || credential
-                    .refresh_token
-                    .as_deref()
-                    .is_some_and(|token| !token.trim().is_empty()))
-        }) {
-            return Err(GenerationError::new(
-                "media_generation_oauth_unavailable",
-                format!("Reconnect the Codex account for {}", provider.name),
-            ));
-        }
-    }
-    Ok(())
+                "Every enabled Target must select an image-capable Provider Model",
+            )
+        })
 }
 
 async fn validate(
@@ -202,7 +165,7 @@ pub(crate) async fn eligible_routes(
     Ok(result)
 }
 
-pub(crate) async fn validated_route(gateway: &Gateway) -> Result<String, GenerationError> {
+pub(crate) async fn validated_route(gateway: &Gateway) -> Result<Route, GenerationError> {
     let config = load(gateway).await?;
     if !config.enabled {
         return Err(GenerationError::new(
@@ -210,6 +173,28 @@ pub(crate) async fn validated_route(gateway: &Gateway) -> Result<String, Generat
             "Media generation is disabled",
         ));
     }
-    validate(gateway, &config).await?;
-    Ok(config.image.route_id.expect("validated image binding"))
+    let route_id = config
+        .image
+        .route_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            GenerationError::new(
+                "media_generation_route_missing",
+                "Select an image generation Route",
+            )
+        })?;
+    let route = gateway
+        .storage
+        .routes()
+        .get(route_id)
+        .await?
+        .ok_or_else(|| {
+            GenerationError::new(
+                "media_generation_route_missing",
+                "Select an existing image generation Route",
+            )
+        })?;
+    validate_targets(gateway, &route).await?;
+    Ok(route)
 }

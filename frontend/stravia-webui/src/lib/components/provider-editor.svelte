@@ -6,72 +6,50 @@ import SearchIcon from '@lucide/svelte/icons/search'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
-import { catalogSelectionStale, localizeBackendErrorMessage } from '$lib/backend-error'
+import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { localeState } from '$lib/localization.svelte'
-import { providerCredentialFieldLabel } from '$lib/provider-credential-labels'
 import {
   buildProviderOptions,
   defaultProviderName,
-  oauthDriverKey,
   optionDescription,
   optionLabel,
   providerNameAfterOptionChange,
   type ProviderOption,
 } from '$lib/provider-options'
-import { PROTOCOL_TABLE, resolveProtocol } from '$lib/protocol'
-import type { CatalogProvider, CreateProvider, Provider, ProviderProtocol, VendorCredentialField } from '$lib/types'
+import type { CreateProvider, OAuthCandidateConfiguration, Provider, ProviderConfigurationPreview } from '$lib/types'
+import ProviderConfigFields from '$lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
+import * as Alert from '$lib/components/ui/alert'
 import { Badge } from '$lib/components/ui/badge'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import * as Field from '$lib/components/ui/field'
 import * as Empty from '$lib/components/ui/empty'
 import * as InputGroup from '$lib/components/ui/input-group'
-import SecretInput from '$lib/components/secret-input.svelte'
 import { Input } from '$lib/components/ui/input'
-import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
 import * as Tabs from '$lib/components/ui/tabs'
-import { Textarea } from '$lib/components/ui/textarea'
 
 interface ProviderForm {
   name: string
-  vendor: string
-  protocol: ProviderProtocol
   baseUrl: string
-  apiKey: string
   useProxy: boolean
-  authMode: 'apikey' | 'oauth'
-  presetKey: string
-  channel: string
-  modelsSource: string
+  values: Record<string, unknown>
 }
 
 interface Props {
   open?: boolean
-  presets: CatalogProvider[]
   onSaved?: (provider: Provider) => void
 }
 
-let { open = $bindable(false), presets, onSaved }: Props = $props()
+let { open = $bindable(false), onSaved }: Props = $props()
 let step = $state<'select' | 'configure'>('select')
 let search = $state('')
 let focusedOptionKey = $state('')
 let selectedOptionKey = $state('')
-let form = $state<ProviderForm>({
-  name: '',
-  vendor: '',
-  protocol: 'openai-compatible',
-  baseUrl: '',
-  apiKey: '',
-  useProxy: false,
-  authMode: 'apikey',
-  presetKey: 'custom',
-  channel: 'default',
-  modelsSource: '',
-})
+let form = $state<ProviderForm>({ name: '', baseUrl: '', useProxy: false, values: {} })
 let oauthSessionId = $state<string>()
 let oauthReady = $state(false)
 let oauthAuthorization = $state<{
@@ -80,90 +58,76 @@ let oauthAuthorization = $state<{
   updateProxy: (useProxy: boolean) => Promise<void>
 }>()
 let saving = $state(false)
-let refreshingCatalog = $state(false)
-let adapterCredentials = $state<Record<string, string>>({})
-const secretResetKey = $derived(`${open}:${selectedOptionKey}:${step}`)
+let reviewing = $state(false)
+let reviewRequestId = 0
+let refreshingServices = $state(false)
+let preview = $state<ProviderConfigurationPreview>()
+let previewFailure = $state('')
 
 const queryClient = useQueryClient()
-const vendorMetadataQuery = createQuery(() => ({ queryKey: ['vendor-metadata'], queryFn: admin.providers.vendors }))
-const options = $derived(buildProviderOptions(presets))
-const selectedOption = $derived(options.find((option) => option.key === selectedOptionKey))
-const credentialFields = $derived<VendorCredentialField[]>(
-  selectedOption
-    ? (vendorMetadataQuery.data?.find((vendor) => vendor.id === selectedOption.preset.vendor_id)?.credentialFields ??
-        [])
-    : [],
-)
-const usesDynamicCredentials = $derived(
-  credentialFields.length > 1 || credentialFields.some((field) => field.key !== 'apiKey'),
-)
-const previewsBaseUrl = $derived(
-  Boolean(
-    selectedOption && !selectedOption.isCustom && !selectedOption.channel.base_url.trim() && usesDynamicCredentials,
-  ),
-)
-const baseUrlCredentials = $derived(
-  Object.fromEntries(
-    credentialFields
-      .filter((field) => !field.secret)
-      .map((field) => [field.key, adapterCredentials[field.key]?.trim() ?? '']),
-  ),
-)
-const baseUrlPreviewQuery = createQuery(() => ({
-  queryKey: ['provider-base-url-preview', selectedOption?.preset.vendor_id, baseUrlCredentials],
-  queryFn: () => admin.providers.previewBaseUrl(selectedOption!.preset.vendor_id, baseUrlCredentials),
-  enabled: previewsBaseUrl && Object.values(baseUrlCredentials).some((value) => value.length > 0),
-  retry: false,
+const providerDescriptorsQuery = createQuery(() => ({
+  queryKey: ['provider-descriptors'],
+  queryFn: admin.providers.descriptors,
 }))
-const assembledBaseUrl = $derived(baseUrlPreviewQuery.data?.base_url ?? '')
-const hasMissingCredential = $derived(
-  usesDynamicCredentials && credentialFields.some((field) => field.required && !adapterCredentials[field.key]?.trim()),
+const options = $derived(buildProviderOptions(providerDescriptorsQuery.data ?? []))
+const selectedOption = $derived(options.find((option) => option.key === selectedOptionKey))
+const configFields = $derived(selectedOption?.descriptor.config_fields ?? [])
+const oauthSessionSecretFields = $derived(
+  oauthReady ? configFields.filter((field) => field.secret && field.required).map((field) => field.key) : [],
 )
+const supportsConfigValidation = $derived(selectedOption?.channel.capabilities.includes('config_validation') ?? false)
+const previewIssues = $derived(preview?.issues ?? [])
+const globalIssues = $derived(previewIssues.filter((issue) => !issue.field))
+const previewAccepted = $derived(Boolean(preview) && previewIssues.length === 0)
+const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
+  base_url: form.baseUrl.trim(),
+  protocol: selectedOption?.channel.protocol,
+  options: configurationValues(false),
+  credentials: configurationValues(true),
+}))
+const oauthProvider = $derived(Boolean(selectedOption?.channel.auth))
 const providerOptions = $derived.by(() => {
   const query = search.trim().toLocaleLowerCase(localeState.current)
-  return options
-    .filter((option) => {
-      if (!query) return true
-      const auth = option.authMode === 'oauth' ? 'oauth account 账号' : 'api key'
-      const text = `${option.preset.id} ${option.preset.name} ${option.channel.id} ${option.channel.label} ${auth}`
-      return text.toLocaleLowerCase(localeState.current).includes(query)
-    })
-    .sort((left, right) => Number(right.isCustom) - Number(left.isCustom))
+  return options.filter((option) => {
+    if (!query) return true
+    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${option.channel.name} ${option.channel.capabilities.join(' ')}`
+    return text.toLocaleLowerCase(localeState.current).includes(query)
+  })
 })
-const availableProtocols = $derived(
-  selectedOption?.isCustom || !selectedOption
-    ? PROTOCOL_TABLE
-    : selectedOption.protocols.map(
-        ({ protocol }) => PROTOCOL_TABLE.find((entry) => entry.id === protocol) ?? PROTOCOL_TABLE[0],
-      ),
-)
-const apiKeyRequired = $derived(
-  Boolean(selectedOption && !selectedOption.isCustom && selectedOption.credentialMode === 'setup_token'),
-)
 
 function handleOpenChange(nextOpen: boolean): void {
   open = nextOpen
   if (!nextOpen) void oauthAuthorization?.cancel()
 }
 
+function invalidatePreview(): void {
+  reviewRequestId += 1
+  reviewing = false
+  preview = undefined
+  previewFailure = ''
+}
+
+function configurationChanged(): void {
+  invalidatePreview()
+  if (!oauthSessionId) return
+  oauthSessionId = undefined
+  oauthReady = false
+  void oauthAuthorization?.cancel()
+}
+
 async function chooseOption(option: ProviderOption): Promise<void> {
   await oauthAuthorization?.cancel()
-  const firstProtocol = option.protocols[0] ?? { protocol: resolveProtocol(option.preset.protocol), baseUrl: '' }
-  const name = providerNameAfterOptionChange(form.name, selectedOption, option, localeState.current)
-  selectedOptionKey = option.key
-  form = {
-    name,
-    vendor: option.isCustom ? '' : option.presetKey,
-    protocol: firstProtocol.protocol,
-    baseUrl: firstProtocol.baseUrl,
-    apiKey: '',
-    useProxy: form.useProxy,
-    authMode: option.authMode,
-    presetKey: option.presetKey,
-    channel: option.channelKey,
-    modelsSource: option.isCustom ? '' : 'catalog',
+  const name = providerNameAfterOptionChange(form.name, selectedOption, option)
+  const values: Record<string, unknown> = {}
+  for (const field of option.descriptor.config_fields) {
+    if (!field.secret && field.default_json != null) values[field.key] = field.default_json
+    else if (!field.secret && field.required && field.kind.type === 'bool') values[field.key] = false
   }
-  adapterCredentials = {}
+  selectedOptionKey = option.key
+  form = { name, baseUrl: option.channel.default_base_url ?? '', useProxy: form.useProxy, values }
+  oauthSessionId = undefined
+  oauthReady = false
+  invalidatePreview()
   step = 'configure'
 }
 
@@ -173,31 +137,16 @@ async function goBack(): Promise<void> {
 }
 
 function changeStep(value: string): void {
-  if (value === 'select') {
-    void goBack()
-  } else if (selectedOption) {
-    step = 'configure'
-  }
+  if (value === 'select') void goBack()
+  else if (selectedOption) step = 'configure'
 }
 
-async function refreshCatalog(): Promise<void> {
-  refreshingCatalog = true
+async function refreshServices(): Promise<void> {
+  refreshingServices = true
   try {
-    const summary = await admin.catalog.refresh()
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['catalog-providers'] }),
-      queryClient.invalidateQueries({ queryKey: ['provider-models'] }),
-    ])
-    toast.success(
-      m.provider_editor_catalog_refresh_summary({
-        provider_count: summary.provider_count,
-        model_count: summary.model_count,
-      }),
-    )
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    await providerDescriptorsQuery.refetch()
   } finally {
-    refreshingCatalog = false
+    refreshingServices = false
   }
 }
 
@@ -222,56 +171,73 @@ function handleProviderOptionKeydown(event: KeyboardEvent): void {
   cards[nextIndex].focus()
 }
 
-function updateProtocol(protocol: ProviderProtocol): void {
-  form.protocol = protocol
-  const endpoint = selectedOption?.protocols.find((item) => item.protocol === protocol)
-  if (endpoint) form.baseUrl = endpoint.baseUrl
+function configurationValues(secret: boolean): Record<string, unknown> {
+  if (!selectedOption) return {}
+  const declared = new Set(
+    selectedOption.descriptor.config_fields.filter((field) => field.secret === secret).map((field) => field.key),
+  )
+  return Object.fromEntries(
+    Object.entries(form.values).filter(
+      ([key, value]) =>
+        declared.has(key) &&
+        value !== undefined &&
+        (!secret || (value !== null && (typeof value !== 'string' || value.length > 0))),
+    ),
+  )
+}
+
+async function reviewConfiguration(): Promise<void> {
+  if (!selectedOption || (!form.baseUrl.trim() && !supportsConfigValidation)) return
+  reviewRequestId += 1
+  const requestId = reviewRequestId
+  reviewing = true
+  previewFailure = ''
+  preview = undefined
+  try {
+    const result = await admin.providers.previewConfiguration({
+      vendor_id: selectedOption.descriptor.provider_id,
+      channel: selectedOption.channel.id,
+      base_url: form.baseUrl.trim(),
+      options: configurationValues(false),
+      credentials: configurationValues(true),
+    })
+    if (requestId !== reviewRequestId) return
+    preview = result
+    if (result.issues.length === 0) form.baseUrl = result.base_url
+  } catch (error) {
+    if (requestId === reviewRequestId) previewFailure = localizeBackendErrorMessage(error)
+  } finally {
+    if (requestId === reviewRequestId) reviewing = false
+  }
 }
 
 async function saveProvider(): Promise<void> {
-  if (!selectedOption || !form.name.trim() || (!form.baseUrl.trim() && !assembledBaseUrl)) return
-  if (apiKeyRequired && !form.apiKey.trim()) return
-  if (hasMissingCredential) return
-  if (form.authMode === 'oauth' && !oauthReady) return
-
-  const credential: CreateProvider['credential'] =
-    selectedOption.credentialMode === 'setup_token'
-      ? { type: 'setup_token', value: form.apiKey.trim() }
-      : form.authMode === 'apikey' && usesDynamicCredentials
-        ? {
-            type: 'fields',
-            values: Object.fromEntries(
-              credentialFields.map((field) => [field.key, adapterCredentials[field.key]?.trim() ?? '']),
-            ),
-          }
-        : form.authMode === 'apikey' && form.apiKey.trim()
-          ? { type: 'api_key', value: form.apiKey.trim() }
-          : { type: 'none' }
+  if (!selectedOption || !previewAccepted || !preview) return
+  if (!form.name.trim() || (oauthProvider && !oauthReady)) return
+  const credentials = configurationValues(true)
+  const credential: CreateProvider['credential'] = oauthProvider
+    ? { type: 'none' }
+    : Object.keys(credentials).length > 0
+      ? { type: 'fields', values: credentials }
+      : { type: 'none' }
   const input: CreateProvider = {
     name: form.name.trim(),
-    source: selectedOption.isCustom
-      ? {
-          type: 'custom',
-          vendor: form.vendor.trim() || undefined,
-          protocol: form.protocol,
-          base_url: form.baseUrl.trim(),
-          models_source: form.modelsSource.trim() || undefined,
-        }
-      : {
-          type: 'catalog',
-          provider_id: selectedOption.presetKey,
-          channel_id: selectedOption.channelKey,
-          fingerprint: selectedOption.channel.fingerprint,
-          base_url_override: form.baseUrl.trim() === selectedOption.channel.base_url ? undefined : form.baseUrl.trim(),
-        },
+    source: {
+      type: 'custom',
+      vendor: selectedOption.descriptor.provider_id,
+      channel: selectedOption.channel.id,
+      protocol: selectedOption.channel.protocol ?? undefined,
+      base_url: preview.base_url,
+    },
     credential,
+    vendor_options: configurationValues(false),
     use_proxy: form.useProxy,
   }
 
   saving = true
   try {
     const savedProvider =
-      form.authMode === 'oauth' && oauthSessionId
+      oauthProvider && oauthSessionId
         ? await admin.providers.createOAuth(oauthSessionId, input)
         : await admin.providers.create(input)
     oauthAuthorization?.consume()
@@ -279,19 +245,11 @@ async function saveProvider(): Promise<void> {
       queryClient.invalidateQueries({ queryKey: ['providers'] }),
       queryClient.invalidateQueries({ queryKey: ['models'] }),
     ])
-    toast.success(m.provider_editor_model_service_connected())
+    toast.success(m.provider_editor_service_connected())
     onSaved?.(savedProvider)
     open = false
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
-    // 目录 revision 已变化,所选服务或登录方式不再存在;重试不会成功。
-    // 丢弃当前选择,拉取最新服务列表,让用户从“选择服务”重新开始。
-    if (catalogSelectionStale(error)) {
-      await oauthAuthorization?.cancel()
-      selectedOptionKey = ''
-      step = 'select'
-      await queryClient.invalidateQueries({ queryKey: ['catalog-providers'] })
-    }
   } finally {
     saving = false
   }
@@ -309,17 +267,19 @@ async function saveProvider(): Promise<void> {
     onkeydown={handleProviderOptionKeydown}
     onclick={() => void chooseOption(option)}>
     <div class="flex w-full items-start gap-3">
-      <ProviderMark icon={option.preset.id} name={optionLabel(option, localeState.current)} catalog />
+      <ProviderMark icon={option.descriptor.catalog_id ?? option.descriptor.provider_id} name={optionLabel(option)} />
       <div class="min-w-0 flex-1">
-        <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option, localeState.current)}</p>
+        <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option)}</p>
         <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-          {optionDescription(option, localeState.current)}
+          {optionDescription(option)}
         </p>
       </div>
     </div>
-    {#if option.isCustom}
-      <Badge variant="outline" class="mt-auto">{m.provider_editor_advanced()}</Badge>
-    {/if}
+    <div class="mt-auto flex flex-wrap gap-1">
+      {#each option.channel.capabilities as capability (capability)}
+        <Badge variant="secondary" class="font-technical">{capability}</Badge>
+      {/each}
+    </div>
   </button>
 {/snippet}
 
@@ -329,30 +289,22 @@ async function saveProvider(): Promise<void> {
     class="{step === 'select'
       ? 'provider-overlay-content'
       : 'route-overlay-content-md'} w-full! gap-0 overflow-hidden p-0"
-    closeLabel={m.provider_editor_close_model_service_setup()}>
+    closeLabel={m.provider_editor_close_service_setup()}>
     <Sheet.Header class="border-b">
-      <div class="flex items-center gap-2">
-        <div>
-          <Sheet.Title>
-            {step === 'select' ? m.common_connect_model_service() : m.provider_editor_connection_details()}
-          </Sheet.Title>
-          <Sheet.Description>
-            {step === 'select'
-              ? m.provider_editor_choose_ai_service_how_want_sign()
-              : m.provider_editor_configuration_help()}
-          </Sheet.Description>
-          <Tabs.Root value={step} onValueChange={changeStep} class="mt-3">
-            <Tabs.List aria-label={m.provider_editor_connection_setup_steps()}>
-              <Tabs.Trigger value="select">
-                {m.provider_editor_choose_service()}
-              </Tabs.Trigger>
-              <Tabs.Trigger value="configure" disabled={!selectedOption}>
-                {m.provider_editor_connection_details()}
-              </Tabs.Trigger>
-            </Tabs.List>
-          </Tabs.Root>
-        </div>
-      </div>
+      <Sheet.Title
+        >{step === 'select' ? m.common_connect_service() : m.provider_editor_connection_details()}</Sheet.Title>
+      <Sheet.Description>
+        {step === 'select'
+          ? m.provider_editor_choose_ai_service_how_want_sign()
+          : m.provider_editor_configuration_help()}
+      </Sheet.Description>
+      <Tabs.Root value={step} onValueChange={changeStep} class="mt-3">
+        <Tabs.List aria-label={m.provider_editor_connection_setup_steps()}>
+          <Tabs.Trigger value="select">{m.provider_editor_choose_service()}</Tabs.Trigger>
+          <Tabs.Trigger value="configure" disabled={!selectedOption}
+            >{m.provider_editor_connection_details()}</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs.Root>
     </Sheet.Header>
 
     {#if step === 'select'}
@@ -371,34 +323,51 @@ async function saveProvider(): Promise<void> {
             type="button"
             variant="outline"
             class="shrink-0"
-            onclick={() => void refreshCatalog()}
-            disabled={refreshingCatalog}>
-            {#if refreshingCatalog}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
+            onclick={refreshServices}
+            disabled={refreshingServices}>
+            {#if refreshingServices}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
                 data-icon="inline-start" />{/if}
             {m.provider_editor_update_service_list()}
           </Button>
         </div>
-        {#if providerOptions.length > 0}
+        {#if providerDescriptorsQuery.isError}
+          <Alert.Root variant="destructive">
+            <Alert.Title>{m.provider_config_plugins_load_failed()}</Alert.Title>
+            <Alert.Description>{localizeBackendErrorMessage(providerDescriptorsQuery.error)}</Alert.Description>
+          </Alert.Root>
+        {:else if providerDescriptorsQuery.isPending}
+          <div class="grid min-h-48 place-items-center"><Spinner /></div>
+        {:else if providerOptions.length > 0}
           <div
             data-provider-grid
             role="group"
             aria-label={m.provider_editor_available_services()}
             class="provider-picker-grid">
-            {#each providerOptions as option (option.key)}
-              {@render providerOptionCard(option)}
-            {/each}
+            {#each providerOptions as option (option.key)}{@render providerOptionCard(option)}{/each}
           </div>
         {:else}
           <Empty.Root class="min-h-48 border border-dashed">
             <Empty.Header>
               <Empty.Media variant="icon"><SearchIcon /></Empty.Media>
-              <Empty.Title>{m.provider_editor_no_matching_services()}</Empty.Title>
-              <Empty.Description>{m.provider_editor_try_another_service_name_sign_method()}</Empty.Description>
+              <Empty.Title>
+                {search.trim() ? m.provider_editor_no_matching_services() : m.provider_config_no_plugins()}
+              </Empty.Title>
+              <Empty.Description>
+                {search.trim()
+                  ? m.provider_editor_try_another_service_name_sign_method()
+                  : m.provider_config_no_plugins_help()}
+              </Empty.Description>
             </Empty.Header>
             <Empty.Content>
-              <Button type="button" variant="outline" size="sm" onclick={() => (search = '')}>
-                {m.provider_editor_clear_search()}
-              </Button>
+              {#if search.trim()}
+                <Button type="button" variant="outline" size="sm" onclick={() => (search = '')}>
+                  {m.provider_editor_clear_search()}
+                </Button>
+              {:else}
+                <Button href="/vendor-plugins" variant="outline" size="sm">
+                  {m.provider_config_manage_plugins()}
+                </Button>
+              {/if}
             </Empty.Content>
           </Empty.Root>
         {/if}
@@ -422,162 +391,126 @@ async function saveProvider(): Promise<void> {
           <Field.Group class="grid gap-6 sm:grid-cols-2">
             <Field.Field size="name" class="sm:col-span-2">
               <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
-              <Input id="provider-name" bind:value={form.name} required />
+              <Input id="provider-name" bind:value={form.name} required oninput={invalidatePreview} />
             </Field.Field>
-            {#if availableProtocols.length > 1}
-              <Field.Field size="select">
-                <Field.Label for="provider-protocol">{m.common_protocol()}</Field.Label>
-                <Select.Root
-                  type="single"
-                  value={form.protocol}
-                  onValueChange={(value: string) => {
-                    const protocol = resolveProtocol(value)
-                    if (protocol) updateProtocol(protocol)
-                  }}>
-                  <Select.Trigger id="provider-protocol" class="w-full"
-                    >{PROTOCOL_TABLE.find((item) => item.id === form.protocol)?.displayName}</Select.Trigger>
-                  <Select.Content>
-                    <Select.Group>
-                      {#each availableProtocols as protocol (protocol.id)}
-                        <Select.Item value={protocol.id}>{protocol.displayName}</Select.Item>
-                      {/each}
-                    </Select.Group>
-                  </Select.Content>
-                </Select.Root>
-              </Field.Field>
-            {/if}
+            <Field.Field size="fill" class="sm:col-span-2">
+              <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
+              <Input
+                id="provider-base-url"
+                class="font-technical"
+                bind:value={form.baseUrl}
+                type="url"
+                required={!supportsConfigValidation}
+                oninput={configurationChanged} />
+            </Field.Field>
+            <ProviderConfigFields
+              fields={configFields}
+              bind:values={form.values}
+              satisfiedSecretFields={oauthSessionSecretFields}
+              issues={previewIssues}
+              idPrefix={`new-provider-${selectedOption.key}`}
+              onChanged={configurationChanged} />
+          </Field.Group>
 
-            <!-- self-end + h-10 keep the switch box in the same 40px band as the sibling protocol Select trigger -->
-            <Field.Field class="self-end">
-              <div class="flex h-10 items-center justify-between gap-3 rounded-lg border px-3">
-                <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
-                  {m.common_use_proxy()}
-                </Field.Label>
-                <Switch
-                  id="provider-use-proxy"
-                  checked={form.useProxy}
-                  onCheckedChange={(checked: boolean) => {
-                    form.useProxy = checked
-                    void oauthAuthorization?.updateProxy(checked)
-                  }} />
+          {#if oauthProvider}
+            <ProviderOAuthAuthorization
+              class="mt-6"
+              bind:this={oauthAuthorization}
+              vendorId={selectedOption.descriptor.provider_id}
+              channel={selectedOption.channel.id}
+              flow={selectedOption.channel.auth!.flow}
+              configuration={oauthConfiguration}
+              useProxy={form.useProxy}
+              mode="connect"
+              providerName={defaultProviderName(selectedOption)}
+              onStateChange={(sessionId: string | undefined, ready: boolean) => {
+                oauthSessionId = sessionId
+                oauthReady = ready
+                invalidatePreview()
+              }} />
+          {/if}
+
+          <Field.Field orientation="horizontal" class="mt-6 min-h-10 justify-between rounded-lg border px-3 py-2">
+            <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
+              {m.common_use_proxy()}
+            </Field.Label>
+            <Switch
+              id="provider-use-proxy"
+              checked={form.useProxy}
+              onCheckedChange={(checked: boolean) => {
+                form.useProxy = checked
+                invalidatePreview()
+                if (oauthReady) {
+                  oauthSessionId = undefined
+                  oauthReady = false
+                }
+                void oauthAuthorization?.updateProxy(checked)
+              }} />
+          </Field.Field>
+
+          <section class="mt-6 rounded-xl border p-4" aria-labelledby="new-provider-network-review-title">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 id="new-provider-network-review-title" class="font-medium">{m.provider_config_review_title()}</h3>
+                <p class="mt-1 text-sm text-muted-foreground">{m.provider_config_review_help()}</p>
               </div>
-            </Field.Field>
-
-            {#if selectedOption.isCustom}
-              <Field.Field size="name" class="sm:col-span-2">
-                <Field.Label for="provider-vendor">{m.common_service_identifier()}</Field.Label>
-                <Input id="provider-vendor" class="font-technical" bind:value={form.vendor} placeholder="custom" />
-              </Field.Field>
-              <Field.Field size="fill" class="sm:col-span-2">
-                <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
-                <Input id="provider-base-url" class="font-technical" bind:value={form.baseUrl} type="url" required />
-              </Field.Field>
-              <Field.Field size="fill" class="sm:col-span-2">
-                <Field.Label for="provider-api-key">{m.common_api_key()}</Field.Label>
-                <SecretInput
-                  id="provider-api-key"
-                  class="font-technical"
-                  bind:value={form.apiKey}
-                  resetKey={secretResetKey}
-                  autocomplete="off" />
-              </Field.Field>
-              <Field.Field size="fill">
-                <Field.Label for="provider-models-source">{m.common_model_list_url()}</Field.Label>
-                <Input
-                  id="provider-models-source"
-                  class="font-technical"
-                  bind:value={form.modelsSource}
-                  type="url"
-                  placeholder="https://api.example.com/v1/models" />
-              </Field.Field>
-            {:else if form.authMode === 'apikey'}
-              {#if selectedOption.channel.base_url.trim().length === 0 && !previewsBaseUrl}
-                <Field.Field size="fill" class="sm:col-span-2">
-                  <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
-                  <Input id="provider-base-url" class="font-technical" bind:value={form.baseUrl} type="url" required />
-                </Field.Field>
-              {:else if previewsBaseUrl}
-                <Field.Field size="fill" class="sm:col-span-2" data-invalid={baseUrlPreviewQuery.isError}>
-                  <Field.Label>{m.common_base_url()}</Field.Label>
-                  {#if assembledBaseUrl}
-                    <Field.Description class="font-technical">{assembledBaseUrl}</Field.Description>
-                  {:else if baseUrlPreviewQuery.isError}
-                    <Field.Error>{localizeBackendErrorMessage(baseUrlPreviewQuery.error)}</Field.Error>
-                  {/if}
-                </Field.Field>
-              {/if}
-              {#if usesDynamicCredentials}
-                {#each credentialFields as field (field.key)}
-                  {@const credentialId = `provider-credential-${field.key}`}
-                  <Field.Field size="fill" class="sm:col-span-2">
-                    <Field.Label for={credentialId}>
-                      {providerCredentialFieldLabel(selectedOption.preset.vendor_id, field, localeState.current)}
-                    </Field.Label>
-                    {#if field.input === 'textarea'}
-                      <Textarea
-                        id={credentialId}
-                        class="min-h-28 font-technical"
-                        bind:value={adapterCredentials[field.key]}
-                        required={field.required}
-                        autocomplete="off" />
-                    {:else if field.input === 'password'}
-                      <SecretInput
-                        id={credentialId}
-                        class="font-technical"
-                        bind:value={adapterCredentials[field.key]}
-                        resetKey={secretResetKey}
-                        autocomplete="off"
-                        required={field.required} />
+              <Button
+                type="button"
+                variant="outline"
+                disabled={reviewing || (!form.baseUrl.trim() && !supportsConfigValidation)}
+                onclick={() => void reviewConfiguration()}>
+                {#if reviewing}<Spinner data-icon="inline-start" />{/if}
+                {m.provider_config_review_action()}
+              </Button>
+            </div>
+            {#if preview}
+              <dl class="mt-4 flex flex-col gap-3">
+                <div>
+                  <dt class="text-xs text-muted-foreground">{m.provider_config_saved_base_url()}</dt>
+                  <dd class="font-technical mt-1 break-all text-sm">{preview.base_url}</dd>
+                </div>
+                <div>
+                  <dt class="text-xs text-muted-foreground">{m.provider_config_authorized_origins()}</dt>
+                  <dd class="mt-1">
+                    {#if preview.network_permissions.length > 0}
+                      <ul class="flex flex-col gap-1">
+                        {#each preview.network_permissions as permission (`${permission.origin}:${permission.configuration_field ?? ''}:${permission.connection_scoped}`)}
+                          <li class="font-technical break-all text-sm">
+                            {permission.origin}
+                            {#if permission.configuration_field}
+                              <span class="font-sans text-xs text-muted-foreground">
+                                · {m.provider_config_origin_from_field({ field: permission.configuration_field })}
+                              </span>
+                            {:else if permission.connection_scoped}
+                              <span class="font-sans text-xs text-muted-foreground">
+                                · {m.provider_config_connection_scoped_origin()}
+                              </span>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ul>
                     {:else}
-                      <Input
-                        id={credentialId}
-                        class="font-technical"
-                        bind:value={adapterCredentials[field.key]}
-                        autocomplete="off"
-                        required={field.required} />
+                      <span class="text-sm text-muted-foreground">{m.provider_config_no_origins()}</span>
                     {/if}
-                  </Field.Field>
-                {/each}
-              {:else}
-                <Field.Field size="fill" class="sm:col-span-2">
-                  <Field.Label
-                    for="provider-api-key"
-                    hint={selectedOption.credentialMode === 'setup_token'
-                      ? m.provider_editor_sign_method_requires_setup_token()
-                      : undefined}>
-                    {selectedOption.credentialMode === 'setup_token'
-                      ? m.provider_options_setup_token()
-                      : m.common_api_key()}
-                  </Field.Label>
-                  <SecretInput
-                    id="provider-api-key"
-                    class="font-technical"
-                    bind:value={form.apiKey}
-                    resetKey={secretResetKey}
-                    autocomplete="off"
-                    required={apiKeyRequired} />
-                </Field.Field>
+                  </dd>
+                </div>
+              </dl>
+              {#if globalIssues.length > 0}
+                <ul class="mt-4 flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
+                  {#each globalIssues as issue (`${issue.code}:${issue.message}`)}<li>{issue.message}</li>{/each}
+                </ul>
+              {:else if previewAccepted}
+                <p class="mt-4 text-sm text-success">{m.provider_config_review_ready()}</p>
               {/if}
             {:else}
-              <ProviderOAuthAuthorization
-                class="sm:col-span-2"
-                bind:this={oauthAuthorization}
-                driver={oauthDriverKey(selectedOption)}
-                useProxy={form.useProxy}
-                mode="connect"
-                providerName={defaultProviderName(selectedOption, localeState.current)}
-                onStateChange={(sessionId: string | undefined, ready: boolean) => {
-                  oauthSessionId = sessionId
-                  oauthReady = ready
-                }} />
+              <p class="mt-4 text-sm text-muted-foreground">{m.provider_config_review_required()}</p>
             {/if}
-          </Field.Group>
+            {#if previewFailure}<p class="mt-3 text-sm text-destructive">{previewFailure}</p>{/if}
+          </section>
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">
-          <Button type="button" variant="outline" onclick={() => void goBack()}>
-            {m.provider_editor_back()}
-          </Button>
+          <Button type="button" variant="outline" onclick={() => void goBack()}>{m.provider_editor_back()}</Button>
           <div class="flex items-center gap-2">
             <Sheet.Close
               type="button"
@@ -587,12 +520,7 @@ async function saveProvider(): Promise<void> {
             </Sheet.Close>
             <Button
               type="submit"
-              disabled={saving ||
-                !form.name.trim() ||
-                (!form.baseUrl.trim() && !assembledBaseUrl) ||
-                (apiKeyRequired && !form.apiKey.trim()) ||
-                hasMissingCredential ||
-                (form.authMode === 'oauth' && !oauthReady)}>
+              disabled={saving || !form.name.trim() || !previewAccepted || (oauthProvider && !oauthReady)}>
               {#if saving}<Spinner data-icon="inline-start" />{/if}
               {m.provider_editor_connect()}
             </Button>

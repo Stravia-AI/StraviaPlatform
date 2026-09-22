@@ -11,7 +11,7 @@ export interface RouteTargetForm {
   key: string
   id?: string
   providerId: string
-  model: string
+  model: string | null
   enabled: boolean
   priority: number
   firstTokenTimeoutSeconds: number
@@ -154,7 +154,7 @@ function validSeconds(value: number): boolean {
 }
 
 function completeTarget(target: RouteTargetForm): boolean {
-  return Boolean(target.providerId && target.model.trim())
+  return Boolean(target.providerId && (target.model === null || target.model.trim()))
 }
 
 export function millisecondsToSeconds(milliseconds: number): number {
@@ -289,11 +289,11 @@ export function buildRouteTargets(targets: RouteTargetForm[]): {
 
   const cleanTargets = [...targets]
     .sort((left, right) => targetKeyOrder(left) - targetKeyOrder(right))
-    .filter((target) => target.providerId && target.model.trim())
+    .filter((target) => target.providerId && (target.model === null || target.model.trim()))
     .map((target): CreateTarget & UpsertTarget => ({
       id: target.id,
       provider_id: target.providerId,
-      model: target.model.trim(),
+      model: target.model === null ? null : target.model.trim(),
       enabled: target.enabled,
       priority: Number(target.priority),
       first_token_timeout_ms: secondsToMilliseconds(target.firstTokenTimeoutSeconds),

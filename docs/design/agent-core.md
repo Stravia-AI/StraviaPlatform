@@ -76,8 +76,8 @@ inference_run::execute / engine::dispatch_pipeline
         ├─ Principal / model binding / root admission
         ├─ HookRuntime
         ├─ TargetSelector / negotiate
-        ├─ Vendor / ProviderAdapter
-        ├─ ProxyClient call / stream
+        ├─ installed Wasm Vendor descriptor / execute_vendor
+        ├─ controlled Vendor HTTP/WebSocket host transport
         ├─ PlatformTool hidden rounds
         └─ delivery encoder
 ```
@@ -266,7 +266,7 @@ flowchart TB
     Hook[HookRuntime]
     Tools[PlatformToolRegistry]
     Route[Route / TargetSelector]
-    Provider[Vendor / ProviderAdapter]
+    Provider[Installed Wasm Vendor / Host Capabilities]
     TurnChain[TurnChain]
     AgentStore[AgentStore]
     Artifacts[ArtifactStore]

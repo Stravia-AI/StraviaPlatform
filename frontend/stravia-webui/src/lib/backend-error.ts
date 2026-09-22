@@ -272,8 +272,6 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.media_generation_provider_missing({}, options)
     case 'media_generation_target_incompatible':
       return m.media_generation_target_incompatible({}, options)
-    case 'media_generation_oauth_unavailable':
-      return m.media_generation_oauth_unavailable({}, options)
     default:
       return m.backend_error_unknown({ message: payload.message || raw }, options)
   }

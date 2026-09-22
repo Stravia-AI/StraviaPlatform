@@ -1,19 +1,30 @@
+use std::path::Path;
+use std::sync::Arc;
+
 use super::*;
 use crate::AdminMode;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use stravia_core::admin::identity::AdminAuth;
 use stravia_core::config::GatewayConfig;
+use stravia_core::storage::MemoryStorage;
 use tower::ServiceExt;
+
+async fn memory_gateway(data_dir: &Path) -> anyhow::Result<Gateway> {
+    Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await
+}
 
 #[tokio::test]
 async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let response = create_unprotected_router(gateway)
         .oneshot(Request::get("/api/v1/status").body(Body::empty())?)
         .await?;
@@ -29,11 +40,7 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 #[tokio::test]
 async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let storage = gateway.storage.clone();
     let app = create_unprotected_router(gateway);
 
@@ -84,11 +91,7 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     );
 
     let other_data_dir = tempfile::tempdir()?;
-    let other_gateway = Gateway::new(GatewayConfig {
-        data_dir: other_data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let other_gateway = memory_gateway(other_data_dir.path()).await?;
     assert_eq!(
         other_gateway
             .storage
@@ -119,11 +122,7 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
 #[tokio::test]
 async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
 
     let response = app
@@ -151,11 +150,7 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
 
 async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -163,7 +158,9 @@ async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String>
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "vendor": "claude-code",
+                    "vendor_id": "anthropic",
+                    "channel": "claude-code",
+                    "base_url": "https://api.anthropic.com",
                     "use_proxy": false,
                     "callback_mode": "auto",
                     "locale": locale,
@@ -209,18 +206,14 @@ async fn automatic_callback_accepts_english_and_falls_back_for_an_invalid_locale
 #[tokio::test]
 async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
     let response = app
         .oneshot(
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor":"codex","use_proxy":false,"callback_mode":"manual"}"#,
+                    r#"{"vendor_id":"openai-codex","channel":"codex","base_url":"https://chatgpt.com/backend-api/codex","use_proxy":false,"callback_mode":"manual"}"#,
                 ))?,
         )
         .await?;
@@ -243,16 +236,12 @@ async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::
 async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
-    let catalog = gateway.provider_catalog.providers().await;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    let catalog = gateway.admin().catalog_choices().await;
     let fingerprint = catalog
         .providers
         .iter()
-        .find(|provider| provider.id == "openai")
+        .find(|provider| provider.id == "openai-codex")
         .and_then(|provider| {
             provider
                 .channels
@@ -266,7 +255,7 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
         "name": "invalid",
         "source": {
             "type": "catalog",
-            "provider_id": "openai",
+            "provider_id": "openai-codex",
             "channel_id": "codex",
             "fingerprint": fingerprint
         },
@@ -289,13 +278,103 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
 }
 
 #[tokio::test]
+async fn provider_endpoints_keep_unavailable_profiles_visible_without_echoing_secrets()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    let available = gateway
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "available-provider".into(),
+            vendor: Some("openai".into()),
+            protocol: "openai-compatible".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            preset_key: Some("openai".into()),
+            channel: Some("default".into()),
+            models_source: Some("catalog".into()),
+            static_models: None,
+            api_key: "available-secret".into(),
+            adapter_credentials: r#"{"apiKey":"available-secret"}"#.into(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+        })
+        .await?;
+    let unavailable = gateway
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "unavailable-provider".into(),
+            vendor: Some("removed-profile".into()),
+            protocol: "removed-protocol".into(),
+            base_url: "https://unavailable.example.test".into(),
+            preset_key: Some("removed-profile".into()),
+            channel: Some("default".into()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: r#"{"privateToken":"unavailable-secret"}"#.into(),
+            vendor_options: r#"{"workspace":"retained"}"#.into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+        })
+        .await?;
+    let storage = gateway.storage.clone();
+    let app = create_unprotected_router(gateway);
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/v1/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let providers = json["data"].as_array().expect("provider list");
+    let available_value = providers
+        .iter()
+        .find(|provider| provider["id"] == available.id)
+        .expect("available provider remains visible");
+    assert_eq!(
+        available_value["configured_credential_fields"],
+        serde_json::json!(["apiKey"])
+    );
+    let unavailable_value = providers
+        .iter()
+        .find(|provider| provider["id"] == unavailable.id)
+        .expect("unavailable provider remains visible");
+    assert_eq!(
+        unavailable_value["configured_credential_fields"],
+        serde_json::json!([])
+    );
+    assert_eq!(unavailable_value["vendor_options"]["workspace"], "retained");
+    assert!(unavailable_value.get("adapter_credentials").is_none());
+    assert!(unavailable_value.get("api_key").is_none());
+    let body = String::from_utf8_lossy(&body);
+    assert!(!body.contains("available-secret"));
+    assert!(!body.contains("unavailable-secret"));
+
+    let response = app
+        .oneshot(Request::get(format!("/api/v1/providers/{}", unavailable.id)).body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let retained = storage
+        .providers()
+        .get(&unavailable.id)
+        .await?
+        .expect("unavailable provider remains stored");
+    assert_eq!(
+        retained.adapter_credentials,
+        r#"{"privateToken":"unavailable-secret"}"#
+    );
+    assert_eq!(retained.vendor_options, r#"{"workspace":"retained"}"#);
+    Ok(())
+}
+
+#[tokio::test]
 async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -303,7 +382,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor":"claude-code","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -320,9 +399,12 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
             Request::post(format!("/api/v1/oauth/sessions/{session_id}/complete"))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "callback_url": format!(
-                        "http://localhost:{port}/callback?error=access_denied&state={state}"
-                    )
+                    "input": {
+                        "type": "callback_url",
+                        "value": format!(
+                            "http://localhost:{port}/callback?error=access_denied&state={state}"
+                        )
+                    }
                 }))?))?,
         )
         .await?;
@@ -350,11 +432,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
 async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -362,7 +440,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor":"claude-code","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -426,11 +504,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
 #[tokio::test]
 async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
             .clone()
@@ -438,7 +512,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
                 Request::post("/api/v1/oauth/sessions/init")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"vendor":"claude-code","use_proxy":false,"callback_mode":"auto","locale":"zh-CN"}"#,
+                        r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto","locale":"zh-CN"}"#,
                     ))?,
             )
             .await?;
@@ -470,11 +544,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
 #[tokio::test]
 async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
 
     let response = app
@@ -560,23 +630,21 @@ async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::R
 #[tokio::test]
 async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
             name: Some("Template Provider".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("openai".to_string()),
-                protocol: "openai-compatible".to_string(),
+                vendor: "protocol-openai-chat-completions".to_string(),
+                channel: "default".to_string(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -646,11 +714,7 @@ async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Res
 #[tokio::test]
 async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
 
     let current = app
@@ -670,23 +734,21 @@ async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::R
 #[tokio::test]
 async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
             name: Some("HTTP Provider Model".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("openai".to_string()),
-                protocol: "openai-compatible".to_string(),
+                vendor: "protocol-openai-chat-completions".to_string(),
+                channel: "default".to_string(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -753,13 +815,15 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
         .create_provider(CreateProvider {
             name: Some("Target Status Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -780,7 +844,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -829,23 +893,21 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
 #[tokio::test]
 async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
             name: Some("Route Bind Provider".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".to_string(),
+                vendor: "protocol-openai-chat-completions".to_string(),
+                channel: "default".to_string(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -1009,11 +1071,7 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
 async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let app = create_unprotected_router(gateway);
 
     let catalog_response = app
@@ -1117,7 +1175,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     let provider_id = created_json["data"]["id"].as_str().expect("provider id");
 
     // 模型清单经 HTTP 发现自 mock 端点;同步后持久化,id 在 canonical 目录
-    // 命中时富化元数据,未命中时保留裸记录,不依赖远端目录 scope。
+    // 命中时补齐缺少的元数据,未命中时保留上游规格,不依赖远端目录 scope。
     let synced = app
         .clone()
         .oneshot(
@@ -1139,10 +1197,12 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     assert_eq!(models.status(), StatusCode::OK);
     let models_body = to_bytes(models.into_body(), usize::MAX).await?;
     let models_json: serde_json::Value = serde_json::from_slice(&models_body)?;
-    let entries: Vec<serde_json::Value> = models_json["data"]["models"]
+    let mut entries: Vec<serde_json::Value> = models_json["data"]["models"]
         .as_array()
         .expect("persisted models")
         .clone();
+    // 发现结果没有顺序契约，按 ID 检查对应的元数据。
+    entries.sort_unstable_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     let model_ids: Vec<&str> = entries
         .iter()
         .map(|model| model["id"].as_str().expect("model id"))
@@ -1156,16 +1216,10 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
         ]
     );
 
-    // deepseek 精确命中、claude-fable-5 经 model 段唯一命中内置 canonical 目录,
-    // 元数据来自模板而非上游显示名;ccc-private-1 无模板,退回裸记录。
+    // canonical 目录补齐上游未提供的通用规格与能力。
     let deepseek = &entries[2];
-    assert_eq!(deepseek["name"], "DeepSeek V4 Pro");
     assert_eq!(deepseek["specification"]["limit"]["context"], 1000000);
     assert_eq!(deepseek["specification"]["tool_call"], true);
-    let fable = &entries[0];
-    assert_eq!(fable["name"], "Claude Fable 5");
-    let private = &entries[1];
-    assert_eq!(private["name"], "commandcode/ccc-private-1");
 
     server.abort();
 

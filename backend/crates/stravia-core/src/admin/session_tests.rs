@@ -1,6 +1,7 @@
 use super::*;
 use crate::auth::{
-    AuthExchangeInput, AuthSessionInitData, OAuthCallbackMode, OAuthSessionStartOptions,
+    AuthCompletionInput, AuthCompletionValue, AuthSessionCandidate, AuthSessionInitData,
+    OAuthCallbackMode, OAuthSessionStartOptions,
 };
 use crate::config::GatewayConfig;
 use serde_json::json;
@@ -21,11 +22,54 @@ async fn manual_oauth_session_exposes_its_effective_callback_contract() -> anyho
     assert_eq!(init.listener_state, "not_started");
     assert_eq!(init.listener_port, None);
     assert_eq!(init.fallback_reason, None);
-    assert!(
-        init.auth_url
-            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback")
-    );
+    assert!(init.auth_url.as_deref().is_some_and(|url| {
+        url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback")
+    }));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let init = gw
+        .admin()
+        .init_oauth_session(
+            AuthSessionCandidate {
+                vendor_id: "devin".into(),
+                channel: "devin".into(),
+                provider_id: None,
+                base_url: "https://server.codeium.com".into(),
+                protocol: None,
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            OAuthSessionStartOptions {
+                callback_mode: OAuthCallbackMode::Manual,
+                redirect_uri: "chisel-show-auth-token".into(),
+                listener_port: None,
+                fallback_reason: None,
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        init.manual_input.as_ref().map(|input| input.input_type),
+        Some(stravia_vendor_sdk::AuthManualInputType::Text)
+    );
+    let status = gw
+        .admin()
+        .complete_oauth_session(
+            &init.session_id,
+            AuthCompletionInput {
+                input: AuthCompletionValue::Manual {
+                    value: "session_token=test-session-token".into(),
+                },
+            },
+        )
+        .await?;
+    assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
     Ok(())
 }
 
@@ -68,9 +112,11 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
         .admin()
         .complete_oauth_session(
             &init.session_id,
-            AuthExchangeInput {
-                callback_url: "https://app.example/callback?code=test-code&state=wrong-state"
-                    .to_string(),
+            AuthCompletionInput {
+                input: AuthCompletionValue::CallbackUrl {
+                    value: "http://localhost:1457/auth/callback?code=test-code&state=wrong-state"
+                        .to_string(),
+                },
             },
         )
         .await
@@ -105,7 +151,7 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
 async fn denied_oauth_callback_becomes_a_terminal_session_error() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
-    let state = reqwest::Url::parse(&init.auth_url)?
+    let state = reqwest::Url::parse(init.auth_url.as_deref().expect("authorization URL"))?
         .query_pairs()
         .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
         .expect("authorization URL should contain state");
@@ -113,10 +159,12 @@ async fn denied_oauth_callback_becomes_a_terminal_session_error() -> anyhow::Res
     gw.admin()
         .complete_oauth_session(
             &init.session_id,
-            AuthExchangeInput {
-                callback_url: format!(
-                    "https://localhost/callback?error=access_denied&error_description=Denied&state={state}"
-                ),
+            AuthCompletionInput {
+                input: AuthCompletionValue::CallbackUrl {
+                    value: format!(
+                        "http://localhost:1457/auth/callback?error=access_denied&error_description=Denied&state={state}"
+                    ),
+                },
             },
         )
         .await
@@ -205,13 +253,106 @@ async fn completing_a_ready_session_is_idempotent() -> anyhow::Result<()> {
         .admin()
         .complete_oauth_session(
             &init.session_id,
-            AuthExchangeInput {
-                callback_url: "https://localhost/callback?code=unused&state=unused".to_string(),
+            AuthCompletionInput {
+                input: AuthCompletionValue::CallbackUrl {
+                    value: "http://localhost:1457/auth/callback?code=unused&state=unused"
+                        .to_string(),
+                },
             },
         )
         .await?;
     assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsafe_auth_session_url_update_is_atomic() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let init = init_codex_session(&gw).await?;
+    let original = gw
+        .admin()
+        .get_auth_session_record(&init.session_id)
+        .await?
+        .expect("authentication session should exist");
+
+    let unsafe_updates = [
+        (Some("javascript:alert('session-secret')"), None),
+        (
+            Some("data:text/html,<script>alert('session-secret')</script>"),
+            None,
+        ),
+        (Some("/relative/authorize"), None),
+        (Some("https://"), None),
+        (
+            Some("https://client:super-secret@example.com/authorize"),
+            None,
+        ),
+        (
+            Some("https://accounts.example.com/device"),
+            Some("javascript:alert('session-secret')"),
+        ),
+    ];
+    for (verification_uri, verification_uri_complete) in unsafe_updates {
+        let error = gw
+            .admin()
+            .update_auth_session_record(
+                &init.session_id,
+                UpdateAuthSession {
+                    status: Some(AuthSessionStatus::Ready.as_str().to_string()),
+                    user_code: Some("changed-code".to_string()),
+                    verification_uri: verification_uri.map(str::to_string),
+                    verification_uri_complete: verification_uri_complete.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("unsafe browser URL should be rejected");
+        assert!(!error.to_string().contains("session-secret"));
+        assert!(!error.to_string().contains("super-secret"));
+
+        let current = gw
+            .admin()
+            .get_auth_session_record(&init.session_id)
+            .await?
+            .expect("authentication session should remain available");
+        assert_eq!(current.status, original.status);
+        assert_eq!(current.user_code, original.user_code);
+        assert_eq!(current.verification_uri, original.verification_uri);
+        assert_eq!(
+            current.verification_uri_complete,
+            original.verification_uri_complete
+        );
+        assert_eq!(current.updated_at, original.updated_at);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_session_url_updates_accept_https_and_loopback_http() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let init = init_codex_session(&gw).await?;
+    let verification_uri = "https://accounts.example.com/device";
+    let verification_uri_complete = "http://localhost:1457/authorize?user_code=public-device-code";
+
+    let updated = gw
+        .admin()
+        .update_auth_session_record(
+            &init.session_id,
+            UpdateAuthSession {
+                verification_uri: Some(verification_uri.to_string()),
+                verification_uri_complete: Some(verification_uri_complete.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    assert_eq!(updated.verification_uri.as_deref(), Some(verification_uri));
+    assert_eq!(
+        updated.verification_uri_complete.as_deref(),
+        Some(verification_uri_complete)
+    );
     Ok(())
 }
 
@@ -325,8 +466,16 @@ async fn ready_session_is_single_use_and_provider_status_exposes_runtime_url() -
 async fn init_codex_session(gw: &Gateway) -> anyhow::Result<AuthSessionInitData> {
     gw.admin()
         .init_oauth_session(
-            "codex",
-            false,
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: CODEX_RUNTIME_URL.into(),
+                protocol: None,
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
                 redirect_uri: "http://localhost:1457/auth/callback".to_string(),
@@ -342,7 +491,15 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
         data_dir: test_data_dir(),
         ..Default::default()
     };
-    let gw = Gateway::new(config).await?;
+    let gw = Gateway::from_storage(
+        config,
+        std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
+    .await?;
     Ok(gw)
 }
 
@@ -351,12 +508,12 @@ fn test_data_dir() -> PathBuf {
 }
 
 async fn oauth_provider_input(gw: &Gateway) -> anyhow::Result<CreateProvider> {
-    let catalog = gw.provider_catalog.providers().await;
+    let catalog = gw.admin().catalog_choices().await;
     let provider = catalog
         .providers
         .iter()
-        .find(|provider| provider.id == "openai")
-        .ok_or_else(|| anyhow::anyhow!("OpenAI missing from built-in Catalog"))?;
+        .find(|provider| provider.id == "openai-codex")
+        .ok_or_else(|| anyhow::anyhow!("OpenAI Codex missing from built-in Catalog"))?;
     let channel = provider
         .channels
         .iter()
@@ -371,6 +528,7 @@ async fn oauth_provider_input(gw: &Gateway) -> anyhow::Result<CreateProvider> {
             base_url_override: None,
         },
         credential: ProviderCredentialInput::None,
+        vendor_options: serde_json::Map::new(),
         use_proxy: false,
     })
 }
@@ -392,5 +550,19 @@ async fn seed_ready_session(
             },
         )
         .await?;
+    let session = admin
+        .get_auth_session_record(session_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("seeded auth session disappeared"))?;
+    let runtime = session
+        .vendor_runtime
+        .ok_or_else(|| anyhow::anyhow!("seeded auth runtime is unavailable"))?;
+    let (_, operation, _) = admin.gw.vendor_plugins.acquire(&session.driver_key)?;
+    let publication = operation.publication_fence(
+        runtime.cancellation.clone(),
+        std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+    );
+    drop(operation);
+    *runtime.publication.lock().await = Some(publication);
     Ok(())
 }

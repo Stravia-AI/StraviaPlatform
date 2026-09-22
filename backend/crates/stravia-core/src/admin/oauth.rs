@@ -2,21 +2,219 @@ use super::*;
 
 mod runtime;
 mod session_store;
-#[cfg(test)]
-use runtime::same_oauth_connection_generation;
+
+fn callback_parameter(url: &reqwest::Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value.into_owned())
+        .or_else(|| {
+            let fragment = url.fragment()?;
+            reqwest::Url::parse(&format!("https://callback.invalid/?{fragment}"))
+                .ok()?
+                .query_pairs()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, value)| value.into_owned())
+        })
+}
+
+fn validate_auth_callback(
+    session: &AuthSession,
+    value: &str,
+) -> Result<String, (&'static str, String, bool)> {
+    let callback = reqwest::Url::parse(value.trim()).map_err(|_| {
+        (
+            "AUTH_CALLBACK_URL_INVALID",
+            "OAuth callback URL is invalid".to_string(),
+            false,
+        )
+    })?;
+    let expected = reqwest::Url::parse(&session.redirect_uri).map_err(|_| {
+        (
+            "AUTH_SESSION_INVALIDATED",
+            "authentication session redirect policy is invalid".to_string(),
+            true,
+        )
+    })?;
+    let same_endpoint = callback.scheme() == expected.scheme()
+        && callback.host_str().map(str::to_ascii_lowercase)
+            == expected.host_str().map(str::to_ascii_lowercase)
+        && callback.port_or_known_default() == expected.port_or_known_default()
+        && callback.path() == expected.path()
+        && callback.username() == expected.username()
+        && callback.password() == expected.password();
+    if !same_endpoint {
+        return Err((
+            "AUTH_CALLBACK_URL_INVALID",
+            "OAuth callback URL does not match this authentication session".to_string(),
+            false,
+        ));
+    }
+    if callback_parameter(&callback, "error").as_deref() == Some("access_denied") {
+        return Err((
+            "AUTH_ACCESS_DENIED",
+            callback_parameter(&callback, "error_description")
+                .unwrap_or_else(|| "OAuth authorization was denied".to_string()),
+            true,
+        ));
+    }
+    let expected_state = session
+        .state_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("state")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    if expected_state.is_none() || callback_parameter(&callback, "state") != expected_state {
+        return Err((
+            "AUTH_CALLBACK_STATE_MISMATCH",
+            "OAuth callback state mismatch".to_string(),
+            false,
+        ));
+    }
+    Ok(callback.to_string())
+}
+
+fn classify_auth_execution_error(error: &anyhow::Error) -> (&'static str, bool) {
+    use stravia_vendor_runtime::RuntimeError;
+
+    if error
+        .to_string()
+        .contains("incompatible with the installed plugin")
+    {
+        return ("AUTH_SESSION_INVALIDATED", true);
+    }
+    match error.downcast_ref::<RuntimeError>() {
+        Some(RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::Upstream(_),
+            ..
+        }) => ("AUTH_EXCHANGE_RETRYABLE", false),
+        Some(RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::Auth,
+            ..
+        }) => ("AUTH_EXCHANGE_REJECTED", true),
+        Some(RuntimeError::DeadlineExceeded) => ("AUTH_TIMEOUT", true),
+        Some(RuntimeError::Cancelled) => ("AUTH_SESSION_CANCELLED", true),
+        Some(_) => ("AUTH_EXCHANGE_FAILED", true),
+        None => ("AUTH_EXCHANGE_FAILED", true),
+    }
+}
+
+fn credential_bundle_from_response(
+    response: stravia_vendor_sdk::AuthResponse,
+) -> anyhow::Result<CredentialBundle> {
+    let stravia_vendor_sdk::AuthResponse::Credentials {
+        values,
+        expires_at_unix_ms,
+    } = response
+    else {
+        anyhow::bail!("vendor did not return credentials")
+    };
+    let string = |key: &str| {
+        values
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let access_token = string("access_token")
+        .or_else(|| string("session_token"))
+        .or_else(|| string("apiKey"))
+        .ok_or_else(|| anyhow::anyhow!("vendor credentials are missing an access token"))?;
+    let scopes = values
+        .get("scopes")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow::anyhow!("credential scopes must be strings"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?
+        .or_else(|| {
+            string("scope").map(|scope| scope.split_ascii_whitespace().map(str::to_owned).collect())
+        })
+        .unwrap_or_default();
+    let expires_at = expires_at_unix_ms
+        .and_then(chrono::DateTime::<Utc>::from_timestamp_millis)
+        .map(|value| value.to_rfc3339());
+    let raw = Value::Object(values.into_iter().collect());
+    Ok(CredentialBundle {
+        access_token: Some(access_token),
+        refresh_token: raw
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        expires_at,
+        resource_url: raw
+            .get("resource_url")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        subject_id: raw
+            .get("subject_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        scopes,
+        raw,
+    })
+}
+
+fn auth_session_uses_profile(session: &AuthSession, provider_id: &str) -> bool {
+    session.vendor_runtime.as_ref().map_or_else(
+        || session.driver_key == provider_id,
+        |runtime| runtime.scope.vendor_id == provider_id,
+    )
+}
 
 impl AdminService {
+    pub async fn affected_vendor_auth_sessions(&self, provider_id: &str) -> usize {
+        self.gw
+            .auth_sessions
+            .read()
+            .await
+            .values()
+            .filter(|session| auth_session_uses_profile(session, provider_id))
+            .count()
+    }
+
+    pub async fn cancel_vendor_sessions(&self, provider_id: &str) -> usize {
+        let removed = {
+            let mut sessions = self.gw.auth_sessions.write().await;
+            let ids: Vec<_> = sessions
+                .iter()
+                .filter(|(_, session)| auth_session_uses_profile(session, provider_id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| sessions.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        let count = removed.len();
+        for session in removed {
+            if let Some(runtime) = session.vendor_runtime {
+                runtime.cancellation.cancel();
+            }
+        }
+        count
+    }
+
     pub async fn init_oauth_session(
         &self,
-        vendor: &str,
-        use_proxy: bool,
+        candidate: AuthSessionCandidate,
         options: OAuthSessionStartOptions,
     ) -> anyhow::Result<AuthSessionInitData> {
         match super::provider_connection::ProviderConnection::new(self)
             .reconnect(super::provider_connection::ProviderReconnect::Start(
                 super::provider_connection::ProviderReconnectStart::Authorization {
-                    vendor: vendor.to_string(),
-                    use_proxy,
+                    candidate: Box::new(candidate),
                     options,
                 },
             ))
@@ -24,35 +222,82 @@ impl AdminService {
         {
             super::provider_connection::ProviderReconnectResult::Redirect(started) => Ok(started),
             super::provider_connection::ProviderReconnectResult::Complete(_) => {
-                unreachable!("OAuth Start cannot complete a callback")
+                unreachable!("auth start cannot complete an input")
             }
-            _ => anyhow::bail!("OAuth authorization start returned an unexpected result"),
+            _ => anyhow::bail!("authentication start returned an unexpected result"),
         }
     }
 
     pub(super) async fn init_oauth_session_record(
         &self,
-        vendor: &str,
-        use_proxy: bool,
+        candidate: AuthSessionCandidate,
         options: OAuthSessionStartOptions,
     ) -> anyhow::Result<AuthSessionInitData> {
-        let driver_key = auth::normalize_driver_key(vendor);
-        if driver_key.is_empty() {
-            anyhow::bail!("auth vendor cannot be empty");
-        }
-        let driver = auth::build_driver(&driver_key)
-            .ok_or_else(|| anyhow::anyhow!("auth vendor not implemented: {driver_key}"))?;
-        let client = self.gw.http_client_for_provider(use_proxy).await?;
-        let created = driver
-            .start(StartAuthContext {
-                use_proxy,
-                redirect_uri: Some(options.redirect_uri.clone()),
-                http_client: Some(client),
-                ..Default::default()
-            })
+        let (mut provider, auth_descriptor) =
+            self.provider_auth_candidate_snapshot(&candidate).await?;
+        provider
+            .operation_metadata
+            .insert("use_proxy".into(), Value::Bool(candidate.use_proxy));
+        let scope = self
+            .gw
+            .create_vendor_session_scope(&candidate.vendor_id, provider)?;
+        let state = stravia_runtime_contract::identifier::new_id();
+        let (response, publication) =
+            if auth_descriptor.flow == stravia_vendor_sdk::AuthFlow::Manual {
+                (None, None)
+            } else {
+                let execution = self
+                    .gw
+                    .execute_vendor_session(
+                        &scope,
+                        crate::plugin::VendorRequest::Auth(stravia_vendor_sdk::AuthRequest {
+                            step: stravia_vendor_sdk::AuthStep::Start {
+                                redirect_uri: options.redirect_uri.clone(),
+                                state: state.clone(),
+                            },
+                        }),
+                        crate::plugin::VendorCallContext::new(
+                            stravia_runtime_contract::CancellationToken::new(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                        ),
+                    )
+                    .await?;
+                let publication = execution.publication.write_fence().await?;
+                let stravia_vendor_sdk::OperationOutput::Auth(response) = execution.output else {
+                    anyhow::bail!("vendor returned the wrong authentication start result")
+                };
+                (Some(response), Some(publication))
+            };
+        let session = self
+            .create_auth_session_record(candidate, auth_descriptor, state, response, scope, options)
             .await?;
-        let session = self.create_auth_session_record(created, options).await?;
+        drop(publication);
         build_auth_session_init_data(&session)
+    }
+
+    async fn execute_auth_session_step(
+        &self,
+        session: &AuthSession,
+        step: stravia_vendor_sdk::AuthStep,
+    ) -> anyhow::Result<crate::plugin::VendorExecution> {
+        let runtime = session
+            .vendor_runtime
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("authentication session runtime is unavailable"))?;
+        let mut context = crate::plugin::VendorCallContext::new(
+            runtime.cancellation.clone(),
+            std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+        );
+        context
+            .metadata
+            .insert("use_proxy".into(), Value::Bool(session.use_proxy));
+        self.gw
+            .execute_vendor_session(
+                &runtime.scope,
+                crate::plugin::VendorRequest::Auth(stravia_vendor_sdk::AuthRequest { step }),
+                context,
+            )
+            .await
     }
 
     pub async fn get_oauth_session_status(
@@ -101,52 +346,69 @@ impl AdminService {
             _ => {}
         }
 
-        if session.scheme == AuthScheme::OAuthAuthCodePkce.as_str()
-            || session.scheme == AuthScheme::SetupToken.as_str()
-        {
+        if session.auth_descriptor.flow != stravia_vendor_sdk::AuthFlow::DeviceCode {
             return Ok(build_auth_session_pending_data(&session));
         }
 
-        let driver = auth::build_driver(&session.driver_key).ok_or_else(|| {
-            anyhow::anyhow!("auth vendor not implemented: {}", session.driver_key)
-        })?;
-        let client = self.gw.http_client_for_provider(session.use_proxy).await?;
-
-        match driver
-            .poll(
-                &session,
-                RefreshAuthContext {
-                    use_proxy: session.use_proxy,
-                    http_client: Some(client),
-                    ..Default::default()
-                },
-            )
-            .await?
+        let execution = match self
+            .execute_auth_session_step(&session, stravia_vendor_sdk::AuthStep::Poll)
+            .await
         {
-            AuthPollState::Pending(progress) => {
+            Ok(execution) => execution,
+            Err(error) => {
+                let (code, terminal) = classify_auth_execution_error(&error);
+                let message = error.to_string();
+                if terminal {
+                    self.mark_oauth_session_error(&session.id, code, &message)
+                        .await?;
+                } else {
+                    self.update_auth_session_record(
+                        &session.id,
+                        UpdateAuthSession {
+                            error_code: Some(code.into()),
+                            last_error: Some(message.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                }
+                return Err(coded_error(code, &message, serde_json::json!({})));
+            }
+        };
+        let publication_token = execution.publication.clone();
+        let publication = publication_token.write_fence().await?;
+        let result = match execution.output {
+            stravia_vendor_sdk::OperationOutput::Auth(
+                stravia_vendor_sdk::AuthResponse::Pending {
+                    retry_after_seconds,
+                },
+            ) => {
                 let updated = self
                     .update_auth_session_record(
                         &session.id,
                         UpdateAuthSession {
-                            user_code: progress.user_code,
-                            verification_uri: progress.verification_uri,
-                            verification_uri_complete: progress.verification_uri_complete,
-                            expires_at: progress.expires_at,
-                            poll_interval_seconds: progress.poll_interval_seconds,
+                            poll_interval_seconds: retry_after_seconds
+                                .map(|seconds| i32::try_from(seconds).unwrap_or(i32::MAX)),
                             ..Default::default()
                         },
                     )
                     .await?;
                 Ok(build_auth_session_pending_data(&updated))
             }
-            AuthPollState::Ready(bundle) => {
+            stravia_vendor_sdk::OperationOutput::Auth(
+                response @ stravia_vendor_sdk::AuthResponse::Credentials { .. },
+            ) => {
+                let bundle = credential_bundle_from_response(response)?;
+                let runtime = session.vendor_runtime.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("authentication session runtime is unavailable")
+                })?;
+                *runtime.publication.lock().await = Some(publication_token);
                 let updated = self
                     .update_auth_session_record(
                         &session.id,
                         UpdateAuthSession {
                             status: Some(AuthSessionStatus::Ready.as_str().to_string()),
                             result_json: Some(serde_json::to_string(&bundle)?),
-                            expires_at: bundle.expires_at.clone(),
                             last_error: Some(String::new()),
                             ..Default::default()
                         },
@@ -154,11 +416,10 @@ impl AdminService {
                     .await?;
                 Ok(build_auth_session_ready_data(&updated, &bundle))
             }
-            AuthPollState::Error { code, message } => {
-                self.delete_auth_session_record(&session.id).await?;
-                Ok(AuthSessionStatusData::Error { code, message })
-            }
-        }
+            _ => anyhow::bail!("vendor returned an invalid OAuth poll result"),
+        };
+        drop(publication);
+        result
     }
 
     pub async fn cancel_oauth_session(&self, session_id: &str) -> anyhow::Result<()> {
@@ -183,6 +444,9 @@ impl AdminService {
         session.last_error = Some(message.to_string());
         session.listener_state = "stopped".to_string();
         session.updated_at = now_rfc3339();
+        if let Some(runtime) = &session.vendor_runtime {
+            runtime.cancellation.cancel();
+        }
         Ok(())
     }
 
@@ -221,7 +485,7 @@ impl AdminService {
     pub async fn complete_oauth_session(
         &self,
         session_id: &str,
-        input: auth::AuthExchangeInput,
+        input: AuthCompletionInput,
     ) -> anyhow::Result<AuthSessionStatusData> {
         match super::provider_connection::ProviderConnection::new(self)
             .reconnect(super::provider_connection::ProviderReconnect::Callback(
@@ -245,7 +509,7 @@ impl AdminService {
     pub(super) async fn complete_oauth_session_record(
         &self,
         session_id: &str,
-        input: auth::AuthExchangeInput,
+        input: AuthCompletionInput,
     ) -> anyhow::Result<AuthSessionStatusData> {
         let session = self.claim_pending_auth_session(session_id).await?;
         if session
@@ -256,38 +520,127 @@ impl AdminService {
             return Ok(build_auth_session_ready_data(&session, &bundle));
         }
 
-        let exchange_result = async {
-            let driver = auth::build_driver(&session.driver_key).ok_or_else(|| {
-                anyhow::anyhow!("auth vendor not implemented: {}", session.driver_key)
-            })?;
-            let client = self.gw.http_client_for_provider(session.use_proxy).await?;
-            driver
-                .exchange(
-                    &session,
-                    input,
-                    ExchangeAuthContext {
-                        use_proxy: session.use_proxy,
-                        http_client: Some(client),
-                        ..Default::default()
-                    },
-                )
-                .await
-        }
-        .await;
+        let step = match input.input {
+            AuthCompletionValue::CallbackUrl { value } => {
+                if session.auth_descriptor.flow != stravia_vendor_sdk::AuthFlow::AuthorizationCode {
+                    self.fail_claimed_auth_session(
+                        &session.id,
+                        false,
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not accept a callback URL",
+                    )
+                    .await?;
+                    return Err(coded_error(
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not accept a callback URL",
+                        serde_json::json!({}),
+                    ));
+                }
+                if session.callback_mode == OAuthCallbackMode::Manual
+                    && !session
+                        .auth_descriptor
+                        .manual_input
+                        .as_ref()
+                        .is_some_and(|input| {
+                            input.input_type == stravia_vendor_sdk::AuthManualInputType::CallbackUrl
+                        })
+                {
+                    self.fail_claimed_auth_session(
+                        &session.id,
+                        false,
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not allow manual callback input",
+                    )
+                    .await?;
+                    return Err(coded_error(
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not allow manual callback input",
+                        serde_json::json!({}),
+                    ));
+                }
+                let callback = match validate_auth_callback(&session, &value) {
+                    Ok(callback) => callback,
+                    Err((code, message, terminal)) => {
+                        self.fail_claimed_auth_session(&session.id, terminal, code, &message)
+                            .await?;
+                        return Err(coded_error(code, &message, serde_json::json!({})));
+                    }
+                };
+                stravia_vendor_sdk::AuthStep::Exchange {
+                    callback_url: callback,
+                }
+            }
+            AuthCompletionValue::Manual { value } => {
+                let allowed = session
+                    .auth_descriptor
+                    .manual_input
+                    .as_ref()
+                    .is_some_and(|input| {
+                        input.input_type == stravia_vendor_sdk::AuthManualInputType::Text
+                    });
+                if !allowed || value.trim().is_empty() {
+                    self.fail_claimed_auth_session(
+                        &session.id,
+                        false,
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not accept manual text input",
+                    )
+                    .await?;
+                    return Err(coded_error(
+                        "AUTH_INPUT_NOT_ALLOWED",
+                        "this authentication flow does not accept manual text input",
+                        serde_json::json!({}),
+                    ));
+                }
+                stravia_vendor_sdk::AuthStep::ManualInput { value }
+            }
+        };
+
+        let exchange_result = self.execute_auth_session_step(&session, step).await;
 
         match exchange_result {
-            Ok(bundle) => {
-                let updated = self
-                    .finish_claimed_auth_session(&session.id, &bundle)
-                    .await?;
-                Ok(build_auth_session_ready_data(&updated, &bundle))
+            Ok(execution) => {
+                let completed = async {
+                    let publication_token = execution.publication.clone();
+                    let publication = publication_token.write_fence().await?;
+                    let stravia_vendor_sdk::OperationOutput::Auth(
+                        response @ stravia_vendor_sdk::AuthResponse::Credentials { .. },
+                    ) = execution.output
+                    else {
+                        anyhow::bail!("vendor returned an invalid authentication result")
+                    };
+                    let bundle = credential_bundle_from_response(response)?;
+                    let runtime = session.vendor_runtime.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("authentication session runtime is unavailable")
+                    })?;
+                    *runtime.publication.lock().await = Some(publication_token);
+                    let updated = self
+                        .finish_claimed_auth_session(&session.id, &bundle)
+                        .await?;
+                    drop(publication);
+                    Ok::<_, anyhow::Error>(build_auth_session_ready_data(&updated, &bundle))
+                }
+                .await;
+                match completed {
+                    Ok(status) => Ok(status),
+                    Err(error) => {
+                        if let Some(runtime) = &session.vendor_runtime {
+                            runtime.publication.lock().await.take();
+                        }
+                        let (code, terminal) = classify_auth_execution_error(&error);
+                        let message = error.to_string();
+                        if let Err(claim_error) = self
+                            .fail_claimed_auth_session(&session.id, terminal, code, &message)
+                            .await
+                        {
+                            return Err(error.context(claim_error.to_string()));
+                        }
+                        Err(coded_error(code, &message, serde_json::json!({})))
+                    }
+                }
             }
             Err(error) => {
-                let exchange_error = error.downcast_ref::<auth::OAuthExchangeError>();
-                let terminal = exchange_error.is_some_and(auth::OAuthExchangeError::is_terminal);
-                let code = exchange_error
-                    .map(auth::OAuthExchangeError::code)
-                    .unwrap_or("AUTH_EXCHANGE_RETRYABLE");
+                let (code, terminal) = classify_auth_execution_error(&error);
                 let message = error.to_string();
                 self.fail_claimed_auth_session(&session.id, terminal, code, &message)
                     .await?;
@@ -301,24 +654,26 @@ impl AdminService {
         session_id: &str,
         input: CreateProvider,
     ) -> anyhow::Result<Provider> {
-        super::provider_connection::ProviderConnection::new(self)
-            .save(super::provider_connection::ProviderSave::Catalog {
-                input,
-                authorization_id: Some(session_id.to_string()),
-            })
+        self.create_provider_with_oauth_session_record(session_id, input)
             .await
     }
 
     pub(super) async fn create_provider_with_oauth_session_record(
         &self,
         session_id: &str,
-        input: CreateProvider,
+        mut input: CreateProvider,
     ) -> anyhow::Result<Provider> {
         let session = self.take_ready_auth_session_record(session_id).await?;
         if is_expired_at(session.expires_at.as_deref()) {
+            if let Some(runtime) = &session.vendor_runtime {
+                runtime.cancellation.cancel();
+            }
             anyhow::bail!("auth session expired");
         }
-
+        let runtime = session
+            .vendor_runtime
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("authentication session runtime is unavailable"))?;
         let bundle = parse_auth_session_bundle(&session)?;
         bundle
             .access_token
@@ -326,26 +681,74 @@ impl AdminService {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("auth session missing access token"))?;
 
+        let publication =
+            runtime.publication.lock().await.take().ok_or_else(|| {
+                anyhow::anyhow!("authentication session publication is unavailable")
+            })?;
+        let write_fence = publication.write_fence().await?;
+        publication.ensure_current()?;
+        if !runtime.scope.provider.credentials.is_empty() {
+            input.credential = ProviderCredentialInput::Fields {
+                values: runtime.scope.provider.credentials.clone(),
+            };
+        }
         let provider = match self.create_provider_from_input(input, true).await {
             Ok(provider) => provider,
             Err(error) => {
+                drop(write_fence);
+                *runtime.publication.lock().await = Some(publication);
                 self.restore_auth_session_record(session).await?;
                 return Err(error);
             }
         };
+        if provider.vendor.as_deref() != Some(session.driver_key.as_str())
+            || provider.channel.as_deref() != Some(session.channel.as_str())
+        {
+            let error = anyhow::anyhow!(
+                "authentication session vendor or channel does not match the Provider"
+            );
+            if let Err(cleanup_error) = self.delete_provider(&provider.id).await {
+                tracing::warn!(%cleanup_error, provider_id = %provider.id, "failed to roll back mismatched OAuth Provider");
+            }
+            drop(write_fence);
+            *runtime.publication.lock().await = Some(publication);
+            self.restore_auth_session_record(session).await?;
+            return Err(error);
+        }
 
         let credential_input =
             upsert_credential_from_bundle(&session.driver_key, &session.scheme, &bundle);
         let provisioned = async {
+            publication.ensure_current()?;
             self.gw
                 .storage
                 .oauth_credentials()
                 .upsert(&provider.id, credential_input)
                 .await?;
-            let credential =
-                stored_credential_from_bundle(&session.driver_key, &session.scheme, &bundle);
-            self.sync_provider_runtime_fields(&provider, &credential)
-                .await
+            let preview = self
+                .preview_provider_configuration(crate::admin::ProviderConfigurationPreviewInput {
+                    provider_id: Some(provider.id.clone()),
+                    vendor_id: session.driver_key.clone(),
+                    channel: provider
+                        .channel
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("OAuth Provider channel is missing"))?,
+                    base_url: provider.base_url.clone(),
+                    options: serde_json::from_str(&provider.vendor_options)?,
+                    credentials: std::collections::BTreeMap::new(),
+                })
+                .await?;
+            super::provider_connection::ensure_configuration_accepted(
+                &preview,
+                &provider.base_url,
+            )?;
+            publication.ensure_current()?;
+            self.gw
+                .vendor_plugins
+                .store
+                .recovered(&provider.id, "credentials")
+                .await?;
+            Ok::<_, anyhow::Error>(provider.clone())
         }
         .await;
 
@@ -359,11 +762,14 @@ impl AdminService {
                         cleanup_error
                     );
                 }
+                drop(write_fence);
+                *runtime.publication.lock().await = Some(publication);
                 self.restore_auth_session_record(session).await?;
                 return Err(error.context("create oauth provider"));
             }
         };
-
+        drop(write_fence);
+        drop(publication);
         Ok(provider)
     }
 
@@ -372,11 +778,7 @@ impl AdminService {
         id: &str,
     ) -> anyhow::Result<ProviderOAuthStatusData> {
         let provider = self.get_provider(id).await?;
-        let driver_key = provider
-            .vendor
-            .as_deref()
-            .map(auth::normalize_driver_key)
-            .unwrap_or_default();
+        let driver_key = provider.vendor.clone().unwrap_or_default();
 
         if driver_key.is_empty() {
             return Ok(build_provider_oauth_status(&provider, "", None, None));
@@ -417,16 +819,24 @@ impl AdminService {
 
     pub async fn logout_provider_oauth(&self, id: &str) -> anyhow::Result<ProviderOAuthStatusData> {
         let provider = self.get_provider(id).await?;
-        let driver_key = provider
-            .vendor
-            .as_deref()
-            .map(auth::normalize_driver_key)
-            .unwrap_or_default();
+        let driver_key = provider.vendor.clone().unwrap_or_default();
 
         if driver_key.is_empty() {
             return Ok(build_provider_oauth_status(&provider, "", None, None));
         }
 
+        let (_, operation, _) = self.gw.vendor_plugins.acquire(&driver_key)?;
+        let publication = operation.publication_fence(
+            stravia_runtime_contract::CancellationToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(120),
+        );
+        drop(operation);
+        let write_fence = publication.write_fence().await?;
+        let current = self.get_provider(id).await?;
+        anyhow::ensure!(
+            serde_json::to_vec(&current)? == serde_json::to_vec(&provider)?,
+            "provider changed while logging out"
+        );
         self.gw
             .storage
             .oauth_credentials()
@@ -446,6 +856,8 @@ impl AdminService {
                 },
             )
             .await?;
+        drop(write_fence);
+        drop(publication);
 
         Ok(build_provider_oauth_status(
             &updated,
@@ -482,37 +894,88 @@ impl AdminService {
         let provider = self.get_provider(provider_id).await?;
         let session = self.take_ready_auth_session_record(session_id).await?;
         if is_expired_at(session.expires_at.as_deref()) {
+            if let Some(runtime) = &session.vendor_runtime {
+                runtime.cancellation.cancel();
+            }
             anyhow::bail!("auth session expired");
         }
-
+        if provider.vendor.as_deref() != Some(session.driver_key.as_str())
+            || provider.channel.as_deref() != Some(session.channel.as_str())
+        {
+            self.restore_auth_session_record(session).await?;
+            anyhow::bail!("authentication session vendor or channel does not match the Provider");
+        }
+        let runtime = session
+            .vendor_runtime
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("authentication session runtime is unavailable"))?;
         let bundle = parse_auth_session_bundle(&session)?;
         bundle
             .access_token
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("auth session missing access token"))?;
+        let publication =
+            runtime.publication.lock().await.take().ok_or_else(|| {
+                anyhow::anyhow!("authentication session publication is unavailable")
+            })?;
+        let write_fence = publication.write_fence().await?;
+        publication.ensure_current()?;
+        let current = self.get_provider(provider_id).await?;
+        if serde_json::to_vec(&current)? != serde_json::to_vec(&provider)? {
+            drop(write_fence);
+            *runtime.publication.lock().await = Some(publication);
+            self.restore_auth_session_record(session).await?;
+            anyhow::bail!("provider changed while binding authentication credentials");
+        }
 
-        let credential =
-            stored_credential_from_bundle(&session.driver_key, &session.scheme, &bundle);
         let credential_input =
             upsert_credential_from_bundle(&session.driver_key, &session.scheme, &bundle);
-        match self
-            .gw
-            .storage
-            .oauth_credentials()
-            .upsert(&provider.id, credential_input)
-            .await
-        {
-            Ok(_) => {}
-            Err(error) => {
-                self.restore_auth_session_record(session).await?;
-                return Err(error);
-            }
+        let result = async {
+            publication.ensure_current()?;
+            self.gw
+                .storage
+                .oauth_credentials()
+                .upsert(&provider.id, credential_input)
+                .await?;
+            let updated = self
+                .gw
+                .storage
+                .providers()
+                .update(
+                    &provider.id,
+                    UpdateProvider {
+                        auth_mode: Some("oauth".into()),
+                        api_key: Some(String::new()),
+                        adapter_credentials: Some(std::collections::BTreeMap::new()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let preview = self
+                .preview_provider_configuration(crate::admin::ProviderConfigurationPreviewInput {
+                    provider_id: Some(updated.id.clone()),
+                    vendor_id: session.driver_key.clone(),
+                    channel: updated
+                        .channel
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("OAuth Provider channel is missing"))?,
+                    base_url: updated.base_url.clone(),
+                    options: serde_json::from_str(&updated.vendor_options)?,
+                    credentials: std::collections::BTreeMap::new(),
+                })
+                .await?;
+            super::provider_connection::ensure_configuration_accepted(&preview, &updated.base_url)?;
+            publication.ensure_current()?;
+            self.gw
+                .vendor_plugins
+                .store
+                .recovered(&provider.id, "credentials")
+                .await?;
+            Ok::<_, anyhow::Error>(updated)
         }
-        let provider = match self
-            .sync_provider_runtime_fields(&provider, &credential)
-            .await
-        {
+        .await;
+        let updated = match result {
             Ok(provider) => provider,
             Err(error) => {
                 if let Err(cleanup_error) = self
@@ -522,16 +985,36 @@ impl AdminService {
                     .delete(&provider.id)
                     .await
                 {
-                    tracing::warn!(%cleanup_error, provider_id = %provider.id, "failed to delete OAuth credential after sync failure");
+                    tracing::warn!(%cleanup_error, provider_id = %provider.id, "failed to delete OAuth credential after bind failure");
                 }
+                if let Err(rollback_error) = self
+                    .gw
+                    .storage
+                    .providers()
+                    .update(
+                        &provider.id,
+                        UpdateProvider {
+                            auth_mode: Some(provider.auth_mode.clone()),
+                            api_key: Some(provider.api_key.clone()),
+                            adapter_credentials: Some(
+                                serde_json::from_str(&provider.adapter_credentials)
+                                    .unwrap_or_default(),
+                            ),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(%rollback_error, provider_id = %provider.id, "failed to restore Provider after OAuth bind failure");
+                }
+                drop(write_fence);
+                *runtime.publication.lock().await = Some(publication);
                 self.restore_auth_session_record(session).await?;
                 return Err(error);
             }
         };
-
-        Ok(provider)
+        drop(write_fence);
+        drop(publication);
+        Ok(updated)
     }
 }
-
-#[cfg(test)]
-mod tests;

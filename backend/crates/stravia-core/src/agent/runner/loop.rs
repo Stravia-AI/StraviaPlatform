@@ -403,6 +403,7 @@ impl AgentRunner {
             .get(&(record.spec.id.clone(), record.spec.revision))
             .copied();
         let mut total_usage = Usage::default();
+        let mut vendor_publications = Vec::new();
         let mut model_turns = 0_u32;
         let mut tool_calls = 0_u32;
         let mut repair_attempts = 0_u32;
@@ -503,7 +504,10 @@ impl AgentRunner {
                 working_deadline
             };
             let response_result = if let Some(response) = hook_response {
-                Ok(response)
+                Ok(AgentModelTurnResult {
+                    response,
+                    publication: None,
+                })
             } else {
                 self.execute_model_turn(
                     {
@@ -524,7 +528,7 @@ impl AgentRunner {
                 )
                 .await
             };
-            let mut response = match response_result {
+            let turn_result = match response_result {
                 Err(error)
                     if !finalizing
                         && error.code == "deadline_exceeded"
@@ -537,6 +541,10 @@ impl AgentRunner {
                 }
                 result => result?,
             };
+            if let Some(publication) = turn_result.publication {
+                vendor_publications.push(publication);
+            }
+            let mut response = turn_result.response;
             if let Some(hooks) = &hooks {
                 let mut hooks = hooks.lock().await;
                 let outcome = hooks
@@ -689,6 +697,17 @@ impl AgentRunner {
                         if input.cancellation.is_cancelled() {
                             return Err(AgentRunError::new("cancelled", "Agent Run cancelled"));
                         }
+                        // 多轮结果直到 validator 的持久化准备与 Agent Turn 原子提交结束
+                        // 都受原 Vendor 版本保护；这里不保留任何活动 operation lease。
+                        let _vendor_guards =
+                            crate::model_turn::vendor_write_fences(&vendor_publications)
+                                .await
+                                .map_err(|_| {
+                                    AgentRunError::new(
+                                        "cancelled",
+                                        "Vendor result can no longer be published",
+                                    )
+                                })?;
                         if let Some(validator) = self
                             .output_validators
                             .get(&(record.spec.id.clone(), record.spec.revision))
@@ -747,7 +766,7 @@ impl AgentRunner {
         input: TurnInput,
         events: &mpsc::Sender<AgentEvent>,
         hooks: Option<&Arc<tokio::sync::Mutex<InferenceRun>>>,
-    ) -> Result<AiResponse, AgentRunError> {
+    ) -> Result<AgentModelTurnResult, AgentRunError> {
         let deadline = input.deadline;
         let cancellation = input.cancellation.clone();
         let turn = self
@@ -758,6 +777,7 @@ impl AgentRunner {
         if let Some(hooks) = hooks {
             hooks.lock().await.set_route(turn.route.clone());
         }
+        let publication = turn.target.publication.clone();
         let mut stream = turn.output;
         loop {
             let event = tokio::select! {
@@ -790,7 +810,28 @@ impl AgentRunner {
                     ));
                 }
                 CanonicalEvent::Completed(response) => {
-                    return Ok(*response);
+                    let publication = match publication.as_ref() {
+                        Some(publication) => {
+                            let publication = publication.current().map_err(|_| {
+                                AgentRunError::new(
+                                    "vendor_publication_missing",
+                                    "Vendor result has no publication fence",
+                                )
+                            })?;
+                            publication.ensure_current().map_err(|_| {
+                                AgentRunError::new(
+                                    "cancelled",
+                                    "Vendor result can no longer be published",
+                                )
+                            })?;
+                            Some(publication)
+                        }
+                        None => None,
+                    };
+                    return Ok(AgentModelTurnResult {
+                        response: *response,
+                        publication,
+                    });
                 }
             }
         }
@@ -825,6 +866,11 @@ impl AgentRunner {
             .map_err(|error| AgentRunError::new("turn_commit_failed", error.to_string()))?;
         Ok(())
     }
+}
+
+struct AgentModelTurnResult {
+    response: AiResponse,
+    publication: Option<crate::plugin::VendorPublicationFence>,
 }
 
 struct TurnCommitContext<'a> {

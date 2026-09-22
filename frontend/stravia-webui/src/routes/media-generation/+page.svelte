@@ -61,7 +61,7 @@ const validationMessage = $derived.by(() => {
 })
 const validationNeedsProvider = $derived(
   configQuery.data?.validation.code === 'media_generation_provider_missing' ||
-    configQuery.data?.validation.code === 'media_generation_oauth_unavailable',
+    configQuery.data?.validation.code === 'media_generation_target_incompatible',
 )
 
 $effect(() => {

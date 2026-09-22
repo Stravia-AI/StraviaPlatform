@@ -34,19 +34,21 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         .create_provider(crate::db::models::CreateProvider {
             name: Some("attachment-wire".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: format!("http://{address}/v1"),
                 models_source: None,
                 static_models: None,
             },
             credential: crate::db::models::ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
         .unwrap();
     admin.create_manual_provider_model(&provider.id, "vision", crate::provider_models::CreateManualProviderModel {
-        metadata: serde_json::json!({"id":"vision","name":"Vision","tool_call":true,"modalities":{"input":["text","image"],"output":["text"]}}),
+        metadata: serde_json::json!({"id":"vision","name":"Vision","attachment":true,"tool_call":true,"modalities":{"input":["text","image"],"output":["text"]}}),
     }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
@@ -54,7 +56,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "vision".into(),
+            target_model: Some("vision".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -288,25 +290,27 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         .create_provider(crate::db::models::CreateProvider {
             name: Some("generated-media".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "google-gemini".into(),
+                vendor: "protocol-gemini".into(),
+                channel: "default".into(),
+                protocol: Some("google-gemini".into()),
                 base_url: format!("http://{address}"),
                 models_source: None,
                 static_models: None,
             },
             credential: crate::db::models::ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
         .unwrap();
-    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","modalities":{"input":["text","image"],"output":["text","image"]}}) }).await.unwrap();
+    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","attachment":true,"modalities":{"input":["text","image"],"output":["text","image"]}}) }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
             model_id: "painter".into(),
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "painter".into(),
+            target_model: Some("painter".into()),
             targets: vec![],
             default_thinking_level: None,
         })

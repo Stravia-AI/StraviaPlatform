@@ -649,3 +649,88 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn redaction_explicit_continuation_preserves_route_identity_and_effective_controls() {
+    let streams = ["first answer", "second answer"]
+        .into_iter()
+        .map(|content| {
+            openai_responses_sse(content)
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|data| *data != "[DONE]")
+                .map(|data| {
+                    let mut event: serde_json::Value = serde_json::from_str(data).unwrap();
+                    if let Some(response) = event.get_mut("response") {
+                        response["reasoning"] =
+                            serde_json::json!({"effort": "low", "summary": null});
+                    }
+                    format!("data: {event}\n\n")
+                })
+                .collect()
+        })
+        .collect();
+    let (upstream, _, captured) = serve_responses_websocket_streams(streams).await;
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let route_id = configure_route_with_protocol(
+        &gateway,
+        "redaction-logical-model",
+        &[upstream],
+        "openai",
+        "open-responses",
+    )
+    .await;
+    gateway
+        .admin()
+        .set_setting(stravia_credential_protection::SETTING_KEY, "true")
+        .await
+        .unwrap();
+    let headers = authorized_headers(&gateway).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+    let router = crate::proxy::server::create_router(gateway.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let first = client
+        .post(&url)
+        .headers(headers.clone())
+        .json(&serde_json::json!({
+            "model": route_id, "store": true, "input": SECRET,
+            "reasoning": {"effort": "low"},
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = first.status();
+    let first: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["output"][0]["content"][0]["text"], "first answer");
+    let second = client
+        .post(&url)
+        .headers(headers)
+        .json(&serde_json::json!({
+            "model": route_id, "store": true,
+            "previous_response_id": first["id"], "input": "second",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = second.status();
+    let second: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["output"][0]["content"][0]["text"], "second answer");
+    let requests = captured.lock().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].to_string().contains(SECRET));
+    assert_eq!(requests[1]["previous_response_id"], "resp-provider");
+    assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+    assert_eq!(requests[1]["reasoning"]["effort"], "low");
+    gateway.shutdown().await;
+    server.abort();
+}

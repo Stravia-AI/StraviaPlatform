@@ -63,6 +63,18 @@ impl RedactionTrace {
         Ok(self.0.lock().provider.clone())
     }
 
+    pub fn has_provider_proof(&self) -> bool {
+        self.0.lock().provider.is_some()
+    }
+
+    /// 以提供方确认的有效控制更新已有证明，保留输入及回复累计的历史摘要。
+    pub fn observe_provider_controls(&self, request: &AiRequest) {
+        if let Some(proof) = self.0.lock().provider.as_mut() {
+            let controls = crate::protocol::ir::canonical::history_request_controls_hash(request);
+            proof.controls_fingerprint = crate::protocol::ir::canonical::hash_hex(&controls);
+        }
+    }
+
     pub fn observe_provider_request(&self, request: &AiRequest) -> Result<(), RedactionError> {
         let mut state = self.0.lock();
         if !state.tracking {

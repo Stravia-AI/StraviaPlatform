@@ -17,7 +17,7 @@ impl PostgresRouteStore {
         let sql = format!(
             "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
              COALESCE(is_enabled, TRUE) AS is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
@@ -45,7 +45,7 @@ impl PostgresRouteStore {
         let route = sqlx::query_as::<_, Route>(
             "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
              COALESCE(is_enabled, TRUE) AS is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models WHERE model_id = $1",
@@ -140,7 +140,8 @@ impl RouteStore for PostgresRouteStore {
             let id = existing
                 .iter()
                 .find(|row| {
-                    row.provider_id == target.provider_id.trim() && row.model == target.model.trim()
+                    row.provider_id == target.provider_id.trim()
+                        && row.model.as_deref() == target.model.as_deref().map(str::trim)
                 })
                 .map(|row| row.id.clone())
                 .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
@@ -150,7 +151,7 @@ impl RouteStore for PostgresRouteStore {
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
-            .bind(target.model.trim())
+            .bind(target.model.as_deref().map(str::trim))
             .bind(target.enabled)
             .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
             .bind(

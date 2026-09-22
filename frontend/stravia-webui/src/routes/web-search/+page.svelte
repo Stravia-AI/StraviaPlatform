@@ -26,13 +26,13 @@ const eligibleModelsQuery = createQuery(() => ({
   queryKey: ['web-search-eligible-models'],
   queryFn: admin.webSearch.eligibleModels,
 }))
-const codexProvidersQuery = createQuery(() => ({
-  queryKey: ['web-search-codex-providers'],
-  queryFn: admin.webSearch.compatibleCodexProviders,
+const externalRoutesQuery = createQuery(() => ({
+  queryKey: ['web-search-external-routes'],
+  queryFn: admin.webSearch.externalRoutes,
 }))
 
 let initialized = $state(false)
-let backendKind = $state<'local' | 'codex'>('local')
+let backendKind = $state<'local' | 'external'>('local')
 
 const sourceSettingsQuery = createQuery(() => ({
   queryKey: ['web-access-settings'],
@@ -48,8 +48,7 @@ const sourceProvidersQuery = createQuery(() => ({
 let toggleSaving = $state(false)
 let toggleError = $state('')
 let localModelId = $state('')
-let codexProviderId = $state('')
-let codexModelId = $state('')
+let externalRouteId = $state('')
 let maxTurns = $state('')
 let totalSeconds = $state('')
 let advancedOpen = $state(false)
@@ -63,19 +62,27 @@ const hasChanges = $derived.by(() => {
     backendKind !== (backend?.kind ?? 'local') ||
     (backendKind === 'local'
       ? localModelId !== (backend?.kind === 'local' ? (backend.model_id ?? '') : '')
-      : codexProviderId !== (backend?.kind === 'codex' ? (backend.provider_id ?? '') : '') ||
-        codexModelId !== (backend?.kind === 'codex' ? (backend.upstream_model ?? '') : '')) ||
+      : externalRouteId !== (backend?.kind === 'external' ? (backend.route_id ?? '') : '')) ||
     Number(maxTurns) !== config.max_turns ||
     Number(totalSeconds) !== config.total_time_seconds
   )
 })
 
-const codexProviders = $derived(codexProvidersQuery.data ?? [])
-const codexModels = $derived(codexProviders.find((provider) => provider.id === codexProviderId)?.models ?? [])
+const externalRoutes = $derived.by(() => {
+  const routes = externalRoutesQuery.data ?? []
+  if (!externalRouteId || routes.some((route) => route.model_id === externalRouteId)) return routes
+  return [
+    ...routes,
+    { id: externalRouteId, model_id: externalRouteId, display_name: externalRouteId, available: false },
+  ]
+})
 const eligibleModels = $derived(sortLogicalModels(eligibleModelsQuery.data ?? []))
 const limits = $derived(configQuery.data?.limits)
+const selectedExternalRoute = $derived(externalRoutes.find((route) => route.model_id === externalRouteId))
 const bindingReady = $derived(
-  backendKind === 'local' ? Boolean(localModelId) : Boolean(codexProviderId) && Boolean(codexModelId),
+  backendKind === 'local'
+    ? Boolean(localModelId)
+    : Boolean(externalRouteId) && Boolean(selectedExternalRoute?.available),
 )
 const localLimitsReady = $derived(
   backendKind !== 'local' ||
@@ -94,15 +101,10 @@ const savedBindingReady = $derived.by(() => {
       !eligibleModelsQuery.isError && Boolean(eligibleModelsQuery.data?.some((model) => model.id === backend.model_id))
     )
   }
-  if (backend?.kind === 'codex') {
+  if (backend?.kind === 'external') {
     return (
-      !codexProvidersQuery.isError &&
-      Boolean(
-        codexProvidersQuery.data?.some(
-          (provider) =>
-            provider.id === backend.provider_id && provider.models.some((model) => model.id === backend.upstream_model),
-        ),
-      )
+      !externalRoutesQuery.isError &&
+      Boolean(externalRoutesQuery.data?.some((route) => route.model_id === backend.route_id && route.available))
     )
   }
   return false
@@ -148,8 +150,7 @@ $effect(() => {
 function loadDraft(config: WebSearchConfig): void {
   backendKind = config.backend?.kind ?? 'local'
   localModelId = config.backend?.kind === 'local' ? (config.backend.model_id ?? '') : ''
-  codexProviderId = config.backend?.kind === 'codex' ? (config.backend.provider_id ?? '') : ''
-  codexModelId = config.backend?.kind === 'codex' ? (config.backend.upstream_model ?? '') : ''
+  externalRouteId = config.backend?.kind === 'external' ? (config.backend.route_id ?? '') : ''
   maxTurns = String(config.max_turns)
   totalSeconds = String(config.total_time_seconds)
 }
@@ -161,7 +162,7 @@ $effect(() => {
 function backendDraft(): WebSearchBackend {
   return backendKind === 'local'
     ? { kind: 'local', model_id: localModelId || null }
-    : { kind: 'codex', provider_id: codexProviderId || null, upstream_model: codexModelId || null }
+    : { kind: 'external', route_id: externalRouteId || null }
 }
 
 async function toggleEnabled(enabled: boolean): Promise<void> {
@@ -308,14 +309,16 @@ async function save(): Promise<void> {
           <Field.Label for="search-backend">{m.web_search_method()}</Field.Label>
           <Select.Root type="single" bind:value={backendKind} disabled={saving}>
             <Select.Trigger id="search-backend" class="w-full">
-              {backendKind === 'local' ? m.web_search_use_stravia_model() : m.web_search_use_codex()}
+              {backendKind === 'local' ? m.web_search_use_stravia_model() : m.web_search_use_external_route()}
             </Select.Trigger>
             <Select.Content
               ><Select.Group>
                 <Select.Item value="local" label={m.web_search_use_stravia_model()}>
                   {m.web_search_use_stravia_model()}
                 </Select.Item>
-                <Select.Item value="codex" label={m.web_search_use_codex()}>{m.web_search_use_codex()}</Select.Item>
+                <Select.Item value="external" label={m.web_search_use_external_route()}>
+                  {m.web_search_use_external_route()}
+                </Select.Item>
               </Select.Group></Select.Content>
           </Select.Root>
         </Field.Field>
@@ -347,43 +350,28 @@ async function save(): Promise<void> {
             </Select.Root>
           </Field.Field>
         {:else}
-          <Field.Field size="select">
-            <Field.Label for="search-codex-provider">{m.web_search_codex_account()}</Field.Label>
+          <Field.Field size="select" data-invalid={Boolean(externalRouteId) && !selectedExternalRoute?.available}>
+            <Field.Label for="search-external-route">{m.web_search_external_route()}</Field.Label>
             <Select.Root
               type="single"
-              bind:value={codexProviderId}
-              disabled={saving || codexProvidersQuery.isPending || codexProvidersQuery.isError}
-              onValueChange={() => {
-                codexModelId = ''
-              }}>
-              <Select.Trigger id="search-codex-provider" class="w-full">
-                {codexProviders.find((provider) => provider.id === codexProviderId)?.name ??
-                  m.web_search_select_codex_account()}
+              bind:value={externalRouteId}
+              disabled={saving || externalRoutesQuery.isPending || externalRoutesQuery.isError}>
+              <Select.Trigger id="search-external-route" class="w-full">
+                {selectedExternalRoute?.display_name ?? m.web_search_select_external_route()}
               </Select.Trigger>
               <Select.Content
                 ><Select.Group>
-                  {#each codexProviders as provider (provider.id)}
-                    <Select.Item value={provider.id} label={provider.name}>{provider.name}</Select.Item>
+                  {#each externalRoutes as route (route.model_id)}
+                    <Select.Item value={route.model_id} label={route.display_name} disabled={!route.available}>
+                      <span class="min-w-0 flex-1 truncate">{route.display_name}</span>
+                      <span class="truncate font-technical text-xs text-muted-foreground">{route.model_id}</span>
+                    </Select.Item>
                   {/each}
                 </Select.Group></Select.Content>
             </Select.Root>
-          </Field.Field>
-          <Field.Field size="select">
-            <Field.Label for="search-codex-model">{m.web_search_codex_model()}</Field.Label>
-            <Select.Root
-              type="single"
-              bind:value={codexModelId}
-              disabled={saving || codexProvidersQuery.isPending || codexProvidersQuery.isError || !codexProviderId}>
-              <Select.Trigger id="search-codex-model" class="w-full">
-                {codexModels.find((model) => model.id === codexModelId)?.id ?? m.web_search_select_codex_model()}
-              </Select.Trigger>
-              <Select.Content
-                ><Select.Group>
-                  {#each codexModels as model (model.id)}
-                    <Select.Item value={model.id} label={model.id}>{model.id}</Select.Item>
-                  {/each}
-                </Select.Group></Select.Content>
-            </Select.Root>
+            {#if externalRouteId && !selectedExternalRoute?.available}
+              <Field.Error>{m.web_search_external_route_unavailable()}</Field.Error>
+            {/if}
           </Field.Field>
         {/if}
       </Field.Group>
@@ -393,13 +381,14 @@ async function save(): Promise<void> {
           message={localizeBackendErrorMessage(eligibleModelsQuery.error)}
           retry={() => eligibleModelsQuery.refetch()}
           retrying={eligibleModelsQuery.isFetching} />
-      {:else if backendKind === 'codex' && codexProvidersQuery.isError}
+      {:else if backendKind === 'external' && externalRoutesQuery.isError}
         <RequestFailure
           class="mt-4"
-          message={localizeBackendErrorMessage(codexProvidersQuery.error)}
-          retry={() => codexProvidersQuery.refetch()}
-          retrying={codexProvidersQuery.isFetching} />
-      {:else if (backendKind === 'local' && eligibleModelsQuery.isPending) || (backendKind === 'codex' && codexProvidersQuery.isPending)}
+          title={m.web_search_external_routes_not_loaded()}
+          message={localizeBackendErrorMessage(externalRoutesQuery.error)}
+          retry={() => externalRoutesQuery.refetch()}
+          retrying={externalRoutesQuery.isFetching} />
+      {:else if (backendKind === 'local' && eligibleModelsQuery.isPending) || (backendKind === 'external' && externalRoutesQuery.isPending)}
         <p class="mt-4 text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
       {/if}
     </section>

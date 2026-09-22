@@ -581,10 +581,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut delivery_completed_at = None;
             if aborted && !preflight_failed && !committed_failure_delivered {
                 if !transport.disrupted() {
-                    let native_error = crate::compaction::NativeCompactionControls::classify(
+                    let native_error = stravia_protocol_codec::codec::compaction::native_compaction_requested(
                         &request,
                     )
-                    .requested()
                     .then(|| {
                         terminal_deltas.iter().find(|delta| {
                             matches!(delta, AiStreamDelta::StreamError { error } if error.raw.is_some())

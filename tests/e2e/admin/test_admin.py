@@ -107,12 +107,14 @@ def _create_probe_provider(
         payload={
             "name": name,
             "source": {
-                "type": "custom", "vendor": "custom", "protocol": "openai",
-                "base_url": env["mock"], "models_source": endpoint, **source,
+                "type": "custom", "vendor": "custom", "channel": "default",
+                "protocol": "openai", "base_url": env["mock"],
+                "models_source": endpoint, **source,
             },
             "credential": credential if credential is not None else {
                 "type": "api_key", "value": "synthetic&key=part+/%?#",
             },
+            "vendor_options": {},
             "use_proxy": use_proxy,
         },
         headers=env["auth"],
@@ -288,7 +290,7 @@ def test_native_google_model_discovery_encodes_query_credentials(admin_env: dict
     with _model_probe_endpoint() as (origin, received):
         provider = _create_probe_provider(
             admin_env, "native-google-models", None,
-            vendor=None, protocol="google-gemini", base_url=origin,
+            vendor="protocol-gemini", protocol="google-gemini", base_url=origin,
         )
         provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
         for method, path in (("GET", "test-models"), ("POST", "models/sync")):
@@ -376,10 +378,12 @@ def _create_provider(env: dict[str, str], name: str) -> str:
             "source": {
                 "type": "custom",
                 "vendor": "custom",
+                "channel": "default",
                 "protocol": "openai",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "dummy-key"},
+            "vendor_options": {},
         },
         headers=env["auth"],
     )

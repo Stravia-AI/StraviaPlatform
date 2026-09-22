@@ -13,7 +13,7 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatDuration } from '$lib/format'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical-model'
-import type { ImageCapabilityDrift, Provider, Route } from '$lib/types'
+import type { ImageCapabilityDrift, Provider, ProviderDescriptor, Route, VendorChannelDescriptor } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderEditor from '$lib/components/provider-editor.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
@@ -37,7 +37,10 @@ import { Skeleton } from '$lib/components/ui/skeleton'
 const queryClient = useQueryClient()
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
-const presetsQuery = createQuery(() => ({ queryKey: ['catalog-providers'], queryFn: admin.catalog.providers }))
+const profileDescriptorsQuery = createQuery(() => ({
+  queryKey: ['provider-descriptors'],
+  queryFn: admin.providers.descriptors,
+}))
 const capabilityDriftsQuery = createQuery(() => ({
   queryKey: ['image-capability-drifts'],
   queryFn: admin.providers.capabilityDrifts,
@@ -55,7 +58,6 @@ let actingProviderId = $state<string>()
 const providers = $derived(providersQuery.data ?? [])
 const models = $derived(modelsQuery.data ?? [])
 const providerDependenciesUnavailable = $derived(modelsQuery.isPending || modelsQuery.isError)
-const presets = $derived(presetsQuery.data ?? [])
 const driftsByProvider = $derived.by(() => {
   const grouped: Record<string, ImageCapabilityDrift[]> = {}
   for (const drift of capabilityDriftsQuery.data ?? []) {
@@ -85,13 +87,21 @@ const providerColumns = providerColumnHelper.columns([
     meta: { label: () => m.common_base_url() },
     size: 320,
   }),
-  providerColumnHelper.accessor((provider) => provider.auth_mode ?? 'apikey', {
-    id: 'authentication',
-    header: () => m.providers_authentication(),
-    cell: (context) => renderSnippet(providerAuthenticationCell, context),
-    meta: { label: () => m.providers_authentication() },
-    size: 160,
-  }),
+  providerColumnHelper.accessor(
+    (provider) =>
+      providerChannel(provider)?.auth
+        ? 'oauth'
+        : (provider.configured_credential_fields?.length ?? 0) > 0
+          ? 'credentials'
+          : 'none',
+    {
+      id: 'authentication',
+      header: () => m.providers_authentication(),
+      cell: (context) => renderSnippet(providerAuthenticationCell, context),
+      meta: { label: () => m.providers_authentication() },
+      size: 160,
+    },
+  ),
   providerColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
     cell: (context) => renderSnippet(providerStatusCell, context),
@@ -114,8 +124,16 @@ const providerTableLabels = $derived({
   noResults: m.providers_table_no_results(),
 })
 
+function profileDescriptor(provider: Provider): ProviderDescriptor | undefined {
+  return profileDescriptorsQuery.data?.find((descriptor) => descriptor.provider_id === provider.vendor)
+}
+
+function providerChannel(provider: Provider): VendorChannelDescriptor | undefined {
+  return profileDescriptor(provider)?.channels.find((channel) => channel.id === provider.channel)
+}
+
 function providerIcon(provider: Provider): string {
-  return provider.preset_key ?? 'custom'
+  return profileDescriptor(provider)?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'
 }
 
 function openCreate(): void {
@@ -142,7 +160,9 @@ function providerReferences(provider: Provider): Array<{ route: Route; target: R
 }
 
 function providerSaved(provider: Provider): void {
-  void goto(resolve(`/providers/${encodeURIComponent(provider.id)}?view=models&sync=created`))
+  const canDiscoverModels = providerChannel(provider)?.capabilities.includes('model_discovery') ?? false
+  const view = canDiscoverModels ? 'models&sync=created' : 'connection'
+  void goto(resolve(`/providers/${encodeURIComponent(provider.id)}?view=${view}`))
 }
 
 function askDelete(provider: Provider): void {
@@ -231,6 +251,7 @@ async function copyProvider(): Promise<void> {
 {/snippet}
 
 {#snippet providerActions(provider: Provider)}
+  {@const channel = providerChannel(provider)}
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
       {#snippet child({ props })}
@@ -246,9 +267,11 @@ async function copyProvider(): Promise<void> {
     </DropdownMenu.Trigger>
     <DropdownMenu.Content class="w-52" align="end">
       <DropdownMenu.Group>
-        <DropdownMenu.Item onSelect={() => void testProvider(provider)} disabled={actingProviderId === provider.id}>
-          {m.providers_test_connection()}
-        </DropdownMenu.Item>
+        {#if channel?.capabilities.includes('infer')}
+          <DropdownMenu.Item onSelect={() => void testProvider(provider)} disabled={actingProviderId === provider.id}>
+            {m.providers_test_connection()}
+          </DropdownMenu.Item>
+        {/if}
         <DropdownMenu.Item onSelect={() => void toggleProvider(provider)} disabled={actingProviderId === provider.id}>
           {provider.is_enabled ? m.providers_disable_service() : m.providers_enable_service()}
         </DropdownMenu.Item>
@@ -271,7 +294,7 @@ async function copyProvider(): Promise<void> {
     <ProviderMark
       icon={providerIcon(provider)}
       name={provider.name}
-      catalog={Boolean(provider.preset_key)}
+      catalog={Boolean(profileDescriptor(provider)?.catalog_id ?? provider.preset_key)}
       endpoint={provider.base_url} />
     <div class="min-w-0">
       <p class="truncate font-medium">{provider.name}</p>
@@ -291,7 +314,7 @@ async function copyProvider(): Promise<void> {
 {/snippet}
 
 {#snippet providerProtocolCell(context: DataTableCellContext<Provider>)}
-  <Badge variant="outline">{context.row.original.protocol}</Badge>
+  <Badge variant="outline">{context.row.original.protocol || m.provider_config_custom_protocol()}</Badge>
 {/snippet}
 
 {#snippet providerBaseUrlCell(context: DataTableCellContext<Provider>)}
@@ -299,7 +322,13 @@ async function copyProvider(): Promise<void> {
 {/snippet}
 
 {#snippet providerAuthenticationCell(context: DataTableCellContext<Provider>)}
-  {context.row.original.auth_mode === 'oauth' ? 'OAuth' : m.common_api_key()}
+  {@const provider = context.row.original}
+  {@const channel = providerChannel(provider)}
+  {channel?.auth
+    ? 'OAuth'
+    : (provider.configured_credential_fields?.length ?? 0) > 0
+      ? m.provider_config_credentials()
+      : m.provider_config_no_credentials()}
 {/snippet}
 
 {#snippet providerStatusCell(context: DataTableCellContext<Provider>)}
@@ -308,7 +337,15 @@ async function copyProvider(): Promise<void> {
     compact
     label={provider.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
     tone={provider.is_enabled ? 'healthy' : 'neutral'} />
-  {#if provider.oauth_status}
+  {#if profileDescriptorsQuery.isPending}
+    <p class="mt-1 text-xs text-muted-foreground">{m.common_loading()}</p>
+  {:else if profileDescriptorsQuery.isError}
+    <p class="mt-1 text-xs text-destructive">{m.provider_config_plugins_load_failed()}</p>
+  {:else if !profileDescriptor(provider)}
+    <p class="mt-1 text-xs text-destructive">{m.provider_config_plugin_missing()}</p>
+  {:else if !providerChannel(provider)}
+    <p class="mt-1 text-xs text-destructive">{m.provider_config_channel_missing()}</p>
+  {:else if provider.oauth_status}
     <p class="mt-1 text-xs text-muted-foreground">OAuth · {provider.oauth_status}</p>
   {/if}
 {/snippet}
@@ -387,12 +424,16 @@ async function copyProvider(): Promise<void> {
                 <ProviderMark
                   icon={providerIcon(provider)}
                   name={provider.name}
-                  catalog={Boolean(provider.preset_key)}
+                  catalog={Boolean(profileDescriptor(provider)?.catalog_id ?? provider.preset_key)}
                   endpoint={provider.base_url} />
                 <div class="min-w-0">
                   <p class="truncate font-medium">{provider.name}</p>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    {provider.protocol} · {provider.auth_mode === 'oauth' ? 'OAuth' : m.common_api_key()}
+                    {provider.protocol || m.provider_config_custom_protocol()} · {providerChannel(provider)?.auth
+                      ? 'OAuth'
+                      : (provider.configured_credential_fields?.length ?? 0) > 0
+                        ? m.provider_config_credentials()
+                        : m.provider_config_no_credentials()}
                   </p>
                 </div>
               </div>
@@ -423,7 +464,7 @@ async function copyProvider(): Promise<void> {
   </section>
 </div>
 
-<ProviderEditor bind:open={editorOpen} {presets} onSaved={providerSaved} />
+<ProviderEditor bind:open={editorOpen} onSaved={providerSaved} />
 
 <AlertDialog.Root bind:open={deleteOpen}>
   {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
@@ -454,7 +495,7 @@ async function copyProvider(): Promise<void> {
               {effectiveModelDisplayName(reference.route)}
               {#if logicalModelSecondaryId(reference.route)}
                 · {reference.route.model_id}{/if}
-              · {reference.target.model}
+              · {reference.target.model ?? m.model_editor_provider_only_search_destination()}
             </span>
             <span class="text-xs text-muted-foreground">{m.providers_change_service()}</span>
           </a>

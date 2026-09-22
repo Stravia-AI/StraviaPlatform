@@ -1127,7 +1127,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let progress = Arc::new(Mutex::new(StreamForwardProgress {
             response: Some(
-                crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                     "resp-timeout",
                     "logical-model",
                     "in_progress",

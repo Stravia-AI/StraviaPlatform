@@ -469,8 +469,9 @@ def test_target_retries_and_failover_keep_provider_text_protected(admin_env: dic
             "POST", f"{env['admin']}/api/v1/providers",
             payload={
                 "name": "redaction-fallback",
-                "source": {"type": "custom", "vendor": "custom", "protocol": "openai", "base_url": url},
+                "source": {"type": "custom", "vendor": "custom", "channel": "default", "protocol": "openai", "base_url": url},
                 "credential": {"type": "api_key", "value": "upstream-secret"},
+                "vendor_options": {},
             },
             headers=env["auth"],
         )

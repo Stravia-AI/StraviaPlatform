@@ -15,6 +15,14 @@ use crate::interaction_observation::RunObserver;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 
+/// Runtime-only envelope for a Generation Chain write and the Vendor result
+/// whose bytes it will publish. The fence deliberately never enters a
+/// persistent request/response DTO.
+pub(super) struct PendingGenerationChainWrite {
+    pub(super) write: crate::generation_chain::GenerationChainWrite,
+    pub(super) vendor_publications: Vec<crate::plugin::VendorPublicationFence>,
+}
+
 /// The outstanding work a run still owes after delivery is confirmed Sent.
 ///
 /// Every field is optional because settlement is shared by paths that owe
@@ -31,8 +39,8 @@ pub(super) struct Settlement {
     /// The live Hook session executions finish under. Required whenever
     /// `started_executions` is non-empty; its absence is itself a failure.
     pub run: Option<crate::hook::InferenceRun>,
-    /// The staged Generation Chain node awaiting its commit persist.
-    pub pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
+    /// The staged Generation Chain node awaiting its fenced commit persist.
+    pub pending_generation_chain: Option<PendingGenerationChainWrite>,
     /// The terminal-delivery timestamp reported by the adapter.
     pub delivery_completed_at: Option<i64>,
     /// The response the client received, staged as observed client output.
@@ -47,6 +55,8 @@ pub(super) enum SettlementFailure {
     MarkerPublish(crate::history_marker::HistoryMarkerError),
     /// Confirmed executions had no live Inference Run to finish under.
     ExecutionsWithoutRun { count: usize },
+    /// The Vendor generation became stale before its final history write.
+    VendorPublication(anyhow::Error),
     /// The pending Generation Chain node failed to persist.
     GenerationCommit(crate::generation_chain::PersistError),
 }
@@ -57,6 +67,9 @@ impl std::fmt::Display for SettlementFailure {
             Self::MarkerPublish(error) => write!(f, "settlement_marker_publish: {error}"),
             Self::ExecutionsWithoutRun { count } => {
                 write!(f, "settlement_executions_without_run: {count}")
+            }
+            Self::VendorPublication(error) => {
+                write!(f, "settlement_vendor_publication: {error}")
             }
             Self::GenerationCommit(error) => write!(f, "settlement_generation_commit: {error}"),
         }
@@ -93,7 +106,8 @@ pub(super) async fn report_projected_delivery(
 /// 4. stage the delivered response as the run's observed client output.
 ///
 /// A step's failure is recorded as an observation gap and enumerated in the
-/// outcome; the remaining steps still run to completion.
+/// outcome; later independent steps still run. A stale Vendor fence is the one
+/// exception: no result-derived publication step may start after revocation.
 pub(super) async fn settle(
     gateway: &crate::Gateway,
     session: &mut ClientProjectionSession,
@@ -103,17 +117,41 @@ pub(super) async fn settle(
     settlement: Settlement,
 ) -> SettlementOutcome {
     let Settlement {
-        staged_delivery,
-        background_executions,
+        mut staged_delivery,
+        mut background_executions,
         mut started_executions,
         run,
-        pending_generation_chain,
+        mut pending_generation_chain,
         delivery_completed_at,
-        delivered_response,
+        mut delivered_response,
     } = settlement;
     let mut outcome = SettlementOutcome {
         published_platform_executions: Vec::new(),
         failures: Vec::new(),
+    };
+
+    let vendor_publications = pending_generation_chain
+        .as_ref()
+        .map(|pending| pending.vendor_publications.clone())
+        .unwrap_or_default();
+    let _vendor_guards = match crate::model_turn::vendor_write_fences(&vendor_publications).await {
+        Ok(guards) => Some(guards),
+        Err(error) => {
+            tracing::error!("refused stale Vendor settlement write: {error}");
+            let failure = SettlementFailure::VendorPublication(error);
+            observer.record(RunEvent::ObservationGap {
+                reason: failure.to_string(),
+            });
+            outcome.failures.push(failure);
+            // 已送达的字节无法收回，但旧代结果不得再发布 Marker、启动依赖任务、
+            // 写 Generation Chain 或登记观测到的历史响应。
+            staged_delivery = None;
+            background_executions.clear();
+            started_executions.clear();
+            pending_generation_chain = None;
+            delivered_response = None;
+            None
+        }
     };
 
     if let Some(batch) = staged_delivery {
@@ -153,10 +191,10 @@ pub(super) async fn settle(
         }
     }
 
-    if let Some(mut write) = pending_generation_chain {
-        match write.persist_holding_fence().await {
+    if let Some(mut pending) = pending_generation_chain {
+        match pending.write.persist_holding_fence().await {
             Ok(()) => {
-                if let Some(fence) = write.take_commit_fence() {
+                if let Some(fence) = pending.write.take_commit_fence() {
                     observer.hold_generation_commit_fence(fence);
                 }
                 ledger
@@ -208,10 +246,17 @@ mod tests {
             .await
             .expect("SQLite migrations");
         let directory = tempfile::tempdir().expect("temp dir");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
+        let gateway = crate::Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .await
         .expect("Gateway");
         let observation = crate::interaction_observation::InteractionObservation::new(
@@ -273,7 +318,7 @@ mod tests {
         reference: &str,
     ) -> ProjectedDeltaBatch {
         session.begin_model_leg(
-            crate::protocol::transform::ThinkingCarrierFacts {
+            stravia_protocol_codec::transform::ThinkingCarrierFacts {
                 indexed: false,
                 may_be_protected: false,
                 stream_unprotected_summaries: false,
@@ -372,7 +417,10 @@ mod tests {
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             Settlement {
                 staged_delivery: Some(batch),
-                pending_generation_chain: Some(pending),
+                pending_generation_chain: Some(PendingGenerationChainWrite {
+                    write: pending,
+                    vendor_publications: Vec::new(),
+                }),
                 delivery_completed_at: Some(1_700_000_000_000),
                 delivered_response: Some(AiResponse::new("response-1", "model")),
                 ..Default::default()

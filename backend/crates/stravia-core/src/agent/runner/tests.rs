@@ -188,6 +188,11 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
         data_dir: directory.path().to_path_buf(),
         ..Default::default()
     })
+    .storage(std::sync::Arc::new(crate::storage::MemoryStorage::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )))
     .build()
     .await
     .unwrap();
@@ -228,6 +233,11 @@ async fn platform_agent_business_json_and_single_text_remain_readable_payloads()
         data_dir: directory.path().to_path_buf(),
         ..Default::default()
     })
+    .storage(std::sync::Arc::new(crate::storage::MemoryStorage::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )))
     .build()
     .await
     .unwrap();

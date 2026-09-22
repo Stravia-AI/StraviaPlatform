@@ -1,10 +1,13 @@
 ---
-status: accepted
+status: superseded
+superseded_by: 0070-run-all-model-vendors-as-wasm-plugins
 ---
 
 # Vendor 按请求用途拥有推理与模型探测的构造契约
 
-本 ADR 的请求构造迁移已落地：Vendor、VendorExtension、推理 pipeline 与管理模型探测统一使用 `construct_request`，旧的认证和 URL 钩子已删除。
+> 本 ADR 记录原生 Vendor interface 的历史决策；[ADR-0070](0070-run-all-model-vendors-as-wasm-plugins.md) 已由统一 Wasm Vendor 组件取代该实现形状。请求构造与模型发现知识仍由 Vendor 拥有，但现在位于 guest，并通过 typed SDK/WIT 与受控 host network 执行。
+
+本 ADR 的请求构造迁移曾落地为：Vendor、VendorExtension、推理 pipeline 与管理模型探测统一使用 `construct_request`，旧的认证和 URL 钩子已删除。
 
 迁移前，管理面的 Provider 模型查询与 Route 模型发现分别拼装认证、URL 和 runtime binding，另有一套按协议字符串判断的认证规则。推理侧 Vendor 的分离认证与 URL interface 没有明确区分请求用途，不能把推理的模型路径改写和认证方式直接用于任意模型列表端点。
 

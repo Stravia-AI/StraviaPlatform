@@ -17,7 +17,7 @@
 
 本设计同时适用于 SQLite 和 PostgreSQL 存储，但实时状态与 Debug 开关只承诺单 Gateway 实例。多实例聚合不在本设计范围内。
 
-Observation 使用统一平台身份契约：随机不透明 ID 是由密码学安全随机生成器均匀采样的 28 位 ASCII 小写字母（约 131.6 bit），完整 SHA-256 派生身份则用 55 位 ASCII 小写字母保留全部 256 bit。Artifact 引用为 `sa:<55 位 ID>`，可带 query、禁止 fragment；History Marker 为 `<!--sh:<28 位 ID>-->`；Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`；可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。这些外壳不授予访问权，外部 Provider／客户端 ID 与真实凭据 token 不变。新格式只用于新部署和全新数据库，不兼容读取旧平台 ID，也不回写不可变或外部历史；旧数据库与用户数据应另外保留而非删除，新会话使用全新数据库。
+Observation 使用统一平台身份契约：随机不透明 ID 是由密码学安全随机生成器均匀采样的 28 位 ASCII 小写字母（约 131.6 bit），完整 SHA-256 派生身份则用 55 位 ASCII 小写字母保留全部 256 bit。Artifact Reference 为 `stravia://artifacts/<55 位 ID>`，Turn Reference 为 `stravia://turns/<28 位 ID>`，Search Source 为 `stravia://turns/<28 位 ID>/sources/<ordinal>`；History Marker 为 `<!--sh:<28 位 ID>-->`，Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`，可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。这些外壳不授予访问权，外部 Provider／客户端 ID 与真实凭据 token 不变；旧平台引用不提供兼容解析，已有不可变或外部历史不回写。
 
 ## 2. 非目标
 
@@ -567,6 +567,12 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 ### 10.6 右侧检查器
 
 桌面使用可调宽、可关闭的右侧检查器，默认约占 40–55%；画布保留选中节点及其因果路径。窄屏使用全屏详情。
+
+以下加载分层是已确认的目标边界，当前实现尚未迁移：
+
+- 画布只需要 Interaction 摘要；打开交互卡片后，检查器加载足以直接阅读会话的首屏、可分页的会话历史与 Run 摘要。会话文本不要求用户逐个展开 Run。
+- 只有用户显式展开某个 Run 的诊断详情时，才进入该 Run 的重型诊断内容需求，包括可读思考、工具参数与结果、Target attempt 详细内容。现有「对话」页中的思考或工具 Marker 展开，以及「诊断」页中对应 Run 的展开，均属于这项显式详情需求；不增加额外操作层级。
+- 关闭检查器时退出该 Interaction 的会话与 Run 详情需求；收起对应 Marker 或 Run 诊断时退出该层的重型诊断内容需求。此分层只约束管理页何时获取和订阅所需详情，不改变后台 Interaction Observation 的记录、保留、Debug 开关或 Debug Trace 契约。
 
 默认「对话」页以只读消息气泡展示当前 Interaction：用户靠右使用 primary 色，模型靠左使用中性底色。连续同一模型的 Run 共用一组头像与名称，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。初始用户消息取已脱敏的 `input_preview`，缺失时可用初始 Run 的 `input_preview_recorded.text` 补足；后续 Run 的输入事件在所属回复前生成独立用户消息，不因文本相同而去重。每个 Run 的回复只拼接按 sequence 排序的 `client_visible_content_delta.text`，不把 Debug 内容当作回复。没有公开文本事件的旧记录只回退一次到 `visible_tail`。没有用户正文时不生成用户消息，没有助手正文时隐藏气泡，但保留流式组件实例，保证首个实时增量仍可逐字显示。
 

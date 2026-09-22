@@ -64,20 +64,34 @@ impl LegFailure {
 
         match self {
             Self::ModelTurn(error) => {
-                let status = model_turn_error_status(error).as_u16();
-                // 只有真实上游失败（带 upstream 标记）才把 HTTP 状态映射为
-                // 语义化 kind；平台内部错误（存储、Hook、脱敏等）保持
-                // stream_mid_error，避免把本地故障误报为上游不可用。
-                let kind = match error.code.as_str() {
-                    "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
-                        AiErrorKind::InvalidRequest
+                let (kind, status) = match error.upstream_error_kind.as_ref() {
+                    Some(kind) if !matches!(kind, AiErrorKind::Unknown) => {
+                        (kind.clone(), error.upstream_status)
                     }
-                    _ if error.upstream_status.is_some() || error.upstream_body.is_some() => {
-                        AiError::kind_from_status(status, error.upstream_body.as_deref())
+                    _ => {
+                        let status = model_turn_error_status(error).as_u16();
+                        match error.code.as_str() {
+                            "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
+                                (AiErrorKind::InvalidRequest, Some(status))
+                            }
+                            _ if error.upstream_status.is_some()
+                                || error.upstream_body.is_some() =>
+                            {
+                                (
+                                    AiError::kind_from_status(
+                                        status,
+                                        error.upstream_body.as_deref(),
+                                    ),
+                                    Some(status),
+                                )
+                            }
+                            _ => (AiErrorKind::StreamMidError, None),
+                        }
                     }
-                    _ => AiErrorKind::StreamMidError,
                 };
-                AiError::new(kind, error.message.clone()).with_status(status)
+                let mut public = AiError::new(kind, error.message.clone());
+                public.status_code = status;
+                public
             }
             Self::TerminalFault(Some(error)) => error.clone(),
             Self::TerminalFault(None) | Self::Incomplete => AiError::new(
@@ -369,7 +383,7 @@ impl ModelLegConsume {
             run.exposed_tool_names(),
             Some(crate::history_marker::ThinkingSource {
                 namespace: turn.target.namespace.clone(),
-                protocol: turn.route.egress,
+                protocol: turn.target.protocol_identity(),
                 actual_model: turn.target.actual_model.clone(),
                 target_id: turn.target.target_id.clone(),
             }),
@@ -380,7 +394,6 @@ impl ModelLegConsume {
                 generation.clone(),
                 ingress,
                 &turn.target,
-                turn.route.egress,
                 turn.model_turn_id.clone(),
                 observer.clone(),
             ),
@@ -726,6 +739,25 @@ impl ModelLegConsume {
                 return LegAdvance::Failed(LegFailure::Completion(failure));
             }
         };
+        let vendor_publication = match self.completion.current_vendor_publication() {
+            Ok(publication) => publication,
+            Err(error) => {
+                return LegAdvance::Failed(LegFailure::Completion(CompletionFailure::Hook(
+                    error.to_string(),
+                )));
+            }
+        };
+        let vendor_guard = match vendor_publication.as_ref() {
+            Some(publication) => match publication.write_fence().await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    return LegAdvance::Failed(LegFailure::Completion(CompletionFailure::Hook(
+                        error.to_string(),
+                    )));
+                }
+            },
+            None => None,
+        };
         match ops.emit_staged(projection, staged_delivery).await {
             LegFlow::Open => {}
             LegFlow::Disrupted(progress) => return LegAdvance::Disrupted(progress),
@@ -737,6 +769,12 @@ impl ModelLegConsume {
             .await
         {
             return LegAdvance::Failed(LegFailure::Completion(failure));
+        }
+        drop(vendor_guard);
+        if let Some(publication) = vendor_publication {
+            // 隐藏轮已完成自己的受栅栏写入；仍保留轻量结果 fence，确保最终
+            // Generation Chain 不会在中途发生不兼容更新后收录旧代输出。
+            env.generation.vendor_publications.push(publication);
         }
         match acquire_followup_model_turn(FollowupLeg {
             executor: env.executor,
@@ -997,10 +1035,17 @@ mod tests {
             .await
             .expect("SQLite migrations");
         let directory = tempfile::tempdir().expect("temp dir");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
+        let gateway = crate::Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .await
         .expect("Gateway");
         let observation = crate::interaction_observation::InteractionObservation::new(
@@ -1080,6 +1125,7 @@ mod tests {
             client_request: request,
             previous_response_id: None,
             compaction_source_generation_id: None,
+            vendor_publications: Vec::new(),
         };
         LegFixture {
             gateway,
@@ -1097,7 +1143,7 @@ mod tests {
                 model_id: "model".into(),
                 provider_id: "provider".into(),
                 target_id: "target".into(),
-                egress: INGRESS,
+                egress: Some(INGRESS),
             },
             AiRequest::new("model", Vec::<AiItem>::new()),
             events,
@@ -1312,7 +1358,7 @@ mod tests {
                 model_id: "model".into(),
                 provider_id: "provider".into(),
                 target_id: "target".into(),
-                egress: INGRESS,
+                egress: Some(INGRESS),
             },
             AiRequest::new("model", Vec::<AiItem>::new()),
             Vec::new(),

@@ -10,6 +10,7 @@ use crate::db::models::{
     ProviderStats, PutRoute, Route, StatsOverview, StatsSeries, Target, UpdateProvider,
     UpsertOAuthCredential,
 };
+use crate::plugin::PluginStore;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
     ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind,
@@ -30,6 +31,7 @@ pub struct MemoryStorage {
     settings: Arc<RwLock<Vec<(String, String)>>>,
     provider_models: Arc<RwLock<Vec<ProviderModelRecord>>>,
     oauth_credentials: Arc<MemoryOAuthCredentialStore>,
+    plugin_store: PluginStore,
 }
 
 impl MemoryStorage {
@@ -38,23 +40,36 @@ impl MemoryStorage {
         models: Vec<Route>,
         settings: Vec<(String, String)>,
     ) -> Self {
+        let providers = Arc::new(RwLock::new(providers));
+        let provider_models = Arc::new(RwLock::new(Vec::new()));
+        let oauth_credentials = Arc::new(MemoryOAuthCredentialStore {
+            credentials: RwLock::new(std::collections::HashMap::new()),
+        });
+        let plugin_store = PluginStore::memory(
+            providers.clone(),
+            provider_models.clone(),
+            oauth_credentials.clone(),
+        );
         Self {
-            providers: Arc::new(RwLock::new(providers)),
+            providers,
             models: Arc::new(RwLock::new(models)),
             settings: Arc::new(RwLock::new(settings)),
-            provider_models: Arc::new(RwLock::new(Vec::new())),
-            oauth_credentials: Arc::new(MemoryOAuthCredentialStore {
-                credentials: RwLock::new(std::collections::HashMap::new()),
-            }),
+            provider_models,
+            oauth_credentials,
+            plugin_store,
         }
     }
 }
 
-pub struct MemoryOAuthCredentialStore {
-    credentials: RwLock<std::collections::HashMap<String, OAuthCredential>>,
+pub(crate) struct MemoryOAuthCredentialStore {
+    pub(crate) credentials: RwLock<std::collections::HashMap<String, OAuthCredential>>,
 }
 
 impl Storage for MemoryStorage {
+    fn vendor_plugins(&self) -> &PluginStore {
+        &self.plugin_store
+    }
+
     fn providers(&self) -> &dyn ProviderStore {
         self
     }
@@ -183,8 +198,11 @@ impl ProviderStore for MemoryStorage {
         let mut providers = self.providers.write().await;
         let mut routes = self.models.write().await;
         let mut provider_models = self.provider_models.write().await;
+        let mut oauth_credentials = self.oauth_credentials.credentials.write().await;
+        self.plugin_store.remove_memory_provider_data(id).await;
         providers.retain(|provider| provider.id != id);
         provider_models.retain(|model| model.provider_id != id);
+        oauth_credentials.remove(id);
         for route in routes.iter_mut() {
             route.targets.retain(|target| target.provider_id != id);
             if let Some(primary) = route.targets.first() {
@@ -276,30 +294,34 @@ impl RouteStore for MemoryStorage {
         let targets = input
             .targets
             .into_iter()
-            .map(|target| Target {
-                id: existing_targets
-                    .iter()
-                    .find(|current| {
-                        current.provider_id == target.provider_id && current.model == target.model
-                    })
-                    .map(|current| current.id.clone())
-                    .unwrap_or_else(stravia_runtime_contract::identifier::new_id),
-                model_id: storage_id.clone(),
-                provider_id: target.provider_id,
-                model: target.model,
-                enabled: target.enabled,
-                priority: target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
-                first_token_timeout_ms: target
-                    .first_token_timeout_ms
-                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
-                target_retry_budget: target
-                    .target_retry_budget
-                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
-                target_cooldown_ms: target
-                    .target_cooldown_ms
-                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
-                created_at: now_rfc3339(),
-                thinking_level_map: sqlx::types::Json(target.thinking_level_map),
+            .map(|target| {
+                let provider_id = target.provider_id.trim().to_owned();
+                let model = target.model.as_deref().map(str::trim).map(str::to_owned);
+                Target {
+                    id: existing_targets
+                        .iter()
+                        .find(|current| {
+                            current.provider_id == provider_id && current.model == model
+                        })
+                        .map(|current| current.id.clone())
+                        .unwrap_or_else(stravia_runtime_contract::identifier::new_id),
+                    model_id: storage_id.clone(),
+                    provider_id,
+                    model,
+                    enabled: target.enabled,
+                    priority: target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
+                    first_token_timeout_ms: target
+                        .first_token_timeout_ms
+                        .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+                    target_retry_budget: target
+                        .target_retry_budget
+                        .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+                    target_cooldown_ms: target
+                        .target_cooldown_ms
+                        .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
+                    created_at: now_rfc3339(),
+                    thinking_level_map: sqlx::types::Json(target.thinking_level_map),
+                }
             })
             .collect::<Vec<_>>();
         let mut route = Route {
@@ -415,6 +437,19 @@ impl StorageBootstrap for MemoryStorage {
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn parse_datetime_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|value| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(value, chrono::Utc)
+                })
+        })
 }
 
 #[async_trait]
@@ -714,11 +749,19 @@ impl OAuthCredentialStore for MemoryOAuthCredentialStore {
         Ok(true)
     }
 
-    async fn list_expiring(&self, _before: Duration) -> anyhow::Result<Vec<OAuthCredential>> {
+    async fn list_expiring(&self, before: Duration) -> anyhow::Result<Vec<OAuthCredential>> {
+        let cutoff = chrono::Utc::now() + chrono::Duration::from_std(before)?;
         let map = self.credentials.read().await;
         Ok(map
             .values()
-            .filter(|c| c.status == "connected")
+            .filter(|credential| {
+                credential.status == "connected"
+                    && credential
+                        .expires_at
+                        .as_deref()
+                        .and_then(parse_datetime_utc)
+                        .is_some_and(|expires_at| expires_at <= cutoff)
+            })
             .cloned()
             .collect())
     }
@@ -772,7 +815,7 @@ mod tests {
         crate::db::models::CreateTarget {
             enabled: true,
             provider_id: provider_id.into(),
-            model: model.into(),
+            model: Some(model.into()),
             priority: Some(1),
             first_token_timeout_ms: None,
             target_retry_budget: None,
@@ -883,12 +926,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_selection_only_returns_credentials_inside_the_expiry_window() {
+        let store = MemoryOAuthCredentialStore {
+            credentials: RwLock::new(std::collections::HashMap::new()),
+        };
+        for (provider_id, expires_at) in [
+            (
+                "expired",
+                Some((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()),
+            ),
+            (
+                "future",
+                Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+            ),
+            ("non-expiring", None),
+        ] {
+            store
+                .upsert(
+                    provider_id,
+                    UpsertOAuthCredential {
+                        driver_key: "openai-codex".into(),
+                        scheme: "oauth".into(),
+                        access_token: format!("{provider_id}-token"),
+                        refresh_token: Some(format!("{provider_id}-refresh")),
+                        expires_at,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("credential");
+        }
+
+        let selected = store
+            .list_expiring(Duration::from_secs(300))
+            .await
+            .expect("expiring credentials");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|credential| credential.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            ["expired"]
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_refresh_lease_is_retryable_and_cas_safe() {
         let store = MemoryOAuthCredentialStore {
             credentials: RwLock::new(std::collections::HashMap::new()),
         };
         let original = UpsertOAuthCredential {
-            driver_key: "codex".into(),
+            driver_key: "openai-codex".into(),
             scheme: "oauth".into(),
             access_token: "expired".into(),
             refresh_token: Some("refresh".into()),
@@ -940,7 +1028,7 @@ mod tests {
             .upsert(
                 "provider",
                 UpsertOAuthCredential {
-                    driver_key: "codex".into(),
+                    driver_key: "openai-codex".into(),
                     scheme: "oauth".into(),
                     access_token: "old".into(),
                     refresh_token: Some("refresh".into()),
@@ -961,7 +1049,7 @@ mod tests {
                 "provider",
                 lease.status_version,
                 UpsertOAuthCredential {
-                    driver_key: "codex".into(),
+                    driver_key: "openai-codex".into(),
                     scheme: "oauth".into(),
                     access_token: "new".into(),
                     refresh_token: Some("refresh-2".into()),
@@ -976,7 +1064,7 @@ mod tests {
             .upsert(
                 "provider",
                 UpsertOAuthCredential {
-                    driver_key: "codex".into(),
+                    driver_key: "openai-codex".into(),
                     scheme: "oauth".into(),
                     access_token: "reconnected".into(),
                     refresh_token: Some("refresh-3".into()),

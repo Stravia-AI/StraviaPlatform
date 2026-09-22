@@ -375,7 +375,7 @@ impl GenerationChainStore {
         let mut source: Option<(usize, String)> = None;
         for (position, item) in request.items.iter().enumerate().rev() {
             let Some(id) = item.id_ref().and_then(
-                crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id,
+                stravia_protocol_codec::codec::open_responses::formatter::response_id_from_gateway_item_id,
             ) else {
                 continue;
             };
@@ -664,7 +664,7 @@ impl GenerationChainStore {
         candidate_state: &GenerationChainState,
         allow_ephemeral_response: bool,
     ) -> bool {
-        if (!request_preserves_upstream_response(request) && !allow_ephemeral_response)
+        if !(request_preserves_upstream_response(request) || allow_ephemeral_response)
             || !candidate_state.supports_open_responses_continuation()
         {
             return false;
@@ -695,8 +695,16 @@ impl GenerationChainStore {
             return false;
         }
         request.items = request.items.split_off(parent_state.context_messages);
-        if let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_mut() {
-            extension.previous_response_id = Some(upstream_id.clone());
+        match request.ext.as_mut() {
+            Some(ProtocolExt::OpenResponses(extension)) => {
+                extension.previous_response_id = Some(upstream_id.clone());
+            }
+            _ => {
+                request.ext = Some(ProtocolExt::OpenResponses(OpenResponsesExt {
+                    previous_response_id: Some(upstream_id.clone()),
+                    ..Default::default()
+                }));
+            }
         }
         request.meta.vendor.ingress.insert(
             "previous_response_id".into(),
@@ -748,7 +756,8 @@ impl GenerationChainStore {
         let mut effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
         let projected_client = project_client_commit(&parent, &request_delta, &response)?;
         let fresh_states = &parent.fresh_inline_states;
-        let inline_boundary = crate::protocol::codec::open_responses::inline_compaction_boundary;
+        let inline_boundary =
+            stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
         let mut effective_inline = false;
         // Hidden rounds also appear in the projected response. Prefer their real
         // position in the effective request so completed platform work survives.

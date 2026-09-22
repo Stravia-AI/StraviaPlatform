@@ -484,7 +484,7 @@ mod tests {
             display_name: None,
             balance: "traffic_equalization".into(),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             is_enabled: true,
             created_at: "2000-01-01T00:00:00Z".into(),
             targets: Vec::new(),

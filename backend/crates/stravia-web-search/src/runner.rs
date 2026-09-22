@@ -44,6 +44,7 @@ pub struct SearchBackendInput {
     pub definition_revision: Option<u32>,
     pub local_limits: Option<LocalSearchLimits>,
     pub cancellation: CancellationToken,
+    pub deadline: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,15 +53,36 @@ pub struct LocalSearchLimits {
     pub total_time: Duration,
 }
 
-#[derive(Debug, Clone)]
 pub struct BackendOutput {
     pub completion: SearchCompletion,
     pub partial_cause: Option<super::SearchPartialCause>,
     pub report: SearchReport,
     pub evidence: SearchEvidenceSet,
-    pub usage: Usage,
+    pub usage: Option<Usage>,
     pub model_turns: u32,
     pub tool_calls: u32,
+    pub publication: Option<crate::host::SearchPublicationGuard>,
+    pub provider_id: Option<String>,
+    pub upstream_model: Option<String>,
+    pub target_id: Option<String>,
+}
+
+impl std::fmt::Debug for BackendOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackendOutput")
+            .field("completion", &self.completion)
+            .field("partial_cause", &self.partial_cause)
+            .field("report", &self.report)
+            .field("evidence", &self.evidence)
+            .field("usage", &self.usage)
+            .field("model_turns", &self.model_turns)
+            .field("tool_calls", &self.tool_calls)
+            .field("provider_id", &self.provider_id)
+            .field("upstream_model", &self.upstream_model)
+            .field("target_id", &self.target_id)
+            .finish_non_exhaustive()
+    }
 }
 
 struct SearchAudit {
@@ -73,7 +95,7 @@ struct SearchAudit {
     model_id: Option<String>,
     config_revision: Option<u64>,
     definition_revision: Option<u32>,
-    usage: Usage,
+    usage: Option<Usage>,
     model_turns: u32,
     tool_calls: u32,
 }
@@ -90,7 +112,7 @@ impl SearchAudit {
             model_id: None,
             config_revision: None,
             definition_revision: None,
-            usage: Usage::default(),
+            usage: None,
             model_turns: 0,
             tool_calls: 0,
         }
@@ -105,13 +127,8 @@ impl SearchAudit {
                 self.backend = Some("local");
                 self.model_id = Some(model_id.clone());
             }
-            ResolvedWebSearchBackend::Codex {
-                provider_id,
-                upstream_model,
-            } => {
-                self.backend = Some("codex");
-                self.provider_id = Some(provider_id.clone());
-                self.model_id = Some(upstream_model.clone());
+            ResolvedWebSearchBackend::External { .. } => {
+                self.backend = Some("external");
             }
         }
     }
@@ -125,7 +142,7 @@ impl SearchAudit {
                 Some(error.code.as_str()),
                 error.backend.map(|backend| match backend {
                     WebSearchBackendKind::Local => "local",
-                    WebSearchBackendKind::Codex => "codex",
+                    WebSearchBackendKind::External => "external",
                 }),
             ),
         };
@@ -145,9 +162,9 @@ impl SearchAudit {
             definition_revision = self.definition_revision,
             model_turns = self.model_turns,
             tool_calls = self.tool_calls,
-            prompt_tokens = self.usage.prompt_tokens,
-            completion_tokens = self.usage.completion_tokens,
-            total_tokens = self.usage.total_tokens,
+            prompt_tokens = self.usage.as_ref().map(|usage| usage.prompt_tokens),
+            completion_tokens = self.usage.as_ref().map(|usage| usage.completion_tokens),
+            total_tokens = self.usage.as_ref().map(|usage| usage.total_tokens),
             elapsed_ms = self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
             "Web Search terminal outcome"
         );
@@ -226,7 +243,7 @@ pub struct WebSearchRunner {
     config: Arc<dyn WebSearchConfigStore>,
     turns: Arc<dyn TurnChainStore>,
     local: Arc<dyn SearchBackend>,
-    codex: Arc<dyn SearchBackend>,
+    external: Arc<dyn SearchBackend>,
     validator: Arc<SearchReportValidator>,
     turn_ttl: Duration,
     authorizer: Arc<dyn SearchRunAuthorizer>,
@@ -237,7 +254,7 @@ impl WebSearchRunner {
         config: Arc<dyn WebSearchConfigStore>,
         turns: Arc<dyn TurnChainStore>,
         local: Arc<dyn SearchBackend>,
-        codex: Arc<dyn SearchBackend>,
+        external: Arc<dyn SearchBackend>,
         validator: Arc<SearchReportValidator>,
         turn_ttl: Duration,
         authorizer: Arc<dyn SearchRunAuthorizer>,
@@ -246,7 +263,7 @@ impl WebSearchRunner {
             config,
             turns,
             local,
-            codex,
+            external,
             validator,
             turn_ttl,
             authorizer,
@@ -406,6 +423,15 @@ impl WebSearchRunner {
                 "Previous Search Turn is unavailable",
             ));
         }
+        if input.previous_turn_id.is_some()
+            && matches!(&snapshot.backend, ResolvedWebSearchBackend::External { .. })
+        {
+            return Err(WebSearchError::backend(
+                WebSearchBackendKind::External,
+                "continuation_unsupported",
+                "External Search reports cannot be continued; start a new search",
+            ));
+        }
         let policy = normalize_policy(match input.policy.clone() {
             Some(policy) => policy,
             None => ancestors
@@ -448,7 +474,7 @@ impl WebSearchRunner {
                     Some(limits),
                 )
             }
-            WebSearchBackendKind::Codex => (Arc::clone(&self.codex), input.deadline, None),
+            WebSearchBackendKind::External => (Arc::clone(&self.external), input.deadline, None),
         };
         if backend.kind() != snapshot.backend.kind() {
             return Err(WebSearchError::new(
@@ -475,6 +501,7 @@ impl WebSearchRunner {
             definition_revision: snapshot.definition_revision,
             local_limits,
             cancellation: input.cancellation.clone(),
+            deadline,
         };
         let output = self
             .await_stage(
@@ -501,6 +528,22 @@ impl WebSearchRunner {
         )
         .await?;
 
+        let BackendOutput {
+            completion,
+            partial_cause,
+            report: unvalidated_report,
+            evidence: output_evidence,
+            usage,
+            model_turns,
+            tool_calls,
+            publication: _publication_guard,
+            provider_id,
+            upstream_model,
+            target_id: _,
+        } = output;
+        audit.provider_id = provider_id;
+        audit.model_id = upstream_model;
+
         let mut evidence =
             SearchEvidenceSet::from_evidence(ancestors.iter().flat_map(|ancestor| {
                 ancestor.report.sources.iter().map(|source| SearchEvidence {
@@ -508,7 +551,7 @@ impl WebSearchRunner {
                     title: source.title.clone(),
                 })
             }));
-        evidence.extend(output.evidence.iter());
+        evidence.extend(output_evidence.iter());
         let report = self
             .await_stage(
                 &input,
@@ -517,9 +560,9 @@ impl WebSearchRunner {
                 events,
                 self.validator.validate(
                     &turn_id,
-                    output.completion,
-                    output.partial_cause,
-                    output.report,
+                    completion,
+                    partial_cause,
+                    unvalidated_report,
                     &evidence,
                     &policy.allowed_domains,
                 ),
@@ -528,19 +571,19 @@ impl WebSearchRunner {
             .await?;
         let result = WebSearchResult {
             turn_id: turn_id.clone(),
-            completion: output.completion,
+            completion,
             report,
         };
-        audit.usage = output.usage.clone();
-        audit.model_turns = output.model_turns;
-        audit.tool_calls = output.tool_calls;
+        audit.usage = usage.clone();
+        audit.model_turns = model_turns;
+        audit.tool_calls = tool_calls;
         let payload = SearchTurnPayload {
             query: input.query.clone(),
             policy: policy.clone(),
             snapshot: snapshot.clone(),
             completion: result.completion,
             report: result.report.clone(),
-            usage: output.usage,
+            usage,
             elapsed_ms: started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
         };
         let commit = self.turns.commit(TurnCommit {
@@ -559,6 +602,7 @@ impl WebSearchRunner {
             WebSearchError::new("storage_failed", "Search Turn could not be committed")
         })
         .await?;
+        drop(_publication_guard);
 
         send_event(
             events,
@@ -611,7 +655,8 @@ struct SearchTurnPayload {
     snapshot: SearchSnapshot,
     completion: SearchCompletion,
     report: SearchReport,
-    usage: Usage,
+    #[serde(default)]
+    usage: Option<Usage>,
     elapsed_ms: u64,
 }
 

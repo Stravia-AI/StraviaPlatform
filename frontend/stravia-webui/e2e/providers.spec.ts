@@ -1,5 +1,6 @@
-import { expect, test } from '@playwright/test'
+import { expect, type Route, test } from '@playwright/test'
 
+import type { ProviderDescriptor } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
 test.beforeEach(async ({ page }) => {
@@ -56,11 +57,8 @@ test('configured Providers table filters and persists column customization', asy
       protocol: 'openai-compatible',
       base_url: 'https://zeta.example/v1',
       use_proxy: false,
-      auth_mode: 'apikey',
-      preset_key: null,
-      channel: null,
-      models_source: null,
-      static_models: null,
+      channel: 'default',
+      configured_credential_fields: ['api_key'],
       is_enabled: true,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
@@ -72,11 +70,8 @@ test('configured Providers table filters and persists column customization', asy
       protocol: 'anthropic-messages',
       base_url: 'https://alpha.example/v1',
       use_proxy: false,
-      auth_mode: 'oauth',
-      preset_key: null,
-      channel: null,
-      models_source: null,
-      static_models: null,
+      channel: 'claude-code',
+      configured_credential_fields: [],
       is_enabled: false,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
@@ -139,49 +134,44 @@ test('configured Providers table filters and persists column customization', asy
   await expect(table.getByRole('row').nth(1)).toContainText('Alpha Service')
 })
 
-test('provider editor selects a Provider option before showing its configuration', async ({ page }) => {
+test('provider editor selects a service before validating its configuration', async ({ page }) => {
+  let previewAttempts = 0
+  await page.route('**/api/v1/providers/configuration-preview', async (route) => {
+    previewAttempts += 1
+    const input = route.request().postDataJSON() as { base_url: string }
+    await route.fulfill({
+      json: {
+        data: {
+          base_url: input.base_url,
+          issues:
+            previewAttempts === 1
+              ? [{ field: 'apiKey', code: 'credential_rejected', message: 'Use a valid fixture credential.' }]
+              : [],
+          network_permissions: [],
+        },
+      },
+    })
+  })
   await page.goto('/providers')
-  await expect(page.getByRole('button', { name: 'Update service list' })).toHaveCount(0)
   await page.getByRole('button', { name: /Connect (first )?service/ }).click()
 
-  await expect(page.getByRole('heading', { name: 'Connect a model service' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toHaveCount(0)
-  const searchInput = page.getByPlaceholder('Search services')
+  const searchInput = page.getByRole('textbox', { name: 'Search services, channels, or capabilities' })
   await expect(searchInput).toBeVisible()
-  const refreshButton = page.getByRole('button', { name: 'Update service list' })
+  const refreshButton = page.getByRole('button', { name: 'Reload model services' })
   await expect(refreshButton).toBeVisible()
-  const searchBox = await searchInput.boundingBox()
-  const refreshBox = await refreshButton.boundingBox()
-  expect(searchBox).not.toBeNull()
-  expect(refreshBox).not.toBeNull()
-  expect(refreshBox!.x).toBeGreaterThan(searchBox!.x + searchBox!.width)
-  const verticalOffset = Math.abs(refreshBox!.y + refreshBox!.height / 2 - (searchBox!.y + searchBox!.height / 2))
-  expect(verticalOffset).toBeLessThanOrEqual(1)
   await refreshButton.click()
-  await expect(page.getByText('Service list updated: 2 services and 4 models.')).toBeVisible()
-  const cardWidths = await page
-    .locator('[data-provider-option]')
-    .evaluateAll((cards) => cards.map((card) => card.getBoundingClientRect().width))
-  expect(Math.min(...cardWidths)).toBeGreaterThanOrEqual(248)
-  await expect(page.getByRole('tab', { name: 'Featured' })).toHaveCount(0)
-  await expect(page.getByRole('tab', { name: 'Other' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /Custom.*Bring your own/ })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*API key/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Codex.*OAuth account/ })).toBeVisible()
-  await expect(page.getByText(/^\d+ models$/)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
 
   await searchInput.fill('OpenAI')
   await expect(page.getByRole('button', { name: /OpenAI.*API key/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Codex.*OAuth account/ })).toBeVisible()
-  await expect(page.locator('img[src$="/catalog/providers/openai/logo"]').first()).toBeVisible()
-  await expect(page.getByRole('tab', { name: 'Choose service' })).toHaveAttribute('data-state', 'active')
+  await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Choose service' })).toHaveAttribute('aria-selected', 'true')
   const openAiOption = page.getByRole('button', { name: /OpenAI.*API key/ })
-  const codexOption = page.getByRole('button', { name: /Codex.*OAuth account/ })
-  await expect(openAiOption.getByText('API Key', { exact: true })).toHaveCount(0)
-  await expect(openAiOption.getByText('API key', { exact: true })).toBeVisible()
-  await expect(codexOption.getByText('OAuth', { exact: true })).toHaveCount(0)
-  await expect(codexOption.getByText('Codex · OAuth account', { exact: true })).toBeVisible()
+  const codexOption = page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })
   await openAiOption.focus()
   await openAiOption.press('ArrowRight')
   await expect(codexOption).toBeFocused()
@@ -191,173 +181,131 @@ test('provider editor selects a Provider option before showing its configuration
   await page.getByRole('button', { name: 'Clear search' }).click()
   await expect(page.getByText('No matching services', { exact: true })).toHaveCount(0)
 
-  await page.getByRole('button', { name: /Custom.*Bring your own/ }).click()
+  const compatibleOption = page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ })
+  await compatibleOption.click()
 
   await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
-  await expect(page.getByLabel('Service identifier')).toBeVisible()
-  await expect(page.getByLabel('Base URL')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible()
-  const apiKey = page.getByLabel('API Key', { exact: true })
+  const providerForm = page.locator('form.route-overlay-form')
+  const baseUrl = page.getByLabel('Base URL')
+  const connect = page.getByRole('button', { name: 'Connect', exact: true })
+  const apiKey = page.getByLabel('API key', { exact: true })
+  await expect.poll(() => providerForm.evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false)
+  await baseUrl.fill('https://custom.example/v1')
   await apiKey.fill('fixture-only-provider-secret')
+  await expect.poll(() => providerForm.evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(true)
+  await expect(connect).toBeDisabled()
+  await page.getByRole('button', { name: 'Review configuration' }).click()
+  await expect(page.getByText('Use a valid fixture credential.')).toBeVisible()
+  await expect(apiKey).toHaveValue('fixture-only-provider-secret')
+  await apiKey.fill('fixture-only-provider-secret-corrected')
+  await expect(page.getByText('Use a valid fixture credential.')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Review configuration' }).click()
+  await expect(connect).toBeEnabled()
   await page.getByRole('button', { name: 'Show secret', exact: true }).click()
   await expect(apiKey).toHaveAttribute('type', 'text')
-  await expect(apiKey).toHaveValue('fixture-only-provider-secret')
-  await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
+  await expect(apiKey).toHaveValue('fixture-only-provider-secret-corrected')
+
   await page.getByRole('tab', { name: 'Choose service' }).click()
-  await expect(page.getByRole('heading', { name: 'Connect a model service' })).toBeVisible()
-  await page.getByRole('button', { name: /Custom.*Bring your own/ }).click()
+  await page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ }).click()
   await expect(apiKey).toHaveAttribute('type', 'password')
+  await expect(apiKey).toHaveValue('')
 })
 
-test('stale catalog selection recovers with a localized error and a refreshed service list', async ({ page }) => {
-  const goneVendor = {
-    id: 'gone-vendor',
-    name: 'Gone Vendor',
-    documentation_url: null,
-    protocol: 'openai-compatible',
-    base_url: 'https://gone.example/v1',
-    vendor_id: 'openai-compatible',
-    npm: '@ai-sdk/openai-compatible',
-    channels: [
-      {
-        id: 'default',
-        label: 'Default',
-        protocol: 'openai-compatible',
-        base_url: 'https://gone.example/v1',
-        auth_mode: 'optional_api_key',
-        fingerprint: 'gone-default',
-      },
-    ],
-  }
-  let catalogFetches = 0
-  await page.route('**/api/v1/catalog/providers', async (route) => {
-    catalogFetches += 1
-    // 第一次列出已过期的服务;目录失效后重新拉取,新 revision 不再包含它。
-    const providers = catalogFetches === 1 ? [goneVendor] : []
-    await route.fulfill({
-      json: {
-        revision: catalogFetches === 1 ? 'stale-catalog' : 'refreshed-catalog',
-        generated_at: '2026-09-16T00:00:00Z',
-        providers,
-      },
-    })
-  })
-  await page.route('**/api/v1/providers', async (route) => {
-    if (route.request().method() === 'POST') {
-      await route.fulfill({
-        status: 404,
-        json: {
-          code: 'CATALOG_PROVIDER_NOT_FOUND',
-          error: 'Catalog provider was not found in the active catalog revision.',
-          params: { provider_id: 'gone-vendor' },
-        },
-      })
-      return
-    }
-    await route.fulfill({ json: { data: [] } })
-  })
-
-  await page.goto('/providers')
-  await page.getByRole('button', { name: /Connect (first )?service/ }).click()
-  await page.getByRole('button', { name: /Gone Vendor.*API key/ }).click()
-  await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
-  await page.getByLabel('API Key', { exact: true }).fill('fixture-only-provider-secret')
-  await page.getByRole('button', { name: 'Connect', exact: true }).click()
-
-  await expect(
-    page.getByText(
-      'The selected service is no longer available in the catalog. Refresh the service list and choose again.',
-    ),
-  ).toBeVisible()
-  // 回到“选择服务”并且过期服务从刷新后的列表里消失。
-  await expect(page.getByRole('tab', { name: 'Choose service' })).toHaveAttribute('data-state', 'active')
-  await expect(page.getByRole('heading', { name: 'Connect a model service' })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Gone Vendor/ })).toHaveCount(0)
-  expect(catalogFetches).toBeGreaterThanOrEqual(2)
-})
-
-test('configured Providers use Catalog logos and Custom uses its endpoint favicon', async ({ page }) => {
-  const configuredProviders = [
-    {
-      id: 'xiaomi-provider',
-      name: 'Xiaomi Catalog',
-      vendor: 'xiaomi',
-      protocol: 'openai-compatible',
-      base_url: 'https://api.xiaomi.example/v1',
-      use_proxy: false,
-      auth_mode: 'apikey',
-      preset_key: 'xiaomi',
-      channel: 'default',
-      models_source: 'catalog',
-      static_models: null,
-      is_enabled: true,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-    },
-    {
-      id: 'custom-provider',
-      name: 'Custom Endpoint',
+for (const mode of ['create', 'edit'] as const) {
+  test(`${mode} Provider discards a configuration review after the candidate changes`, async ({ page }) => {
+    const provider = {
+      id: 'review-provider',
+      name: 'Review Provider',
       vendor: 'openai',
+      channel: 'default',
       protocol: 'openai-compatible',
-      base_url: 'https://custom.example/v1',
+      base_url: 'https://before.example/v1',
       use_proxy: false,
-      auth_mode: 'apikey',
-      preset_key: null,
-      channel: null,
-      models_source: null,
-      static_models: null,
+      vendor_options: {},
+      configured_credential_fields: ['api_key'],
       is_enabled: true,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
-    },
-  ]
-  await page.route('**/api/v1/providers', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.fallback()
-      return
     }
-    await route.fulfill({ json: { data: configuredProviders } })
-  })
-  await page.route('**/api/v1/providers/image-capability-drifts', async (route) => {
-    await route.fulfill({
+    const firstReview = Promise.withResolvers<Route>()
+    const secondReview = Promise.withResolvers<Route>()
+    let reviewCount = 0
+    await page.route('**/api/v1/providers/configuration-preview', (route) => {
+      reviewCount += 1
+      if (reviewCount === 1) firstReview.resolve(route)
+      else secondReview.resolve(route)
+    })
+    if (mode === 'edit') {
+      await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+      await page.route('**/api/v1/providers/review-provider/models', (route) =>
+        route.fulfill({ json: { data: { models: [] } } }),
+      )
+      await page.goto('/providers/review-provider?view=connection')
+    } else {
+      await page.goto('/providers')
+      await page.getByRole('button', { name: /Connect (first )?service/ }).click()
+      await page.getByRole('button', { name: /OpenAI.*API key/ }).click()
+      await page.getByLabel('Base URL').fill(provider.base_url)
+      await page.getByLabel('API key', { exact: true }).fill('fixture-only-review-secret')
+    }
+    const baseUrl = page.getByLabel('Base URL')
+    const save = page.getByRole('button', { name: mode === 'edit' ? 'Save connection' : 'Connect', exact: true })
+    const review = page.getByRole('button', { name: 'Review configuration' })
+    const staleResponse = page.waitForResponse('**/api/v1/providers/configuration-preview')
+    await review.click()
+    const pending = await firstReview.promise
+    await baseUrl.fill('https://after.example/v1')
+    await expect(save).toBeDisabled()
+    await pending.fulfill({
       json: {
-        data: [
-          {
-            id: 'drift-1',
-            provider_id: 'xiaomi-provider',
-            upstream_model: 'mimo-v2',
-            safe_message: 'Image output support changed',
-            detected_at: '2026-01-02T00:00:00Z',
-          },
-        ],
+        data: {
+          base_url: provider.base_url,
+          issues: [],
+          network_permissions: [
+            { origin: 'https://before.example', configuration_field: null, connection_scoped: true },
+          ],
+        },
       },
     })
+    await (await staleResponse).finished()
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+    await expect(baseUrl).toHaveValue('https://after.example/v1')
+    await expect(save).toBeDisabled()
+    await expect(page.getByText('https://before.example · this connection', { exact: true })).toHaveCount(0)
+
+    await review.click()
+    await (
+      await secondReview.promise
+    ).fulfill({
+      json: {
+        data: {
+          base_url: 'https://after.example/v1',
+          issues: [],
+          network_permissions: [
+            { origin: 'https://after.example', configuration_field: null, connection_scoped: true },
+            { origin: 'https://after.example', configuration_field: null, connection_scoped: false },
+          ],
+        },
+      },
+    })
+    await expect(save).toBeEnabled()
+    await expect(baseUrl).toHaveValue('https://after.example/v1')
+    await expect(page.getByText('https://after.example · this connection', { exact: true })).toBeVisible()
+    await expect(page.getByText('https://after.example', { exact: true })).toBeVisible()
   })
-  await page.goto('/providers')
+}
 
-  const xiaomiRow = page.getByRole('row').filter({ hasText: 'Xiaomi Catalog' })
-  const catalogLogo = xiaomiRow.locator('img[src$="/catalog/providers/xiaomi/logo"]')
-  await expect(catalogLogo).toBeVisible()
-  await page.evaluate(() => document.documentElement.classList.add('dark'))
-  await expect(catalogLogo).toHaveCSS('filter', 'invert(1)')
-  await expect(xiaomiRow.locator('[title*="mimo-v2"]')).toBeVisible()
-  const customMobileRow = page.locator('.route-mobile-row').filter({ hasText: 'Custom Endpoint' })
-  await expect(customMobileRow.locator('img')).toHaveAttribute('src', 'https://custom.example/favicon.ico')
-})
-
-test('editing a legacy Provider preserves credentials and legacy option fields', async ({ page }) => {
-  const legacyProvider = {
-    id: 'legacy-provider',
-    name: 'Legacy Provider',
+test('editing a Provider keeps saved credentials write-only', async ({ page }) => {
+  const credentialProvider = {
+    id: 'credential-provider',
+    name: 'Credential Provider',
     vendor: 'openai',
+    channel: 'default',
     protocol: 'openai-compatible',
-    base_url: 'https://legacy.example/v1',
+    base_url: 'https://credential.example/v1',
     use_proxy: false,
-    auth_mode: 'apikey',
-    preset_key: null,
-    channel: null,
-    models_source: null,
-    static_models: null,
+    vendor_options: {},
+    configured_credential_fields: ['api_key'],
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -367,10 +315,10 @@ test('editing a legacy Provider preserves credentials and legacy option fields',
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
     if (path === '/providers' && request.method() === 'GET') {
-      await route.fulfill({ json: { data: [legacyProvider] } })
+      await route.fulfill({ json: { data: [credentialProvider] } })
       return
     }
-    if (path === '/providers/legacy-provider/models' && request.method() === 'GET') {
+    if (path === '/providers/credential-provider/models' && request.method() === 'GET') {
       await route.fulfill({
         json: {
           data: {
@@ -398,38 +346,127 @@ test('editing a legacy Provider preserves credentials and legacy option fields',
       })
       return
     }
-    if (path === '/providers/legacy-provider' && request.method() === 'PUT') {
+    if (path === '/providers/credential-provider' && request.method() === 'PUT') {
       updateBody = request.postDataJSON()
-      await route.fulfill({ json: { data: legacyProvider } })
+      await route.fulfill({ json: { data: credentialProvider } })
       return
     }
     await route.fallback()
   })
 
-  await page.goto('/providers/legacy-provider?view=connection')
-  await expect(page.getByRole('heading', { name: legacyProvider.name })).toBeVisible()
+  await page.goto('/providers/credential-provider?view=connection')
+  await expect(page.getByRole('heading', { name: credentialProvider.name })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Available models' })).toBeVisible()
+  await expect(page.getByLabel('API key', { exact: true })).toHaveValue('')
+  await page.getByRole('button', { name: 'Review configuration' }).click()
   await page.getByRole('button', { name: 'Save connection' }).click()
 
   await expect.poll(() => updateBody).toBeDefined()
-  expect(updateBody).not.toHaveProperty('api_key')
-  expect(updateBody).not.toHaveProperty('preset_key')
+  expect(updateBody).not.toHaveProperty('adapter_credentials')
+  expect(updateBody).not.toHaveProperty('vendor')
   expect(updateBody).not.toHaveProperty('channel')
+  expect(updateBody).toMatchObject({ vendor_options: {} })
 })
 
-test('OAuth Provider connection view reconnects the saved account without showing API Key input', async ({ page }) => {
+test('Provider configuration follows plugin field visibility conditions', async ({ page }) => {
+  const provider = {
+    id: 'conditional-provider',
+    name: 'Conditional Provider',
+    vendor: 'fixture.conditional',
+    channel: 'default',
+    protocol: '',
+    base_url: 'https://conditional.example',
+    use_proxy: false,
+    vendor_options: { mode: 'basic' },
+    configured_credential_fields: [],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/api/v1/vendors', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            provider_id: provider.vendor,
+            catalog_id: null,
+            display_name: 'Conditional fixture',
+            description: 'Exercises conditional configuration fields.',
+            channels: [
+              {
+                id: provider.channel,
+                name: 'Default',
+                description: null,
+                auth: null,
+                protocol: null,
+                default_base_url: null,
+                capabilities: ['config_validation'],
+                model_capabilities: [],
+                search_model_required: false,
+              },
+            ],
+            capabilities: ['config_validation'],
+            config_fields: [
+              {
+                key: 'mode',
+                label: 'Connection mode',
+                kind: {
+                  type: 'enum',
+                  options: [
+                    { value: 'basic', label: 'Basic' },
+                    { value: 'advanced', label: 'Advanced' },
+                  ],
+                },
+                required: true,
+                default_json: 'basic',
+                secret: false,
+              },
+              {
+                key: 'endpoint_label',
+                label: 'Endpoint label',
+                kind: { type: 'string', multiline: false },
+                required: true,
+                secret: false,
+                visible_when: { field: 'mode', equals: 'advanced' },
+              },
+            ],
+            network: { base_url_field: null, extra_origins: [], field_origins: [] },
+            data_compat: {
+              config_fields_format: 1,
+              private_state_format: 1,
+              credentials_format: 1,
+              model_metadata_format: 1,
+            },
+          },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/providers', async (route) => {
+    await route.fulfill({ json: { data: [provider] } })
+  })
+
+  await page.goto(`/providers/${provider.id}?view=connection`)
+  await expect(page.getByLabel('Endpoint label', { exact: true })).toHaveCount(0)
+  await page.getByLabel('Connection mode', { exact: true }).click()
+  await page.getByRole('option', { name: 'Advanced', exact: true }).click()
+  await expect(page.getByLabel('Endpoint label', { exact: true })).toBeVisible()
+  await page.getByLabel('Connection mode', { exact: true }).click()
+  await page.getByRole('option', { name: 'Basic', exact: true }).click()
+  await expect(page.getByLabel('Endpoint label', { exact: true })).toHaveCount(0)
+})
+
+test('OAuth Provider connection view reconnects the saved vendor channel', async ({ page }) => {
   const provider = {
     id: 'oauth-provider',
     name: 'Codex Account',
-    vendor: 'openai',
+    vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://api.openai.com/v1',
     use_proxy: false,
-    auth_mode: 'oauth',
-    preset_key: 'openai',
     channel: 'codex',
-    models_source: 'catalog',
-    static_models: null,
+    vendor_options: {},
+    configured_credential_fields: [],
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -446,7 +483,6 @@ test('OAuth Provider connection view reconnects the saved account without showin
 
   await page.goto(`/providers/${provider.id}?view=connection`)
   await expect(page.getByRole('heading', { name: provider.name })).toBeVisible()
-  await expect(page.getByLabel('API Key', { exact: true })).toHaveCount(0)
   const initRequest = page.waitForRequest(
     (request) => request.url().endsWith('/api/v1/oauth/sessions/init') && request.method() === 'POST',
   )
@@ -454,7 +490,12 @@ test('OAuth Provider connection view reconnects the saved account without showin
   await page.getByRole('button', { name: 'Sign in again' }).click()
   const popup = await popupPromise
   await popup.close()
-  expect((await initRequest).postDataJSON()).toMatchObject({ vendor: provider.channel, use_proxy: false })
+  expect((await initRequest).postDataJSON()).toMatchObject({
+    vendor_id: provider.vendor,
+    channel: provider.channel,
+    use_proxy: false,
+    callback_mode: 'auto',
+  })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
   await page.getByRole('button', { name: 'Cancel sign-in' }).click()
   await expect(page.getByRole('button', { name: 'Sign in again' })).toBeVisible()
@@ -466,6 +507,8 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const provider = {
     id: 'specification-provider',
     name: 'Specification Provider',
+    vendor: 'openai-compatible',
+    channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://specification.example/v1',
     use_proxy: false,
@@ -614,6 +657,8 @@ test('Model specification filters combine all conditions and compose with catalo
   const provider = {
     id: 'filter-provider',
     name: 'Filter Provider',
+    vendor: 'openai-compatible',
+    channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://filter.example/v1',
     use_proxy: false,
@@ -845,11 +890,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     protocol: 'openai-compatible',
     base_url: 'https://models.example/v1',
     use_proxy: false,
-    auth_mode: 'apikey',
-    preset_key: 'openai',
     channel: 'default',
-    models_source: 'catalog',
-    static_models: null,
+    vendor_options: {},
+    configured_credential_fields: ['api_key'],
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -1162,9 +1205,7 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   await page.getByRole('button', { name: /Connect (first )?service/ }).click()
   await page.getByRole('button', { name: /Codex.*OAuth account/ }).click()
 
-  await expect(page.getByLabel('Connection name')).toHaveValue('Codex')
-  await expect(page.getByLabel('Service identifier')).toHaveCount(0)
-  await expect(page.getByLabel('API Key', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Connection name')).toHaveValue('OpenAI Codex')
 
   const initRequest = page.waitForRequest(
     (request) => request.url().endsWith('/api/v1/oauth/sessions/init') && request.method() === 'POST',
@@ -1174,7 +1215,12 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   const popup = await popupPromise
   await popup.close()
 
-  expect((await initRequest).postDataJSON()).toMatchObject({ vendor: 'codex', use_proxy: false, callback_mode: 'auto' })
+  expect((await initRequest).postDataJSON()).toMatchObject({
+    vendor_id: 'openai-codex',
+    channel: 'codex',
+    use_proxy: false,
+    callback_mode: 'auto',
+  })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
   await expect(page.getByLabel('Callback URL')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Complete', exact: true })).toBeDisabled()
@@ -1188,10 +1234,193 @@ test('OAuth Provider configuration allows manual completion while the localhost 
     await route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
   })
   const callbackUrl = 'http://localhost:1457/auth/callback?code=test-code&state=test-state'
+  const completeRequest = page.waitForRequest(
+    (request) =>
+      request.url().endsWith('/api/v1/oauth/sessions/oauth-session-1/complete') && request.method() === 'POST',
+  )
   await page.getByLabel('Callback URL').fill(callbackUrl)
   await page.getByRole('button', { name: 'Complete', exact: true }).click()
+  expect((await completeRequest).postDataJSON()).toEqual({ input: { type: 'callback_url', value: callbackUrl } })
   await expect(page.getByText('Authorization complete', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Callback URL')).toHaveCount(0)
+})
+
+test('completed OAuth satisfies session credential fields and submits the provider form', async ({ page }) => {
+  const manualInput = {
+    type: 'text',
+    label: 'Devin token',
+    description: 'Paste the local fixture token returned by authorization.',
+    secret: true,
+  } as const
+  const descriptor = {
+    provider_id: 'devin',
+    catalog_id: 'devin',
+    display_name: 'Devin',
+    description: 'Local OAuth form regression fixture.',
+    channels: [
+      {
+        id: 'devin',
+        name: 'Devin',
+        description: 'OAuth account',
+        auth: {
+          flow: 'authorization_code',
+          callback: {
+            bind_host: '127.0.0.1',
+            redirect_host: '127.0.0.1',
+            path: '/callback',
+            port: { kind: 'dynamic' },
+            manual_redirect_uri: 'chisel-show-auth-token',
+          },
+          manual_input: manualInput,
+        },
+        protocol: 'devin-connect',
+        default_base_url: 'https://server.codeium.test',
+        capabilities: ['infer', 'auth_oauth', 'config_validation'],
+        model_capabilities: [],
+        search_model_required: false,
+      },
+    ],
+    capabilities: ['infer', 'auth_oauth', 'config_validation'],
+    config_fields: [
+      {
+        key: 'apiKey',
+        label: 'Session token',
+        description: 'OAuth-created session token or a manually pasted token.',
+        kind: { type: 'string', multiline: false },
+        required: true,
+        secret: true,
+        max_length: 16_384,
+      },
+    ],
+    network: {
+      base_url_field: null,
+      extra_origins: [{ scheme: 'https', host: 'server.codeium.test' }],
+      field_origins: [],
+    },
+    data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
+  } satisfies ProviderDescriptor
+  const fixtureSecret = 'fixture-only-devin-session-token'
+  let oauthReady = false
+  let initBody: Record<string, unknown> | undefined
+  let createBody: Record<string, unknown> | undefined
+
+  await page.route('**/api/v1/vendors', (route) => route.fulfill({ json: { data: [descriptor] } }))
+  await page.route('**/api/v1/providers/configuration-preview', async (route) => {
+    const input = route.request().postDataJSON() as { base_url: string; credentials: Record<string, unknown> }
+    expect(input.credentials).toEqual({})
+    await route.fulfill({ json: { data: { base_url: input.base_url, issues: [], network_permissions: [] } } })
+  })
+  await page.route('**/api/v1/oauth/sessions/init', async (route) => {
+    initBody = route.request().postDataJSON()
+    await route.fulfill({
+      json: {
+        data: {
+          session_id: 'devin-oauth-session',
+          vendor_id: 'devin',
+          channel: 'devin',
+          flow: 'authorization_code',
+          auth_url: null,
+          callback_mode: 'auto',
+          listener_state: 'listening',
+          listener_port: 1457,
+          redirect_uri: 'http://127.0.0.1:1457/callback',
+          fallback_reason: null,
+          manual_input: manualInput,
+          expires_in: 600,
+          interval: 2,
+        },
+      },
+    })
+  })
+  await page.route('**/api/v1/oauth/sessions/devin-oauth-session/status', async (route) => {
+    await route.fulfill({
+      json: {
+        data: oauthReady
+          ? { status: 'ready', expires_in: 600 }
+          : {
+              status: 'pending',
+              auth_url: null,
+              callback_mode: 'auto',
+              listener_state: 'listening',
+              listener_port: 1457,
+              redirect_uri: 'http://127.0.0.1:1457/callback',
+              fallback_reason: null,
+              manual_input: manualInput,
+              expires_in: 600,
+              interval: 2,
+            },
+      },
+    })
+  })
+  await page.route('**/api/v1/oauth/sessions/devin-oauth-session/complete', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ input: { type: 'manual', value: fixtureSecret } })
+    oauthReady = true
+    await route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+  })
+  await page.route('**/api/v1/providers/oauth', async (route) => {
+    createBody = route.request().postDataJSON()
+    await route.fulfill({
+      json: {
+        data: {
+          id: 'devin-provider',
+          name: 'Devin',
+          vendor: 'devin',
+          channel: 'devin',
+          protocol: 'devin-connect',
+          base_url: 'https://server.codeium.test',
+          use_proxy: false,
+          vendor_options: {},
+          configured_credential_fields: ['apiKey'],
+          is_enabled: true,
+          created_at: '2026-09-21T00:00:00Z',
+          updated_at: '2026-09-21T00:00:00Z',
+        },
+      },
+    })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Connect (first )?service/ }).click()
+  await page.getByRole('button', { name: /Devin.*OAuth account/ }).click()
+
+  const providerForm = page.locator('form.route-overlay-form')
+  const sessionToken = page.getByLabel('Session token', { exact: true })
+  const connect = page.getByRole('button', { name: 'Connect', exact: true })
+  await expect(sessionToken).toHaveAttribute('required', '')
+  await expect.poll(() => providerForm.evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false)
+  await page.getByRole('button', { name: 'Review configuration' }).click()
+  await expect(connect).toBeDisabled()
+
+  const popupPromise = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Sign in with OAuth' }).click()
+  await popupPromise
+  await page.getByLabel('Devin token', { exact: true }).fill(fixtureSecret)
+  await page.getByRole('button', { name: 'Complete', exact: true }).click()
+  await expect(page.getByText('Authorization complete', { exact: true })).toBeVisible()
+
+  expect(initBody).toMatchObject({ vendor_id: 'devin', channel: 'devin', credentials: {} })
+  expect(JSON.stringify(initBody)).not.toContain(fixtureSecret)
+  await expect(sessionToken).toHaveValue('')
+  await expect(sessionToken).not.toHaveAttribute('required', '')
+  await expect.poll(() => providerForm.evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(true)
+
+  await page.getByRole('button', { name: 'Review configuration' }).click()
+  await expect(connect).toBeEnabled()
+  const createRequest = page.waitForRequest(
+    (request) => request.url().endsWith('/api/v1/providers/oauth') && request.method() === 'POST',
+  )
+  await connect.click()
+  await createRequest
+
+  expect(createBody).toMatchObject({
+    session_id: 'devin-oauth-session',
+    input: {
+      source: { type: 'custom', vendor: 'devin', channel: 'devin' },
+      credential: { type: 'none' },
+      vendor_options: {},
+    },
+  })
+  expect(JSON.stringify(createBody)).not.toContain(fixtureSecret)
 })
 
 test('manual OAuth fallback shows one full callback URL field', async ({ page }) => {
@@ -1212,8 +1441,9 @@ test('manual OAuth fallback shows one full callback URL field', async ({ page })
       json: {
         data: {
           session_id: 'oauth-session-1',
-          vendor: 'codex',
-          scheme: 'oauth_auth_code_pkce',
+          vendor_id: 'openai-codex',
+          channel: 'codex',
+          flow: 'authorization_code',
           auth_url: 'https://auth.openai.example/authorize',
           callback_mode: 'manual',
           listener_state: 'not_started',
@@ -1258,11 +1488,9 @@ test('Provider detail separates connection, inventory, references, and guarded m
     protocol: 'openai-compatible',
     base_url: 'https://provider.example/v1',
     use_proxy: false,
-    auth_mode: 'apikey',
-    preset_key: 'openai',
     channel: 'default',
-    models_source: 'catalog',
-    static_models: null,
+    vendor_options: {},
+    configured_credential_fields: ['api_key'],
     is_enabled: true,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -1554,6 +1782,8 @@ test('dependency previews block referenced Provider deletion and explain Route d
   const provider = {
     id: 'provider-used',
     name: 'Used Provider',
+    vendor: 'openai-compatible',
+    channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://used.example/v1',
     use_proxy: false,
@@ -1643,20 +1873,19 @@ test('creating a Provider opens its saved detail and recovers automatic model sy
   const createdProvider = {
     id: 'created-provider',
     name: 'Created Provider',
-    vendor: 'custom',
+    vendor: 'openai-compatible',
+    channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://created.example/v1',
     use_proxy: false,
-    auth_mode: 'apikey',
-    preset_key: null,
-    channel: null,
-    models_source: null,
-    static_models: null,
+    vendor_options: {},
+    configured_credential_fields: ['apiKey'],
     is_enabled: true,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
   }
   let created = false
+  let createBody: Record<string, unknown> | undefined
   let syncCalls = 0
   const initialSync = Promise.withResolvers<void>()
   await page.route('**/api/v1/providers**', async (route) => {
@@ -1667,6 +1896,7 @@ test('creating a Provider opens its saved detail and recovers automatic model sy
       return
     }
     if (path === '/providers' && request.method() === 'POST') {
+      createBody = request.postDataJSON()
       created = true
       await route.fulfill({ json: { data: createdProvider } })
       return
@@ -1690,11 +1920,26 @@ test('creating a Provider opens its saved detail and recovers automatic model sy
 
   await page.goto('/providers')
   await page.getByRole('button', { name: /Connect (first )?service/ }).click()
-  await page.getByRole('button', { name: /Custom.*Bring your own/ }).click()
+  await page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ }).click()
   await page.getByLabel('Connection name').fill(createdProvider.name)
   await page.getByLabel('Base URL').fill(createdProvider.base_url)
+  await page.getByLabel('API key', { exact: true }).fill('fixture-only-provider-secret')
+  await page.getByRole('button', { name: 'Review configuration' }).click()
   await page.getByRole('button', { name: 'Connect', exact: true }).click()
 
+  await expect
+    .poll(() => createBody)
+    .toMatchObject({
+      name: createdProvider.name,
+      source: {
+        type: 'custom',
+        vendor: 'openai-compatible',
+        channel: 'default',
+        protocol: 'openai-compatible',
+        base_url: createdProvider.base_url,
+      },
+      credential: { type: 'fields', values: { apiKey: 'fixture-only-provider-secret' } },
+    })
   await expect(page).toHaveURL(new RegExp(`/providers/${createdProvider.id}\\?view=models`))
   await expect(page.getByRole('heading', { name: createdProvider.name })).toBeVisible()
   await expect(page.getByText('Syncing models…')).toBeVisible()
@@ -1723,6 +1968,8 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
   const provider = {
     id: 'provider-primary',
     name: 'Primary Provider',
+    vendor: 'openai-compatible',
+    channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://primary.example/v1',
     use_proxy: false,

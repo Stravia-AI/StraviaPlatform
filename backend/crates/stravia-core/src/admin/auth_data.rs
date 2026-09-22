@@ -65,24 +65,6 @@ pub(super) fn upsert_credential_from_oauth(oauth: &OAuthCredential) -> UpsertOAu
     }
 }
 
-pub(super) fn stored_credential_from_bundle(
-    driver_key: &str,
-    scheme: &str,
-    bundle: &CredentialBundle,
-) -> StoredCredential {
-    StoredCredential {
-        driver_key: driver_key.to_string(),
-        scheme: scheme.to_string(),
-        access_token: normalized_optional(bundle.access_token.as_deref()),
-        refresh_token: normalized_optional(bundle.refresh_token.as_deref()),
-        expires_at: normalized_optional(bundle.expires_at.as_deref()),
-        resource_url: normalized_optional(bundle.resource_url.as_deref()),
-        subject_id: normalized_optional(bundle.subject_id.as_deref()),
-        scopes: bundle.scopes.clone(),
-        meta: bundle.raw.clone(),
-    }
-}
-
 pub(super) fn build_provider_oauth_status(
     provider: &Provider,
     driver_key: &str,
@@ -142,14 +124,15 @@ pub(super) fn build_auth_session_init_data(
 ) -> anyhow::Result<AuthSessionInitData> {
     Ok(AuthSessionInitData {
         session_id: session.id.clone(),
-        vendor: session.driver_key.clone(),
-        scheme: session.scheme.clone(),
+        vendor_id: session.driver_key.clone(),
+        channel: session.channel.clone(),
+        flow: session.auth_descriptor.flow,
         auth_url: session
             .verification_uri_complete
             .clone()
-            .or_else(|| session.verification_uri.clone())
-            .unwrap_or_default(),
+            .or_else(|| session.verification_uri.clone()),
         user_code: session.user_code.clone(),
+        manual_input: session.auth_descriptor.manual_input.clone(),
         callback_mode: session.callback_mode,
         listener_state: session.listener_state.clone(),
         listener_port: session.listener_port,
@@ -162,13 +145,15 @@ pub(super) fn build_auth_session_init_data(
 
 pub(super) fn build_auth_session_pending_data(session: &AuthSession) -> AuthSessionStatusData {
     AuthSessionStatusData::Pending {
-        scheme: session.scheme.clone(),
+        vendor_id: session.driver_key.clone(),
+        channel: session.channel.clone(),
+        flow: session.auth_descriptor.flow,
         auth_url: session
             .verification_uri_complete
             .clone()
-            .or_else(|| session.verification_uri.clone())
-            .unwrap_or_default(),
+            .or_else(|| session.verification_uri.clone()),
         user_code: session.user_code.clone(),
+        manual_input: session.auth_descriptor.manual_input.clone().map(Box::new),
         callback_mode: session.callback_mode,
         listener_state: session.listener_state.clone(),
         listener_port: session.listener_port,

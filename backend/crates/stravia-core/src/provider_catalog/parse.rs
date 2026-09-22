@@ -88,27 +88,30 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
             .with_context(|| format!("catalog provider key {provider_key:?} id {id:?}"))?;
         let name = required_string(object, "name", provider_key)?;
         let package = required_string(object, "npm", provider_key)?;
-        let Some(vendor_id) = vendor_id_for_npm(&package) else {
+        let Some(adapter_id) = adapter_id_for_npm(&package) else {
             hidden_package += 1;
             continue;
         };
         let protocol = protocol_for_package(&package, &id)
             .expect("supported npm package must resolve a protocol");
+        // The catalog's npm adapter is presentation/egress metadata, not a
+        // selectable provider identity. Installed profiles explicitly opt into
+        // this entry through ProviderDescriptor::catalog_id.
         let base_url = object
             .get("api")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
-            .or_else(|| adapter_default_base_url(vendor_id).map(str::to_owned))
+            .or_else(|| adapter_default_base_url(adapter_id).map(str::to_owned))
             .unwrap_or_default();
         let documentation_url = object.get("doc").and_then(Value::as_str).map(str::to_owned);
         let channels = catalog_channels(&id, &name, &protocol, &base_url);
         providers.push(CatalogProvider {
+            catalog_id: Some(id.clone()),
             id,
             name,
             documentation_url,
             npm: package,
-            vendor_id: vendor_id.to_string(),
             protocol,
             base_url,
             channels,
@@ -117,7 +120,6 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
     if providers.is_empty() {
         bail!("provider index contains no supported providers");
     }
-    merge_builtin_providers(&mut providers);
     providers.sort_by(|left, right| {
         left.name
             .to_lowercase()
@@ -130,72 +132,6 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
         "normalized provider index"
     );
     Ok(providers)
-}
-
-/// 仅以编译期 vendor 形式存在、远端目录(models.stravia.cn,源自 models.dev)
-/// 不会收录的服务。它们随每次索引规范化并入快照,保证 bootstrap 与刷新后
-/// “选择服务”列表始终提供这些内置服务。`custom` 由前端合成为自定义入口、
-/// `ollama` 面向本地守护进程,都不是目录服务,不在此列。
-const BUILTIN_CATALOG_PROVIDERS: &[&str] = &["command-code", "devin"];
-
-/// 该 catalog 服务是否为编译期并入(远端目录不提供它的索引与 scope)。
-pub(crate) fn is_builtin_catalog_provider(provider_id: &str) -> bool {
-    BUILTIN_CATALOG_PROVIDERS.contains(&provider_id)
-}
-
-fn merge_builtin_providers(providers: &mut Vec<CatalogProvider>) {
-    for vendor_id in BUILTIN_CATALOG_PROVIDERS {
-        if providers.iter().any(|provider| provider.id == *vendor_id) {
-            continue;
-        }
-        match builtin_catalog_provider(vendor_id) {
-            Some(provider) => providers.push(provider),
-            None => tracing::warn!(
-                vendor_id,
-                "built-in catalog provider has no registered vendor"
-            ),
-        }
-    }
-}
-
-fn builtin_catalog_provider(vendor_id: &str) -> Option<CatalogProvider> {
-    let metadata = crate::provider::VendorRegistry::global().metadata(vendor_id)?;
-    let channels = metadata
-        .channels
-        .iter()
-        .map(|definition| {
-            let endpoint = definition.base_urls.first();
-            channel(
-                metadata.id,
-                definition.id,
-                definition.label.en,
-                endpoint
-                    .map(|endpoint| endpoint.protocol)
-                    .unwrap_or(metadata.default_protocol),
-                endpoint.map(|endpoint| endpoint.base_url).unwrap_or(""),
-                match definition.auth_mode {
-                    crate::provider::metadata::AuthMode::ApiKey => CatalogAuthMode::OptionalApiKey,
-                    crate::provider::metadata::AuthMode::OAuth => CatalogAuthMode::OAuth,
-                    crate::provider::metadata::AuthMode::SetupToken => CatalogAuthMode::SetupToken,
-                },
-            )
-        })
-        .collect();
-    Some(CatalogProvider {
-        id: metadata.id.to_string(),
-        name: metadata.label.en.to_string(),
-        documentation_url: None,
-        npm: String::new(),
-        vendor_id: metadata.id.to_string(),
-        protocol: metadata.default_protocol.to_string(),
-        base_url: metadata
-            .channels
-            .first()
-            .and_then(|definition| definition.base_urls.first())
-            .map(|endpoint| endpoint.base_url.to_string())
-            .unwrap_or_default(),
-        channels,
-    })
 }
 
 pub(super) fn parse_canonical_models(body: &[u8]) -> anyhow::Result<BTreeMap<String, Value>> {
@@ -559,7 +495,7 @@ pub(super) fn infer_reasoning_options(
     }
 }
 
-pub(super) fn vendor_id_for_npm(package: &str) -> Option<&'static str> {
+pub(super) fn adapter_id_for_npm(package: &str) -> Option<&'static str> {
     Some(match package {
         "@ai-sdk/openai" => "openai",
         "@ai-sdk/openai-compatible" => "openai-compatible",
@@ -606,7 +542,7 @@ pub(super) fn protocol_for_package(package: &str, provider_id: &str) -> Option<S
         "@ai-sdk/cohere" => "cohere-chat",
         "watsonx-ai-provider" => "watsonx-text-chat",
         "@ai-sdk/gateway" => "gateway-language-model",
-        _ if vendor_id_for_npm(package).is_some() => "openai-compatible",
+        _ if adapter_id_for_npm(package).is_some() => "openai-compatible",
         _ if provider_id == "openai" => "open-responses",
         _ if provider_id == "anthropic" => "anthropic-messages",
         _ if provider_id == "google" => "google-gemini",
@@ -616,8 +552,8 @@ pub(super) fn protocol_for_package(package: &str, provider_id: &str) -> Option<S
     Some(protocol.to_string())
 }
 
-pub(super) fn adapter_default_base_url(vendor_id: &str) -> Option<&'static str> {
-    match vendor_id {
+pub(super) fn adapter_default_base_url(adapter_id: &str) -> Option<&'static str> {
+    match adapter_id {
         "openai" => Some("https://api.openai.com/v1"),
         "anthropic" => Some("https://api.anthropic.com"),
         "google" => Some("https://generativelanguage.googleapis.com"),
@@ -725,99 +661,16 @@ pub(super) fn channel(
     }
 }
 
-/// OpenCode Zen 的 `*-free` 模型只能在 OpenCode 客户端里用；Stravia 作为第三方网关会收到 400。
-pub(crate) fn opencode_zen_free_tier_model(model_id: &str) -> bool {
-    model_id
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or(model_id)
-        .to_ascii_lowercase()
-        .ends_with("-free")
-}
-
-pub(super) fn catalog_model_included(provider_id: &str, channel_id: &str, model_id: &str) -> bool {
-    match (provider_id, channel_id) {
-        ("openai", "codex") => codex_subscription_model(model_id),
-        ("opencode", _) => !opencode_zen_free_tier_model(model_id),
-        _ => true,
-    }
-}
-
-pub(super) fn catalog_source_model_id(source: &CatalogModelSource) -> &str {
-    source
-        .metadata
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-}
-
-pub(super) fn codex_subscription_model(model_id: &str) -> bool {
-    const EXPLICIT: &[&str] = &["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
-    const DENIED: &[&str] = &["gpt-5.5-pro"];
-    if DENIED.contains(&model_id) {
-        return false;
-    }
-    if EXPLICIT.contains(&model_id) {
-        return true;
-    }
-    let Some(rest) = model_id.strip_prefix("gpt-") else {
-        return false;
-    };
-    let mut parts = rest.split('.');
-    let Some(major) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-        return false;
-    };
-    let Some(minor) = parts.next().and_then(|value| {
-        value
-            .split(|character: char| !character.is_ascii_digit())
-            .next()
-            .and_then(|value| value.parse::<u32>().ok())
-    }) else {
-        return false;
-    };
-    (major, minor) > (5, 4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn opencode_zen_hides_free_tier_catalog_models() {
-        assert!(opencode_zen_free_tier_model("mimo-v2.5-free"));
-        assert!(opencode_zen_free_tier_model("GLM-5-Free"));
-        assert!(opencode_zen_free_tier_model("org/mimo-v2.5-free"));
-        assert!(!opencode_zen_free_tier_model("mimo-v2.5"));
-        assert!(!opencode_zen_free_tier_model("free"));
-        assert!(!opencode_zen_free_tier_model("mimo-v2-pro"));
-        assert!(catalog_model_included(
-            "opencode",
-            "default",
-            "claude-sonnet-4-6"
-        ));
-        assert!(!catalog_model_included(
-            "opencode",
-            "default",
-            "mimo-v2.5-free"
-        ));
-        assert!(catalog_model_included(
-            "opencode-go",
-            "default",
-            "mimo-v2.5-free"
-        ));
-        assert!(catalog_model_included(
-            "openai",
-            "default",
-            "mimo-v2.5-free"
-        ));
-        assert!(!catalog_model_included("openai", "codex", "gpt-5.5-pro"));
-        assert!(catalog_model_included("openai", "codex", "gpt-5.4"));
-    }
-
-    #[test]
-    fn xai_catalog_publishes_grok_oauth_channel() {
+    fn xai_catalog_scope_recognizes_the_dedicated_grok_channel() {
         let channels = catalog_channels("xai", "xAI", "openai-compatible", "https://api.x.ai/v1");
 
+        // Raw catalog channels validate model-scope access. Public choices are
+        // intersected with one exact ProviderDescriptor in ProviderCatalog::providers.
         let grok = channels
             .iter()
             .find(|channel| channel.id == "grok")

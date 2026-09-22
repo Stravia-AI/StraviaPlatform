@@ -72,7 +72,7 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-也可使用 `nix run github:Stravia-AI/StraviaPlatform`，或从 Releases 下载对应平台压缩包（请先对照 `SHA256SUMS` 校验）。
+也可从 Releases 下载对应平台压缩包（请先对照 `SHA256SUMS` 校验）。
 
 **首次启动（两种形态相同）：**
 
@@ -118,16 +118,22 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 ### 平台工具与内置 Agent 运行时
 
 - `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
-- **联网搜索** —— Agent 循环替模型搜索、读网页，可用内嵌 Moli 引擎、Exa 或智谱，也可绑定 Codex 搜索。
+- **联网搜索** —— 可使用 Local Agent 循环配合内嵌 Moli、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
-- **媒体生成** —— 通过已有 Codex OAuth Route 生成或编辑一张图片，再用 Artifact Reference 在后续工具中复用。
+- **媒体生成** —— 通过由具备能力的 Vendor 插件支持的已保存 Route 生成或编辑图片，再用 Artifact Reference 在后续工具中复用。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
 
 #### 图片生成
 
-在 **高级功能 → 媒体生成** 中绑定支持图片生成的 Codex OAuth 模型路由并开启能力，即可通过 MCP 或兼容模型请求生成、编辑图片，并在后续操作中继续使用生成结果。
+在 **高级功能 → 媒体生成** 中绑定已保存且所有启用目标均支持图片生成的 Route，再开启能力。内置 Codex OAuth 与纯图片插件使用同一 Route 机制；实际可用性仍取决于上游账号和模型支持。
 
 具体可用性取决于上游账号和模型支持；尺寸偏好不保证精确输出，重试可能额外消耗额度。配置、调用示例和限制见[媒体生成文档](docs/design/media-generation.md)。
+
+### 供应商插件
+
+所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 恰好随附五个包：一个基础 Vendor 覆盖 Codex、Grok、Command Code、Devin 之外的既有接入，另有四个专属包分别负责这四种身份。专属包完整拥有对应供应商身份，任何情况下都不会回退到基础包。
+
+内置插件首次使用即可用；可在**供应商插件**中查看，或导入本地 `.wasm` 替换包，不依赖插件市场。插件会获得所选连接的上游凭据和已批准网络目标，因此使用前应核对来源与请求的 origin。支持能力、隔离、更新与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
 
 ### 密钥、用量与请求记录
 
@@ -150,7 +156,7 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 ### 存储与部署
 
 - 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。
-- 实例数据集中在一个目录，便于管理；迁移与升级前请阅读[部署与存储说明](docs/design/architecture.md)，确认备份和版本兼容要求。
+- 实例数据集中在一个目录，便于管理。数据库与本地文件（包括已安装的插件 Component）必须配套备份；仅备份远程 PostgreSQL 并不完整。迁移与升级前请阅读[部署与存储说明](docs/design/architecture.md)，确认备份和版本兼容要求。
 - 一个端口同时提供模型 API、MCP、Admin API、健康探针与内嵌 WebUI；反向代理下可用显式管理入口与受信代理。
 
 ## 部署形态
@@ -160,7 +166,7 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 | 形态     | Tauri 桌面应用，集成管理界面           | 单一无头二进制或容器镜像              |
 | 适用     | 个人开发者；可直接写入本机客户端配置   | 自托管与团队共享部署                  |
 | 存储     | 本地 SQLite                            | SQLite 或 PostgreSQL                  |
-| 获取     | Releases 上的 Windows NSIS / Linux AppImage | 压缩包 · `ghcr.io` 镜像 · Nix flake |
+| 获取     | Releases 上的 Windows NSIS / Linux AppImage | 压缩包 · `ghcr.io` 镜像 |
 
 同一套 Rust 核心驱动两种形态，管理面是同一个 WebUI。
 

@@ -2,16 +2,37 @@ use super::*;
 
 // ── Providers ──
 
-pub(super) fn provider_value(provider: Provider) -> serde_json::Value {
-    serde_json::to_value(provider).expect("Provider serialization must succeed")
+pub(super) async fn provider_value(
+    gw: &Gateway,
+    provider: Provider,
+) -> anyhow::Result<serde_json::Value> {
+    let configured_credential_fields = gw
+        .admin()
+        .configured_provider_credential_fields(&provider)
+        .await?;
+    let mut value = serde_json::to_value(provider)?;
+    value
+        .as_object_mut()
+        .expect("Provider serialization must produce an object")
+        .insert(
+            "configured_credential_fields".into(),
+            serde_json::to_value(configured_credential_fields)?,
+        );
+    Ok(value)
 }
 
 pub(super) async fn list_providers(State(gw): State<Gateway>) -> impl IntoResponse {
     match gw.admin().list_providers().await {
-        Ok(providers) => Json(serde_json::json!({
-            "data": providers.into_iter().map(provider_value).collect::<Vec<_>>()
-        }))
-        .into_response(),
+        Ok(providers) => {
+            let mut data = Vec::with_capacity(providers.len());
+            for provider in providers {
+                match provider_value(&gw, provider).await {
+                    Ok(provider) => data.push(provider),
+                    Err(error) => return err(error),
+                }
+            }
+            Json(serde_json::json!({ "data": data })).into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -153,7 +174,10 @@ pub(super) async fn get_provider_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match gw.admin().get_provider(&id).await {
-        Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
+        Ok(v) => match provider_value(&gw, v).await {
+            Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+            Err(error) => err(error),
+        },
         Err(e) => err(e),
     }
 }
@@ -163,7 +187,10 @@ pub(super) async fn create_provider_handler(
     Json(input): Json<CreateProvider>,
 ) -> impl IntoResponse {
     match gw.admin().create_provider(input).await {
-        Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
+        Ok(v) => match provider_value(&gw, v).await {
+            Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+            Err(error) => err(error),
+        },
         Err(e) if e.to_string().contains("AUTH_SESSION_REQUIRED") => oauth_err(e),
         // Catalog 选择过期(服务或渠道被目录新 revision 移除/变更)由 err() 里的
         // 类型化 CatalogError 映射为 404/409 + code,前端据此提示重新选择。
@@ -171,27 +198,12 @@ pub(super) async fn create_provider_handler(
     }
 }
 
-#[derive(Deserialize)]
-pub(super) struct PreviewProviderBaseUrlRequest {
-    vendor_id: String,
-    #[serde(default)]
-    adapter_credentials: std::collections::BTreeMap<String, String>,
-    base_url: Option<String>,
-}
-
-pub(super) async fn preview_provider_base_url_handler(
+pub(super) async fn preview_provider_configuration_handler(
     State(gw): State<Gateway>,
-    Json(input): Json<PreviewProviderBaseUrlRequest>,
+    Json(input): Json<stravia_core::admin::ProviderConfigurationPreviewInput>,
 ) -> impl IntoResponse {
-    match gw.admin().preview_provider_base_url(
-        &input.vendor_id,
-        input.adapter_credentials,
-        input.base_url.as_deref(),
-    ) {
-        Ok(base_url) => Json(serde_json::json!({
-            "data": { "base_url": base_url }
-        }))
-        .into_response(),
+    match gw.admin().preview_provider_configuration(input).await {
+        Ok(preview) => Json(serde_json::json!({ "data": preview })).into_response(),
         Err(error) => err(error),
     }
 }
@@ -203,7 +215,10 @@ pub(super) async fn copy_provider_handler(
 ) -> impl IntoResponse {
     let options = options.map(|Json(options)| options).unwrap_or_default();
     match gw.admin().copy_provider_with_options(&id, options).await {
-        Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
+        Ok(v) => match provider_value(&gw, v).await {
+            Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+            Err(error) => err(error),
+        },
         Err(e) => err(e),
     }
 }
@@ -214,7 +229,10 @@ pub(super) async fn update_provider_handler(
     Json(input): Json<UpdateProvider>,
 ) -> impl IntoResponse {
     match gw.admin().update_provider(&id, input).await {
-        Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
+        Ok(v) => match provider_value(&gw, v).await {
+            Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+            Err(error) => err(error),
+        },
         Err(e) => err(e),
     }
 }
@@ -449,11 +467,19 @@ pub(super) struct ModelCapabilitiesQuery {
 
 #[derive(Deserialize)]
 pub(super) struct InitOAuthSessionRequest {
-    vendor: String,
+    vendor_id: String,
+    channel: String,
     #[serde(default)]
     use_proxy: bool,
     callback_mode: OAuthCallbackMode,
     locale: Option<String>,
+    provider_id: Option<String>,
+    base_url: String,
+    protocol: Option<String>,
+    #[serde(default)]
+    options: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    credentials: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -468,8 +494,16 @@ pub(super) async fn init_oauth_session_handler(
 ) -> impl IntoResponse {
     match callbacks
         .init_session(
-            &input.vendor,
-            input.use_proxy,
+            AuthSessionCandidate {
+                vendor_id: input.vendor_id,
+                channel: input.channel,
+                provider_id: input.provider_id,
+                base_url: input.base_url,
+                protocol: input.protocol,
+                options: input.options,
+                credentials: input.credentials,
+                use_proxy: input.use_proxy,
+            },
             input.callback_mode,
             input.locale.as_deref(),
         )
@@ -513,7 +547,7 @@ pub(super) async fn complete_oauth_session_handler(
     State(gw): State<Gateway>,
     Extension(callbacks): Extension<OAuthCallbackManager>,
     Path(id): Path<String>,
-    Json(input): Json<AuthExchangeInput>,
+    Json(input): Json<AuthCompletionInput>,
 ) -> impl IntoResponse {
     match gw.admin().complete_oauth_session(&id, input).await {
         Ok(v) => {
@@ -561,7 +595,10 @@ pub(super) async fn create_oauth_provider_handler(
         .create_provider_with_oauth_session(&input.session_id, input.input)
         .await
     {
-        Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
+        Ok(v) => match provider_value(&gw, v).await {
+            Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+            Err(error) => err(error),
+        },
         Err(e) => err(e),
     }
 }

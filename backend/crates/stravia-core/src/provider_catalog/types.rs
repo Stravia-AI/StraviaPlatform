@@ -43,11 +43,13 @@ pub struct CatalogProviderList {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CatalogProvider {
+    /// Selectable provider profile identity saved in `providers.vendor`.
     pub id: String,
+    /// Upstream catalog identity used for branding and model templates.
+    pub catalog_id: Option<String>,
     pub name: String,
     pub documentation_url: Option<String>,
     pub npm: String,
-    pub vendor_id: String,
     pub protocol: String,
     pub base_url: String,
     pub channels: Vec<CatalogChannel>,

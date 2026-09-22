@@ -64,7 +64,7 @@ def _start_initialized(
         ],
     )
     base = f"http://127.0.0.1:{port}"
-    wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+    wait_until_ready(f"{base}/api/v1/auth/state")
     session = initialize_server(
         base,
         wait_for_setup_token(logs, process),
@@ -330,7 +330,7 @@ def test_bundle_ticket_is_invalidated_by_process_restart(stravia_binary: Path) -
             )
             restart_base = f"http://127.0.0.1:{restart_port}"
             try:
-                wait_until_ready(f"{restart_base}/api/v1/auth/state", timeout=40.0)
+                wait_until_ready(f"{restart_base}/api/v1/auth/state")
                 old_path = "/" + ticket_url.split("/", 3)[-1]
                 status, headers, body = http_bytes("GET", f"{restart_base}{old_path}")
                 assert status == 404
@@ -425,7 +425,7 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
             )
             restart_base = f"http://127.0.0.1:{restart_port}"
             try:
-                wait_until_ready(f"{restart_base}/readyz", timeout=40.0)
+                wait_until_ready(f"{restart_base}/readyz")
                 deadline = time.time() + 10.0
                 while trace_directory.exists() and time.time() < deadline:
                     time.sleep(0.1)
@@ -545,7 +545,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
             )
             restart_base = f"http://127.0.0.1:{restart_port}"
             try:
-                wait_until_ready(f"{restart_base}/api/v1/auth/state", timeout=40.0)
+                wait_until_ready(f"{restart_base}/api/v1/auth/state")
                 session = WebSession(restart_base)
                 status, login = session.request(
                     "POST",
@@ -707,7 +707,7 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                 ])
                 base = f"http://127.0.0.1:{port}"
                 try:
-                    wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+                    wait_until_ready(f"{base}/api/v1/auth/state")
                     session = WebSession(base)
                     status, login = session.request("POST", "/api/v1/auth/login", {
                         "username": "admin", "password": "correct horse battery staple",

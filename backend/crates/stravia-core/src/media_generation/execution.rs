@@ -1,25 +1,26 @@
 use std::{io::Cursor, time::Instant};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
-use futures::StreamExt;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stravia_runtime_contract::{
     CancellationToken, Principal,
     artifact::{ArtifactError, ArtifactId, bytes_stream},
-    model_turn::CanonicalEvent,
-    protocol::ir::{AiRequest, ContentBlock, MediaSource, MessageContent},
+    protocol::ir::{AiItem, AiRequest, ContentBlock, MediaSource, MessageContent, Role},
+};
+use stravia_vendor_sdk::{
+    MediaArtifact, MediaImageAspectRatio, MediaImageRequest, MediaImageResolution, MediaReference,
+    OperationOutput,
 };
 
 use super::{GenerationError, config};
 use crate::{
     Gateway,
-    model_turn::{ModelTurnAuthorization, TurnInput},
+    plugin::{VendorCallContext, VendorRequest},
 };
 
-// 平台对一次调用的素材预算；不是独立 Codex Images API 的数量保证。
+// 平台对一次调用的素材预算；供应商更小的限制必须由插件明确拒绝。
 pub(crate) const MAX_REFERENCE_IMAGES: usize = 5;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 8192;
@@ -38,35 +39,11 @@ struct GenerateRequest {
 struct ImageInput {
     prompt: String,
     #[serde(default, deserialize_with = "optional_non_null")]
-    aspect_ratio: Option<AspectRatio>,
+    aspect_ratio: Option<MediaImageAspectRatio>,
     #[serde(default, deserialize_with = "optional_non_null")]
-    resolution: Option<Resolution>,
+    resolution: Option<MediaImageResolution>,
     #[serde(default, deserialize_with = "optional_non_null")]
     reference_images: Option<Vec<String>>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-pub(crate) enum AspectRatio {
-    #[serde(rename = "1:1")]
-    Square,
-    #[serde(rename = "3:4")]
-    Portrait,
-    #[serde(rename = "4:3")]
-    Landscape,
-    #[serde(rename = "9:16")]
-    Tall,
-    #[serde(rename = "16:9")]
-    Wide,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-pub(crate) enum Resolution {
-    #[serde(rename = "1K")]
-    OneK,
-    #[serde(rename = "2K")]
-    TwoK,
-    #[serde(rename = "4K")]
-    FourK,
 }
 
 fn optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -130,20 +107,33 @@ pub(crate) async fn generate(
     let route = config::validated_route(gateway).await?;
     check_execution(&cancellation, deadline)?;
 
-    let mut request = crate::provider::openai::codex::media_generation::image_request(
-        route,
-        input.input.prompt,
+    let mut observation_request = reference_request(
+        route.model_id.clone(),
+        input.input.prompt.clone(),
         references,
-        input.input.aspect_ratio,
-        input.input.resolution,
     );
-    normalize_references(gateway, &principal, &mut request, &cancellation, deadline).await?;
-    validate_references(gateway, &principal, &request, &cancellation, deadline).await?;
-    request.instructions = Some(if contains_reference_images(&request) {
-        "Use the available image generation tool to edit or create exactly one PNG image for the user request. Treat the provided input images as ordered edit/reference images. Do not use any other tool."
-    } else {
-        "Use the available image generation tool to generate exactly one PNG image for the user request. Do not use any other tool."
-    }.to_owned());
+    normalize_references(
+        gateway,
+        &principal,
+        &mut observation_request,
+        &cancellation,
+        deadline,
+    )
+    .await?;
+    let references = materialize_references(
+        gateway,
+        &principal,
+        &observation_request,
+        &cancellation,
+        deadline,
+    )
+    .await?;
+    let request = MediaImageRequest {
+        prompt: input.input.prompt,
+        references,
+        aspect_ratio: input.input.aspect_ratio,
+        resolution: input.input.resolution,
+    };
 
     let inherited = crate::interaction_observation::scope::current();
     let standalone = inherited.is_none();
@@ -164,12 +154,12 @@ pub(crate) async fn generate(
                     principal: principal.api_key_id().into(),
                     api_key_id: Some(principal.api_key_id().into()),
                     api_key_name: None,
-                    route_id: request.model.clone(),
-                    model_display_name: None,
+                    route_id: route.model_id.clone(),
+                    model_display_name: route.display_name.clone(),
                     ingress_protocol: "mcp".into(),
                 },
                 AdmissionFacts {
-                    client_request: request.clone(),
+                    client_request: observation_request.clone(),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,
@@ -179,6 +169,7 @@ pub(crate) async fn generate(
     });
     let result = generate_image(
         gateway,
+        &route,
         request,
         principal,
         cancellation,
@@ -200,57 +191,61 @@ pub(crate) async fn generate(
             generation_root_id: None,
         });
     }
-    result
+    result.map(|(value, _publication)| value)
 }
 
 async fn generate_image(
     gateway: &Gateway,
-    request: AiRequest,
+    route: &crate::db::models::Route,
+    request: MediaImageRequest,
     principal: Principal,
     cancellation: CancellationToken,
     deadline: Instant,
     observer: crate::interaction_observation::RunObserver,
-) -> Result<Value, GenerationError> {
-    let mut turn_input = TurnInput::new(principal.clone(), request)
-        .with_authorization(ModelTurnAuthorization::CapabilityGrant)
-        .with_execution(cancellation.clone(), deadline)
-        .with_normalized_attachments()
-        .without_responses_websocket();
-    turn_input = turn_input.with_observer(observer);
-    let turn = gateway
-        .model_turn
-        .execute(turn_input)
+) -> Result<(Value, tokio::sync::OwnedRwLockReadGuard<()>), GenerationError> {
+    let mut context = VendorCallContext::new(cancellation.clone(), deadline);
+    context.observer = Some(observer);
+    let execution = gateway
+        .execute_vendor_route(
+            &principal,
+            route,
+            VendorRequest::MediaImage(request),
+            context,
+        )
         .await
-        .map_err(model_turn_error)?;
-
-    let mut output = turn.output;
-    let mut image_result = None;
-    while let Some(event) = output.next().await {
-        match event.map_err(model_turn_error)? {
-            CanonicalEvent::Completed(response) => {
-                image_result = Some(
-                    crate::provider::openai::codex::media_generation::image_result(*response)?,
-                );
-            }
-            CanonicalEvent::Delta(_) => {}
-            CanonicalEvent::Compacted(_) => {
-                return Err(GenerationError::new(
-                    "invalid_generation_output",
-                    "Image generation returned an unexpected compacted response",
-                ));
-            }
+        .map_err(|error| vendor_route_error(error, &cancellation, deadline))?;
+    let response = match execution.output {
+        OperationOutput::MediaImage(response) => response,
+        _ => {
+            return Err(GenerationError::new(
+                "invalid_generation_output",
+                "Image generation returned an unexpected operation result",
+            ));
         }
-    }
-    let encoded = image_result.ok_or_else(|| {
+    };
+    let [
+        MediaArtifact {
+            media_type,
+            bytes,
+            upstream_ref: _,
+            metadata: _,
+        },
+    ] = response.artifacts.try_into().map_err(|_| {
         GenerationError::new(
             "invalid_generation_output",
-            "Image generation returned no image",
+            "Image generation must return exactly one image",
         )
     })?;
-    let bytes = decode_image_result(&encoded)?;
+    let bytes = Bytes::from(bytes);
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+        return Err(GenerationError::new(
+            "invalid_generation_output",
+            "Generated image has an invalid size",
+        ));
+    }
     let (mime_type, width, height) = inspect_image_async(
         bytes.clone(),
-        None,
+        Some(media_type),
         "generated image",
         &cancellation,
         deadline,
@@ -258,6 +253,11 @@ async fn generate_image(
     .await?;
 
     check_execution(&cancellation, deadline)?;
+    let publication = execution
+        .publication
+        .write_fence()
+        .await
+        .map_err(|error| publication_error(error, &cancellation, deadline))?;
     let retention = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(interruption(deadline)),
@@ -277,15 +277,41 @@ async fn generate_image(
         },
     };
 
-    Ok(json!({
-        "path": artifact.reference(),
-        "mime_type": artifact.mime_type,
-        "size": artifact.size,
-        "media": {
-            "width": width,
-            "height": height,
-        },
-    }))
+    Ok((
+        json!({
+            "path": artifact.reference(),
+            "mime_type": artifact.mime_type,
+            "size": artifact.size,
+            "media": {
+                "width": width,
+                "height": height,
+            },
+        }),
+        publication,
+    ))
+}
+
+fn reference_request(model: String, prompt: String, references: Vec<String>) -> AiRequest {
+    let mut content = Vec::with_capacity(references.len() + 1);
+    content.push(ContentBlock::Text {
+        text: prompt,
+        cache_control: None,
+    });
+    content.extend(references.into_iter().map(|reference| ContentBlock::Image {
+        source: MediaSource::Url(reference),
+        detail: None,
+        cache_control: None,
+    }));
+    AiRequest::new(
+        model,
+        vec![AiItem {
+            role: Role::User,
+            content: MessageContent::Blocks(content),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    )
 }
 
 async fn normalize_references(
@@ -305,13 +331,13 @@ async fn normalize_references(
     }
 }
 
-async fn validate_references(
+async fn materialize_references(
     gateway: &Gateway,
     principal: &Principal,
     request: &AiRequest,
     cancellation: &CancellationToken,
     deadline: Instant,
-) -> Result<(), GenerationError> {
+) -> Result<Vec<MediaReference>, GenerationError> {
     let retention = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(interruption(deadline)),
@@ -332,6 +358,7 @@ async fn validate_references(
             MessageContent::Text(_) => None,
         })
         .unwrap_or_default();
+    let mut references = Vec::with_capacity(blocks.len().saturating_sub(1));
     for block in blocks {
         let ContentBlock::Image {
             source: MediaSource::Url(reference),
@@ -353,45 +380,20 @@ async fn validate_references(
                 "Reference image exceeds the 32 MiB limit",
             ));
         }
-        inspect_image_async(
-            bytes,
+        let (media_type, _, _) = inspect_image_async(
+            bytes.clone(),
             Some(artifact.mime_type),
             "reference image",
             cancellation,
             deadline,
         )
         .await?;
+        references.push(MediaReference {
+            media_type: media_type.to_owned(),
+            bytes: bytes.to_vec(),
+        });
     }
-    Ok(())
-}
-
-fn contains_reference_images(request: &AiRequest) -> bool {
-    request.items.iter().any(|item| {
-        matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })))
-    })
-}
-
-fn decode_image_result(encoded: &str) -> Result<Bytes, GenerationError> {
-    let encoded = encoded.trim();
-    if encoded.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-        return Err(GenerationError::new(
-            "invalid_generation_output",
-            "Generated image exceeds the 32 MiB limit",
-        ));
-    }
-    let bytes = STANDARD.decode(encoded).map_err(|_| {
-        GenerationError::new(
-            "invalid_generation_output",
-            "Generated image is not valid base64",
-        )
-    })?;
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-        return Err(GenerationError::new(
-            "invalid_generation_output",
-            "Generated image has an invalid size",
-        ));
-    }
-    Ok(Bytes::from(bytes))
+    Ok(references)
 }
 
 fn inspect_image(
@@ -519,21 +521,42 @@ fn output_storage_error(error: ArtifactError) -> GenerationError {
     )
 }
 
-fn model_turn_error(
-    error: stravia_runtime_contract::model_turn::ModelTurnError,
+fn vendor_route_error(
+    error: anyhow::Error,
+    cancellation: &CancellationToken,
+    deadline: Instant,
 ) -> GenerationError {
-    match error.code.as_str() {
-        "cancelled" => GenerationError::new("cancelled", "Media generation was cancelled"),
-        "deadline_exceeded" => deadline_error(),
-        "authorization_failed" | "api_key_not_found" | "api_key_expired" => {
-            GenerationError::new("authorization_failed", "Principal authorization failed")
-        }
-        // Provider error text can echo credentials, input images, or internal
-        // locations. Redacted diagnostics retain details; tool results do not.
+    match error.downcast_ref::<stravia_vendor_runtime::RuntimeError>() {
+        Some(stravia_vendor_runtime::RuntimeError::Cancelled)
+        | Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::Cancelled,
+            ..
+        }) => GenerationError::new("cancelled", "Media generation was cancelled"),
+        Some(stravia_vendor_runtime::RuntimeError::DeadlineExceeded)
+        | Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::DeadlineExceeded,
+            ..
+        }) => deadline_error(),
+        _ if cancellation.is_cancelled() || Instant::now() >= deadline => interruption(deadline),
         _ => GenerationError::new(
             "upstream_generation_failed",
-            format!("Upstream image generation failed ({})", error.code),
+            "Upstream image generation failed",
         ),
+    }
+}
+
+fn publication_error(
+    _error: anyhow::Error,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> GenerationError {
+    if cancellation.is_cancelled() || Instant::now() >= deadline {
+        interruption(deadline)
+    } else {
+        GenerationError::new(
+            "generation_result_expired",
+            "The generated image can no longer be published",
+        )
     }
 }
 

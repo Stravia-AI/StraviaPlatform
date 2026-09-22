@@ -9,7 +9,9 @@ use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{BindRouteInput, CopyProviderOptions, UnbindRouteInput};
-use stravia_core::auth::{AuthExchangeInput, AuthSessionStatusData, OAuthCallbackMode};
+use stravia_core::auth::{
+    AuthCompletionInput, AuthSessionCandidate, AuthSessionStatusData, OAuthCallbackMode,
+};
 use stravia_core::provider_catalog::CatalogError;
 use stravia_core::provider_models::{
     CreateManualProviderModel, ProviderModelSelectionPolicy, UpdateProviderModel,
@@ -55,6 +57,7 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
 
     let mut api = Router::new()
         .route("/system/extensions", get(list_loaded_extensions))
+        .merge(vendor_plugins::routes())
         .route(
             "/connect-clients/preview",
             post(preview_connect_client_handler),
@@ -96,8 +99,8 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(list_providers).post(create_provider_handler),
         )
         .route(
-            "/providers/base-url/preview",
-            post(preview_provider_base_url_handler),
+            "/providers/configuration-preview",
+            post(preview_provider_configuration_handler),
         )
         .route("/providers/{id}/copy", post(copy_provider_handler))
         .route("/providers/{id}", providers_item)
@@ -121,8 +124,8 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(list_eligible_web_search_models_handler),
         )
         .route(
-            "/web-search/codex-providers",
-            get(list_compatible_codex_search_providers_handler),
+            "/web-search/external-routes",
+            get(list_external_search_routes_handler),
         )
         .route(
             "/providers/{id}/test-models",
@@ -345,6 +348,7 @@ mod settings;
 mod stats;
 mod status;
 mod updates;
+mod vendor_plugins;
 mod web;
 
 use api_keys::*;

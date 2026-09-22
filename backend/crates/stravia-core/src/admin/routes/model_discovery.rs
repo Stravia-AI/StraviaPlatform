@@ -1,7 +1,13 @@
-use async_trait::async_trait;
+use std::collections::{BTreeMap, HashSet};
+use std::time::{Duration, Instant};
+
 use thiserror::Error;
 
 use super::*;
+use crate::plugin::{VendorCallContext, VendorPublicationFence, VendorRequest};
+
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DISCOVERY_PAGES: usize = 1024;
 
 #[derive(Debug, Error)]
 pub(crate) enum RouteModelDiscoveryError {
@@ -11,17 +17,6 @@ pub(crate) enum RouteModelDiscoveryError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("Catalog Provider identity is missing for Provider {provider_id}")]
-    CatalogIdentityMissing { provider_id: String },
-    #[error("Model Discovery URL is empty for Provider {provider_id}")]
-    DiscoveryUrlEmpty { provider_id: String },
-    #[error("Provider Model discovery failed for Provider {provider_id}: {message}")]
-    DiscoveryRequestFailed {
-        provider_id: String,
-        message: String,
-    },
-    #[error("Provider Model discovery returned HTTP {status} for Provider {provider_id}")]
-    DiscoveryHttpStatus { provider_id: String, status: u16 },
     #[error(
         "Provider Model discovery returned an invalid or empty list for Provider {provider_id}"
     )]
@@ -37,215 +32,146 @@ impl RouteModelDiscoveryError {
     }
 }
 
-#[async_trait]
-pub(super) trait ProviderModelDiscovery: Send + Sync {
-    async fn discover(
-        &self,
-        admin: &AdminService,
-        provider_id: &str,
-    ) -> Result<Vec<String>, RouteModelDiscoveryError>;
+pub(super) struct DiscoveredModels {
+    pub(super) models: Vec<stravia_vendor_sdk::DiscoveredModel>,
+    publications: Vec<VendorPublicationFence>,
 }
 
-pub(super) struct HttpProviderModelDiscovery;
-
-#[async_trait]
-impl ProviderModelDiscovery for HttpProviderModelDiscovery {
-    async fn discover(
+impl DiscoveredModels {
+    /// Validate every page, then acquire the shared vendor publication fence
+    /// before publishing a combined inventory. An incompatible update
+    /// invalidates old pages and no partial or late model set reaches storage.
+    pub(super) async fn write_fence(
         &self,
-        admin: &AdminService,
-        provider_id: &str,
-    ) -> Result<Vec<String>, RouteModelDiscoveryError> {
-        let provider = admin
-            .get_provider(provider_id)
-            .await
-            .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        if uses_catalog_inventory(&provider) {
-            return admin
-                .preset_catalog_models_for_provider(&provider)
-                .await
-                .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?
-                .map(|catalog| {
-                    retain_discovered_model_ids(
-                        &provider,
-                        catalog.models.into_iter().map(|model| model.id).collect(),
-                    )
-                })
-                .ok_or_else(|| RouteModelDiscoveryError::CatalogIdentityMissing {
-                    provider_id: provider_id.to_string(),
-                });
+    ) -> anyhow::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        // Every page belongs to the same vendor activity. Validate them all,
+        // then take one read guard; taking several sequential guards can lock
+        // invert with a queued incompatible-update writer.
+        for publication in &self.publications {
+            publication.ensure_current()?;
         }
-        let runtime = admin
-            .resolve_provider_runtime(&provider)
+        self.publications
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("model discovery produced no publication fence"))?
+            .write_fence()
+            .await
+    }
+}
+
+pub(super) async fn discover_provider_models(
+    admin: &AdminService,
+    provider_id: &str,
+) -> Result<DiscoveredModels, RouteModelDiscoveryError> {
+    let cancellation = stravia_runtime_contract::CancellationToken::new();
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let prepared = admin
+        .gw
+        .prepare_vendor_execution(
+            provider_id,
+            None,
+            stravia_vendor_sdk::Operation::Discover,
+            &VendorCallContext::new(cancellation.clone(), deadline),
+        )
+        .await
+        .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
+    let channel_id = prepared.provider().channel.trim();
+    let channel = prepared
+        .descriptor()
+        .channels
+        .iter()
+        .find(|channel| channel.id == channel_id)
+        .ok_or_else(|| {
+            RouteModelDiscoveryError::setup(
+                provider_id,
+                anyhow::anyhow!("Vendor channel `{channel_id}` is not installed"),
+            )
+        })?;
+    if !channel
+        .capabilities
+        .contains(&stravia_vendor_sdk::Capability::ModelDiscovery)
+    {
+        return Err(RouteModelDiscoveryError::setup(
+            provider_id,
+            anyhow::anyhow!("Vendor channel `{channel_id}` does not support model discovery"),
+        ));
+    }
+
+    let mut models = BTreeMap::new();
+    let mut publications = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor = None;
+
+    for _ in 0..MAX_DISCOVERY_PAGES {
+        let execution = admin
+            .gw
+            .execute_prepared_vendor(
+                prepared.clone(),
+                VendorRequest::Discover(stravia_vendor_sdk::DiscoverRequest {
+                    cursor: cursor.clone(),
+                }),
+                VendorCallContext::new(cancellation.clone(), deadline),
+            )
             .await
             .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        if provider.vendor.as_deref() == Some("devin") {
-            // Union with the preset selector list: the catalog omits
-            // `swe-1-6-slow` on some accounts even though free tier can still
-            // run it (upstream #258), so the curated list doubles as the
-            // safety net for selectors the catalog does not advertise. The
-            // merged selectors fold to one id per family — the same shape
-            // record sync produces — instead of every upstream variant.
-            let entries = discover_devin_catalog(admin, &provider, &runtime)
-                .await
-                .unwrap_or_default();
-            let merged = static_model_union(
-                &runtime,
-                &provider,
-                entries.iter().map(|entry| entry.selector.clone()).collect(),
-            );
-            if !merged.is_empty() {
-                let families = crate::provider::devin::family::group_families(&merged, &entries);
-                return Ok(retain_discovered_model_ids(
-                    &provider,
-                    families.iter().map(|family| family.id.clone()).collect(),
+        let response = match execution.output {
+            stravia_vendor_sdk::OperationOutput::Discover(response) => response,
+            _ => {
+                return Err(RouteModelDiscoveryError::setup(
+                    provider_id,
+                    anyhow::anyhow!("Vendor returned a non-discovery result"),
                 ));
             }
-        }
-        if let Some(static_list) = runtime.binding.static_models_override.as_deref() {
-            let models = static_list
-                .iter()
-                .map(|model| model.trim().to_string())
-                .filter(|model| !model.is_empty())
-                .collect::<Vec<_>>();
-            if !models.is_empty() {
-                return Ok(models);
+        };
+        publications.push(execution.publication);
+
+        for model in response.models {
+            let id = model.id.trim();
+            if id.is_empty() || model.display_name.trim().is_empty() {
+                return Err(RouteModelDiscoveryError::InvalidDiscoveryResponse {
+                    provider_id: provider_id.to_owned(),
+                });
+            }
+            match models.entry(id.to_owned()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(model);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    return Err(RouteModelDiscoveryError::setup(
+                        provider_id,
+                        anyhow::anyhow!(
+                            "Vendor model discovery returned duplicate model `{}`",
+                            entry.key()
+                        ),
+                    ));
+                }
             }
         }
-        let preset_static_models = preset_static_models(&provider);
-        if !preset_static_models.is_empty() {
-            return Ok(preset_static_models);
-        }
-        let endpoint = runtime
-            .binding
-            .models_source_override
-            .clone()
-            .or_else(|| resolve_models_endpoint(&provider))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| RouteModelDiscoveryError::DiscoveryUrlEmpty {
-                provider_id: provider_id.to_string(),
-            })?;
 
-        let constructed = construct_models_request(&provider, &runtime, &endpoint)
-            .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        let client = admin
-            .gw
-            .http_client_for_provider(provider.use_proxy)
-            .await
-            .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        let request = client
-            .get(constructed.url)
-            .headers(constructed.headers)
-            .timeout(Duration::from_secs(10));
-
-        let response = request.send().await.map_err(|error| {
-            RouteModelDiscoveryError::DiscoveryRequestFailed {
-                provider_id: provider_id.to_string(),
-                message: format_connectivity_error(&error),
+        cursor = response
+            .next_cursor
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let Some(next) = cursor.as_ref() else {
+            if models.is_empty() {
+                return Err(RouteModelDiscoveryError::InvalidDiscoveryResponse {
+                    provider_id: provider_id.to_owned(),
+                });
             }
-        })?;
-        if !response.status().is_success() {
-            return Err(RouteModelDiscoveryError::DiscoveryHttpStatus {
-                provider_id: provider_id.to_string(),
-                status: response.status().as_u16(),
+            return Ok(DiscoveredModels {
+                models: models.into_values().collect(),
+                publications,
             });
-        }
-        let json: Value = response.json().await.unwrap_or_default();
-        let models =
-            extract_models_from_response(&provider.protocol, provider.vendor.as_deref(), &json);
-        if models.is_empty() {
-            return Err(RouteModelDiscoveryError::InvalidDiscoveryResponse {
-                provider_id: provider_id.to_string(),
-            });
-        }
-        Ok(models)
-    }
-}
-
-/// Devin's model inventory is not an HTTP JSON endpoint — it is the unary
-/// Connect-RPC `ApiServerService/GetCliModelConfigs` on the api-server host.
-/// The request carries only `ClientMetadata` (raw `application/proto`, doubled
-/// Basic auth), the same shape the seat-management monitor already uses.
-/// Errors propagate to the caller, which falls back to the preset selector
-/// list — discovery must never fail a sync just because the catalog probe did.
-pub(super) async fn discover_devin_catalog(
-    admin: &AdminService,
-    provider: &Provider,
-    runtime: &ResolvedProviderRuntime,
-) -> anyhow::Result<Vec<crate::protocol::codec::devin_connect::DevinModelConfig>> {
-    let token = runtime.access_token.trim();
-    if token.is_empty() {
-        anyhow::bail!("devin session token is empty");
-    }
-    let base_url = runtime
-        .binding
-        .base_url_override
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            let value = provider.base_url.trim();
-            (!value.is_empty()).then_some(value)
-        })
-        .unwrap_or("https://server.codeium.com")
-        .trim_end_matches('/');
-    let url = format!("{base_url}/exa.api_server_pb.ApiServerService/GetCliModelConfigs");
-
-    let mut headers = HeaderMap::new();
-    for (name, value) in &runtime.binding.extra_headers {
-        if let (Ok(name), Ok(value)) = (
-            name.parse::<reqwest::header::HeaderName>(),
-            HeaderValue::from_str(value),
-        ) {
-            headers.insert(name, value);
+        };
+        if !seen_cursors.insert(next.clone()) {
+            return Err(RouteModelDiscoveryError::setup(
+                provider_id,
+                anyhow::anyhow!("Vendor model discovery repeated its pagination cursor"),
+            ));
         }
     }
-    headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/proto"),
-    );
-    headers.insert(
-        reqwest::header::HeaderName::from_static("connect-protocol-version"),
-        HeaderValue::from_static("1"),
-    );
 
-    let client = admin
-        .gw
-        .http_client_for_provider(provider.use_proxy)
-        .await?;
-    let response = client
-        .post(url)
-        .headers(headers)
-        .body(crate::protocol::codec::devin_connect::encode_client_metadata_request(token, true))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        anyhow::bail!("GetCliModelConfigs returned HTTP {}", response.status());
-    }
-    let body = response.bytes().await?;
-    Ok(crate::protocol::codec::devin_connect::decode_cli_model_configs(&body))
-}
-
-/// Merge live catalog selectors with the preset/binding static list, keeping
-/// discovery order first and appending static entries the catalog missed.
-pub(super) fn static_model_union(
-    runtime: &ResolvedProviderRuntime,
-    provider: &Provider,
-    mut models: Vec<String>,
-) -> Vec<String> {
-    let statics = runtime
-        .binding
-        .static_models_override
-        .clone()
-        .filter(|list| !list.is_empty())
-        .unwrap_or_else(|| preset_static_models(provider));
-    for entry in statics {
-        let entry = entry.trim();
-        if !entry.is_empty() && !models.iter().any(|model| model == entry) {
-            models.push(entry.to_string());
-        }
-    }
-    models
+    Err(RouteModelDiscoveryError::setup(
+        provider_id,
+        anyhow::anyhow!("Vendor model discovery exceeded {MAX_DISCOVERY_PAGES} pages"),
+    ))
 }

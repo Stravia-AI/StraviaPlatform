@@ -117,6 +117,44 @@ async fn debug_redacts_only_authorization_header_values() {
 }
 
 #[tokio::test]
+async fn raw_media_non_utf8_and_websocket_messages_preserve_observed_bytes() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let media = r#"{"image":"data:image/png;base64,AAECA/8="}"#;
+    assert_eq!(
+        handle.record(wire_record(1, "body_chunk", Value::String(media.into()))),
+        TraceWriteOutcome::Queued
+    );
+
+    let mut non_utf8 = wire_record(2, "body_chunk", Value::String("/wAB".into()));
+    non_utf8.payload_encoding = "base64".into();
+    assert_eq!(handle.record(non_utf8), TraceWriteOutcome::Queued);
+
+    let mut websocket_text = wire_record(3, "text", Value::String("ws-雪".into()));
+    websocket_text.transport = Some("websocket".into());
+    assert_eq!(handle.record(websocket_text), TraceWriteOutcome::Queued);
+
+    let mut websocket_binary = wire_record(4, "binary", Value::String("AP+A".into()));
+    websocket_binary.transport = Some("websocket".into());
+    websocket_binary.payload_encoding = "base64".into();
+    assert_eq!(handle.record(websocket_binary), TraceWriteOutcome::Queued);
+
+    assert_eq!(handle.finish().await.status, "complete");
+    let records = persisted_records(&handle).await;
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0].payload, media);
+    assert_eq!(records[1].payload_encoding, "base64");
+    assert_eq!(records[1].payload, "/wAB");
+    assert_eq!(records[2].transport.as_deref(), Some("websocket"));
+    assert_eq!(records[2].payload, "ws-雪");
+    assert_eq!(records[3].message_type.as_deref(), Some("binary"));
+    assert_eq!(records[3].payload_encoding, "base64");
+    assert_eq!(records[3].payload, "AP+A");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn malformed_complete_wire_is_complete_capture() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");

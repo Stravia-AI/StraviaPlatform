@@ -154,6 +154,129 @@ async fn stale_reused_websocket_falls_back_then_retries_websocket() {
 }
 
 #[tokio::test]
+async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
+    let (base_url, upstream_connections, upstream_requests) =
+        serve_responses_websocket_sequence(vec!["first direct", "second direct", "stale direct"])
+            .await;
+    let (proxy_url, proxy_connections) = serve_rejecting_http_proxy().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let admin = gateway.admin();
+    admin
+        .set_setting("proxy_enabled", "false")
+        .await
+        .expect("disable Gateway proxy");
+    admin
+        .set_setting("proxy_url", &proxy_url)
+        .await
+        .expect("configure Gateway proxy");
+    admin
+        .set_setting("proxy_force_http1", "false")
+        .await
+        .expect("configure Gateway proxy HTTP version");
+    let model = "websocket-proxy-scope";
+    configure_route_with_protocol(&gateway, model, &[base_url], "openai", "open-responses").await;
+    let provider_id = gateway
+        .storage
+        .routes()
+        .list()
+        .await
+        .expect("Routes")
+        .into_iter()
+        .find(|route| route.model_id == model)
+        .expect("configured Route")
+        .targets[0]
+        .provider_id
+        .clone();
+    gateway
+        .admin()
+        .update_provider(
+            &provider_id,
+            crate::db::models::UpdateProvider {
+                use_proxy: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enable provider proxy preference");
+
+    for expected in ["first direct", "second direct"] {
+        let response = execute_protocol_request_with_session(
+            gateway.clone(),
+            model,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            "/v1/chat/completions",
+            true,
+            "proxy-scope-session",
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("direct WebSocket response body");
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert!(
+            String::from_utf8_lossy(&body).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    assert_eq!(upstream_connections.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream_requests.lock().len(), 2);
+    assert_eq!(proxy_connections.load(Ordering::SeqCst), 0);
+
+    gateway
+        .admin()
+        .set_setting("proxy_enabled", "true")
+        .await
+        .expect("enable Gateway proxy");
+    let response = execute_protocol_request_with_session(
+        gateway,
+        model,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        "/v1/chat/completions",
+        true,
+        "proxy-scope-session",
+    )
+    .await;
+
+    assert_ne!(response.status(), StatusCode::OK);
+    assert!(proxy_connections.load(Ordering::SeqCst) > 0);
+    assert_eq!(upstream_connections.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream_requests.lock().len(), 2);
+}
+
+async fn serve_rejecting_http_proxy() -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind rejecting proxy");
+    let address = listener.local_addr().expect("proxy address");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let observed = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.expect("accept proxy request");
+            observed.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}"), connections)
+}
+
+#[tokio::test]
 async fn unsupported_websocket_handshake_falls_back_before_sending_a_request() {
     let (base_url, calls) = serve_sse_sequence(vec![
         openai_responses_sse("unused handshake body"),

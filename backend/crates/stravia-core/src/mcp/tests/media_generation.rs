@@ -138,7 +138,7 @@ async fn generation_app() -> GenerationApp {
         .providers()
         .create(CreateProviderRecord {
             name: "Local Codex fixture".into(),
-            vendor: Some("openai".into()),
+            vendor: Some("openai-codex".into()),
             protocol: "open-responses".into(),
             base_url: base_url.clone(),
             preset_key: Some("openai".into()),
@@ -159,7 +159,7 @@ async fn generation_app() -> GenerationApp {
         .upsert(
             &provider.id,
             UpsertOAuthCredential {
-                driver_key: "codex".into(),
+                driver_key: "openai-codex".into(),
                 scheme: "oauth_auth_code_pkce".into(),
                 access_token: "local-test-not-a-production-credential".into(),
                 resource_url: Some(base_url),
@@ -169,7 +169,7 @@ async fn generation_app() -> GenerationApp {
         .await
         .unwrap();
     app.gateway.admin().create_manual_provider_model(&provider.id, "gpt-5.4", crate::provider_models::CreateManualProviderModel {
-        metadata: json!({"id":"gpt-5.4","name":"Local GPT","tool_call":true,"modalities":{"input":["text","image"],"output":["text"]}}),
+        metadata: json!({"id":"gpt-5.4","name":"Local GPT","attachment":true,"tool_call":true,"capabilities":["media_image"],"modalities":{"input":["text","image"],"output":["text"]}}),
     }).await.unwrap();
     let route = app
         .gateway
@@ -179,10 +179,10 @@ async fn generation_app() -> GenerationApp {
             display_name: Some("Image generation".into()),
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "gpt-5.4".into(),
+            target_model: Some("gpt-5.4".into()),
             targets: vec![CreateTarget {
                 provider_id: provider.id,
-                model: "gpt-5.4".into(),
+                model: Some("gpt-5.4".into()),
                 enabled: true,
                 priority: Some(0),
                 first_token_timeout_ms: None,
@@ -464,7 +464,7 @@ async fn artifact_save_failure_does_not_repeat_successful_upstream_generation() 
 }
 
 #[tokio::test]
-async fn route_failover_handles_reported_and_ambiguous_transport_failures() {
+async fn route_failover_handles_typed_status_and_transport_failures() {
     for failure in [
         GenerationReply::Status(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -489,7 +489,7 @@ async fn route_failover_handles_reported_and_ambiguous_transport_failures() {
                 provider,
                 "gpt-5.2",
                 crate::provider_models::CreateManualProviderModel {
-                    metadata: json!({"id":"gpt-5.2","name":"Fallback GPT","tool_call":true}),
+                    metadata: json!({"id":"gpt-5.2","name":"Fallback GPT","tool_call":true,"capabilities":["media_image"]}),
                 },
             )
             .await
@@ -665,6 +665,15 @@ async fn generated_image_downloads_real_bytes_and_can_be_edited() {
         json!({"type":"image_generation"})
     );
     assert_eq!(requests[0]["tools"][0]["action"], "generate");
+    assert_eq!(requests[0]["tools"][0]["size"], "1536x1024");
+    assert_eq!(requests[0]["tools"][0]["quality"], "high");
+    assert!(
+        requests[0]["instructions"]
+            .as_str()
+            .is_some_and(|instructions| {
+                instructions.contains("16:9") && instructions.contains("4K")
+            })
+    );
     assert_eq!(requests[1]["tools"][0]["action"], "edit");
     assert!(
         requests[1]

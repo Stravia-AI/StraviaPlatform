@@ -4,7 +4,7 @@ export interface Route {
   display_name?: string | null
   balance: RouteSelectionStrategy
   target_provider: string
-  target_model: string
+  target_model: string | null
   is_enabled: boolean
   created_at: string
   default_thinking_level?: ThinkingLevel | null
@@ -21,7 +21,8 @@ export interface Target {
   id: string
   model_id: string
   provider_id: string
-  model: string
+  /** null is a Provider-only full-search destination. */
+  model: string | null
   enabled: boolean
   priority: number
   first_token_timeout_ms: number
@@ -51,7 +52,7 @@ export interface CreateRoute {
   display_name?: string | null
   balance?: RouteSelectionStrategy
   target_provider: string
-  target_model: string
+  target_model: string | null
   targets?: CreateTarget[]
   default_thinking_level?: ThinkingLevel | null
 }
@@ -77,7 +78,7 @@ export interface UpdateRoute {
   display_name?: string | null
   balance?: RouteSelectionStrategy
   target_provider?: string
-  target_model?: string
+  target_model?: string | null
   targets?: UpsertTarget[]
   is_enabled?: boolean
   default_thinking_level?: ThinkingLevel | null
@@ -85,7 +86,7 @@ export interface UpdateRoute {
 
 export interface CreateTarget {
   provider_id: string
-  model: string
+  model: string | null
   enabled?: boolean
   priority?: number
   first_token_timeout_ms?: number
@@ -97,7 +98,7 @@ export interface CreateTarget {
 export interface UpsertTarget {
   id?: string
   provider_id: string
-  model: string
+  model: string | null
   enabled?: boolean
   priority?: number
   first_token_timeout_ms?: number
@@ -111,7 +112,7 @@ export type TargetRuntimeState = 'available' | 'cooling_down' | 'half_open' | 'p
 export interface TargetRuntimeStatus {
   target_id: string
   provider_id: string
-  model: string
+  model: string | null
   state: TargetRuntimeState
   cooldown_remaining_ms: number | null
 }

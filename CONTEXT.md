@@ -192,16 +192,16 @@ Agent Turn 是 Agent Run 成功完成或受预算约束完成后提交的不可�
 
 ## Turn Chain
 
-Turn Chain 是由持久化不可变历史节点组成、归属于一个认证主体的有向无环父链。调用方以节点 ID 选择精确前缀，平台据此恢复完整规范化历史；不存在内存事实源、可变 latest head 或独立 Session 身份。
+Turn Chain 是由持久化不可变历史节点组成、归属于一个认证主体的有向无环父链。调用方以 Turn Reference 选择精确前缀，平台据此恢复完整规范化历史；不存在内存事实源、可变 latest head 或独立 Session 身份。
 
 ## Turn Reference
 
-Turn Reference 是供 Connect Client 与模型传递的稳定、不透明续接引用，精确选择 Principal 所属 Turn Chain 中的一个不可变节点；它不表示独立 Session 或可变 latest head，也不授予访问权限。
+Turn Reference 是供 Connect Client 与模型传递的稳定、不透明续接引用，外壳为 `stravia://turns/<turn-id>`，精确选择 Principal 所属 Turn Chain 中的一个不可变节点；它不表示独立 Session 或可变 latest head，也不授予访问权限。
 _避免使用_：Session ID、latest head、访问凭据
 
 ## Artifact
 
-Artifact 是归属于一个认证主体的不可变媒体或大对象；同一主体下，声明媒体类型与完整内容完全相同的文件具有同一身份，而非按上传次数区分。外部以 opaque ArtifactId 引用它，保留期与内容身份相互独立。
+Artifact 是归属于一个认证主体的不可变媒体或大对象；同一主体下，声明媒体类型与完整内容完全相同的文件具有同一身份，而非按上传次数区分。内部以 opaque ArtifactId 标识，外部通过 Artifact Reference 引用；保留期与内容身份相互独立。
 
 ## Artifact Store
 
@@ -209,7 +209,7 @@ Artifact Store 是保存并读取 Artifact 内容的深模块。它向调用方�
 
 ## Artifact Reference
 
-Artifact Reference 是供 Connect Client 与模型传递的稳定、不透明文件引用，不是实际下载地址，也不授予访问权限。解析必须校验当前 Principal 的归属；同一 Principal 可以跨对话复用，不同 Principal 不得解析。
+Artifact Reference 是供 Connect Client 与模型传递的稳定、不透明文件引用，外壳为 `stravia://artifacts/<artifact-id>`；它不是实际下载地址，也不授予访问权限。解析必须校验当前 Principal 的归属；同一 Principal 可以跨对话复用，不同 Principal 不得解析。
 _避免使用_：公开文件地址、下载凭据、伪 URL
 
 ## Artifact Download Grant
@@ -374,7 +374,7 @@ _避免使用_：Provider Offering、Catalog Model
 
 ## Provider Model
 
-Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照；它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target。
+Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照，可以表示纯媒体生成模型，不以具备聊天能力为前提。它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target；模型身份与其支持的能力相互区分。
 _避免使用_：Provider Model Override、Catalog Model
 
 ## Model Specification
@@ -459,12 +459,12 @@ Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `p
 
 ## Target
 
-Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；普通生成请求只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Remote Compaction Request、Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+Target 是 Route 上一个已配置的上游目的地，关联 Provider，并在所用能力要求模型选择时关联上游模型；独立完整搜索服务可以仅关联 Provider。只有已启用且符合所需能力的 Target 才能执行，重试与切换遵守对应能力的错误及结果提交规则，不因外围 Hook 或 Platform Tool 失败而重放已经完成的上游调用。
 _避免使用_：调度泳池
 
 ## Enabled Target
 
-已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target。缺省为已启用。它必须已配置 Provider 与上游 model。
+已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target，缺省为已启用。它必须已配置 Provider，并满足所需能力的模型选择要求；不公开模型选择的独立搜索服务不要求配置上游模型。
 _避免使用_：调度泳池、可调度 Target、在线 Target
 
 ## Disabled Target
@@ -552,8 +552,8 @@ _避免使用_：Egress Wire Value、Native Reasoning Option、Mapped Effort
 
 ## Provider
 
-Provider 是管理员保存的一条上游连接，包含 Catalog 身份、Vendor、Protocol、base URL 与 Adapter Credentials；base URL 是保存时由 Vendor 从 Adapter Credentials 派生的快照，管理员显式覆盖时保存覆盖值，推理期间不重新派生。它不是 Provider Catalog Entry，也不是客户端 Route。
-_避免使用_：Vendor（当指这条保存记录）
+Provider 是管理员保存的一条上游连接，引用一个 Vendor、供应商身份及其 channel，并保存 Protocol、已确认的服务地址、普通选项和连接范围的上游凭据。供应商身份表示这条连接属于哪类上游接入；保存连接的 UUID 区分具体连接记录，同一供应商身份可以有多条连接，两者不得互换。Provider 是调用与凭据信任的连接边界，不是 Vendor Plugin、Provider Catalog Entry 或客户端 Route。
+_避免使用_：Vendor（当指这条保存记录）、把供应商身份当作连接 UUID
 
 ## Provider Allowance
 
@@ -562,7 +562,7 @@ _避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
 
 ## Provider Allowance Monitor
 
-Provider Allowance Monitor 是 Stravia Core 按 Provider 的 Catalog 身份选择、读取并规范化上游额度的受信实现；只有启用且命中本地 Monitor registry 的 Provider 才具有 Provider Allowance。Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
+Provider Allowance Monitor 是 Provider 所引用的 Vendor Plugin 为该类供应商读取并规范化上游额度的受信能力。Stravia 负责按 Provider 调度读取、保存样本与呈现结果；Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
 _避免使用_：Catalog Allowance Capability、Quota Endpoint、远端解析规则
 
 ## Allowance Item
@@ -587,8 +587,28 @@ _避免使用_：7 日均用量、Usage Forecast
 
 ## Vendor
 
-Vendor 是按 npm 包标识的上游运行时适配器；同一 npm 的多个 Provider Catalog Entry 共用它。它拥有 Adapter Credentials 校验、base URL 组装、供应商 headers，以及分别面向推理与模型探测的请求构造和鉴权约定，不拥有 wire codec、模型来源选择或发现失败后的回退，也不执行 npm 包；自定义模型探测地址在没有内置端点或 OAuth binding 明确约定时继承该 Vendor 的模型探测认证约定，不按任意 URL 猜测，也不自动轮试认证方式。
-_避免使用_：SDK、Provider Adapter
+Vendor 是具有稳定身份的供应商接入实现，可以包含多个 channel。基础回退 Vendor 以一个身份覆盖多个供应商 Profile；专属 Vendor 完整接管其供应商身份下的全部连接，不与基础 Vendor 按 channel、能力或操作混用，在专属实现缺失、不可用或失败时也不回退。供应商身份与已保存 Provider 连接的 UUID 不同。
+_避免使用_：SDK、npm package、Provider（当指接入定义）、把基础 Vendor 的供应商身份当作多个 Vendor
+
+## Vendor Plugin
+
+Vendor Plugin 是实现一个 Vendor 的可安装、版本化软件包，可包含多个 channel，并提供模型推理、完整联网搜索、媒体生成中的一种或多种能力，不以模型推理为必备能力。一个基础插件实现一个覆盖多个供应商 Profile 的回退 Vendor，而不是导出多个 Vendor 身份；专属插件完整接管匹配的供应商 Profile。它不是已保存的 Provider 连接，也不是供多个插件复用的 Protocol Codec。
+_避免使用_：Provider 连接、Protocol Codec
+
+## Vendor Credential Authorization
+
+Vendor Credential Authorization 是管理员为选定 Vendor Plugin 的连接登录或填写凭据时，授予该插件处理本连接上游账户秘密的信任；连接尚未保存时，该信任限定于对应的待配置连接认证会话。它不授予其他 Provider、其他认证会话或 Stravia 平台凭据的访问权，也不表示凭据对插件不可见。
+_避免使用_：平台管理授权、所有账户访问权、凭据对插件不可见
+
+## Protocol Codec
+
+Protocol Codec 是规范化模型语义与一种 wire protocol 之间的编解码契约及其实现，可由多个 Vendor Plugin 复用。复用同一个 Protocol Codec 不意味着这些插件属于同一 Vendor。
+_避免使用_：Vendor、Vendor Plugin
+
+## Vendor Private State
+
+Vendor Private State 是 Vendor Plugin 为一条 Provider 保存的、必要时跨重启保留的供应商私有状态，例如设备注册标识与账户绑定信息；连接尚未保存时，其临时状态只归属于对应认证会话。它不替代连接配置、凭据或 Provider Model，也不表示活跃网络连接与请求可以跨重启恢复。
+_避免使用_：凭据存储、Provider Model、可恢复的网络会话
 
 ## Adapter Credentials
 
@@ -622,7 +642,7 @@ Web Search 是把查询转换为有来源 Search Report 的平台能力。用户
 
 ## Search Backend
 
-Search Backend 是 Web Search 的执行方式，当前取值为 Local Agent 或 Codex Agentic Search。一个根 Search Turn 固定其 Backend 和模型绑定，后续续接不会随管理员配置切换。Local Agent 使用平台配置的研究预算；Codex Agentic Search 不受 Stravia 研究步数和总时长预算控制，但仍受调用方取消、请求生命周期和传输安全边界约束。
+Search Backend 是 Web Search 的执行方式，分为 Local Agent 与供应商提供的外部完整搜索，Codex hosted search 属于后者。Local Agent 使用平台研究预算并支持固定原绑定的续接；外部搜索通过 Route 选择符合能力的 Target，按单次独立调用执行，不提供续接、不使用 Local 研究预算，但仍受调用方取消、请求生命周期和传输安全边界约束。
 
 ## Search Report
 
@@ -630,11 +650,11 @@ Search Report 是 Web Search 返回的强校验工具结果，由 Markdown answe
 
 ## Search Turn
 
-Search Turn 是一次完整或有效 partial Web Search 提交的不可变续接点。它复用 Turn Chain 的 Principal、父链、分支与保留期语义，但不保存网页正文或内部 Agent transcript。
+Search Turn 是一次完整或有效 partial Web Search 提交的不可变报告记录，具有 Principal 归属、来源引用身份与保留期；它不保存网页正文或内部 Agent transcript。Local 搜索记录可作为固定原绑定的续接与分支点，外部搜索记录不授予续接能力。
 
 ## Search Source
 
-Search Source 是某个 Search Turn 已验证 Search Report 中实际引用、且可追溯到当前或历史已验证 Web evidence 的从属来源条目。它依附于所属 Search Turn，不是独立会话，也不授予访问权限；未被 Report 引用的 consulted URL 不是 Search Source。
+Search Source 是某个 Search Turn 已验证 Search Report 中实际引用、且可追溯到当前或历史已验证 Web evidence 的从属来源条目，引用外壳为 `stravia://turns/<turn-id>/sources/<ordinal>`。它依附于所属 Search Turn，不是独立会话，也不授予访问权限；未被 Report 引用的 consulted URL 不是 Search Source。
 
 ## Web Access
 

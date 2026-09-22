@@ -174,10 +174,17 @@ mod tests {
     async fn remote_mcp_content_preserves_media_and_protects_readable_resources() {
         const SECRET: &str = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
         let directory = tempfile::tempdir().unwrap();
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
+        let gateway = crate::Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .await
         .unwrap();
         let owner = Principal::new("owner");

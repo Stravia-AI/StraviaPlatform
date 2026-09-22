@@ -8,8 +8,6 @@ use serde_json::Value;
 
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::AiItem;
-use stravia_runtime_contract::protocol::ir::AiRequest;
-use stravia_runtime_contract::protocol::ir::ProtocolExt;
 use stravia_runtime_contract::protocol::ir::canonical;
 
 mod sql;
@@ -20,32 +18,6 @@ mod retention_tests;
 const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_RESOLUTION_RECORDS: usize = 256;
-
-pub(crate) struct NativeCompactionControls {
-    pub trigger: bool,
-    pub active_control: bool,
-}
-
-impl NativeCompactionControls {
-    pub fn classify(request: &AiRequest) -> Self {
-        let trigger = request.items.iter().any(AiItem::is_compaction_trigger);
-        let control = match &request.ext {
-            Some(ProtocolExt::OpenResponses(ext)) => ext.passthrough_body.get("context_management"),
-            _ => None,
-        };
-        // Null and empty controls are inactive; an explicit trigger remains active.
-        let active_control = control
-            .is_some_and(|value| !value.is_null() && !value.as_array().is_some_and(Vec::is_empty));
-        Self {
-            trigger,
-            active_control,
-        }
-    }
-
-    pub fn requested(&self) -> bool {
-        self.trigger || self.active_control
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CompactionTarget {
@@ -342,7 +314,7 @@ mod tests {
     fn state() -> AiItem {
         let wire =
             serde_json::json!({"type": "compaction", "encrypted_content": "local-opaque-state"});
-        crate::protocol::codec::open_responses::decoder::decode_input_item(&wire)
+        stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
             .expect("native state")
             .expect("item")
     }
@@ -380,9 +352,10 @@ mod tests {
         let wire = serde_json::json!({
             "type": "compaction", "id": "hook-state", "encrypted_content": "original"
         });
-        let mut item = crate::protocol::codec::open_responses::decoder::decode_input_item(&wire)
-            .unwrap()
-            .unwrap();
+        let mut item =
+            stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
+                .unwrap()
+                .unwrap();
         let mut input = registration("before-canonical-replacement");
         input.window = vec![item.clone()];
         input.state_items = vec![item.clone()];

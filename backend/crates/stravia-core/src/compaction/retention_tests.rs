@@ -82,7 +82,7 @@ fn state(id: &str, content: &str) -> AiItem {
         "id": id,
         "encrypted_content": content,
     });
-    crate::protocol::codec::open_responses::decoder::decode_input_item(&wire)
+    stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
         .expect("native state")
         .expect("item")
 }

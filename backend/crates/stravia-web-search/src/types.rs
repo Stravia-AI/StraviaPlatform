@@ -135,7 +135,7 @@ pub struct WebSearchResult {
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchBackendKind {
     Local,
-    Codex,
+    External,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,40 +146,29 @@ pub struct LocalSearchBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CodexSearchBinding {
-    pub provider_id: String,
-    pub upstream_model: String,
+pub struct ExternalSearchBinding {
+    pub route_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebSearchBackendDraft {
-    Local {
-        model_id: Option<String>,
-    },
-    Codex {
-        provider_id: Option<String>,
-        upstream_model: Option<String>,
-    },
+    Local { model_id: Option<String> },
+    External { route_id: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolvedWebSearchBackend {
-    Local {
-        model_id: String,
-    },
-    Codex {
-        provider_id: String,
-        upstream_model: String,
-    },
+    Local { model_id: String },
+    External { route_id: String },
 }
 
 impl ResolvedWebSearchBackend {
     pub fn kind(&self) -> WebSearchBackendKind {
         match self {
             Self::Local { .. } => WebSearchBackendKind::Local,
-            Self::Codex { .. } => WebSearchBackendKind::Codex,
+            Self::External { .. } => WebSearchBackendKind::External,
         }
     }
 }

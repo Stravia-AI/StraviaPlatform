@@ -141,19 +141,18 @@ pub(crate) async fn route_metadata(
 ) -> MediaRoute {
     let mut targets = Vec::with_capacity(route.targets.len());
     for target in &route.targets {
-        let actual_model = if target.model.is_empty() || target.model == "*" {
-            route.model_id.as_str()
+        let metadata = if let Some(actual_model) = target.model.as_deref() {
+            gateway
+                .storage
+                .provider_models()
+                .find(&target.provider_id, actual_model)
+                .await
+                .ok()
+                .flatten()
+                .map(|record| record.metadata)
         } else {
-            target.model.as_str()
+            None
         };
-        let metadata = gateway
-            .storage
-            .provider_models()
-            .find(&target.provider_id, actual_model)
-            .await
-            .ok()
-            .flatten()
-            .map(|record| record.metadata);
         targets.push(MediaTarget {
             provider_id: target.provider_id.clone(),
             model: target.model.clone(),
@@ -195,16 +194,6 @@ pub(crate) async fn model_is_image_capable(
 ) -> bool {
     stravia_media::platform::model_is_image_capable(&route_metadata(gateway, model).await)
 }
-pub(crate) fn supports_image(metadata: &crate::provider_models::ProviderModelMetadata) -> bool {
-    stravia_media::supports_image(
-        metadata
-            .modalities
-            .as_ref()
-            .map(|modalities| modalities.input.as_slice())
-            .unwrap_or_default(),
-    )
-}
-
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]

@@ -107,7 +107,7 @@ def compaction_provider():
                     status = 200
             else:
                 result, status = {"error": {"code": "unsupported_path"}}, 404
-            if body.get("instructions") == "reject-compaction":
+            if body.get("instructions") in ("reject-compaction", "reject-compaction-secret"):
                 result = {"error": {
                     "code": "upstream_compaction_unavailable",
                     "type": "provider_capacity_error",
@@ -115,6 +115,8 @@ def compaction_provider():
                     "param": "context_management",
                     "details": {"retryable": True},
                 }}
+                if body["instructions"] == "reject-compaction-secret":
+                    result["error"]["message"] = "rejected " + self.headers["Authorization"].removeprefix("Bearer ")
                 status = 503
             if status == 200 and result.get("object") == "response" and (trigger or automatic):
                 result["output"] = compact_window + result["output"]
@@ -180,8 +182,9 @@ def compaction_provider():
 
 def _native_route(env: dict[str, Any], base_url: str, name: str, *, vendor: str = "custom") -> tuple[str, str]:
     status, body = http_request("POST", f"{env['admin']}/api/v1/providers", payload={
-        "name": name, "source": {"type": "custom", "vendor": vendor, "protocol": "open-responses", "base_url": base_url},
+        "name": name, "source": {"type": "custom", "vendor": vendor, "channel": "default", "protocol": "open-responses", "base_url": base_url},
         "credential": {"type": "api_key", "value": "local-test-credential"},
+        "vendor_options": {},
     }, headers=env["auth"])
     assert status == 200, body
     provider_id = body["data"]["id"]
@@ -425,9 +428,10 @@ def test_unknown_compaction_capability_is_forwarded(admin_env, compaction_provid
 @pytest.mark.e2e
 @pytest.mark.admin
 @pytest.mark.parametrize("mode", ["standalone", "controls", "trigger"])
-def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_env, compaction_provider, mode):
-    model = f"compaction-error-{mode}"
-    route, key = _native_route(admin_env, compaction_provider[0], model)
+@pytest.mark.parametrize("vendor", ["custom", "openai"])
+def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_env, compaction_provider, mode, vendor):
+    model = f"compaction-error-{vendor}-{mode}"
+    route, key = _native_route(admin_env, compaction_provider[0], model, vendor=vendor)
     _native_route(admin_env, compaction_provider[0], f"{model}-fallback")
     _fallback_target(admin_env, model, f"{model}-fallback")
     items = [{"role": "user", "content": "do not retry this operation"}]
@@ -453,6 +457,23 @@ def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_e
     assert failure["error"]["source"] == "upstream"
     assert failure["error"]["status_code"] == 503
     assert failure["error"]["message"] == "Compaction capacity is exhausted."
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_compaction_error_redacts_known_connection_secret(admin_env, compaction_provider):
+    model = "compaction-known-secret"
+    _route, key = _native_route(admin_env, compaction_provider[0], model)
+    status, result = _request(
+        admin_env, key, model, [{"role": "user", "content": "compact safely"}],
+        instructions="reject-compaction-secret",
+        context_management=[{"type": "compaction", "compact_threshold": 2000}],
+    )
+    assert status == 503, result
+    assert result["error"]["code"] == "upstream_compaction_unavailable"
+    assert result["error"]["details"]["retryable"] is True
+    assert "local-test-credential" not in json.dumps(result)
+    assert len(compaction_provider[2]) == 1
 
 
 @pytest.mark.e2e

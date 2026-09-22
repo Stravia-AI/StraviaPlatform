@@ -77,6 +77,10 @@ type ImageGenerateOutput = {
 
 管理员按生成类型分别绑定 Route，当前仅有图片绑定。调用方不能覆盖该绑定。所有已启用 Target 必须满足当前类型的媒体生成适配器接入要求；绑定时与执行前均校验，不从混合 Route 中静默筛选候选。已禁用 Target 不参与资格校验。这里的专用约束不新增 Route 类型，也不禁止同一 Route 被普通推理引用。
 
+按照已确认的 [Vendor 插件设计](vendor-plugins.md)，媒体生成可以与推理、完整搜索由同一 Vendor Plugin 和 Provider 连接提供，也可以是插件唯一的能力。沿用 Provider Model → Target → Route；Provider Model 可表示纯图片模型，不以聊天能力为前提，普通聊天执行不得选择不具备其所需能力的 Target。
+
+插件拥有供应商参数映射、请求及结果解析；宿主继续拥有公开 generate 工具、权限、输入处理、Artifact 收存与交付，不允许插件自行注册 MCP 工具。能力移除更新保留绑定并明确不可用；内置自动更新不为此暂停确认，但数据丢弃仍须确认。兼容在途生成使用旧版本完成，不兼容更新取消生成并阻止迟到结果提交。
+
 Codex 参考 [OMP image-gen.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/tools/image-gen.ts) 的实现方式：
 
 1. 通过 Route 选择 Target，复用相应 Codex Provider 的账号、认证和连接设置。

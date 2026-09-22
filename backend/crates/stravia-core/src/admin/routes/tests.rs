@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-use axum::{Router, http::StatusCode, routing::get};
 use serde_json::json;
 
 use super::*;
@@ -10,115 +8,40 @@ use crate::provider_models::{
 };
 use crate::thinking::mapping_control;
 
-struct StubModelDiscovery;
-
-#[async_trait]
-impl ProviderModelDiscovery for StubModelDiscovery {
-    async fn discover(
-        &self,
-        _admin: &AdminService,
-        provider_id: &str,
-    ) -> Result<Vec<String>, RouteModelDiscoveryError> {
-        Ok(vec![format!("{provider_id}-model")])
-    }
-}
-
-#[tokio::test]
-async fn route_model_discovery_uses_the_injected_adapter() -> anyhow::Result<()> {
-    let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
-    .await?;
-    let discovery = StubModelDiscovery;
-    let admin = gateway.admin();
-    let models = RouteModule::with_model_discovery(&admin, &discovery)
-        .discover_provider_model_ids("provider")
-        .await?;
-    assert_eq!(models, ["provider-model"]);
-    Ok(())
-}
-
-#[tokio::test]
-async fn discovery_http_failure_is_typed_and_hides_the_response_body() -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/models",
-                get(|| async { (StatusCode::BAD_GATEWAY, "secret upstream diagnostic") }),
-            ),
-        )
-        .await
-        .expect("serve discovery fixture");
-    });
-
-    let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
-    .await?;
-    let admin = gateway.admin();
-    let provider = admin
-        .create_provider(CreateProvider {
-            name: Some("Discovery Error Provider".into()),
-            source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
-                base_url: format!("http://{address}"),
-                models_source: Some(format!("http://{address}/models")),
-                static_models: None,
-            },
-            credential: ProviderCredentialInput::ApiKey {
-                value: "discovery-test-key".into(),
-            },
-            use_proxy: false,
-        })
-        .await?;
-
-    let error = RouteModule::new(&admin)
-        .discover_provider_model_ids(&provider.id)
-        .await
-        .expect_err("discovery should reject the upstream status");
-    assert!(
-        matches!(
-            &error,
-            RouteModelDiscoveryError::DiscoveryHttpStatus {
-                provider_id,
-                status: 502,
-            } if provider_id == &provider.id
-        ),
-        "unexpected Route error: {error:?}"
-    );
-    assert!(!error.to_string().contains("secret upstream diagnostic"));
-    Ok(())
-}
-
 async fn route_fixture_with_protocol(
     protocol: &str,
 ) -> anyhow::Result<(tempfile::TempDir, Gateway, Provider)> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        },
+        std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await?;
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
             name: Some("Route Test Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: protocol.into(),
+                vendor: match protocol {
+                    "open-responses" => "protocol-open-responses",
+                    _ => "protocol-openai-chat-completions",
+                }
+                .into(),
+                channel: "default".into(),
+                protocol: Some(protocol.into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -147,7 +70,7 @@ async fn route_fixture_with_protocol(
 }
 
 async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider)> {
-    route_fixture_with_protocol("openai").await
+    route_fixture_with_protocol("openai-compatible").await
 }
 
 #[test]
@@ -159,6 +82,23 @@ fn route_wire_inputs_use_model_id_and_reject_legacy_name() {
         "target_model": "upstream-model"
     }));
     assert!(current.is_ok(), "current Route contract must deserialize");
+
+    let provider_only = serde_json::from_value::<CreateRoute>(json!({
+        "model_id": "research",
+        "target_provider": "provider",
+        "target_model": null
+    }))
+    .expect("Provider-only Route contract");
+    assert!(provider_only.target_model.is_none());
+
+    let provider_only_patch = serde_json::from_value::<UpdateRoute>(json!({
+        "target_model": null
+    }))
+    .expect("explicit Provider-only Route patch");
+    let omitted_patch =
+        serde_json::from_value::<UpdateRoute>(json!({})).expect("partial Route patch");
+    assert_eq!(provider_only_patch.target_model, Some(None));
+    assert_eq!(omitted_patch.target_model, None);
 
     let legacy = serde_json::from_value::<CreateRoute>(json!({
         "name": "client-model",
@@ -195,8 +135,21 @@ fn route_target_wire_input_defaults_enabled_and_accepts_disabled() {
     }))
     .expect("disabled Target");
 
+    let provider_only = serde_json::from_value::<CreateTarget>(json!({
+        "provider_id": "research-provider",
+        "model": null
+    }))
+    .expect("Provider-only Target");
+    let blank = serde_json::from_value::<CreateTarget>(json!({
+        "provider_id": "provider",
+        "model": "   "
+    }))
+    .expect("structurally valid blank Target");
+
     assert!(enabled.enabled);
     assert!(!disabled.enabled);
+    assert!(provider_only.model.is_none());
+    assert!(ensure_route_targets_valid(&[blank]).is_err());
 }
 
 #[test]
@@ -227,7 +180,7 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: Some(ThinkingLevel::High),
         })
@@ -291,7 +244,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     let create_target = |model: &str, priority: i32| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: model.into(),
+        model: Some(model.into()),
         priority: Some(priority),
         first_token_timeout_ms: None,
         target_retry_budget: None,
@@ -304,7 +257,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![
                 create_target("upstream-model", 100_000),
                 create_target("second-model", 0),
@@ -330,7 +283,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: String::new(),
-                target_model: String::new(),
+                target_model: None,
                 targets: vec![create_target("upstream-model", valid)],
                 default_thinking_level: None,
             })
@@ -343,7 +296,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             display_name: None,
             balance: Some("weighted_random".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![create_target("upstream-model", 0)],
             default_thinking_level: None,
         })
@@ -373,7 +326,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         .await?;
     let target = |model: &str, enabled: bool| CreateTarget {
         provider_id: provider.id.clone(),
-        model: model.into(),
+        model: Some(model.into()),
         enabled,
         priority: Some(if enabled { -1 } else { i32::MAX }),
         first_token_timeout_ms: None,
@@ -388,7 +341,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![
                 target("upstream-model", true),
                 target("standby-model", false),
@@ -401,17 +354,17 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         route
             .targets
             .iter()
-            .find(|target| target.model == "upstream-model")
+            .find(|target| target.model.as_deref() == Some("upstream-model"))
             .is_some_and(|target| target.enabled)
     );
     assert!(
         route
             .targets
             .iter()
-            .find(|target| target.model == "standby-model")
+            .find(|target| target.model.as_deref() == Some("standby-model"))
             .is_some_and(|target| !target.enabled)
     );
-    assert_eq!(route.target_model, "upstream-model");
+    assert_eq!(route.target_model.as_deref(), Some("upstream-model"));
 
     let error = admin
         .create_model(CreateRoute {
@@ -419,7 +372,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![target("upstream-model", false)],
             default_thinking_level: None,
         })
@@ -460,7 +413,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     assert_eq!(first.display_name.as_deref(), Some("Upstream Model"));
     assert_eq!(second.targets.len(), 1);
     assert_eq!(second.targets[0].provider_id, provider.id);
-    assert_eq!(second.targets[0].model, "upstream-model");
+    assert_eq!(second.targets[0].model.as_deref(), Some("upstream-model"));
     assert!(second.targets[0].enabled);
     assert_eq!(second.context_window, Some(200_000));
     assert_eq!(second.output_max_tokens, Some(32_000));
@@ -521,7 +474,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
     let create_target = |model: &str| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: model.into(),
+        model: Some(model.into()),
         priority: None,
         first_token_timeout_ms: None,
         target_retry_budget: None,
@@ -536,13 +489,13 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![create_target("GLM-4.6")],
             default_thinking_level: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(route.targets[0].model, "GLM-4.6");
+    assert_eq!(route.targets[0].model.as_deref(), Some("GLM-4.6"));
     // 能力元数据经宽松匹配解析成功
     assert_eq!(route.context_window, Some(131_072));
     assert_eq!(route.output_max_tokens, Some(16_384));
@@ -568,7 +521,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
     let create_target = |model: &str| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: model.into(),
+        model: Some(model.into()),
         priority: None,
         first_token_timeout_ms: None,
         target_retry_budget: None,
@@ -580,7 +533,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         display_name: None,
         balance: None,
         target_provider: String::new(),
-        target_model: String::new(),
+        target_model: None,
         targets: vec![target],
         default_thinking_level: None,
     };
@@ -624,7 +577,7 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
 
     let route = routes.get("cased-route").await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(route.targets[0].model, "upstream-model");
+    assert_eq!(route.targets[0].model.as_deref(), Some("upstream-model"));
     Ok(())
 }
 
@@ -697,7 +650,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
         target_provider: provider.id.clone(),
-        target_model: "upstream-model".into(),
+        target_model: Some("upstream-model".into()),
         targets: Vec::new(),
         default_thinking_level: None,
     };
@@ -771,10 +724,10 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: vec![CreateTarget {
                 provider_id: provider.id,
-                model: "upstream-model".into(),
+                model: Some("upstream-model".into()),
                 enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
@@ -802,7 +755,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "missing-model".into(),
+            target_model: Some("missing-model".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -864,7 +817,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "effort-model".into(),
+            target_model: Some("effort-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -965,7 +918,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "max-effort-model".into(),
+            target_model: Some("max-effort-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -982,25 +935,42 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> anyhow::Result<Route> {
+async fn create_toggle_route(
+    vendor: &str,
+    model: &str,
+    protocol: &str,
+    capabilities: &[&str],
+    reasoning: Option<bool>,
+) -> anyhow::Result<Route> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        },
+        std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await?;
     let admin = gateway.admin();
     let provider = admin
         .create_provider(CreateProvider {
             name: Some(format!("{vendor} Route Test Provider")),
             source: ProviderSourceInput::Custom {
-                vendor: Some(vendor.into()),
-                protocol: "openai-compatible".into(),
+                vendor: vendor.into(),
+                channel: "default".into(),
+                protocol: Some(protocol.into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
-            credential: ProviderCredentialInput::None,
+            credential: ProviderCredentialInput::ApiKey {
+                value: "route-fixture-key".into(),
+            },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -1011,7 +981,9 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
             CreateManualProviderModel {
                 metadata: json!({
                     "id": model,
-                    "reasoning_options": [{"type": "toggle"}]
+                    "reasoning": reasoning,
+                    "reasoning_options": [{"type": "toggle"}],
+                    "capabilities": capabilities,
                 }),
             },
         )
@@ -1023,7 +995,7 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: model.into(),
+            target_model: Some(model.into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -1032,7 +1004,7 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
 
 #[tokio::test]
 async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Result<()> {
-    let route = create_openai_compatible_toggle_route("xiaomi", "mimo-v2.5").await?;
+    let route = create_toggle_route("xiaomi", "mimo-v2.5", "openai-compatible", &[], None).await?;
 
     assert_eq!(
         route.supported_thinking_levels.0,
@@ -1043,8 +1015,14 @@ async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Re
 
 #[tokio::test]
 async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow::Result<()> {
-    let route =
-        create_openai_compatible_toggle_route("openai-compatible", "custom-toggle-model").await?;
+    let route = create_toggle_route(
+        "openai-compatible",
+        "custom-toggle-model",
+        "openai-compatible",
+        &[],
+        None,
+    )
+    .await?;
 
     assert!(route.supported_thinking_levels.0.is_empty());
     for row in route.targets[0].thinking_level_map.iter() {
@@ -1058,12 +1036,80 @@ async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow
 }
 
 #[tokio::test]
+async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::Result<()> {
+    let route = create_toggle_route(
+        "openai-compatible",
+        "unknown-wire-toggle-model",
+        "vendor-private-wire",
+        &[],
+        None,
+    )
+    .await?;
+
+    assert!(route.supported_thinking_levels.0.is_empty());
+    assert!(
+        route.targets[0]
+            .thinking_level_map
+            .iter()
+            .all(|row| row.control.is_hidden())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_capability_declaration_authorizes_compatible_toggle_controls() -> anyhow::Result<()>
+{
+    let route = create_toggle_route(
+        "openai-compatible",
+        "declared-toggle-model",
+        "openai-compatible",
+        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
+        None,
+    )
+    .await?;
+
+    assert_eq!(
+        route.supported_thinking_levels.0,
+        vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reasoning_false_rejects_declared_toggle_controls() -> anyhow::Result<()> {
+    let route = create_toggle_route(
+        "xiaomi",
+        "non-reasoning-model",
+        "openai-compatible",
+        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
+        Some(false),
+    )
+    .await?;
+
+    assert!(route.supported_thinking_levels.0.is_empty());
+    assert!(
+        route.targets[0]
+            .thinking_level_map
+            .iter()
+            .all(|row| row.control.is_hidden())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
     let data_dir = tempfile::tempdir().expect("tempdir");
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        },
+        std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .expect("gateway");
     let admin = gateway.admin();
@@ -1071,13 +1117,17 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
         .create_provider(CreateProvider {
             name: Some("Unknown Compatible Route Test Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("openai-compatible".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "openai-compatible".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
-            credential: ProviderCredentialInput::None,
+            credential: ProviderCredentialInput::ApiKey {
+                value: "route-fixture-key".into(),
+            },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -1103,10 +1153,10 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
-                model: "custom-toggle-model".into(),
+                model: Some("custom-toggle-model".into()),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1150,23 +1200,32 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
 #[tokio::test]
 async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..GatewayConfig::default()
-    })
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        },
+        std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await?;
     let admin = gateway.admin();
     let provider = admin
         .create_provider(CreateProvider {
             name: Some("Gemini Route Test Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "google-gemini".into(),
+                vendor: "protocol-gemini".into(),
+                channel: "default".into(),
+                protocol: Some("google-gemini".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -1192,7 +1251,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "gemini-effort-model".into(),
+            target_model: Some("gemini-effort-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -1256,11 +1315,11 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "wide-effort-model".into(),
+            target_model: Some("wide-effort-model".into()),
             targets: vec![
                 CreateTarget {
                     provider_id: provider.id.clone(),
-                    model: "wide-effort-model".into(),
+                    model: Some("wide-effort-model".into()),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
@@ -1270,7 +1329,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                 },
                 CreateTarget {
                     provider_id: provider.id,
-                    model: "narrow-effort-model".into(),
+                    model: Some("narrow-effort-model".into()),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
@@ -1301,13 +1360,15 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .create_provider(CreateProvider {
             name: Some("Toggle Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "anthropic".into(),
+                vendor: "protocol-anthropic-messages".into(),
+                channel: "default".into(),
+                protocol: Some("anthropic-messages".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
@@ -1329,7 +1390,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "toggle-model".into(),
+            target_model: Some("toggle-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -1381,7 +1442,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })

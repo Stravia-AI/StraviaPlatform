@@ -1,5 +1,191 @@
 import type { Page } from '@playwright/test'
 import type { UpdateStatus } from '../src/lib/product-update'
+import type { ProviderDescriptor } from '../src/lib/types'
+
+const codexManualInput = {
+  type: 'callback_url',
+  label: 'Callback URL',
+  description: 'Paste the full callback URL after authorization.',
+  secret: false,
+} as const
+
+const providerDescriptors = [
+  {
+    provider_id: 'openai',
+    catalog_id: 'openai',
+    display_name: 'OpenAI',
+    description: 'OpenAI API connections.',
+    channels: [
+      {
+        id: 'default',
+        name: 'OpenAI API',
+        description: 'API key',
+        auth: null,
+        protocol: 'openai-compatible',
+        default_base_url: 'https://api.openai.com/v1',
+        capabilities: ['infer', 'compact', 'model_discovery', 'config_validation'],
+        model_capabilities: [],
+        search_model_required: false,
+      },
+    ],
+    capabilities: ['infer', 'compact', 'model_discovery', 'config_validation'],
+    config_fields: [
+      {
+        key: 'api_key',
+        label: 'API key',
+        description: 'OpenAI API key.',
+        kind: { type: 'string', multiline: false },
+        required: false,
+        secret: true,
+      },
+    ],
+    network: { base_url_field: null, extra_origins: [], field_origins: [] },
+    data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
+  },
+  {
+    provider_id: 'openai-codex',
+    catalog_id: 'openai',
+    display_name: 'OpenAI Codex',
+    description: 'Codex OAuth account connections.',
+    channels: [
+      {
+        id: 'codex',
+        name: 'Codex',
+        description: 'OAuth account',
+        auth: {
+          flow: 'authorization_code',
+          callback: {
+            bind_host: '127.0.0.1',
+            redirect_host: 'localhost',
+            path: '/auth/callback',
+            port: { kind: 'fixed', primary: 1455, fallback: 1456 },
+            manual_redirect_uri: 'http://localhost:1457/auth/callback',
+            cancel_path: '/cancel',
+          },
+          manual_input: codexManualInput,
+        },
+        protocol: 'open-responses',
+        default_base_url: 'https://chatgpt.com/backend-api/codex',
+        capabilities: [
+          'infer',
+          'compact',
+          'search',
+          'media_image',
+          'auth_oauth',
+          'model_discovery',
+          'allowance',
+          'config_validation',
+        ],
+        model_capabilities: [],
+        search_model_required: true,
+      },
+    ],
+    capabilities: [
+      'infer',
+      'compact',
+      'search',
+      'media_image',
+      'auth_oauth',
+      'model_discovery',
+      'allowance',
+      'config_validation',
+    ],
+    config_fields: [],
+    network: {
+      base_url_field: null,
+      extra_origins: [
+        { scheme: 'https', host: 'auth.openai.com' },
+        { scheme: 'https', host: 'chatgpt.com' },
+      ],
+      field_origins: [],
+    },
+    data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
+  },
+  {
+    provider_id: 'anthropic',
+    catalog_id: 'anthropic',
+    display_name: 'Anthropic',
+    description: 'Anthropic API and Claude Code OAuth account connections.',
+    channels: [
+      {
+        id: 'default',
+        name: 'Anthropic API',
+        description: 'API key',
+        auth: null,
+        protocol: 'anthropic-messages',
+        default_base_url: 'https://api.anthropic.com',
+        capabilities: ['infer', 'compact', 'model_discovery', 'config_validation'],
+        model_capabilities: [],
+        search_model_required: false,
+      },
+      {
+        id: 'claude-code',
+        name: 'Claude Code',
+        description: 'OAuth account',
+        auth: {
+          flow: 'authorization_code',
+          callback: {
+            bind_host: '127.0.0.1',
+            redirect_host: 'localhost',
+            path: '/auth/callback',
+            port: { kind: 'dynamic' },
+          },
+          manual_input: null,
+        },
+        protocol: 'anthropic-messages',
+        default_base_url: 'https://api.anthropic.com',
+        capabilities: ['infer', 'compact', 'auth_oauth', 'model_discovery', 'config_validation'],
+        model_capabilities: [],
+        search_model_required: false,
+      },
+    ],
+    capabilities: ['infer', 'compact', 'auth_oauth', 'model_discovery', 'config_validation'],
+    config_fields: [
+      {
+        key: 'api_key',
+        label: 'API key',
+        description: 'Anthropic API key for the default channel.',
+        kind: { type: 'string', multiline: false },
+        required: false,
+        secret: true,
+      },
+    ],
+    network: { base_url_field: null, extra_origins: [], field_origins: [] },
+    data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
+  },
+  {
+    provider_id: 'openai-compatible',
+    catalog_id: null,
+    display_name: 'OpenAI Compatible',
+    description: 'Bring your own OpenAI-compatible endpoint.',
+    channels: [
+      {
+        id: 'default',
+        name: 'Default',
+        description: 'Bring your own endpoint',
+        auth: null,
+        protocol: 'openai-compatible',
+        default_base_url: null,
+        capabilities: ['infer', 'model_discovery'],
+        model_capabilities: [],
+        search_model_required: false,
+      },
+    ],
+    capabilities: ['infer', 'model_discovery'],
+    config_fields: [
+      {
+        key: 'apiKey',
+        label: 'API key',
+        description: 'Credential sent to the configured endpoint.',
+        kind: { type: 'string', multiline: false },
+        required: true,
+        secret: true,
+      },
+    ],
+    network: { base_url_field: null, extra_origins: [], field_origins: [] },
+    data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
+  },
+] satisfies ProviderDescriptor[]
 
 const settingValues: Record<string, string> = {
   artifact_settings: JSON.stringify({
@@ -70,65 +256,13 @@ export async function prepareApp(page: Page): Promise<void> {
       })
       return
     }
-    if (path === '/catalog/providers') {
-      await route.fulfill({
-        json: {
-          revision: 'test-catalog',
-          generated_at: '2026-08-20T14:01:40Z',
-          providers: [
-            {
-              id: 'openai',
-              name: 'OpenAI',
-              documentation_url: 'https://platform.openai.com/docs',
-              protocol: 'openai-compatible',
-              base_url: 'https://api.openai.com/v1',
-              channels: [
-                {
-                  id: 'default',
-                  label: 'Default',
-                  protocol: 'openai-compatible',
-                  base_url: 'https://api.openai.com/v1',
-                  auth_mode: 'optional_api_key',
-                  fingerprint: 'openai-default',
-                },
-                {
-                  id: 'codex',
-                  label: 'Codex',
-                  protocol: 'open-responses',
-                  base_url: 'https://chatgpt.com/backend-api/codex',
-                  auth_mode: 'oauth',
-                  fingerprint: 'openai-codex',
-                },
-              ],
-            },
-            {
-              id: 'anthropic',
-              name: 'Anthropic',
-              documentation_url: 'https://docs.anthropic.com',
-              protocol: 'anthropic-messages',
-              base_url: 'https://api.anthropic.com',
-              channels: [
-                {
-                  id: 'default',
-                  label: 'Default',
-                  protocol: 'anthropic-messages',
-                  base_url: 'https://api.anthropic.com',
-                  auth_mode: 'optional_api_key',
-                  fingerprint: 'anthropic-default',
-                },
-                {
-                  id: 'claude-code',
-                  label: 'Claude Code',
-                  protocol: 'anthropic-messages',
-                  base_url: 'https://api.anthropic.com',
-                  auth_mode: 'oauth',
-                  fingerprint: 'anthropic-claude-code',
-                },
-              ],
-            },
-          ],
-        },
-      })
+    if (path === '/vendors') {
+      await route.fulfill({ json: { data: providerDescriptors } })
+      return
+    }
+    if (path === '/providers/configuration-preview') {
+      const input = request.postDataJSON() as { base_url?: string }
+      await route.fulfill({ json: { data: { base_url: input.base_url ?? '', issues: [], network_permissions: [] } } })
       return
     }
     if (path === '/catalog/models') {
@@ -145,31 +279,21 @@ export async function prepareApp(page: Page): Promise<void> {
       })
       return
     }
-    if (path === '/catalog/refresh') {
-      await route.fulfill({
-        json: {
-          revision: 'refreshed-catalog',
-          generated_at: '2026-08-20T15:01:40Z',
-          provider_count: 2,
-          model_count: 4,
-          changed: true,
-        },
-      })
-      return
-    }
     if (path === '/oauth/sessions/init') {
       await route.fulfill({
         json: {
           data: {
             session_id: 'oauth-session-1',
-            vendor: 'codex',
-            scheme: 'oauth_auth_code_pkce',
+            vendor_id: 'openai-codex',
+            channel: 'codex',
+            flow: 'authorization_code',
             auth_url: 'https://auth.openai.example/authorize',
             callback_mode: 'auto',
             listener_state: 'listening',
             listener_port: 1457,
             redirect_uri: 'http://localhost:1457/auth/callback',
             fallback_reason: null,
+            manual_input: codexManualInput,
             expires_in: 600,
             interval: 2,
           },
@@ -214,13 +338,13 @@ export async function prepareApp(page: Page): Promise<void> {
         json: {
           data: {
             status: 'pending',
-            scheme: 'oauth_auth_code_pkce',
             auth_url: 'https://auth.openai.example/authorize',
             callback_mode: 'auto',
             listener_state: 'listening',
             listener_port: 1457,
             redirect_uri: 'http://localhost:1457/auth/callback',
             fallback_reason: null,
+            manual_input: codexManualInput,
             expires_in: 600,
             interval: 2,
           },

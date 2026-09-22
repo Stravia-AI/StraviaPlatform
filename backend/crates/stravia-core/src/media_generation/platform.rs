@@ -25,7 +25,7 @@ use crate::{
 const TOOL_ID: &str = "media-generation";
 const TOOL_NAME: &str = "generate";
 const LIMIT: Duration = Duration::from_secs(15 * 60);
-const DESCRIPTION: &str = "Generate one image from a prompt, optionally using up to five ordered JPEG/PNG/WebP reference images (owned plain stravia://artifacts/<artifact-id> paths without read options, or public HTTP(S) image URLs; at most 32 MiB and 25 megapixels each). aspect_ratio and resolution are preferences, not exact guarantees; the current Codex backend clamps to 1024x1024, 1024x1536, or 1536x1024. Returns a stable Artifact path and actual image dimensions. Reuse it as a reference image, or use StraviaRead with ?download=1 to download. Retries may repeat generation and consume quota.";
+const DESCRIPTION: &str = "Generate one image from a prompt, optionally using up to five ordered JPEG/PNG/WebP reference images (owned plain stravia://artifacts/<artifact-id> paths without read options, or public HTTP(S) image URLs; at most 32 MiB and 25 megapixels each). aspect_ratio and resolution are preferences mapped by the selected image Provider and are not exact guarantees. Returns a stable Artifact path and actual image dimensions. Reuse it as a reference image, or use StraviaRead with ?download=1 to download. Retries may repeat generation and consume quota.";
 
 pub(crate) fn input_schema() -> Value {
     json!({

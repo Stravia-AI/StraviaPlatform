@@ -3,8 +3,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, types::Json};
 
-use crate::provider::AuthMode;
-use crate::provider::VendorRegistry;
 use crate::thinking::ThinkingLevelMapping;
 use crate::thinking::mapping_control;
 use stravia_runtime_contract::thinking::ThinkingLevel;
@@ -15,47 +13,6 @@ pub fn default_provider_auth_mode() -> String {
 
 pub fn is_valid_provider_auth_mode(value: &str) -> bool {
     matches!(value.trim(), "apikey" | "oauth")
-}
-
-fn auth_mode_to_legacy(mode: AuthMode) -> &'static str {
-    // Legacy DB / WebUI vocabulary only knows "apikey" / "oauth"; the
-    // newer `setuptoken` mode degrades to "apikey" for storage purposes
-    // (the OAuth driver layer knows the real flow via vendor metadata).
-    match mode {
-        AuthMode::ApiKey => "apikey",
-        AuthMode::OAuth => "oauth",
-        AuthMode::SetupToken => "apikey",
-    }
-}
-
-/// Resolve the authentication mode for a Provider's `(vendor, preset_key,
-/// channel_id)` identity. Catalog identity remains in `preset_key`, while
-/// credential semantics belong to the npm-keyed Vendor.
-pub fn resolve_preset_channel_auth_mode(
-    vendor_id: Option<&str>,
-    preset_key: Option<&str>,
-    channel_id: Option<&str>,
-) -> Option<String> {
-    let preset_key = preset_key?.trim();
-    if preset_key.is_empty() {
-        return None;
-    }
-    let requested_channel = channel_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("default");
-    let registry = VendorRegistry::global();
-    let metadata = vendor_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|vendor_id| registry.metadata(vendor_id))
-        .or_else(|| registry.metadata(preset_key))?;
-    let channel = metadata
-        .channels
-        .iter()
-        .find(|c| c.id.eq_ignore_ascii_case(requested_channel))
-        .or_else(|| metadata.channels.iter().find(|c| c.id == "default"))?;
-    Some(auth_mode_to_legacy(channel.auth_mode).to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -136,7 +93,8 @@ pub struct Route {
     pub default_thinking_level: Option<String>,
     pub balance: String,
     pub target_provider: String,
-    pub target_model: String,
+    /// Model of the highest-priority enabled Target, or `None` for Provider-only.
+    pub target_model: Option<String>,
     pub is_enabled: bool,
     pub created_at: String,
     #[serde(default)]
@@ -199,7 +157,8 @@ pub struct Target {
     pub id: String,
     pub model_id: String,
     pub provider_id: String,
-    pub model: String,
+    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
+    pub model: Option<String>,
     #[serde(default = "default_target_enabled")]
     pub enabled: bool,
     pub priority: i32,
@@ -299,6 +258,8 @@ pub struct CreateProvider {
     #[serde(default)]
     pub credential: ProviderCredentialInput,
     #[serde(default)]
+    pub vendor_options: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     pub use_proxy: bool,
 }
 
@@ -313,10 +274,12 @@ pub enum ProviderSourceInput {
         base_url_override: Option<String>,
     },
     Custom {
-        vendor: Option<String>,
-        protocol: String,
+        vendor: String,
+        channel: String,
+        #[serde(default)]
+        protocol: Option<String>,
         base_url: String,
-        #[serde(default, alias = "modelsSource")]
+        #[serde(default)]
         models_source: Option<String>,
         #[serde(default)]
         static_models: Option<String>,
@@ -333,7 +296,7 @@ pub enum ProviderCredentialInput {
         value: String,
     },
     Fields {
-        values: BTreeMap<String, String>,
+        values: BTreeMap<String, serde_json::Value>,
     },
     #[default]
     None,
@@ -368,9 +331,9 @@ pub struct UpdateProvider {
     pub models_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: Option<String>,
-    pub adapter_credentials: Option<BTreeMap<String, String>>,
-    /// Validated against the vendor's declared `option_fields`; `None` keeps
-    /// the stored value, an empty object resets every option to its default.
+    pub adapter_credentials: Option<BTreeMap<String, serde_json::Value>>,
+    /// Validated against the vendor's declared non-secret `config_fields`;
+    /// `None` keeps the stored value, while an empty object reapplies defaults.
     #[serde(default)]
     pub vendor_options: Option<serde_json::Map<String, serde_json::Value>>,
     pub auth_mode: Option<String>,
@@ -386,7 +349,9 @@ pub struct UpdateRoute {
     #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: Option<String>,
-    pub target_model: Option<String>,
+    /// Omitted preserves the projection; explicit `null` selects Provider-only.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub target_model: Option<Option<String>>,
     #[serde(default)]
     pub targets: Option<Vec<UpsertTarget>>,
     pub is_enabled: Option<bool>,
@@ -403,7 +368,7 @@ pub struct CreateRoute {
     #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: String,
-    pub target_model: String,
+    pub target_model: Option<String>,
     #[serde(default)]
     pub targets: Vec<CreateTarget>,
     #[serde(default)]
@@ -414,7 +379,8 @@ pub struct CreateRoute {
 #[serde(deny_unknown_fields)]
 pub struct CreateTarget {
     pub provider_id: String,
-    pub model: String,
+    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
+    pub model: Option<String>,
     #[serde(default = "default_target_enabled")]
     pub enabled: bool,
     pub priority: Option<i32>,
@@ -430,7 +396,8 @@ pub struct CreateTarget {
 pub struct UpsertTarget {
     pub id: Option<String>,
     pub provider_id: String,
-    pub model: String,
+    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
+    pub model: Option<String>,
     #[serde(default = "default_target_enabled")]
     pub enabled: bool,
     pub priority: Option<i32>,
@@ -760,10 +727,12 @@ pub struct ModelCapabilities {
 
 impl Provider {
     pub fn adapter_credential(&self, key: &str) -> Option<String> {
-        serde_json::from_str::<BTreeMap<String, String>>(&self.adapter_credentials)
-            .ok()?
-            .remove(key)
-            .filter(|value| !value.trim().is_empty())
+        let mut values =
+            serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&self.adapter_credentials)
+                .ok()?;
+        let value = values.remove(key)?;
+        let value = value.as_str()?.trim();
+        (!value.is_empty()).then(|| value.to_owned())
     }
 
     /// Parsed `vendor_options` object; malformed JSON yields an empty map
@@ -781,19 +750,12 @@ impl Provider {
     }
 
     pub fn effective_auth_mode(&self) -> String {
-        resolve_preset_channel_auth_mode(
-            self.vendor.as_deref(),
-            self.preset_key.as_deref(),
-            self.channel.as_deref(),
-        )
-        .unwrap_or_else(|| {
-            let mode = self.auth_mode.trim();
-            if mode.is_empty() {
-                default_provider_auth_mode()
-            } else {
-                mode.to_string()
-            }
-        })
+        let mode = self.auth_mode.trim();
+        if mode.is_empty() {
+            default_provider_auth_mode()
+        } else {
+            mode.to_string()
+        }
     }
 
     pub fn effective_models_source(&self) -> Option<&str> {

@@ -116,8 +116,9 @@ mod tests {
             .create_provider(CreateProvider {
                 name: Some("Models list provider".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("custom".into()),
-                    protocol: "openai-compatible".into(),
+                    vendor: "protocol-openai-chat-completions".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai-compatible".into()),
                     base_url: "http://127.0.0.1:9/v1".into(),
                     models_source: None,
                     static_models: None,
@@ -125,6 +126,7 @@ mod tests {
                 credential: ProviderCredentialInput::ApiKey {
                     value: "provider-secret".into(),
                 },
+                vendor_options: Default::default(),
                 use_proxy: false,
             })
             .await
@@ -148,10 +150,10 @@ mod tests {
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
-                model: "provider-model".into(),
+                model: Some("provider-model".into()),
                 enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
@@ -368,7 +370,7 @@ mod tests {
                 display_name: None,
                 balance: "traffic_equalization".into(),
                 target_provider: String::new(),
-                target_model: String::new(),
+                target_model: None,
                 is_enabled: true,
                 created_at: "2000-01-01T00:00:00Z".into(),
                 supported_thinking_levels: sqlx::types::Json(Vec::new()),

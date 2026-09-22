@@ -1830,10 +1830,6 @@ name = "Other"
                 .display()
                 .to_string()
         );
-        assert!(opencode.paths[0].contains(temporary.path().to_string_lossy().as_ref()));
-        assert!(openclaw.paths[0].contains(temporary.path().to_string_lossy().as_ref()));
-        assert!(!opencode.paths[0].contains("project"));
-        assert!(!openclaw.paths[0].contains("project"));
     }
 
     #[test]

@@ -1,41 +1,29 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future::{BoxFuture, FutureExt, Shared};
 use futures::stream::{self, StreamExt};
-use reqwest::header::{
-    ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, ORIGIN, REFERER,
-    USER_AGENT,
-};
-use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use tokio::sync::Notify;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::admin::AdminService;
 use crate::db::models::Provider;
+use crate::plugin::{VendorCallContext, VendorRequest};
 
 use super::samples::{AllowanceSample, AllowanceSampleStore, SAMPLE_RETENTION_MILLIS};
 use super::{
-    Allowance, AllowanceCondition, CommandCodeSubscription, ExhaustionForecast,
-    ExhaustionForecastStatus, MonitorKind, ParsedAllowance, ProviderAllowanceError,
+    Allowance, AllowanceAmount, AllowanceCondition, AllowanceKind, ExhaustionForecast,
+    ExhaustionForecastStatus, ModelAllowance, ProviderAllowanceError,
     ProviderAllowanceErrorCategory, ProviderAllowanceSnapshot, ProviderAllowanceStatus,
-    ProviderAllowanceTarget, commandcode_billing_cycle, monitor_for, parse_commandcode_org_id,
-    parse_commandcode_subscription, parse_commandcode_summary_cost, parse_minimax_fallback,
-    parse_monitor_response,
+    ProviderAllowanceTarget,
 };
 
 const SUCCESS_TTL: Duration = Duration::from_secs(180);
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_FORECAST_SPAN_MILLIS: i64 = 24 * 60 * 60 * 1000;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PARALLEL_REFRESHES: usize = 4;
 
 type SharedFetch =
@@ -50,23 +38,6 @@ pub(crate) struct ProviderAllowanceState {
 struct ProviderAllowanceStateInner {
     cache: RwLock<HashMap<String, CacheEntry>>,
     inflight: Mutex<HashMap<String, SharedFetch>>,
-    #[cfg(test)]
-    coalesced_fetches: AtomicUsize,
-    #[cfg(test)]
-    coalesced_fetch: Notify,
-}
-
-#[cfg(test)]
-impl ProviderAllowanceState {
-    pub(super) async fn wait_for_coalesced_fetch(&self) {
-        loop {
-            let notified = self.inner.coalesced_fetch.notified();
-            if self.inner.coalesced_fetches.load(Ordering::SeqCst) > 0 {
-                return;
-            }
-            notified.await;
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -76,160 +47,67 @@ struct CacheEntry {
     successful_at: Option<Instant>,
 }
 
-pub(super) struct AllowanceHttpRequest {
-    pub method: Method,
-    pub url: String,
-    pub headers: HeaderMap,
-    pub body: Vec<u8>,
-}
-
-pub(super) struct AllowanceHttpResponse {
-    pub status: StatusCode,
-    pub headers: HeaderMap,
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TransportFailure {
-    Timeout,
-    Unavailable,
-    InvalidResponse,
-}
-
-#[async_trait]
-pub(super) trait AllowanceTransport: Send + Sync {
-    async fn execute(
-        &self,
-        client: reqwest::Client,
-        use_proxy: bool,
-        request: AllowanceHttpRequest,
-    ) -> Result<AllowanceHttpResponse, TransportFailure>;
-}
-
-struct ReqwestAllowanceTransport;
-
-#[async_trait]
-impl AllowanceTransport for ReqwestAllowanceTransport {
-    async fn execute(
-        &self,
-        client: reqwest::Client,
-        _use_proxy: bool,
-        request: AllowanceHttpRequest,
-    ) -> Result<AllowanceHttpResponse, TransportFailure> {
-        let mut builder = client
-            .request(request.method, request.url)
-            .headers(request.headers)
-            .timeout(REQUEST_TIMEOUT);
-        if !request.body.is_empty() {
-            builder = builder.body(request.body);
-        }
-        let response = builder.send().await.map_err(|error| {
-            if error.is_timeout() {
-                TransportFailure::Timeout
-            } else {
-                TransportFailure::Unavailable
-            }
-        })?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(TransportFailure::InvalidResponse);
-        }
-        let mut stream = response.bytes_stream();
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                if error.is_timeout() {
-                    TransportFailure::Timeout
-                } else {
-                    TransportFailure::Unavailable
-                }
-            })?;
-            if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(TransportFailure::InvalidResponse);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(AllowanceHttpResponse {
-            status,
-            headers,
-            body,
-        })
-    }
-}
-
 impl AdminService {
     pub async fn list_provider_allowances(&self) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
-        list_provider_allowances_with_transport(self, false, Arc::new(ReqwestAllowanceTransport))
-            .await
+        list_provider_allowances(self, false).await
     }
 
     /// Non-blocking list: returns each eligible provider's identity plus its
-    /// cached snapshot when one exists, and kicks off upstream fetches for
-    /// entries whose cache is missing or stale instead of awaiting them.
+    /// cached snapshot and starts a coalesced Wasm allowance read when stale.
     pub async fn list_provider_allowance_targets(
         &self,
     ) -> anyhow::Result<Vec<ProviderAllowanceTarget>> {
-        list_provider_allowance_targets_with_transport(self, Arc::new(ReqwestAllowanceTransport))
-            .await
+        let providers = eligible_allowance_providers(self).await?;
+        let mut targets = Vec::with_capacity(providers.len());
+        for provider in providers {
+            let identity = provider_identity(self, &provider).await?;
+            let previous = {
+                let cache = self.gw.provider_allowance_state.inner.cache.read().await;
+                cache
+                    .get(&provider.id)
+                    .filter(|entry| entry.identity == identity)
+                    .cloned()
+            };
+            let fresh = previous.as_ref().is_some_and(|entry| {
+                entry
+                    .successful_at
+                    .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
+            });
+            let snapshot = previous.map(|entry| entry.snapshot);
+            if fresh {
+                targets.push(allowance_target(&provider, snapshot, false));
+            } else {
+                spawn_allowance_fetch(self.clone(), provider.clone());
+                targets.push(allowance_target(&provider, snapshot, true));
+            }
+        }
+        Ok(targets)
     }
 
-    /// Returns one provider's snapshot, serving the fresh cache when possible
-    /// and otherwise awaiting (or coalescing onto) the upstream fetch.
     pub async fn get_provider_allowance(
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-        get_provider_allowance_with_transport(
-            self,
-            provider_id,
-            Arc::new(ReqwestAllowanceTransport),
-        )
-        .await
+        provider_allowance(self, provider_id, false).await
     }
 
     pub async fn refresh_provider_allowance(
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-        refresh_provider_allowance_with_transport(
-            self,
-            provider_id,
-            Arc::new(ReqwestAllowanceTransport),
-        )
-        .await
+        provider_allowance(self, provider_id, true).await
     }
 }
 
-pub(super) async fn get_provider_allowance_with_transport(
-    admin: &AdminService,
-    provider_id: &str,
-    transport: Arc<dyn AllowanceTransport>,
-) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-    provider_allowance_with_transport(admin, provider_id, false, transport).await
-}
-
-pub(super) async fn refresh_provider_allowance_with_transport(
-    admin: &AdminService,
-    provider_id: &str,
-    transport: Arc<dyn AllowanceTransport>,
-) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-    provider_allowance_with_transport(admin, provider_id, true, transport).await
-}
-
-async fn provider_allowance_with_transport(
+async fn provider_allowance(
     admin: &AdminService,
     provider_id: &str,
     force: bool,
-    transport: Arc<dyn AllowanceTransport>,
 ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
     let Some(provider) = admin.gw.storage.providers().get(provider_id).await? else {
         return Ok(None);
     };
-    if !eligible_monitor()(&provider) {
+    if !eligible_allowance_provider(admin, &provider) {
         admin
             .gw
             .provider_allowance_state
@@ -240,12 +118,12 @@ async fn provider_allowance_with_transport(
             .remove(provider_id);
         return Ok(None);
     }
-    fetch_provider_allowance(admin, provider, force, transport).await
+    fetch_provider_allowance(admin, provider, force).await
 }
 
-async fn eligible_monitor_providers(admin: &AdminService) -> anyhow::Result<Vec<Provider>> {
+async fn eligible_allowance_providers(admin: &AdminService) -> anyhow::Result<Vec<Provider>> {
     let mut providers = admin.gw.storage.providers().list().await?;
-    providers.retain(eligible_monitor());
+    providers.retain(|provider| eligible_allowance_provider(admin, provider));
     providers.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -264,51 +142,42 @@ async fn eligible_monitor_providers(admin: &AdminService) -> anyhow::Result<Vec<
         .write()
         .await
         .retain(|provider_id, _| eligible_ids.contains(provider_id));
-
     Ok(providers)
 }
 
-pub(super) async fn list_provider_allowance_targets_with_transport(
-    admin: &AdminService,
-    transport: Arc<dyn AllowanceTransport>,
-) -> anyhow::Result<Vec<ProviderAllowanceTarget>> {
-    let providers = eligible_monitor_providers(admin).await?;
-    let mut targets = Vec::with_capacity(providers.len());
-    for provider in providers {
-        let identity = provider_identity(admin, &provider).await?;
-        let previous = {
-            let cache = admin.gw.provider_allowance_state.inner.cache.read().await;
-            cache
-                .get(&provider.id)
-                .filter(|entry| entry.identity == identity)
-                .cloned()
-        };
-        let fresh = previous.as_ref().is_some_and(|entry| {
-            entry
-                .successful_at
-                .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
-        });
-        let snapshot = previous.map(|entry| entry.snapshot);
-        if fresh {
-            targets.push(allowance_target(&provider, snapshot, false));
-            continue;
-        }
-        // Kick the upstream fetch now so a later per-provider GET coalesces
-        // onto it instead of starting from scratch.
-        spawn_allowance_fetch(admin.clone(), provider.clone(), Arc::clone(&transport));
-        targets.push(allowance_target(&provider, snapshot, true));
+fn eligible_allowance_provider(admin: &AdminService, provider: &Provider) -> bool {
+    if !provider.is_enabled {
+        return false;
     }
-    Ok(targets)
+    let Some(vendor_id) = provider
+        .vendor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Ok(descriptor) = admin.gw.vendor_plugins.descriptor(vendor_id) else {
+        return false;
+    };
+    let channel_id = provider
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+    descriptor.channels.iter().any(|channel| {
+        channel.id == channel_id
+            && channel
+                .capabilities
+                .contains(&stravia_vendor_sdk::Capability::Allowance)
+    })
 }
 
-fn spawn_allowance_fetch(
-    admin: AdminService,
-    provider: Provider,
-    transport: Arc<dyn AllowanceTransport>,
-) {
+fn spawn_allowance_fetch(admin: AdminService, provider: Provider) {
     let provider_id = provider.id.clone();
     tokio::spawn(async move {
-        if let Err(error) = fetch_provider_allowance(&admin, provider, false, transport).await {
+        if let Err(error) = fetch_provider_allowance(&admin, provider, false).await {
             tracing::warn!(
                 provider_id = %provider_id,
                 error = %error,
@@ -333,29 +202,26 @@ fn allowance_target(
     }
 }
 
-pub(super) async fn list_provider_allowances_with_transport(
+async fn list_provider_allowances(
     admin: &AdminService,
     force: bool,
-    transport: Arc<dyn AllowanceTransport>,
 ) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
-    let providers = eligible_monitor_providers(admin).await?;
-
+    let providers = eligible_allowance_providers(admin).await?;
     let results = stream::iter(providers.into_iter().map(|provider| {
         let admin = admin.clone();
-        let transport = Arc::clone(&transport);
         async move {
             let provider_for_error = provider.clone();
-            match fetch_provider_allowance(&admin, provider, force, transport).await {
+            match fetch_provider_allowance(&admin, provider, force).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     tracing::error!(
                         provider_id = %provider_for_error.id,
                         error = %error,
-                        "Failed to revalidate provider allowance state"
+                        "failed to revalidate provider allowance state"
                     );
                     Some(error_snapshot(
                         &provider_for_error,
-                        safe_error(ProviderAllowanceErrorCategory::UpstreamUnavailable),
+                        safe_error(error_category(&error)),
                     ))
                 }
             }
@@ -364,34 +230,17 @@ pub(super) async fn list_provider_allowances_with_transport(
     .buffered(MAX_PARALLEL_REFRESHES)
     .collect::<Vec<_>>()
     .await;
-
     Ok(results.into_iter().flatten().collect())
-}
-
-fn eligible_monitor() -> impl FnMut(&Provider) -> bool {
-    |provider| {
-        if !provider.is_enabled {
-            return false;
-        }
-        let Some(preset_key) = provider.preset_key.as_deref() else {
-            return false;
-        };
-        let channel = provider.channel.as_deref().unwrap_or("default");
-        monitor_for(preset_key, channel).is_some()
-    }
 }
 
 async fn fetch_provider_allowance(
     admin: &AdminService,
     provider: Provider,
     force: bool,
-    transport: Arc<dyn AllowanceTransport>,
 ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-    let Some(monitor) = provider.preset_key.as_deref().and_then(|preset_key| {
-        monitor_for(preset_key, provider.channel.as_deref().unwrap_or("default"))
-    }) else {
+    if !eligible_allowance_provider(admin, &provider) {
         return Ok(None);
-    };
+    }
     let identity = provider_identity(admin, &provider).await?;
     let previous = {
         let cache = admin.gw.provider_allowance_state.inner.cache.read().await;
@@ -419,21 +268,6 @@ async fn fetch_provider_allowance(
             .lock()
             .await;
         if let Some(fetch) = inflight.get(&inflight_key) {
-            #[cfg(test)]
-            {
-                admin
-                    .gw
-                    .provider_allowance_state
-                    .inner
-                    .coalesced_fetches
-                    .fetch_add(1, Ordering::SeqCst);
-                admin
-                    .gw
-                    .provider_allowance_state
-                    .inner
-                    .coalesced_fetch
-                    .notify_waiters();
-            }
             fetch.clone()
         } else {
             let admin = admin.clone();
@@ -447,56 +281,112 @@ async fn fetch_provider_allowance(
                     else {
                         return Ok(None);
                     };
-                    if !eligible_monitor()(&current)
+                    if !eligible_allowance_provider(&admin, &current)
                         || provider_identity(&admin, &current).await? != identity_for_future
                     {
                         return Ok(None);
                     }
 
-                    let mut snapshot = fetch_uncached(
-                        &admin,
-                        &current,
-                        monitor,
-                        previous.as_ref().map(|entry| &entry.snapshot),
-                        transport,
-                    )
-                    .await;
+                    let execution = admin
+                        .gw
+                        .execute_vendor(
+                            &provider_id,
+                            None,
+                            VendorRequest::Allowance(
+                                stravia_vendor_sdk::AllowanceRequest::default(),
+                            ),
+                            VendorCallContext::new(
+                                stravia_runtime_contract::CancellationToken::new(),
+                                Instant::now() + REQUEST_TIMEOUT,
+                            ),
+                        )
+                        .await;
+
+                    let (mut snapshot, publication) = match execution {
+                        Ok(execution) => {
+                            let response = match execution.output {
+                                stravia_vendor_sdk::OperationOutput::Allowance(response) => {
+                                    response
+                                }
+                                _ => anyhow::bail!("vendor returned a non-allowance result"),
+                            };
+                            let mapped = map_allowance_response(&current, response).unwrap_or_else(
+                                |error| {
+                                    tracing::warn!(
+                                        provider_id = %provider_id,
+                                        error = %error,
+                                        "vendor allowance result was invalid"
+                                    );
+                                    stale_or_error_snapshot(
+                                        &current,
+                                        previous.as_ref().map(|entry| &entry.snapshot),
+                                        safe_error(ProviderAllowanceErrorCategory::InvalidResponse),
+                                    )
+                                },
+                            );
+                            (mapped, Some(execution.publication))
+                        }
+                        Err(error) => {
+                            if matches!(
+                                error.downcast_ref::<stravia_vendor_runtime::RuntimeError>(),
+                                Some(stravia_vendor_runtime::RuntimeError::Cancelled)
+                            ) || error.to_string().contains("vendor operation was cancelled")
+                            {
+                                return Err(error);
+                            }
+                            (
+                                stale_or_error_snapshot(
+                                    &current,
+                                    previous.as_ref().map(|entry| &entry.snapshot),
+                                    safe_error(error_category(&error)),
+                                ),
+                                None,
+                            )
+                        }
+                    };
 
                     let Some(latest) = admin.gw.storage.providers().get(&provider_id).await? else {
                         return Ok(None);
                     };
-                    if !eligible_monitor()(&latest)
+                    if !eligible_allowance_provider(&admin, &latest)
                         || provider_identity(&admin, &latest).await? != identity_for_future
                     {
                         return Ok(None);
                     }
 
-                    if snapshot.status == ProviderAllowanceStatus::Fresh
-                        && let Err(error) = admin
+                    // Successful guest results remain fenced until the final
+                    // sample, forecast and cache publication has completed.
+                    let _publication_guard = match publication {
+                        Some(publication) => Some(publication.write_fence().await?),
+                        None => None,
+                    };
+
+                    if snapshot.status == ProviderAllowanceStatus::Fresh {
+                        if let Err(error) = admin
                             .gw
                             .allowance_samples
                             .record_snapshot_at(&snapshot, chrono::Utc::now().timestamp_millis())
                             .await
-                    {
-                        tracing::warn!(
-                            provider_id = %provider_id,
-                            error = ?error,
-                            "provider allowance sample write failed"
-                        );
-                    }
-                    if snapshot.status == ProviderAllowanceStatus::Fresh
-                        && let Err(error) = apply_forecasts(
+                        {
+                            tracing::warn!(
+                                provider_id = %provider_id,
+                                error = ?error,
+                                "provider allowance sample write failed"
+                            );
+                        }
+                        if let Err(error) = apply_forecasts(
                             &mut snapshot,
                             &admin.gw.allowance_samples,
                             chrono::Utc::now().timestamp_millis(),
                         )
                         .await
-                    {
-                        tracing::warn!(
-                            provider_id = %provider_id,
-                            error = ?error,
-                            "provider allowance forecast load failed"
-                        );
+                        {
+                            tracing::warn!(
+                                provider_id = %provider_id,
+                                error = ?error,
+                                "provider allowance forecast load failed"
+                            );
+                        }
                     }
 
                     let successful_at =
@@ -537,12 +427,13 @@ async fn provider_identity(admin: &AdminService, provider: &Provider) -> anyhow:
     for value in [
         provider.id.as_str(),
         provider.name.as_str(),
+        provider.vendor.as_deref().unwrap_or_default(),
         provider.preset_key.as_deref().unwrap_or_default(),
         provider.channel.as_deref().unwrap_or("default"),
+        provider.base_url.as_str(),
+        provider.protocol.as_str(),
         provider.api_key.as_str(),
         provider.adapter_credentials.as_str(),
-        // vendor options change request behavior (e.g. command-code zdr) and
-        // must invalidate cached allowances just like credentials do.
         provider.vendor_options.as_str(),
         provider.auth_mode.as_str(),
         if provider.use_proxy {
@@ -555,7 +446,13 @@ async fn provider_identity(admin: &AdminService, provider: &Provider) -> anyhow:
         digest.update(value.as_bytes());
         digest.update([0]);
     }
-    if provider.effective_auth_mode().trim() == "oauth"
+    if let Some(vendor_id) = provider.vendor.as_deref()
+        && let Ok(descriptor) = admin.gw.vendor_plugins.descriptor(vendor_id)
+    {
+        digest.update(serde_json::to_vec(&descriptor)?);
+        digest.update([0]);
+    }
+    if provider.auth_mode.trim() == "oauth"
         && let Some(credential) = admin
             .gw
             .storage
@@ -563,63 +460,177 @@ async fn provider_identity(admin: &AdminService, provider: &Provider) -> anyhow:
             .get(&provider.id)
             .await?
     {
-        digest.update(credential.connection_id.as_bytes());
-        digest.update([0]);
+        for value in [
+            credential.connection_id.as_str(),
+            credential.access_token.as_str(),
+            credential.refresh_token.as_deref().unwrap_or_default(),
+            credential.expires_at.as_deref().unwrap_or_default(),
+            credential.resource_url.as_deref().unwrap_or_default(),
+            credential.subject_id.as_deref().unwrap_or_default(),
+            credential.meta.as_str(),
+        ] {
+            digest.update(value.as_bytes());
+            digest.update([0]);
+        }
     }
     Ok(URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
-async fn fetch_uncached(
-    admin: &AdminService,
+fn map_allowance_response(
     provider: &Provider,
-    monitor: MonitorKind,
-    previous: Option<&ProviderAllowanceSnapshot>,
-    transport: Arc<dyn AllowanceTransport>,
-) -> ProviderAllowanceSnapshot {
-    let result = async {
-        let runtime = admin
-            .resolve_provider_runtime(provider)
-            .await
-            .map_err(|_| safe_error(ProviderAllowanceErrorCategory::Authentication))?;
-        if runtime.access_token.trim().is_empty() {
-            return Err(safe_error(ProviderAllowanceErrorCategory::Authentication));
-        }
-        let client = admin
-            .gw
-            .http_client_for_provider(provider.use_proxy)
-            .await
-            .map_err(|_| safe_error(ProviderAllowanceErrorCategory::UpstreamUnavailable))?;
-        fetch_monitor(
-            monitor,
-            provider.use_proxy,
-            runtime.access_token,
-            runtime.binding.extra_headers,
-            client,
-            transport,
-        )
-        .await
-    }
-    .await;
+    response: stravia_vendor_sdk::AllowanceResponse,
+) -> anyhow::Result<ProviderAllowanceSnapshot> {
+    let allowances = response
+        .allowances
+        .into_iter()
+        .map(map_allowance)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let models = response
+        .models
+        .into_iter()
+        .map(|model| {
+            let model_id = model.model.trim();
+            anyhow::ensure!(
+                !model_id.is_empty(),
+                "model allowance has an empty model id"
+            );
+            Ok(ModelAllowance {
+                model: model_id.to_owned(),
+                allowances: model
+                    .allowances
+                    .into_iter()
+                    .map(map_allowance)
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !allowances.is_empty() || models.iter().any(|model| !model.allowances.is_empty()),
+        "allowance result is empty"
+    );
+    Ok(ProviderAllowanceSnapshot {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
+        plan_label: response
+            .plan_label
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        status: ProviderAllowanceStatus::Fresh,
+        allowances,
+        models,
+        fetched_at: Some(chrono::Utc::now().to_rfc3339()),
+        error: None,
+    })
+}
 
-    match result {
-        Ok(mut parsed) => {
-            for allowance in &mut parsed.allowances {
-                allowance.condition = allowance_condition(allowance);
-            }
-            ProviderAllowanceSnapshot {
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
-                channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
-                plan_label: parsed.plan_label,
-                status: ProviderAllowanceStatus::Fresh,
-                fetched_at: Some(chrono::Utc::now().to_rfc3339()),
-                allowances: parsed.allowances,
-                models: parsed.models,
-                error: None,
-            }
+fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allowance> {
+    let key = item.key.trim();
+    let label = item.label.trim();
+    anyhow::ensure!(!key.is_empty(), "allowance key is empty");
+    anyhow::ensure!(!label.is_empty(), "allowance label is empty");
+    let kind = match item.kind.as_str() {
+        "quota_window" => AllowanceKind::QuotaWindow,
+        "request_allowance" => AllowanceKind::RequestAllowance,
+        "balance" => AllowanceKind::Balance,
+        other => anyhow::bail!("unsupported allowance kind `{other}`"),
+    };
+    let used = item.used.map(map_amount).transpose()?;
+    let remaining = item.remaining.map(map_amount).transpose()?;
+    let limit = item.limit.map(map_amount).transpose()?;
+    ensure_compatible_amounts([used.as_ref(), remaining.as_ref(), limit.as_ref()])?;
+    let used_percent = item
+        .used_percent
+        .map(|value| parse_decimal(&value, "used percent"))
+        .transpose()?;
+    let derive_condition = item.condition.is_none();
+    let condition = match item.condition.as_deref() {
+        None | Some("unknown") => None,
+        Some("normal") => Some(AllowanceCondition::Normal),
+        Some("tight") => Some(AllowanceCondition::Tight),
+        Some("exhausted") => Some(AllowanceCondition::Exhausted),
+        Some(other) => anyhow::bail!("unsupported allowance condition `{other}`"),
+    };
+    let mut allowance = Allowance {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        kind,
+        used,
+        remaining,
+        limit,
+        used_percent,
+        window_seconds: item.window_seconds,
+        reset_at: item.resets_at_unix_ms,
+        condition,
+        forecast: ExhaustionForecast::default(),
+    };
+    if derive_condition {
+        allowance.condition = allowance_condition(&allowance);
+    }
+    Ok(allowance)
+}
+
+fn map_amount(amount: stravia_vendor_sdk::AllowanceAmount) -> anyhow::Result<AllowanceAmount> {
+    let unit = amount.unit.trim();
+    anyhow::ensure!(!unit.is_empty(), "allowance amount unit is empty");
+    let currency = amount
+        .currency
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    Ok(AllowanceAmount {
+        value: parse_decimal(&amount.value, "allowance amount")?,
+        unit: unit.to_owned(),
+        currency,
+    })
+}
+
+fn parse_decimal(value: &str, label: &str) -> anyhow::Result<f64> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("{label} is not a decimal"))?;
+    anyhow::ensure!(parsed.is_finite(), "{label} must be finite");
+    Ok(parsed)
+}
+
+fn ensure_compatible_amounts(amounts: [Option<&AllowanceAmount>; 3]) -> anyhow::Result<()> {
+    let mut identity: Option<(&str, Option<&str>)> = None;
+    for amount in amounts.into_iter().flatten() {
+        let current = (amount.unit.as_str(), amount.currency.as_deref());
+        if let Some(identity) = identity {
+            anyhow::ensure!(
+                identity == current,
+                "allowance amounts use incompatible units"
+            );
+        } else {
+            identity = Some(current);
         }
-        Err(error) => stale_or_error_snapshot(provider, previous, error),
+    }
+    Ok(())
+}
+
+fn error_category(error: &anyhow::Error) -> ProviderAllowanceErrorCategory {
+    match error.downcast_ref::<stravia_vendor_runtime::RuntimeError>() {
+        Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::Auth,
+            ..
+        }) => ProviderAllowanceErrorCategory::Authentication,
+        Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            upstream_status: Some(429),
+            ..
+        }) => ProviderAllowanceErrorCategory::RateLimited,
+        Some(stravia_vendor_runtime::RuntimeError::DeadlineExceeded) => {
+            ProviderAllowanceErrorCategory::Timeout
+        }
+        Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind:
+                stravia_vendor_sdk::ErrorKind::Invalid | stravia_vendor_sdk::ErrorKind::Unsupported,
+            ..
+        })
+        | Some(stravia_vendor_runtime::RuntimeError::InvalidOutput) => {
+            ProviderAllowanceErrorCategory::InvalidResponse
+        }
+        _ => ProviderAllowanceErrorCategory::UpstreamUnavailable,
     }
 }
 
@@ -634,7 +645,6 @@ fn allowance_condition(allowance: &Allowance) -> Option<AllowanceCondition> {
     {
         return Some(AllowanceCondition::Exhausted);
     }
-
     let remaining_percent = allowance
         .used_percent
         .filter(|used| used.is_finite())
@@ -649,7 +659,6 @@ fn allowance_condition(allowance: &Allowance) -> Option<AllowanceCondition> {
                 })
                 .map(|(remaining, limit)| remaining.value / limit.value * 100.0)
         })?;
-
     Some(if remaining_percent < 20.0 {
         AllowanceCondition::Tight
     } else {
@@ -704,11 +713,10 @@ fn forecast_allowance(allowance: &Allowance, samples: &[AllowanceSample]) -> Exh
         };
         let projected = line.value_at(reset_at);
         if line.slope < 0.0 && projected <= 0.0 {
-            let exhausts_at = line.zero_at().map(|value| value.round() as i64);
             return ExhaustionForecast {
                 status: ExhaustionForecastStatus::WillExhaust,
                 projected_remaining_percent: Some(0.0),
-                exhausts_at,
+                exhausts_at: line.zero_at().map(|value| value.round() as i64),
             };
         }
         return ExhaustionForecast {
@@ -840,393 +848,6 @@ impl LinearTrend {
     }
 }
 
-pub(super) async fn fetch_monitor(
-    monitor: MonitorKind,
-    use_proxy: bool,
-    credential: String,
-    extra_headers: HashMap<String, String>,
-    client: reqwest::Client,
-    transport: Arc<dyn AllowanceTransport>,
-) -> Result<ParsedAllowance, ProviderAllowanceError> {
-    if monitor == MonitorKind::CommandCode {
-        return fetch_commandcode(use_proxy, &credential, client, transport).await;
-    }
-
-    let requests = monitor_requests(monitor, &credential, &extra_headers)?;
-    let request_count = requests.len();
-    for (index, request) in requests.into_iter().enumerate() {
-        let response = transport
-            .execute(client.clone(), use_proxy, request)
-            .await
-            .map_err(transport_error)?;
-        if !response.status.is_success() {
-            if request_count > 1 && index == 0 && response.status == StatusCode::NOT_FOUND {
-                continue;
-            }
-            return Err(error_for_status(response.status));
-        }
-        if monitor == MonitorKind::XaiGrok
-            && let Some(error) = grpc_status_error(&response.headers)
-        {
-            return Err(error);
-        }
-        let parsed = if request_count > 1 && index > 0 {
-            parse_minimax_fallback(&response.body)
-        } else {
-            parse_monitor_response(monitor, &response.body)
-        };
-        match parsed {
-            Ok(parsed) => return Ok(parsed),
-            Err(_) if request_count > 1 && index == 0 => continue,
-            Err(_) => {
-                return Err(safe_error(ProviderAllowanceErrorCategory::InvalidResponse));
-            }
-        }
-    }
-    Err(safe_error(ProviderAllowanceErrorCategory::InvalidResponse))
-}
-
-pub(super) fn monitor_requests(
-    monitor: MonitorKind,
-    credential: &str,
-    extra_headers: &HashMap<String, String>,
-) -> Result<Vec<AllowanceHttpRequest>, ProviderAllowanceError> {
-    let (method, urls, body) = match monitor {
-        MonitorKind::AnthropicClaudeCode => (
-            Method::GET,
-            vec!["https://api.anthropic.com/api/oauth/usage"],
-            Vec::new(),
-        ),
-        MonitorKind::OpenAiCodex => (
-            Method::GET,
-            vec!["https://chatgpt.com/backend-api/wham/usage"],
-            Vec::new(),
-        ),
-        MonitorKind::GitHubCopilot => (
-            Method::GET,
-            vec!["https://api.github.com/copilot_internal/user"],
-            Vec::new(),
-        ),
-        MonitorKind::KimiForCoding => (
-            Method::GET,
-            vec!["https://api.kimi.com/coding/v1/usages"],
-            Vec::new(),
-        ),
-        MonitorKind::NanoGpt => (
-            Method::GET,
-            vec!["https://nano-gpt.com/api/subscription/v1/usage"],
-            Vec::new(),
-        ),
-        MonitorKind::ZaiCodingPlan => (
-            Method::GET,
-            vec!["https://api.z.ai/api/monitor/usage/quota/limit"],
-            Vec::new(),
-        ),
-        MonitorKind::ZhipuAiCodingPlan => (
-            Method::GET,
-            vec!["https://open.bigmodel.cn/api/monitor/usage/quota/limit"],
-            Vec::new(),
-        ),
-        MonitorKind::MiniMaxCodingPlan => (
-            Method::GET,
-            vec![
-                "https://api.minimax.io/v1/token_plan/remains",
-                "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
-            ],
-            Vec::new(),
-        ),
-        MonitorKind::MiniMaxCnCodingPlan => (
-            Method::GET,
-            vec![
-                "https://api.minimaxi.com/v1/token_plan/remains",
-                "https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains",
-            ],
-            Vec::new(),
-        ),
-        MonitorKind::Wafer => (
-            Method::GET,
-            vec!["https://pass.wafer.ai/v1/inference/quota"],
-            Vec::new(),
-        ),
-        MonitorKind::OpenCodeGo => (
-            Method::GET,
-            vec!["https://opencode.ai/zen/go/v1/usage"],
-            Vec::new(),
-        ),
-        MonitorKind::Crof => (Method::GET, vec!["https://crof.ai/usage_api/"], Vec::new()),
-        MonitorKind::DeepSeek => (
-            Method::GET,
-            vec!["https://api.deepseek.com/user/balance"],
-            Vec::new(),
-        ),
-        MonitorKind::NeuralWatt => (
-            Method::GET,
-            vec!["https://api.neuralwatt.com/v1/quota"],
-            Vec::new(),
-        ),
-        MonitorKind::XaiGrok => (
-            Method::POST,
-            vec!["https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"],
-            vec![0, 0, 0, 0, 0],
-        ),
-        // GetUserStatus is a zero-billable unary Connect-RPC on the same host as
-        // chat: raw protobuf body (no envelope), `application/proto`, doubled
-        // Basic auth — the wire shape the CLI itself sends.
-        MonitorKind::Devin => (
-            Method::POST,
-            vec![
-                "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
-            ],
-            crate::protocol::codec::devin_connect::encode_client_metadata_request(
-                credential.trim(),
-                false,
-            ),
-        ),
-        // 顺序即 fetch_commandcode 的调用顺序:whoami → credits → subscriptions → summary。
-        MonitorKind::CommandCode => (
-            Method::GET,
-            vec![
-                "https://api.commandcode.ai/alpha/whoami",
-                "https://api.commandcode.ai/alpha/billing/credits",
-                "https://api.commandcode.ai/alpha/billing/subscriptions",
-                "https://api.commandcode.ai/alpha/usage/summary",
-            ],
-            Vec::new(),
-        ),
-    };
-
-    let mut requests = Vec::with_capacity(urls.len());
-    for url in urls {
-        let mut headers = HeaderMap::new();
-        let authorization = if monitor == MonitorKind::GitHubCopilot {
-            format!("token {credential}")
-        } else if monitor == MonitorKind::Devin {
-            let token = credential.trim();
-            format!("Basic {token}-{token}")
-        } else {
-            format!("Bearer {credential}")
-        };
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&authorization)
-                .map_err(|_| safe_error(ProviderAllowanceErrorCategory::Authentication))?,
-        );
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-
-        match monitor {
-            MonitorKind::AnthropicClaudeCode => {
-                headers.insert(
-                    HeaderName::from_static("anthropic-beta"),
-                    HeaderValue::from_static("oauth-2025-04-20"),
-                );
-            }
-            MonitorKind::OpenAiCodex => {
-                if let Some(account_id) = extra_headers.get("chatgpt-account-id") {
-                    headers.insert(
-                        HeaderName::from_static("chatgpt-account-id"),
-                        HeaderValue::from_str(account_id).map_err(|_| {
-                            safe_error(ProviderAllowanceErrorCategory::Authentication)
-                        })?,
-                    );
-                }
-            }
-            MonitorKind::GitHubCopilot => {
-                headers.insert(
-                    HeaderName::from_static("editor-version"),
-                    HeaderValue::from_static("vscode/1.96.2"),
-                );
-                headers.insert(
-                    HeaderName::from_static("x-github-api-version"),
-                    HeaderValue::from_static("2025-04-01"),
-                );
-            }
-            MonitorKind::OpenCodeGo => {
-                headers.insert(USER_AGENT, HeaderValue::from_static("Stravia"));
-            }
-            MonitorKind::Devin => {
-                headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/proto"));
-                headers.insert(
-                    HeaderName::from_static("connect-protocol-version"),
-                    HeaderValue::from_static("1"),
-                );
-            }
-            MonitorKind::XaiGrok => {
-                headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-                headers.insert(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("application/grpc-web+proto"),
-                );
-                headers.insert(ORIGIN, HeaderValue::from_static("https://grok.com"));
-                headers.insert(
-                    REFERER,
-                    HeaderValue::from_static("https://grok.com/?_s=usage"),
-                );
-                headers.insert(
-                    HeaderName::from_static("x-grpc-web"),
-                    HeaderValue::from_static("1"),
-                );
-                headers.insert(
-                    HeaderName::from_static("x-user-agent"),
-                    HeaderValue::from_static("connect-es/2.1.1"),
-                );
-                headers.insert(USER_AGENT, HeaderValue::from_static("Stravia"));
-            }
-            _ => {}
-        }
-        requests.push(AllowanceHttpRequest {
-            method: method.clone(),
-            url: url.to_string(),
-            headers,
-            body: body.clone(),
-        });
-    }
-    Ok(requests)
-}
-
-fn transport_error(failure: TransportFailure) -> ProviderAllowanceError {
-    safe_error(match failure {
-        TransportFailure::Timeout => ProviderAllowanceErrorCategory::Timeout,
-        TransportFailure::Unavailable => ProviderAllowanceErrorCategory::UpstreamUnavailable,
-        TransportFailure::InvalidResponse => ProviderAllowanceErrorCategory::InvalidResponse,
-    })
-}
-
-async fn execute_allowance_request(
-    transport: &Arc<dyn AllowanceTransport>,
-    client: &reqwest::Client,
-    use_proxy: bool,
-    request: AllowanceHttpRequest,
-) -> Result<AllowanceHttpResponse, ProviderAllowanceError> {
-    let response = transport
-        .execute(client.clone(), use_proxy, request)
-        .await
-        .map_err(transport_error)?;
-    if !response.status.is_success() {
-        return Err(error_for_status(response.status));
-    }
-    Ok(response)
-}
-
-fn with_commandcode_params(
-    mut request: AllowanceHttpRequest,
-    org_id: Option<&str>,
-    since: Option<&str>,
-) -> AllowanceHttpRequest {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in [("orgId", org_id), ("since", since)]
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key, value)))
-    {
-        serializer.append_pair(key, value);
-    }
-    let query = serializer.finish();
-    if !query.is_empty() {
-        request.url = format!("{}?{}", request.url, query);
-    }
-    request
-}
-
-/// Command Code 的额度链路:`whoami` 解析组织上下文(多组织账号需要 orgId
-/// 选择归属),`billing/credits` 提供 5h/weekly 窗口与点数余额,
-/// `billing/subscriptions` 与 `usage/summary` 提供套餐与本期用量。
-/// 后两者失败只损失增强信息,不影响核心额度。
-async fn fetch_commandcode(
-    use_proxy: bool,
-    credential: &str,
-    client: reqwest::Client,
-    transport: Arc<dyn AllowanceTransport>,
-) -> Result<ParsedAllowance, ProviderAllowanceError> {
-    let mut requests =
-        monitor_requests(MonitorKind::CommandCode, credential, &HashMap::new())?.into_iter();
-    let (Some(whoami), Some(credits), Some(subscriptions), Some(summary)) = (
-        requests.next(),
-        requests.next(),
-        requests.next(),
-        requests.next(),
-    ) else {
-        return Err(safe_error(ProviderAllowanceErrorCategory::InvalidResponse));
-    };
-
-    let whoami = execute_allowance_request(&transport, &client, use_proxy, whoami).await?;
-    let org_id = parse_commandcode_org_id(&whoami.body);
-
-    let credits = with_commandcode_params(credits, org_id.as_deref(), None);
-    let credits = execute_allowance_request(&transport, &client, use_proxy, credits).await?;
-    let mut parsed = parse_monitor_response(MonitorKind::CommandCode, &credits.body)
-        .map_err(|_| safe_error(ProviderAllowanceErrorCategory::InvalidResponse))?;
-
-    let subscriptions = with_commandcode_params(subscriptions, org_id.as_deref(), None);
-    let subscription: Option<CommandCodeSubscription> =
-        execute_allowance_request(&transport, &client, use_proxy, subscriptions)
-            .await
-            .ok()
-            .and_then(|response| parse_commandcode_subscription(&response.body));
-    if let Some(subscription) = &subscription {
-        parsed.plan_label = subscription.plan_label.clone();
-    }
-
-    // 不带 since 的 summary 无法区分账期,总花费会混进历史用量。
-    if let Some(subscription) = &subscription
-        && let Some(period_start) = subscription.period_start_raw.as_deref()
-    {
-        let summary = with_commandcode_params(summary, org_id.as_deref(), Some(period_start));
-        if let Ok(response) =
-            execute_allowance_request(&transport, &client, use_proxy, summary).await
-            && let Some(spent) = parse_commandcode_summary_cost(&response.body)
-            && let Some(remaining) = parsed
-                .allowances
-                .iter()
-                .find(|allowance| allowance.key == "credits_balance")
-                .and_then(|allowance| allowance.remaining.as_ref())
-                .map(|amount| amount.value)
-            && let Some(period_end) = subscription.period_end
-        {
-            let window_seconds = subscription
-                .period_start
-                .filter(|start| period_end > *start)
-                .and_then(|start| u64::try_from((period_end - start) / 1000).ok());
-            parsed.allowances.push(commandcode_billing_cycle(
-                spent,
-                remaining,
-                Some(period_end),
-                window_seconds,
-            ));
-        }
-    }
-
-    Ok(parsed)
-}
-
-fn grpc_status_error(headers: &HeaderMap) -> Option<ProviderAllowanceError> {
-    let status = headers
-        .get("grpc-status")?
-        .to_str()
-        .ok()?
-        .parse::<u16>()
-        .ok()?;
-    if status == 0 {
-        return None;
-    }
-    Some(safe_error(match status {
-        16 => ProviderAllowanceErrorCategory::Authentication,
-        8 => ProviderAllowanceErrorCategory::RateLimited,
-        4 => ProviderAllowanceErrorCategory::Timeout,
-        _ => ProviderAllowanceErrorCategory::UpstreamUnavailable,
-    }))
-}
-
-fn error_for_status(status: StatusCode) -> ProviderAllowanceError {
-    safe_error(match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            ProviderAllowanceErrorCategory::Authentication
-        }
-        StatusCode::TOO_MANY_REQUESTS => ProviderAllowanceErrorCategory::RateLimited,
-        StatusCode::REQUEST_TIMEOUT => ProviderAllowanceErrorCategory::Timeout,
-        _ => ProviderAllowanceErrorCategory::UpstreamUnavailable,
-    })
-}
-
 fn safe_error(category: ProviderAllowanceErrorCategory) -> ProviderAllowanceError {
     let message = match category {
         ProviderAllowanceErrorCategory::Authentication => {
@@ -1285,5 +906,60 @@ fn stale_or_error_snapshot(
         allowances: previous.allowances.clone(),
         models: previous.models.clone(),
         error: Some(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sdk_amount(value: &str, currency: Option<&str>) -> stravia_vendor_sdk::AllowanceAmount {
+        stravia_vendor_sdk::AllowanceAmount {
+            value: value.into(),
+            unit: "currency".into(),
+            currency: currency.map(str::to_owned),
+        }
+    }
+
+    fn sdk_item(currency: &str) -> stravia_vendor_sdk::AllowanceItem {
+        stravia_vendor_sdk::AllowanceItem {
+            key: format!("balance_{}", currency.to_ascii_lowercase()),
+            label: "Balance".into(),
+            kind: "balance".into(),
+            used: None,
+            remaining: Some(sdk_amount("12.25", Some(currency))),
+            limit: None,
+            used_percent: None,
+            window_seconds: None,
+            resets_at_unix_ms: None,
+            condition: Some("unknown".into()),
+        }
+    }
+
+    #[test]
+    fn sdk_allowances_keep_currency_and_unknown_state_distinct() {
+        let cny = map_allowance(sdk_item("CNY")).expect("CNY allowance");
+        let usd = map_allowance(sdk_item("USD")).expect("USD allowance");
+        assert_eq!(
+            cny.remaining
+                .as_ref()
+                .and_then(|amount| amount.currency.as_deref()),
+            Some("CNY")
+        );
+        assert_eq!(
+            usd.remaining
+                .as_ref()
+                .and_then(|amount| amount.currency.as_deref()),
+            Some("USD")
+        );
+        assert_eq!(cny.condition, None);
+        assert_eq!(usd.condition, None);
+    }
+
+    #[test]
+    fn one_allowance_cannot_merge_different_currencies() {
+        let mut item = sdk_item("USD");
+        item.used = Some(sdk_amount("1", Some("CNY")));
+        assert!(map_allowance(item).is_err());
     }
 }

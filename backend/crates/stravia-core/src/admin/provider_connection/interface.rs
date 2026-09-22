@@ -14,7 +14,7 @@ pub(crate) enum ProviderSave {
 
 pub(crate) enum ProviderConnectivityTest {
     Existing(String),
-    Candidate(CreateProvider),
+    Candidate(Box<CreateProvider>),
 }
 
 pub(crate) enum ProviderReconnect {
@@ -24,8 +24,7 @@ pub(crate) enum ProviderReconnect {
 
 pub(crate) enum ProviderReconnectStart {
     Authorization {
-        vendor: String,
-        use_proxy: bool,
+        candidate: Box<AuthSessionCandidate>,
         options: OAuthSessionStartOptions,
     },
     Existing {
@@ -36,7 +35,7 @@ pub(crate) enum ProviderReconnectStart {
 pub(crate) enum ProviderReconnectCallback {
     Complete {
         authorization_id: String,
-        input: auth::AuthExchangeInput,
+        input: AuthCompletionInput,
     },
     Bind {
         provider_id: String,
@@ -61,29 +60,44 @@ impl<'a> ProviderConnection<'a> {
     }
 
     pub(crate) async fn catalog_choices(&self) -> crate::provider_catalog::CatalogProviderList {
-        self.admin.gw.provider_catalog.providers().await
+        let descriptors = self.admin.gw.vendor_plugins.descriptors();
+        self.admin.gw.provider_catalog.providers(&descriptors).await
     }
 
     pub(crate) async fn requires_oauth_session(
         &self,
         input: &CreateProvider,
     ) -> anyhow::Result<bool> {
-        let ProviderSourceInput::Catalog {
-            provider_id,
-            channel_id,
-            fingerprint,
-            ..
-        } = &input.source
-        else {
-            return Ok(false);
-        };
-        let (_, channel) = self
-            .admin
-            .gw
-            .provider_catalog
-            .resolve_channel(provider_id, channel_id, fingerprint)
-            .await?;
-        Ok(channel.auth_mode == crate::provider_catalog::CatalogAuthMode::OAuth)
+        match &input.source {
+            ProviderSourceInput::Catalog {
+                provider_id,
+                channel_id,
+                fingerprint,
+                ..
+            } => {
+                let descriptors = self.admin.gw.vendor_plugins.descriptors();
+                let (_, channel) = self
+                    .admin
+                    .gw
+                    .provider_catalog
+                    .resolve_channel(provider_id, channel_id, fingerprint, &descriptors)
+                    .await?;
+                Ok(channel.auth_mode == crate::provider_catalog::CatalogAuthMode::OAuth)
+            }
+            ProviderSourceInput::Custom {
+                vendor, channel, ..
+            } => {
+                let descriptor = self.admin.gw.vendor_plugins.descriptor(vendor)?;
+                let channel = descriptor
+                    .channels
+                    .iter()
+                    .find(|candidate| candidate.id == channel.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Vendor `{vendor}` does not declare channel `{channel}`")
+                    })?;
+                Ok(channel.auth.is_some())
+            }
+        }
     }
 
     pub(crate) async fn list(&self) -> anyhow::Result<Vec<Provider>> {
@@ -98,19 +112,6 @@ impl<'a> ProviderConnection<'a> {
             .get(provider_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("provider not found: {provider_id}"))
-    }
-
-    pub(crate) fn preview_base_url(
-        &self,
-        vendor_id: &str,
-        credentials: std::collections::BTreeMap<String, String>,
-        configured_base_url: Option<&str>,
-    ) -> anyhow::Result<String> {
-        validate_provider_base_url(&assemble_vendor_base_url(
-            vendor_id,
-            &credentials,
-            configured_base_url,
-        )?)
     }
 
     pub(crate) async fn save(&self, input: ProviderSave) -> anyhow::Result<Provider> {
@@ -156,7 +157,7 @@ impl<'a> ProviderConnection<'a> {
         match input {
             ProviderConnectivityTest::Existing(id) => self.admin.test_provider_record(&id).await,
             ProviderConnectivityTest::Candidate(input) => {
-                self.admin.test_provider_candidate_record(input).await
+                self.admin.test_provider_candidate_record(*input).await
             }
         }
     }
@@ -171,12 +172,11 @@ impl<'a> ProviderConnection<'a> {
     ) -> anyhow::Result<ProviderReconnectResult> {
         match input {
             ProviderReconnect::Start(ProviderReconnectStart::Authorization {
-                vendor,
-                use_proxy,
+                candidate,
                 options,
             }) => self
                 .admin
-                .init_oauth_session_record(&vendor, use_proxy, options)
+                .init_oauth_session_record(*candidate, options)
                 .await
                 .map(ProviderReconnectResult::Redirect),
             ProviderReconnect::Start(ProviderReconnectStart::Existing { provider_id }) => self
@@ -214,7 +214,7 @@ impl AdminService {
         input: CreateProvider,
     ) -> anyhow::Result<TestResult> {
         ProviderConnection::new(self)
-            .test(ProviderConnectivityTest::Candidate(input))
+            .test(ProviderConnectivityTest::Candidate(Box::new(input)))
             .await
     }
 }
@@ -257,18 +257,21 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Custom Connection".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: None,
-                    protocol: "openai".into(),
+                    vendor: "protocol-openai-chat-completions".into(),
+                    channel: "default".into(),
+                    protocol: None,
                     base_url: "http://127.0.0.1:9/v1/".into(),
                     models_source: None,
                     static_models: None,
                 },
                 credential: ProviderCredentialInput::None,
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
 
         assert_eq!(provider.name, "Custom Connection");
+        assert_eq!(provider.protocol, "openai-compatible");
         assert_eq!(provider.base_url, "http://127.0.0.1:9/v1");
         assert_eq!(provider.last_test_success, None);
         assert_eq!(providers.list().await?.len(), 1);
@@ -304,7 +307,10 @@ mod tests {
                         fingerprint: channel.fingerprint.clone(),
                         base_url_override: Some("https://proxy.example/v1/".into()),
                     },
-                    credential: ProviderCredentialInput::None,
+                    credential: ProviderCredentialInput::ApiKey {
+                        value: "test-key".into(),
+                    },
+                    vendor_options: Map::new(),
                     use_proxy: false,
                 },
                 authorization_id: None,
@@ -312,7 +318,7 @@ mod tests {
             .await?;
 
         assert_eq!(provider.vendor.as_deref(), Some("openai"));
-        assert_eq!(provider.protocol, "open-responses");
+        assert_eq!(provider.protocol, "openai-compatible");
         assert_eq!(provider.base_url, "https://proxy.example/v1");
         assert_eq!(provider.models_source.as_deref(), Some("catalog"));
         Ok(())
@@ -327,13 +333,17 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Original".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: None,
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "http://127.0.0.1:9".into(),
                     models_source: None,
                     static_models: None,
                 },
-                credential: ProviderCredentialInput::None,
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "test-key".into(),
+                },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
@@ -341,10 +351,10 @@ mod tests {
         let result = providers
             .test(ProviderConnectivityTest::Existing(original.id.clone()))
             .await?;
-        assert!(!result.success);
+        assert!(result.success);
         assert_eq!(
             providers.get(&original.id).await?.last_test_success,
-            Some(false)
+            Some(true)
         );
 
         let copied = providers
@@ -363,8 +373,16 @@ mod tests {
         let result = ProviderConnection::new(&admin)
             .reconnect(ProviderReconnect::Start(
                 ProviderReconnectStart::Authorization {
-                    vendor: "codex".into(),
-                    use_proxy: false,
+                    candidate: Box::new(AuthSessionCandidate {
+                        vendor_id: "openai-codex".into(),
+                        channel: "codex".into(),
+                        provider_id: None,
+                        base_url: "https://chatgpt.com/backend-api/codex".into(),
+                        protocol: None,
+                        options: BTreeMap::new(),
+                        credentials: BTreeMap::new(),
+                        use_proxy: false,
+                    }),
                     options: OAuthSessionStartOptions {
                         callback_mode: OAuthCallbackMode::Manual,
                         redirect_uri: "http://localhost:1457/auth/callback".into(),
@@ -378,9 +396,10 @@ mod tests {
         let ProviderReconnectResult::Redirect(started) = result else {
             panic!("authorization start must return a redirect contract");
         };
-        assert_eq!(started.vendor, "codex");
+        assert_eq!(started.vendor_id, "openai-codex");
+        assert_eq!(started.channel, "codex");
         assert!(!started.session_id.is_empty());
-        assert!(!started.auth_url.is_empty());
+        assert!(started.auth_url.is_some());
         Ok(())
     }
 
@@ -394,15 +413,17 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Invalid".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("openai".into()),
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "https://snapshot.example/v1".into(),
                     models_source: None,
                     static_models: None,
                 },
                 credential: ProviderCredentialInput::Fields {
-                    values: BTreeMap::from([("unknown".into(), "secret".into())]),
+                    values: BTreeMap::from([("unknown".into(), json!("secret"))]),
                 },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await
@@ -413,15 +434,17 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Snapshot".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("openai".into()),
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "https://snapshot.example/v1/".into(),
                     models_source: None,
                     static_models: None,
                 },
                 credential: ProviderCredentialInput::Fields {
-                    values: BTreeMap::from([("apiKey".into(), "first".into())]),
+                    values: BTreeMap::from([("apiKey".into(), json!("first"))]),
                 },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
@@ -429,12 +452,31 @@ mod tests {
             .save(ProviderSave::Update {
                 provider_id: provider.id,
                 input: UpdateProvider {
-                    adapter_credentials: Some(BTreeMap::from([("apiKey".into(), "second".into())])),
+                    adapter_credentials: Some(BTreeMap::from([("apiKey".into(), json!("second"))])),
                     ..UpdateProvider::default()
                 },
             })
             .await?;
         assert_eq!(updated.base_url, "https://snapshot.example/v1");
+        let preserved = providers
+            .save(ProviderSave::Update {
+                provider_id: updated.id.clone(),
+                input: UpdateProvider {
+                    adapter_credentials: Some(BTreeMap::from([(
+                        "apiKey".into(),
+                        Value::String(String::new()),
+                    )])),
+                    ..UpdateProvider::default()
+                },
+            })
+            .await?;
+        assert_eq!(preserved.id, updated.id);
+        assert_eq!(
+            admin
+                .configured_provider_credential_fields(&preserved)
+                .await?,
+            vec!["apiKey"]
+        );
         Ok(())
     }
 
@@ -447,8 +489,9 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("CC Options".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("command-code".into()),
-                    protocol: "command-code".into(),
+                    vendor: "command-code".into(),
+                    channel: "default".into(),
+                    protocol: Some("command-code".into()),
                     base_url: "https://api.commandcode.ai".into(),
                     models_source: None,
                     static_models: None,
@@ -456,10 +499,11 @@ mod tests {
                 credential: ProviderCredentialInput::ApiKey {
                     value: "sk-cc".into(),
                 },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
-        assert_eq!(provider.vendor_options, "{}");
+        assert_eq!(provider.vendor_options, r#"{"zdr":true}"#);
 
         // 未声明的 key 与类型不符的值都要被拒。
         for invalid in [
@@ -506,8 +550,9 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("OpenAI".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("openai".into()),
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "https://api.openai.com/v1".into(),
                     models_source: None,
                     static_models: None,
@@ -515,6 +560,7 @@ mod tests {
                 credential: ProviderCredentialInput::ApiKey {
                     value: "sk-oai".into(),
                 },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
@@ -539,21 +585,25 @@ mod tests {
         let input = CreateProvider {
             name: Some("Unsaved Candidate".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai".into(),
+                vendor: "openai".into(),
+                channel: "default".into(),
+                protocol: Some("openai".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
-            credential: ProviderCredentialInput::None,
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-key".into(),
+            },
+            vendor_options: Map::new(),
             use_proxy: false,
         };
 
         let result = providers
-            .test(ProviderConnectivityTest::Candidate(input))
+            .test(ProviderConnectivityTest::Candidate(Box::new(input)))
             .await?;
 
-        assert!(!result.success);
+        assert!(result.success);
         assert!(providers.list().await?.is_empty());
         Ok(())
     }
@@ -567,13 +617,17 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Before".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: None,
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "http://127.0.0.1:9/v1".into(),
                     models_source: None,
                     static_models: None,
                 },
-                credential: ProviderCredentialInput::None,
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "test-key".into(),
+                },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
@@ -602,13 +656,17 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Disposable Connection".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: None,
-                    protocol: "openai".into(),
+                    vendor: "openai".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai".into()),
                     base_url: "http://127.0.0.1:9".into(),
                     models_source: None,
                     static_models: None,
                 },
-                credential: ProviderCredentialInput::None,
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "test-key".into(),
+                },
+                vendor_options: Map::new(),
                 use_proxy: false,
             }))
             .await?;
@@ -659,13 +717,17 @@ mod tests {
         let save = |name: &str| CreateProvider {
             name: Some(name.into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai".into(),
+                vendor: "openai".into(),
+                channel: "default".into(),
+                protocol: Some("openai".into()),
                 base_url: "http://127.0.0.1:9".into(),
                 models_source: None,
                 static_models: None,
             },
-            credential: ProviderCredentialInput::None,
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-key".into(),
+            },
+            vendor_options: Map::new(),
             use_proxy: false,
         };
         let primary = admin.create_provider(save("Primary Connection")).await?;
@@ -694,11 +756,11 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: primary.id.clone(),
-                target_model: "primary-model".into(),
+                target_model: Some("primary-model".into()),
                 targets: vec![
                     CreateTarget {
                         provider_id: primary.id.clone(),
-                        model: "primary-model".into(),
+                        model: Some("primary-model".into()),
                         enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
@@ -708,7 +770,7 @@ mod tests {
                     },
                     CreateTarget {
                         provider_id: fallback.id.clone(),
-                        model: "fallback-model".into(),
+                        model: Some("fallback-model".into()),
                         enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,
@@ -726,7 +788,7 @@ mod tests {
         let routes = admin.list_models().await?;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].target_provider, fallback.id);
-        assert_eq!(routes[0].target_model, "fallback-model");
+        assert_eq!(routes[0].target_model.as_deref(), Some("fallback-model"));
         assert_eq!(routes[0].targets.len(), 1);
         assert_eq!(routes[0].targets[0].provider_id, fallback.id);
         assert!(

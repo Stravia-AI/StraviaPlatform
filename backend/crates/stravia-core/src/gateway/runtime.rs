@@ -115,15 +115,19 @@ impl Gateway {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
-        let responses_websocket_client = reqwest::Client::builder()
+        let vendor_http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let vendor_websocket_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
             .http1_only()
             .build()?;
 
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
-        let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let provider_catalog = provider_catalog::ProviderCatalog::new(paths.catalog_root())?;
         let retention_days = match storage.settings().get("log_retention_days").await {
             Ok(value) => value
@@ -289,21 +293,27 @@ impl Gateway {
             Arc::clone(&storage),
             config.product_update_download_supported,
         )?);
+        let vendor_plugins = crate::plugin::manager::VendorPlugins::open(
+            storage.vendor_plugins().clone(),
+            crate::data_paths::DataPaths::new(&config.data_dir).plugins(),
+        )
+        .await?;
         let mut gw = Self {
             config,
             storage,
             storage_kind,
             http_client,
-            responses_websocket_client,
+            vendor_http_client,
+            vendor_websocket_client,
+            vendor_plugins,
+            vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
             provider_catalog,
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::default(),
             allowance_samples,
-            proxy_client_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            responses_websockets: proxy::client::ResponsesWebSocketRegistry::default(),
+            vendor_client_cache: Arc::new(tokio::sync::RwLock::new([None, None])),
             model_cache,
             cache_affinity: router::cache_affinity::CacheAffinity::default(),
             route_policy_state: router::RoutePolicyState::default(),
-            ollama_capability_cache,
             observation,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
@@ -331,6 +341,7 @@ impl Gateway {
             principal_admission: Arc::new(admission::PrincipalAdmission::new()),
             lifecycle_owner: true,
         };
+        gw.vendor_plugins.reconcile_bundled(&gw).await?;
         gw.install_model_turn();
         configure_gateway_extensions(&mut gw, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             .await?;
@@ -586,49 +597,38 @@ impl Gateway {
         self.artifact_store.as_ref()
     }
 
-    pub async fn http_client_for_provider(
+    pub(crate) async fn vendor_client_snapshot(
         &self,
         use_proxy: bool,
-    ) -> anyhow::Result<reqwest::Client> {
-        self.client_for_provider(use_proxy, false).await
+    ) -> anyhow::Result<VendorClientSnapshot> {
+        let proxy = self.effective_vendor_proxy(use_proxy).await?;
+        let http = self.client_for_vendor(&proxy, false).await?;
+        let websocket = self.client_for_vendor(&proxy, true).await?;
+        Ok(VendorClientSnapshot {
+            http,
+            websocket,
+            websocket_reuse_identity: proxy.reuse_identity()?,
+        })
     }
 
-    pub(crate) async fn responses_websocket_client_for_provider(
+    async fn effective_vendor_proxy(
         &self,
         use_proxy: bool,
-    ) -> anyhow::Result<reqwest::Client> {
-        self.client_for_provider(use_proxy, true).await
-    }
-
-    async fn client_for_provider(
-        &self,
-        use_proxy: bool,
-        require_http1: bool,
-    ) -> anyhow::Result<reqwest::Client> {
-        let default_client = if require_http1 {
-            &self.responses_websocket_client
-        } else {
-            &self.http_client
-        };
+    ) -> anyhow::Result<EffectiveVendorProxy> {
         if !use_proxy {
-            return Ok(default_client.clone());
+            return Ok(EffectiveVendorProxy::Direct { use_proxy: false });
         }
-
-        let enabled = self
-            .storage
-            .settings()
+        let settings = self.storage.settings();
+        let enabled = settings
             .get("proxy_enabled")
             .await?
             .as_deref()
             .map(parse_bool_setting)
             .unwrap_or(false);
         if !enabled {
-            return Ok(default_client.clone());
+            return Ok(EffectiveVendorProxy::Direct { use_proxy: true });
         }
-
-        let proxy_url = self
-            .storage
-            .settings()
+        let proxy_url = settings
             .get("proxy_url")
             .await?
             .unwrap_or_default()
@@ -637,75 +637,83 @@ impl Gateway {
         if proxy_url.is_empty() {
             anyhow::bail!("proxy_url is empty");
         }
+        let force_http1 = settings
+            .get("proxy_force_http1")
+            .await?
+            .as_deref()
+            .map(parse_bool_setting)
+            .unwrap_or(false);
+        Ok(EffectiveVendorProxy::Explicit {
+            proxy_url,
+            force_http1,
+        })
+    }
 
-        let force_http1 = require_http1
-            || self
-                .storage
-                .settings()
-                .get("proxy_force_http1")
-                .await?
-                .as_deref()
-                .map(parse_bool_setting)
-                .unwrap_or(false);
-
+    async fn client_for_vendor(
+        &self,
+        proxy: &EffectiveVendorProxy,
+        require_http1: bool,
+    ) -> anyhow::Result<reqwest::Client> {
+        let default_client = if require_http1 {
+            &self.vendor_websocket_client
+        } else {
+            &self.vendor_http_client
+        };
+        let EffectiveVendorProxy::Explicit {
+            proxy_url,
+            force_http1,
+        } = proxy
+        else {
+            return Ok(default_client.clone());
+        };
+        let force_http1 = require_http1 || *force_http1;
         let cache_key = format!("{proxy_url}|{force_http1}");
-        if let Some(cached) = self.proxy_client_cache.read().await.clone()
+        let slot = usize::from(force_http1);
+        let mut cache = self.vendor_client_cache.write().await;
+        if let Some(cached) = &cache[slot]
             && cached.cache_key == cache_key
         {
-            return Ok(cached.client);
+            return Ok(cached.client.clone());
         }
 
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300));
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none());
         if force_http1 {
             builder = builder.http1_only();
         }
-        let client = builder.proxy(reqwest::Proxy::all(&proxy_url)?).build()?;
+        let client = builder.proxy(reqwest::Proxy::all(proxy_url)?).build()?;
 
-        *self.proxy_client_cache.write().await = Some(ProxyClientCache {
+        cache[slot] = Some(VendorClientCache {
             cache_key,
             client: client.clone(),
         });
         Ok(client)
     }
+}
 
-    pub async fn get_ollama_capabilities_cached(
-        &self,
-        provider_id: &str,
-        model: &str,
-        ttl: Duration,
-    ) -> Option<Vec<String>> {
-        let key = format!("{provider_id}:{model}");
-        let cache = self.ollama_capability_cache.read().await;
-        cache.get(&key).and_then(|entry| {
-            if entry.cached_at.elapsed() < ttl {
-                Some(entry.capabilities.clone())
-            } else {
-                None
-            }
-        })
-    }
+enum EffectiveVendorProxy {
+    Direct {
+        use_proxy: bool,
+    },
+    Explicit {
+        proxy_url: String,
+        force_http1: bool,
+    },
+}
 
-    pub async fn set_ollama_capabilities_cache(
-        &self,
-        provider_id: &str,
-        model: &str,
-        capabilities: Vec<String>,
-    ) {
-        let key = format!("{provider_id}:{model}");
-        let mut cache = self.ollama_capability_cache.write().await;
-        cache.insert(
-            key,
-            CapabilityCacheEntry {
-                capabilities,
-                cached_at: Instant::now(),
-            },
-        );
-    }
-
-    pub async fn clear_ollama_capability_cache_for_provider(&self, provider_id: &str) {
-        let prefix = format!("{provider_id}:");
-        let mut cache = self.ollama_capability_cache.write().await;
-        cache.retain(|k, _| !k.starts_with(&prefix));
+impl EffectiveVendorProxy {
+    fn reuse_identity(&self) -> anyhow::Result<String> {
+        let encoded = match self {
+            Self::Direct { use_proxy } => serde_json::to_vec(&("direct", use_proxy))?,
+            Self::Explicit {
+                proxy_url,
+                force_http1,
+            } => serde_json::to_vec(&("explicit", proxy_url, force_http1))?,
+        };
+        Ok(stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+            &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&encoded),
+        ))
     }
 }
 
@@ -735,6 +743,71 @@ fn to_sql_backend_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxied_http_requests_reuse_connections_across_vendor_snapshots() -> anyhow::Result<()>
+    {
+        use axum::extract::{ConnectInfo, State};
+        use std::collections::BTreeSet;
+        use std::net::SocketAddr;
+
+        let connections = Arc::new(tokio::sync::Mutex::new(BTreeSet::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_url = format!("http://{}", listener.local_addr()?);
+        let app = axum::Router::new()
+            .fallback(
+                |ConnectInfo(peer): ConnectInfo<SocketAddr>,
+                 State(connections): State<
+                    Arc<tokio::sync::Mutex<BTreeSet<SocketAddr>>>,
+                >| async move {
+                    connections.lock().await.insert(peer);
+                    "proxy response"
+                },
+            )
+            .with_state(Arc::clone(&connections));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+        let directory = tempfile::tempdir()?;
+        let gateway = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    ("proxy_enabled".into(), "true".into()),
+                    ("proxy_url".into(), proxy_url),
+                ],
+            )),
+        )
+        .await?;
+        let result = async {
+            for _ in 0..2 {
+                let clients = gateway.vendor_client_snapshot(true).await?;
+                let body = clients
+                    .http
+                    .get("http://127.0.0.1:9/vendor")
+                    .send()
+                    .await?
+                    .text()
+                    .await?;
+                assert_eq!(body, "proxy response");
+            }
+            assert_eq!(connections.lock().await.len(), 1);
+            anyhow::Ok(())
+        }
+        .await;
+        gateway.shutdown().await;
+        server.abort();
+        result
+    }
 
     #[tokio::test(start_paused = true)]
     async fn provider_allowance_sampler_waits_thirty_minutes_and_stops_on_shutdown() {

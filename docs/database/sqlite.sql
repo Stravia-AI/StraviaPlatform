@@ -57,7 +57,7 @@ CREATE TABLE api_keys (
     expires_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
-, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, concurrency_limit INTEGER CHECK (concurrency_limit > 0), transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0);
+, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, concurrency_limit INTEGER CHECK (concurrency_limit > 0), transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE artifact_download_grants (
     token_hash TEXT PRIMARY KEY,
@@ -189,15 +189,16 @@ CREATE TABLE "model_backends" (
     id                     TEXT PRIMARY KEY,
     model_id               TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
     provider_id            TEXT NOT NULL REFERENCES providers(id),
-    model                  TEXT NOT NULL,
+    model                  TEXT CHECK (model IS NULL OR length(trim(model)) > 0),
     priority               INTEGER NOT NULL DEFAULT 0,
     created_at             TEXT DEFAULT (datetime('now')),
     thinking_level_map     TEXT NOT NULL DEFAULT '[{"level":"off","control":{"type":"hidden"},"source":"generated"},{"level":"minimal","control":{"type":"hidden"},"source":"generated"},{"level":"low","control":{"type":"hidden"},"source":"generated"},{"level":"medium","control":{"type":"hidden"},"source":"generated"},{"level":"high","control":{"type":"hidden"},"source":"generated"},{"level":"xhigh","control":{"type":"hidden"},"source":"generated"},{"level":"max","control":{"type":"hidden"},"source":"generated"}]'
         CHECK (json_valid(thinking_level_map)),
     first_token_timeout_ms INTEGER NOT NULL DEFAULT 60000,
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
-    target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000
-, enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)));
+    target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000,
+    enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+);
 
 CREATE TABLE model_turn_observations (
     id TEXT PRIMARY KEY,
@@ -435,6 +436,23 @@ CREATE TABLE target_attempt_observations (
     last_event_sequence INTEGER NOT NULL
 );
 
+CREATE TABLE turn_chain_content_refs (
+    node_id TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content_key TEXT NOT NULL,
+    PRIMARY KEY (node_id, path),
+    FOREIGN KEY (node_id, principal) REFERENCES turn_chain_nodes(id, principal) ON DELETE CASCADE,
+    FOREIGN KEY (principal, content_key) REFERENCES turn_chain_contents(principal, content_key)
+);
+
+CREATE TABLE turn_chain_contents (
+    principal TEXT NOT NULL,
+    content_key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    PRIMARY KEY (principal, content_key)
+);
+
 CREATE TABLE turn_chain_nodes (
     id              TEXT PRIMARY KEY,
     kind            TEXT NOT NULL CHECK (kind IN ('response', 'agent', 'web_search')),
@@ -448,6 +466,31 @@ CREATE TABLE turn_chain_nodes (
     prefix_fingerprint  TEXT,
     prefix_item_count   INTEGER,
     prefix_completed_at INTEGER
+, storage_format INTEGER NOT NULL DEFAULT 0 CHECK (storage_format IN (0, 1)));
+
+CREATE TABLE vendor_data_recovery (
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    data_kind TEXT NOT NULL CHECK (data_kind IN ('options', 'credentials', 'models')),
+    PRIMARY KEY (provider_id, data_kind)
+);
+
+CREATE TABLE vendor_plugins (
+    vendor_id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('builtin', 'local')),
+    descriptor TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    data_epoch BIGINT NOT NULL CHECK (data_epoch >= 0),
+    installed_at BIGINT NOT NULL
+);
+
+CREATE TABLE vendor_private_state (
+    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    vendor_id TEXT NOT NULL,
+    format_version TEXT NOT NULL,
+    payload BLOB NOT NULL CHECK (length(payload) <= 262144),
+    updated_at BIGINT NOT NULL
 );
 
 CREATE TABLE web_providers (
@@ -552,7 +595,11 @@ ON reversible_redaction_mappings(expires_at);
 CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
 ON reversible_redaction_mappings(principal, expires_at);
 
+CREATE INDEX idx_turn_chain_content_refs_content ON turn_chain_content_refs(principal, content_key);
+
 CREATE INDEX idx_turn_chain_expiry ON turn_chain_nodes(expires_at);
+
+CREATE UNIQUE INDEX idx_turn_chain_node_principal ON turn_chain_nodes(id, principal);
 
 CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id);
 
@@ -569,6 +616,8 @@ ON turn_chain_nodes (
     created_at DESC
 )
 WHERE prefix_namespace IS NOT NULL;
+
+CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
 
 CREATE UNIQUE INDEX idx_web_providers_local_singleton
 ON web_providers(kind)

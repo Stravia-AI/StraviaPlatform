@@ -5,22 +5,402 @@ mod capabilities;
 mod configuration;
 mod interface;
 
-use configuration::*;
+use configuration::{
+    NormalizedConfiguration, require_descriptor, resolved_permissions,
+    validate_configuration_fields, validate_persisted_configuration_fields,
+    validate_provider_base_url,
+};
+pub use configuration::{
+    ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderNetworkPermission,
+};
 pub(crate) use interface::{
     ProviderConnection, ProviderConnectivityTest, ProviderReconnect, ProviderReconnectCallback,
     ProviderReconnectResult, ProviderReconnectStart, ProviderSave,
 };
 
+fn configured_secret_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
+    left.id == right.id
+        && left.name == right.name
+        && left.vendor == right.vendor
+        && left.protocol == right.protocol
+        && left.base_url == right.base_url
+        && left.preset_key == right.preset_key
+        && left.channel == right.channel
+        && left.models_source == right.models_source
+        && left.static_models == right.static_models
+        && left.api_key == right.api_key
+        && left.adapter_credentials == right.adapter_credentials
+        && left.vendor_options == right.vendor_options
+        && left.auth_mode == right.auth_mode
+        && left.use_proxy == right.use_proxy
+        && left.last_test_success == right.last_test_success
+        && left.last_test_at == right.last_test_at
+        && left.is_enabled == right.is_enabled
+        && left.created_at == right.created_at
+        && left.updated_at == right.updated_at
+}
+
+fn legacy_credential_field<'a>(
+    descriptor: &'a stravia_vendor_sdk::ProviderDescriptor,
+    preferred: &str,
+) -> anyhow::Result<&'a str> {
+    if let Some(field) = descriptor
+        .config_fields
+        .iter()
+        .find(|field| field.secret && field.key == preferred)
+    {
+        return Ok(&field.key);
+    }
+    let mut candidates = descriptor
+        .config_fields
+        .iter()
+        .filter(|field| field.secret)
+        .filter(|field| {
+            matches!(
+                &field.kind,
+                stravia_vendor_sdk::ConfigFieldKind::String { .. }
+            )
+        });
+    let candidate = candidates
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Vendor does not declare a string credential field"))?;
+    anyhow::ensure!(
+        candidates.next().is_none(),
+        "Vendor declares multiple credential fields; submit named credential values"
+    );
+    Ok(&candidate.key)
+}
+
+pub(super) fn ensure_configuration_accepted(
+    preview: &ProviderConfigurationPreview,
+    saved_base_url: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        preview.issues.is_empty(),
+        "vendor configuration validation failed: {}",
+        serde_json::to_string(&preview.issues)?
+    );
+    anyhow::ensure!(
+        preview.base_url == saved_base_url,
+        "vendor proposed Base URL `{}`; preview and explicitly save that URL before continuing",
+        preview.base_url
+    );
+    Ok(())
+}
+
 impl AdminService {
     // ── Providers ──
 
-    pub fn preview_provider_base_url(
+    pub async fn preview_provider_configuration(
         &self,
-        vendor_id: &str,
-        credentials: std::collections::BTreeMap<String, String>,
-        configured_base_url: Option<&str>,
-    ) -> anyhow::Result<String> {
-        ProviderConnection::new(self).preview_base_url(vendor_id, credentials, configured_base_url)
+        input: ProviderConfigurationPreviewInput,
+    ) -> anyhow::Result<ProviderConfigurationPreview> {
+        let descriptor = require_descriptor(&self.gw.vendor_plugins, &input.vendor_id)?;
+        let channel = descriptor
+            .channels
+            .iter()
+            .find(|channel| channel.id == input.channel)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Vendor `{}` does not declare channel `{}`",
+                    descriptor.provider_id,
+                    input.channel
+                )
+            })?;
+
+        let mut credentials = input.credentials;
+        let protocol = if let Some(provider_id) = input.provider_id.as_deref() {
+            let provider = self.get_provider(provider_id).await?;
+            anyhow::ensure!(
+                provider.vendor.as_deref() == Some(descriptor.provider_id.as_str())
+                    && provider.channel.as_deref() == Some(input.channel.as_str()),
+                "provider identity does not match the configuration preview"
+            );
+            let saved_credentials = self
+                .provider_configuration_credentials(&provider, &descriptor)
+                .await?;
+            for field in descriptor.config_fields.iter().filter(|field| field.secret) {
+                if credentials
+                    .get(&field.key)
+                    .is_none_or(|value| !configured_secret_value(value))
+                {
+                    credentials.remove(&field.key);
+                    if let Some(value) = saved_credentials
+                        .get(&field.key)
+                        .filter(|value| configured_secret_value(value))
+                    {
+                        credentials.insert(field.key.clone(), value.clone());
+                    }
+                }
+            }
+            provider.protocol
+        } else {
+            channel.protocol.clone().unwrap_or_default()
+        };
+        let supports_config_validation = channel
+            .capabilities
+            .contains(&stravia_vendor_sdk::Capability::ConfigValidation);
+        // An empty candidate asks the guest to derive a URL from declared fields. The
+        // ConfigValidation session is still scoped from this empty snapshot, so the
+        // guest's proposal cannot grant that same execution a new base origin.
+        let mut base_url = if input.base_url.trim().is_empty() && supports_config_validation {
+            String::new()
+        } else {
+            validate_provider_base_url(&input.base_url)?
+        };
+        let mut relaxed_descriptor;
+        let validation_descriptor = if channel.auth.is_some() {
+            relaxed_descriptor = descriptor.clone();
+            for field in &mut relaxed_descriptor.config_fields {
+                if field.secret {
+                    field.required = false;
+                }
+            }
+            &relaxed_descriptor
+        } else {
+            &descriptor
+        };
+        let NormalizedConfiguration {
+            options,
+            credentials,
+            mut issues,
+        } = validate_configuration_fields(validation_descriptor, input.options, credentials)?;
+
+        if issues.is_empty() && supports_config_validation {
+            let provider = stravia_vendor_sdk::ProviderSnapshot {
+                provider_id: descriptor.provider_id.clone(),
+                channel: input.channel,
+                base_url: base_url.clone(),
+                protocol,
+                options: options.clone(),
+                credentials: credentials.clone(),
+                model: None,
+                model_metadata: None,
+                client_headers: Vec::new(),
+                operation_metadata: std::collections::BTreeMap::new(),
+            };
+            let scope = self
+                .gw
+                .create_vendor_session_scope(&descriptor.provider_id, provider)?;
+            let execution = self
+                .gw
+                .execute_vendor_session(
+                    &scope,
+                    crate::plugin::VendorRequest::ConfigValidation(
+                        stravia_vendor_sdk::ConfigValidationRequest {
+                            options: options.clone(),
+                        },
+                    ),
+                    crate::plugin::VendorCallContext::new(
+                        stravia_runtime_contract::CancellationToken::new(),
+                        std::time::Instant::now() + std::time::Duration::from_secs(30),
+                    ),
+                )
+                .await?;
+            let _publication = execution.publication.write_fence().await?;
+            let stravia_vendor_sdk::OperationOutput::ConfigValidation(validation) =
+                execution.output
+            else {
+                anyhow::bail!("vendor returned the wrong configuration validation result")
+            };
+            if let Some(proposed) = validation.proposed_base_url {
+                base_url = validate_provider_base_url(&proposed)?;
+            }
+            issues = validation.issues;
+        }
+
+        if issues.is_empty() {
+            base_url = validate_provider_base_url(&base_url)?;
+        }
+        let network_permissions =
+            resolved_permissions(&descriptor, &base_url, &options, &credentials)?;
+        Ok(ProviderConfigurationPreview {
+            base_url,
+            issues,
+            network_permissions,
+        })
+    }
+
+    pub(in crate::admin) async fn provider_auth_candidate_snapshot(
+        &self,
+        candidate: &AuthSessionCandidate,
+    ) -> anyhow::Result<(
+        stravia_vendor_sdk::ProviderSnapshot,
+        stravia_vendor_sdk::AuthDescriptor,
+    )> {
+        let descriptor = require_descriptor(&self.gw.vendor_plugins, &candidate.vendor_id)?;
+        let channel_id = candidate.channel.as_str();
+        let mut credentials = candidate.credentials.clone();
+        let channel = descriptor
+            .channels
+            .iter()
+            .find(|candidate| candidate.id == channel_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Vendor `{}` does not declare channel `{channel_id}`",
+                    descriptor.provider_id
+                )
+            })?;
+        anyhow::ensure!(
+            channel
+                .capabilities
+                .contains(&stravia_vendor_sdk::Capability::AuthOauth),
+            "Vendor channel does not support authentication"
+        );
+        let auth = channel
+            .auth
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Vendor channel does not declare authentication"))?;
+
+        let existing_protocol = if let Some(provider_id) = candidate.provider_id.as_deref() {
+            let provider = self.get_provider(provider_id).await?;
+            anyhow::ensure!(
+                provider.vendor.as_deref() == Some(descriptor.provider_id.as_str())
+                    && provider.channel.as_deref() == Some(channel_id),
+                "provider identity does not match the authentication candidate"
+            );
+            let saved_credentials = self
+                .provider_configuration_credentials(&provider, &descriptor)
+                .await?;
+            for field in descriptor.config_fields.iter().filter(|field| field.secret) {
+                if credentials
+                    .get(&field.key)
+                    .is_none_or(|value| !configured_secret_value(value))
+                {
+                    credentials.remove(&field.key);
+                    if let Some(value) = saved_credentials
+                        .get(&field.key)
+                        .filter(|value| configured_secret_value(value))
+                    {
+                        credentials.insert(field.key.clone(), value.clone());
+                    }
+                }
+            }
+            Some(provider.protocol)
+        } else {
+            None
+        };
+        let protocol = candidate
+            .protocol
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or(existing_protocol)
+            .or_else(|| channel.protocol.clone())
+            .unwrap_or_default();
+        // 登录必须使用管理员明确提交的地址，不能把未展示的 Guest 建议变成认证授权。
+        let base_url = validate_provider_base_url(&candidate.base_url)?;
+        let mut auth_candidate_descriptor = descriptor.clone();
+        for field in &mut auth_candidate_descriptor.config_fields {
+            if field.secret {
+                field.required = false;
+            }
+        }
+        let NormalizedConfiguration {
+            options,
+            credentials,
+            issues,
+        } = validate_configuration_fields(
+            &auth_candidate_descriptor,
+            candidate.options.clone(),
+            credentials,
+        )?;
+        anyhow::ensure!(
+            issues.is_empty(),
+            "vendor configuration validation failed: {}",
+            serde_json::to_string(&issues)?
+        );
+        Ok((
+            stravia_vendor_sdk::ProviderSnapshot {
+                provider_id: descriptor.provider_id.clone(),
+                channel: channel_id.to_owned(),
+                base_url,
+                protocol,
+                options,
+                credentials,
+                model: None,
+                model_metadata: None,
+                client_headers: Vec::new(),
+                operation_metadata: std::collections::BTreeMap::new(),
+            },
+            auth,
+        ))
+    }
+
+    pub async fn configured_provider_credential_fields(
+        &self,
+        provider: &Provider,
+    ) -> anyhow::Result<Vec<String>> {
+        let Some(descriptor) = provider
+            .vendor
+            .as_deref()
+            .and_then(|vendor_id| self.gw.vendor_plugins.descriptor(vendor_id).ok())
+        else {
+            // An unavailable package/profile must not hide its saved connection. Do not
+            // guess field semantics from another descriptor or expose unclassified keys;
+            // restoring the owning profile makes the configured field names visible again.
+            return Ok(Vec::new());
+        };
+        let values = self
+            .provider_configuration_credentials(provider, &descriptor)
+            .await?;
+        let mut configured: Vec<_> = descriptor
+            .config_fields
+            .iter()
+            .filter(|field| field.secret)
+            .filter(|field| values.get(&field.key).is_some_and(configured_secret_value))
+            .map(|field| field.key.clone())
+            .collect();
+        configured.sort();
+        Ok(configured)
+    }
+
+    async fn provider_configuration_credentials(
+        &self,
+        provider: &Provider,
+        descriptor: &stravia_vendor_sdk::ProviderDescriptor,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Value>> {
+        let mut values: std::collections::BTreeMap<String, Value> =
+            serde_json::from_str(&provider.adapter_credentials)?;
+        if !provider.api_key.trim().is_empty()
+            && let Ok(key) = legacy_credential_field(descriptor, "apiKey")
+        {
+            values
+                .entry(key.to_owned())
+                .or_insert_with(|| Value::String(provider.api_key.clone()));
+        }
+        if let Some(oauth) = self
+            .gw
+            .storage
+            .oauth_credentials()
+            .get(&provider.id)
+            .await?
+        {
+            if let Value::Object(meta) = serde_json::from_str::<Value>(&oauth.meta)? {
+                values.extend(meta);
+            }
+            values.insert("access_token".into(), Value::String(oauth.access_token));
+            if let Some(value) = oauth.refresh_token {
+                values.insert("refresh_token".into(), Value::String(value));
+            }
+            if let Some(value) = oauth.resource_url {
+                values.insert("resource_url".into(), Value::String(value));
+            }
+            values.insert(
+                "scopes".into(),
+                serde_json::from_str(&oauth.scopes).unwrap_or(Value::Array(Vec::new())),
+            );
+        }
+        Ok(values)
     }
 
     pub async fn list_providers(&self) -> anyhow::Result<Vec<Provider>> {
@@ -40,20 +420,14 @@ impl AdminService {
     }
 
     pub async fn create_provider(&self, input: CreateProvider) -> anyhow::Result<Provider> {
-        let save = match input.source {
-            ProviderSourceInput::Catalog { .. } => {
-                crate::admin::provider_connection::ProviderSave::Catalog {
-                    input,
-                    authorization_id: None,
-                }
-            }
-            ProviderSourceInput::Custom { .. } => {
-                crate::admin::provider_connection::ProviderSave::Custom(input)
-            }
+        let save = match &input.source {
+            ProviderSourceInput::Catalog { .. } => ProviderSave::Catalog {
+                input,
+                authorization_id: None,
+            },
+            ProviderSourceInput::Custom { .. } => ProviderSave::Custom(input),
         };
-        crate::admin::provider_connection::ProviderConnection::new(self)
-            .save(save)
-            .await
+        ProviderConnection::new(self).save(save).await
     }
 
     pub(super) async fn create_provider_from_input(
@@ -61,47 +435,93 @@ impl AdminService {
         input: CreateProvider,
         allow_oauth: bool,
     ) -> anyhow::Result<Provider> {
-        let record = self.resolve_create_provider(input, allow_oauth).await?;
+        let (record, descriptor) = self.resolve_create_provider(input, allow_oauth).await?;
         self.ensure_provider_name_unique(None, &record.name).await?;
-        self.gw.storage.providers().create(record).await
+        let vendor_id = record
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is required"))?;
+        let _configuration = self
+            .gw
+            .vendor_plugins
+            .operations
+            .configuration_guard(vendor_id)
+            .await;
+        let (loaded, operation, _) = self.gw.vendor_plugins.acquire(vendor_id)?;
+        anyhow::ensure!(
+            loaded.descriptor().provider(vendor_id) == Some(&descriptor),
+            "vendor plugin changed while validating provider configuration"
+        );
+        let write_fence = operation.write_fence().await?;
+        let provider = self.gw.storage.providers().create(record).await?;
+        drop(write_fence);
+        drop(operation);
+        Ok(provider)
     }
 
     async fn resolve_create_provider(
         &self,
         input: CreateProvider,
         allow_oauth: bool,
-    ) -> anyhow::Result<CreateProviderRecord> {
-        match input.source {
+    ) -> anyhow::Result<(CreateProviderRecord, stravia_vendor_sdk::ProviderDescriptor)> {
+        let CreateProvider {
+            name,
+            source,
+            credential,
+            vendor_options,
+            use_proxy,
+        } = input;
+        match source {
             ProviderSourceInput::Catalog {
                 provider_id,
                 channel_id,
                 fingerprint,
                 base_url_override,
             } => {
+                let descriptors = self.gw.vendor_plugins.descriptors();
                 let (provider, channel) = self
                     .gw
                     .provider_catalog
-                    .resolve_channel(&provider_id, &channel_id, &fingerprint)
+                    .resolve_channel(&provider_id, &channel_id, &fingerprint, &descriptors)
                     .await?;
-                let name = normalize_name(
-                    input.name.as_deref().unwrap_or(&provider.name),
-                    "provider name",
-                )?;
-                let (credentials, auth_mode) = match (channel.auth_mode, input.credential) {
+                let descriptor = descriptors
+                    .into_iter()
+                    .find(|descriptor| descriptor.provider_id == provider.id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Provider profile `{}` is not installed", provider.id)
+                    })?;
+                let declared_models_source = descriptor
+                    .channels
+                    .iter()
+                    .find(|declared| declared.id == channel.id)
+                    .and_then(|declared| declared.default_models_source)
+                    .map(|source| source.as_str().to_owned());
+                let uses_catalog_scope = match provider.catalog_id.as_deref() {
+                    Some(catalog_id) => {
+                        self.gw.provider_catalog.contains_provider(catalog_id).await
+                    }
+                    None => false,
+                };
+                let models_source = uses_catalog_scope
+                    .then(|| "catalog".to_owned())
+                    .or(declared_models_source);
+                let name =
+                    normalize_name(name.as_deref().unwrap_or(&provider.name), "provider name")?;
+                let (credentials, auth_mode) = match (channel.auth_mode, credential) {
                     (
                         crate::provider_catalog::CatalogAuthMode::OptionalApiKey,
                         ProviderCredentialInput::ApiKey { value },
                     ) => (
-                        std::collections::BTreeMap::from([("apiKey".to_string(), value)]),
+                        std::collections::BTreeMap::from([(
+                            legacy_credential_field(&descriptor, "apiKey")?.to_owned(),
+                            Value::String(value),
+                        )]),
                         "apikey".to_string(),
                     ),
                     (
                         crate::provider_catalog::CatalogAuthMode::OptionalApiKey,
                         ProviderCredentialInput::Fields { values },
-                    ) => (
-                        validate_adapter_credentials(&provider.vendor_id, values)?,
-                        "apikey".to_string(),
-                    ),
+                    ) => (values, "apikey".to_string()),
                     (
                         crate::provider_catalog::CatalogAuthMode::OptionalApiKey,
                         ProviderCredentialInput::None,
@@ -110,13 +530,20 @@ impl AdminService {
                         crate::provider_catalog::CatalogAuthMode::SetupToken,
                         ProviderCredentialInput::SetupToken { value },
                     ) => (
-                        std::collections::BTreeMap::from([("apiKey".to_string(), value)]),
+                        std::collections::BTreeMap::from([(
+                            legacy_credential_field(&descriptor, "setup_token")?.to_owned(),
+                            Value::String(value),
+                        )]),
                         "apikey".to_string(),
                     ),
                     (
                         crate::provider_catalog::CatalogAuthMode::OAuth,
                         ProviderCredentialInput::None,
                     ) if allow_oauth => (std::collections::BTreeMap::new(), "oauth".to_string()),
+                    (
+                        crate::provider_catalog::CatalogAuthMode::OAuth,
+                        ProviderCredentialInput::Fields { values },
+                    ) if allow_oauth => (values, "oauth".to_string()),
                     (
                         crate::provider_catalog::CatalogAuthMode::OAuth,
                         ProviderCredentialInput::None,
@@ -127,74 +554,153 @@ impl AdminService {
                         "credential type is not allowed for catalog channel {provider_id}/{channel_id}"
                     ),
                 };
+                let (vendor_options, credentials) = validate_persisted_configuration_fields(
+                    &descriptor,
+                    vendor_options,
+                    credentials,
+                    auth_mode == "oauth",
+                )?;
                 let adapter_credentials = serde_json::to_string(&credentials)?;
-                let api_key = credentials.get("apiKey").cloned().unwrap_or_default();
+                let api_key = credentials
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 let selected_base_url = base_url_override
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .unwrap_or(&channel.base_url);
-                let assembled_base_url = assemble_vendor_base_url(
-                    &provider.vendor_id,
-                    &credentials,
-                    Some(selected_base_url),
-                )?;
-                let base_url = validate_provider_base_url(&assembled_base_url)?;
-                Ok(CreateProviderRecord {
-                    name,
-                    vendor: Some(provider.vendor_id),
-                    protocol: channel.protocol,
-                    base_url,
-                    preset_key: Some(provider.id),
-                    channel: Some(channel.id),
-                    models_source: Some("catalog".to_string()),
-                    static_models: None,
-                    api_key,
-                    adapter_credentials,
-                    vendor_options: "{}".to_string(),
-                    auth_mode,
-                    use_proxy: input.use_proxy,
-                })
+                let base_url = validate_provider_base_url(selected_base_url)?;
+                if auth_mode != "oauth" {
+                    let preview = self
+                        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+                            provider_id: None,
+                            vendor_id: provider.id.clone(),
+                            channel: channel.id.clone(),
+                            base_url: base_url.clone(),
+                            options: vendor_options.clone().into_iter().collect(),
+                            credentials: credentials.clone(),
+                        })
+                        .await?;
+                    ensure_configuration_accepted(&preview, &base_url)?;
+                }
+                Ok((
+                    CreateProviderRecord {
+                        name,
+                        vendor: Some(provider.id),
+                        protocol: channel.protocol,
+                        base_url,
+                        preset_key: provider.catalog_id,
+                        channel: Some(channel.id),
+                        models_source,
+                        static_models: None,
+                        api_key,
+                        adapter_credentials,
+                        vendor_options: serde_json::to_string(&vendor_options)?,
+                        auth_mode,
+                        use_proxy,
+                    },
+                    descriptor,
+                ))
             }
             ProviderSourceInput::Custom {
                 vendor,
+                channel,
                 protocol,
                 base_url,
                 models_source,
                 static_models,
             } => {
-                let name =
-                    normalize_name(input.name.as_deref().unwrap_or_default(), "provider name")?;
-                let vendor = normalize_vendor(vendor.as_deref());
-                let credentials = match input.credential {
+                let name = normalize_name(name.as_deref().unwrap_or_default(), "provider name")?;
+                let vendor = vendor.trim().to_owned();
+                anyhow::ensure!(!vendor.is_empty(), "provider vendor is required");
+                let descriptor = require_descriptor(&self.gw.vendor_plugins, &vendor)?;
+                let channel = descriptor
+                    .channels
+                    .iter()
+                    .find(|candidate| candidate.id == channel.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Vendor `{vendor}` does not declare channel `{channel}`")
+                    })?;
+                let models_source = models_source.or_else(|| {
+                    channel
+                        .default_models_source
+                        .map(|source| source.as_str().to_owned())
+                });
+                let oauth_requested = channel.auth.is_some();
+                if oauth_requested && !allow_oauth {
+                    anyhow::bail!(
+                        r#"{{"code":"AUTH_SESSION_REQUIRED","message":"OAuth providers must be created from a completed authentication session"}}"#
+                    );
+                }
+                let credentials = match credential {
                     ProviderCredentialInput::ApiKey { value } => {
-                        std::collections::BTreeMap::from([("apiKey".to_string(), value)])
+                        std::collections::BTreeMap::from([(
+                            legacy_credential_field(&descriptor, "apiKey")?.to_owned(),
+                            Value::String(value),
+                        )])
                     }
-                    ProviderCredentialInput::Fields { values } => {
-                        validate_adapter_credentials(vendor.as_deref().unwrap_or("custom"), values)?
-                    }
+                    ProviderCredentialInput::Fields { values } => values,
                     ProviderCredentialInput::None => std::collections::BTreeMap::new(),
-                    ProviderCredentialInput::SetupToken { .. } => {
-                        anyhow::bail!("setup token is only valid for a catalog channel")
+                    ProviderCredentialInput::SetupToken { value } => {
+                        std::collections::BTreeMap::from([(
+                            legacy_credential_field(&descriptor, "setup_token")?.to_owned(),
+                            Value::String(value),
+                        )])
                     }
                 };
+                let (vendor_options, credentials) = validate_persisted_configuration_fields(
+                    &descriptor,
+                    vendor_options,
+                    credentials,
+                    oauth_requested,
+                )?;
                 let adapter_credentials = serde_json::to_string(&credentials)?;
-                let api_key = credentials.get("apiKey").cloned().unwrap_or_default();
-                Ok(CreateProviderRecord {
-                    name,
-                    vendor,
-                    protocol,
-                    base_url: validate_provider_base_url(&base_url)?,
-                    preset_key: None,
-                    channel: None,
-                    models_source,
-                    static_models,
-                    api_key,
-                    adapter_credentials,
-                    vendor_options: "{}".to_string(),
-                    auth_mode: "apikey".to_string(),
-                    use_proxy: input.use_proxy,
-                })
+                let api_key = credentials
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let base_url = validate_provider_base_url(&base_url)?;
+                if !oauth_requested {
+                    let preview = self
+                        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+                            provider_id: None,
+                            vendor_id: vendor.clone(),
+                            channel: channel.id.clone(),
+                            base_url: base_url.clone(),
+                            options: vendor_options.clone().into_iter().collect(),
+                            credentials: credentials.clone(),
+                        })
+                        .await?;
+                    ensure_configuration_accepted(&preview, &base_url)?;
+                }
+                let protocol = protocol
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| channel.protocol.clone())
+                    .unwrap_or_default();
+                Ok((
+                    CreateProviderRecord {
+                        name,
+                        vendor: Some(vendor),
+                        protocol,
+                        base_url,
+                        preset_key: None,
+                        channel: Some(channel.id.clone()),
+                        models_source,
+                        static_models,
+                        api_key,
+                        adapter_credentials,
+                        vendor_options: serde_json::to_string(&vendor_options)?,
+                        auth_mode: if oauth_requested { "oauth" } else { "apikey" }.to_string(),
+                        use_proxy,
+                    },
+                    descriptor,
+                ))
             }
         }
     }
@@ -222,7 +728,7 @@ impl AdminService {
         let credential = if original.effective_auth_mode() == "oauth" {
             ProviderCredentialInput::None
         } else {
-            let values: std::collections::BTreeMap<String, String> =
+            let values: std::collections::BTreeMap<String, Value> =
                 serde_json::from_str(&original.adapter_credentials).unwrap_or_default();
             if !values.is_empty() {
                 ProviderCredentialInput::Fields { values }
@@ -234,19 +740,33 @@ impl AdminService {
                 ProviderCredentialInput::None
             }
         };
-        let copied = ProviderConnection::new(self)
-            .save(ProviderSave::Custom(CreateProvider {
-                name: Some(name),
-                source: ProviderSourceInput::Custom {
-                    vendor: original.vendor.clone(),
-                    protocol: original.protocol.clone(),
-                    base_url: original.base_url.clone(),
-                    models_source: original.models_source.clone(),
-                    static_models: original.static_models.clone(),
+        let vendor = original
+            .vendor
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let channel = original
+            .channel
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("provider channel is missing"))?;
+        let copied = self
+            .create_provider_from_input(
+                CreateProvider {
+                    name: Some(name),
+                    source: ProviderSourceInput::Custom {
+                        vendor: vendor.clone(),
+                        channel,
+                        protocol: (!original.protocol.trim().is_empty())
+                            .then(|| original.protocol.clone()),
+                        base_url: original.base_url.clone(),
+                        models_source: original.models_source.clone(),
+                        static_models: original.static_models.clone(),
+                    },
+                    credential,
+                    vendor_options: serde_json::from_str(&original.vendor_options)?,
+                    use_proxy: original.use_proxy,
                 },
-                credential,
-                use_proxy: original.use_proxy,
-            }))
+                original.effective_auth_mode() == "oauth",
+            )
             .await?;
         let copied = self
             .update_provider(
@@ -269,6 +789,14 @@ impl AdminService {
                 Some(credential) => {
                     let credential_input = upsert_credential_from_oauth(&credential);
                     let provisioned = async {
+                        let (_, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
+                        let publication = operation.publication_fence(
+                            stravia_runtime_contract::CancellationToken::new(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                        );
+                        drop(operation);
+                        let write_fence = publication.write_fence().await?;
+                        publication.ensure_current()?;
                         self.gw
                             .storage
                             .oauth_credentials()
@@ -276,7 +804,11 @@ impl AdminService {
                             .await?;
                         let driver_key = credential.driver_key.clone();
                         let stored = stored_credential_from_oauth(&credential, &driver_key);
-                        self.sync_provider_runtime_fields(&copied, &stored).await
+                        let provider = self.sync_provider_runtime_fields(&copied, &stored).await?;
+                        publication.ensure_current()?;
+                        drop(write_fence);
+                        drop(publication);
+                        Ok::<_, anyhow::Error>(provider)
                     }
                     .await;
 
@@ -328,118 +860,143 @@ impl AdminService {
         input: UpdateProvider,
     ) -> anyhow::Result<Provider> {
         let current = self.get_provider(id).await?;
-        let is_catalog =
-            current.models_source.as_deref() == Some("catalog") && current.preset_key.is_some();
-        let changes_identity = input
-            .preset_key
-            .as_deref()
-            .is_some_and(|value| Some(value) != current.preset_key.as_deref())
-            || input
-                .channel
-                .as_deref()
-                .is_some_and(|value| Some(value) != current.channel.as_deref())
-            || input
-                .auth_mode
-                .as_deref()
-                .is_some_and(|value| value != current.auth_mode)
-            || is_catalog
-                && input
-                    .protocol
-                    .as_deref()
-                    .is_some_and(|value| value != current.protocol)
-            || is_catalog
-                && input
-                    .vendor
-                    .as_deref()
-                    .is_some_and(|value| Some(value) != current.vendor.as_deref())
-            || is_catalog
-                && input
-                    .models_source
-                    .as_deref()
-                    .is_some_and(|value| Some(value) != current.models_source.as_deref())
-            || is_catalog && input.static_models.is_some();
-        if changes_identity {
-            anyhow::bail!(
-                "provider source, channel, protocol, and authentication cannot be changed after creation"
-            );
-        }
-        let current_base_url = current.base_url.clone();
-        let models_source_input = input.models_source.map(|value| value.trim().to_string());
-
-        let name = normalize_name(&input.name.unwrap_or(current.name), "provider name")?;
-        self.ensure_provider_name_unique(Some(id), &name).await?;
-        let vendor = if input.vendor.is_some() {
-            normalize_vendor(input.vendor.as_deref())
-        } else {
-            normalize_vendor(current.vendor.as_deref())
-        };
-        let models_source = models_source_input
-            .or_else(|| current.models_source.as_deref().map(ToString::to_string));
-        let protocol = input.protocol.unwrap_or(current.protocol);
-        let requested_base_url = input.base_url;
-        let preset_key = input.preset_key.or(current.preset_key);
-        let channel = input.channel.or(current.channel);
-        let static_models = input.static_models.or(current.static_models);
-        let api_key_input = input.api_key.clone();
-        let credential_vendor = vendor.as_deref().unwrap_or("custom");
-        let adapter_credentials = match input.adapter_credentials {
-            Some(values) => Some(validate_adapter_credentials(credential_vendor, values)?),
-            None => api_key_input
-                .as_ref()
-                .map(|api_key| {
-                    let mut values = serde_json::from_str::<
-                        std::collections::BTreeMap<String, String>,
-                    >(&current.adapter_credentials)
-                    .unwrap_or_default();
-                    values.insert("apiKey".to_string(), api_key.clone());
-                    validate_adapter_credentials(credential_vendor, values)
-                })
-                .transpose()?,
-        };
-        let api_key = api_key_input.unwrap_or(current.api_key);
-        let auth_mode = input.auth_mode.unwrap_or(current.auth_mode);
-        let api_key = if auth_mode == "oauth" {
-            Some(String::new())
-        } else {
-            Some(api_key)
-        };
-        let adapter_credentials = if auth_mode == "oauth" {
-            Some(std::collections::BTreeMap::new())
-        } else {
-            adapter_credentials
-        };
-        let vendor_options = match input.vendor_options {
-            Some(values) => Some(validate_vendor_options(credential_vendor, values)?),
-            None => None,
-        };
-        let current_credentials =
-            serde_json::from_str::<std::collections::BTreeMap<String, String>>(
-                &current.adapter_credentials,
-            )
-            .unwrap_or_default();
-        let next_credentials = adapter_credentials.as_ref().unwrap_or(&current_credentials);
-        let current_derived_base_url =
-            assemble_vendor_base_url(credential_vendor, &current_credentials, None)
-                .and_then(|base_url| validate_provider_base_url(&base_url))
-                .ok();
-        let current_is_derived = current_derived_base_url
-            .as_deref()
-            .is_some_and(|value| value == current.base_url);
-        let configured_base_url = requested_base_url
+        let vendor = current
+            .vendor
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .filter(|value| *value != current.base_url || !current_is_derived)
-            .or_else(|| (!current_is_derived).then_some(current.base_url.as_str()));
-        let base_url = validate_provider_base_url(&assemble_vendor_base_url(
-            credential_vendor,
-            next_credentials,
-            configured_base_url,
-        )?)?;
-        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
-        let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
-        let base_url_changed = base_url != current_base_url;
+            .ok_or_else(|| anyhow::anyhow!("provider does not have a stable vendor identity"))?
+            .to_owned();
+        let channel = current
+            .channel
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("provider does not have a vendor channel"))?
+            .to_owned();
+        let descriptor = require_descriptor(&self.gw.vendor_plugins, &vendor)?;
+        let changes_identity = input
+            .vendor
+            .as_deref()
+            .is_some_and(|value| value.trim() != vendor)
+            || input
+                .channel
+                .as_deref()
+                .is_some_and(|value| value.trim() != channel)
+            || input
+                .protocol
+                .as_deref()
+                .is_some_and(|value| value.trim() != current.protocol)
+            || input
+                .auth_mode
+                .as_deref()
+                .is_some_and(|value| value.trim() != current.auth_mode)
+            || input
+                .preset_key
+                .as_deref()
+                .is_some_and(|value| Some(value) != current.preset_key.as_deref());
+        anyhow::ensure!(
+            !changes_identity,
+            "provider vendor, channel, protocol, and authentication cannot be changed after creation"
+        );
 
+        let changes_options = input.vendor_options.is_some();
+        let credential_updates = input.adapter_credentials.clone().unwrap_or_default();
+        let changes_credentials = credential_updates.values().any(configured_secret_value)
+            || input
+                .api_key
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+        let name = normalize_name(
+            input.name.as_deref().unwrap_or(&current.name),
+            "provider name",
+        )?;
+        self.ensure_provider_name_unique(Some(id), &name).await?;
+        let mut credentials = serde_json::from_str::<std::collections::BTreeMap<String, Value>>(
+            &current.adapter_credentials,
+        )?;
+        if !current.api_key.trim().is_empty()
+            && let Ok(key) = legacy_credential_field(&descriptor, "apiKey")
+        {
+            credentials
+                .entry(key.to_owned())
+                .or_insert_with(|| Value::String(current.api_key.clone()));
+        }
+        for (key, value) in credential_updates {
+            let declared_secret = descriptor
+                .config_fields
+                .iter()
+                .any(|field| field.secret && field.key == key);
+            if declared_secret && !configured_secret_value(&value) {
+                continue;
+            }
+            credentials.insert(key, value);
+        }
+        if let Some(api_key) = input
+            .api_key
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            credentials.insert("apiKey".into(), Value::String(api_key.clone()));
+        }
+        let auth_mode = input
+            .auth_mode
+            .clone()
+            .unwrap_or_else(|| current.auth_mode.clone());
+        let options = match input.vendor_options.clone() {
+            Some(options) => options,
+            None => serde_json::from_str(&current.vendor_options)?,
+        };
+        let (options, credentials) = validate_persisted_configuration_fields(
+            &descriptor,
+            options,
+            credentials,
+            auth_mode == "oauth",
+        )?;
+        let base_url =
+            validate_provider_base_url(input.base_url.as_deref().unwrap_or(&current.base_url))?;
+        let preview = self
+            .preview_provider_configuration(ProviderConfigurationPreviewInput {
+                provider_id: Some(id.to_owned()),
+                vendor_id: vendor.clone(),
+                channel: channel.clone(),
+                base_url: base_url.clone(),
+                options: options.clone().into_iter().collect(),
+                credentials: credentials.clone(),
+            })
+            .await?;
+        ensure_configuration_accepted(&preview, &base_url)?;
+
+        let _configuration = self
+            .gw
+            .vendor_plugins
+            .operations
+            .configuration_guard(&vendor)
+            .await;
+        let (loaded, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
+        anyhow::ensure!(
+            loaded.descriptor().provider(&vendor) == Some(&descriptor),
+            "vendor plugin changed while validating provider configuration"
+        );
+        let write_fence = operation.write_fence().await?;
+        let unchanged = self
+            .gw
+            .storage
+            .providers()
+            .get(id)
+            .await?
+            .is_some_and(|provider| same_provider_generation(&provider, &current));
+        anyhow::ensure!(unchanged, "provider changed while validating configuration");
+
+        let api_key = if auth_mode == "oauth" {
+            String::new()
+        } else {
+            credentials
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
         let provider = self
             .gw
             .storage
@@ -448,28 +1005,39 @@ impl AdminService {
                 id,
                 UpdateProvider {
                     name: Some(name),
-                    vendor,
-                    protocol: Some(protocol),
-                    base_url: Some(base_url),
-                    preset_key,
-                    channel,
-                    models_source,
-                    static_models,
-                    api_key,
-                    adapter_credentials,
-                    vendor_options,
+                    vendor: Some(vendor),
+                    protocol: Some(current.protocol),
+                    base_url: Some(base_url.clone()),
+                    preset_key: current.preset_key,
+                    channel: Some(channel),
+                    models_source: input.models_source.or(current.models_source),
+                    static_models: input.static_models.or(current.static_models),
+                    api_key: Some(api_key),
+                    adapter_credentials: Some(credentials),
+                    vendor_options: Some(options),
                     auth_mode: Some(auth_mode),
-                    use_proxy: Some(use_proxy),
-                    is_enabled: Some(is_enabled),
+                    use_proxy: Some(input.use_proxy.unwrap_or(current.use_proxy)),
+                    is_enabled: Some(input.is_enabled.unwrap_or(current.is_enabled)),
                 },
             )
             .await?;
-
-        if base_url_changed {
-            self.gw.clear_ollama_capability_cache_for_provider(id).await;
+        if changes_options {
+            self.gw
+                .vendor_plugins
+                .store
+                .recovered(id, "options")
+                .await?;
         }
-
+        if changes_credentials {
+            self.gw
+                .vendor_plugins
+                .store
+                .recovered(id, "credentials")
+                .await?;
+        }
         self.bump_config_epoch().await?;
+        drop(write_fence);
+        drop(operation);
         Ok(provider)
     }
 
@@ -480,12 +1048,45 @@ impl AdminService {
     }
 
     pub(super) async fn delete_provider_record(&self, id: &str) -> anyhow::Result<()> {
+        let provider = self.get_provider(id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .filter(|vendor| !vendor.is_empty());
+        // 删除仅清理 Core 自有数据；旧连接的组件即使损坏或无法加载，也必须可清理。
+        let _configuration = match vendor {
+            Some(vendor) => Some(
+                self.gw
+                    .vendor_plugins
+                    .operations
+                    .configuration_guard(vendor)
+                    .await,
+            ),
+            None => None,
+        };
+        let operation = vendor
+            .map(|vendor| self.gw.vendor_plugins.operations.begin(vendor))
+            .transpose()?;
+        let write_fence = match &operation {
+            Some(operation) => Some(operation.write_fence().await?),
+            None => None,
+        };
+        let unchanged = self
+            .gw
+            .storage
+            .providers()
+            .get(id)
+            .await?
+            .is_some_and(|current| same_provider_generation(&current, &provider));
+        anyhow::ensure!(unchanged, "provider changed while preparing deletion");
+
         // ProviderStore owns the backend transaction that removes this
         // Provider, prunes its Targets, and deletes Routes left empty.
         self.gw.storage.providers().delete(id).await?;
         super::routes::RouteModule::new(self).reload_cache().await?;
         self.bump_config_epoch().await?;
-        self.gw.clear_ollama_capability_cache_for_provider(id).await;
+        drop(write_fence);
+        drop(operation);
         Ok(())
     }
 
@@ -550,72 +1151,59 @@ impl AdminService {
 
     pub(super) async fn test_provider_record(&self, id: &str) -> anyhow::Result<TestResult> {
         let provider = self.get_provider(id).await?;
-        self.gw
-            .clear_ollama_capability_cache_for_provider(&provider.id)
-            .await;
         let start = Instant::now();
-        let protocol = provider.protocol.trim();
-        let vertex_runtime = if google_vertex::is_vertex_vendor(&provider) {
-            Some(self.resolve_provider_runtime(&provider).await?)
+        let vendor_id = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let channel_id = provider
+            .channel
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider channel is missing"))?;
+        let descriptor = require_descriptor(&self.gw.vendor_plugins, vendor_id)?;
+        let supports_validation = descriptor
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .is_some_and(|channel| {
+                channel
+                    .capabilities
+                    .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
+            });
+        let result = if supports_validation {
+            let preview = self
+                .preview_provider_configuration(ProviderConfigurationPreviewInput {
+                    provider_id: Some(provider.id.clone()),
+                    vendor_id: vendor_id.to_owned(),
+                    channel: channel_id.to_owned(),
+                    base_url: provider.base_url.clone(),
+                    options: serde_json::from_str(&provider.vendor_options)?,
+                    credentials: std::collections::BTreeMap::new(),
+                })
+                .await?;
+            let error = if preview.issues.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Vendor configuration validation failed: {}",
+                    serde_json::to_string(&preview.issues)?
+                ))
+            };
+            TestResult {
+                success: error.is_none(),
+                latency_ms: start.elapsed().as_millis() as u64,
+                model: None,
+                error,
+            }
         } else {
-            None
-        };
-        let base_url_owned = vertex_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.binding.base_url_override.as_deref())
-            .map(str::to_string)
-            .unwrap_or_else(|| provider.base_url.clone());
-        let base_url = base_url_owned.trim();
-
-        let result = if base_url.is_empty() {
             TestResult {
                 success: false,
-                latency_ms: 0,
+                latency_ms: start.elapsed().as_millis() as u64,
                 model: None,
-                error: Some("Base URL is empty".to_string()),
-            }
-        } else {
-            let mut failures: Vec<String> = Vec::new();
-            if reqwest::Url::parse(base_url).is_err() {
-                failures.push(format!("{protocol}: Base URL format is invalid"));
-            } else {
-                let mut request = self
-                    .gw
-                    .http_client
-                    .get(base_url)
-                    .timeout(Duration::from_secs(10));
-                if let Some(runtime) = &vertex_runtime {
-                    let mut headers = runtime_binding_headers(&runtime.binding)?;
-                    if !runtime.binding.disable_default_auth {
-                        headers.insert(
-                            AUTHORIZATION,
-                            HeaderValue::from_str(&format!("Bearer {}", runtime.access_token))?,
-                        );
-                    }
-                    request = request.headers(headers);
-                }
-                if let Err(e) = request.send().await {
-                    failures.push(format!("{protocol}: {}", format_connectivity_error(&e)));
-                }
-            }
-
-            if failures.is_empty() {
-                TestResult {
-                    success: true,
-                    latency_ms: start.elapsed().as_millis() as u64,
-                    model: None,
-                    error: None,
-                }
-            } else {
-                TestResult {
-                    success: false,
-                    latency_ms: start.elapsed().as_millis() as u64,
-                    model: None,
-                    error: Some(format!(
-                        "Connectivity check failed for provider endpoint: {}",
-                        failures.join("; ")
-                    )),
-                }
+                error: Some(
+                    "Vendor channel does not declare configuration validation; no non-consuming connectivity test is available"
+                        .into(),
+                ),
             }
         };
         self.record_provider_test_result(&provider.id, &result)
@@ -627,34 +1215,30 @@ impl AdminService {
         &self,
         input: CreateProvider,
     ) -> anyhow::Result<TestResult> {
-        let record = self.resolve_create_provider(input, false).await?;
         let start = Instant::now();
-        let result = match self
-            .gw
-            .http_client
-            .get(&record.base_url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(_) => TestResult {
-                success: true,
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error: None,
-            },
-            Err(error) => TestResult {
-                success: false,
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error: Some(format!(
-                    "Connectivity check failed for provider endpoint: {}: {}",
-                    record.protocol,
-                    format_connectivity_error(&error)
-                )),
-            },
-        };
-        Ok(result)
+        let (record, descriptor) = self.resolve_create_provider(input, false).await?;
+        let channel_id = record
+            .channel
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider channel is missing"))?;
+        let supports_validation = descriptor
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .is_some_and(|channel| {
+                channel
+                    .capabilities
+                    .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
+            });
+        Ok(TestResult {
+            success: supports_validation,
+            latency_ms: start.elapsed().as_millis() as u64,
+            model: None,
+            error: (!supports_validation).then(|| {
+                "Vendor channel does not declare configuration validation; no non-consuming connectivity test is available"
+                    .into()
+            }),
+        })
     }
 
     async fn record_provider_test_result(
@@ -673,20 +1257,5 @@ impl AdminService {
                 },
             )
             .await
-    }
-
-    pub(super) async fn preset_catalog_models_for_provider(
-        &self,
-        provider: &Provider,
-    ) -> anyhow::Result<Option<crate::provider_catalog::CatalogModelList>> {
-        let Some(provider_id) = provider.preset_key.as_deref() else {
-            return Ok(None);
-        };
-        let channel_id = provider.channel.as_deref().unwrap_or("default");
-        self.gw
-            .provider_catalog
-            .models(provider_id, channel_id)
-            .await
-            .map(Some)
     }
 }

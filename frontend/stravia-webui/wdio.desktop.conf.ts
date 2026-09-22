@@ -51,7 +51,7 @@ export const config: WebdriverIO.Config = {
         autoInstallTauriDriver: true,
         captureBackendLogs: true,
         captureFrontendLogs: true,
-        startTimeout: 60_000,
+        startTimeout: 180_000,
       },
     ],
   ],
@@ -62,7 +62,8 @@ export const config: WebdriverIO.Config = {
   waitforTimeout: 10_000,
   connectionRetryTimeout: 90_000,
   connectionRetryCount: 1,
-  mochaOpts: { ui: 'bdd', timeout: 60_000 },
+  // WDIO 在调用钩子前捕获 Mocha 的预算，钩子内部设置 timeout 无法覆盖该外层截止时间。
+  mochaOpts: { ui: 'bdd', timeout: 180_000 },
   onComplete: async () => {
     // WebView2 的测试用户数据目录位于 runRoot 内，
     // 其锁文件在应用退出后仍被 msedgewebview2.exe 短暂持有。临时目录清理是

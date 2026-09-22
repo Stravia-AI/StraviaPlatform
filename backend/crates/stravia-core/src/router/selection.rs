@@ -22,6 +22,7 @@ use super::continuation::ContinuationLookup;
 use super::selector::{
     ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
     RouteSchedulingSnapshot, TargetSchedulingSnapshot, conversation_identity, selected_target_key,
+    target_key,
 };
 
 /// Why selection could not produce a policy.
@@ -116,6 +117,43 @@ impl RouteSelector {
         Ok(policy)
     }
 
+    /// Assemble scheduling for an operation that has no generation history,
+    /// continuation, or prompt-cache identity (for example full search or
+    /// media generation). It uses the same Target eligibility, priority,
+    /// cooldown, retry, and scheduling evidence as model turns.
+    pub(crate) async fn select_independent(
+        &self,
+        principal: &Principal,
+        route: &Route,
+        estimated_input_tokens: u64,
+        observer: Option<&RunObserver>,
+    ) -> Result<RouteAttemptPolicy, SelectionError> {
+        let snapshot = self
+            .scheduling_snapshot(&route.targets, observer)
+            .await
+            .map_err(SelectionError::SchedulingEvidence)?;
+        let context = RouteAttemptContext {
+            principal: principal.continuation_key(),
+            route_id: route.id.clone(),
+            conversation: None,
+            conversation_affinity_target: None,
+            cache_affinity_target: None,
+            estimated_uncached_input_tokens: estimated_input_tokens,
+            now_ms: self.policy_state.now_ms(),
+        };
+        let policy = RouteAttemptPolicy::new(
+            &route.balance,
+            &route.targets,
+            context,
+            &snapshot,
+            self.policy_state.clone(),
+        );
+        if policy.is_empty() {
+            return Err(SelectionError::NoEligibleTarget);
+        }
+        Ok(policy)
+    }
+
     /// Usage statistics per target joined with provider-model prices, plus a
     /// default entry per configured Target so every candidate has a snapshot.
     async fn scheduling_snapshot(
@@ -135,7 +173,7 @@ impl RouteSelector {
             targets: usage.targets,
         };
         for target in targets {
-            let key = format!("{}:{}", target.provider_id, target.model);
+            let key = target_key(&target.provider_id, target.model.as_deref());
             let index = snapshot
                 .targets
                 .iter()
@@ -147,10 +185,13 @@ impl RouteSelector {
                     });
                     snapshot.targets.len() - 1
                 });
+            let Some(model) = target.model.as_deref() else {
+                continue;
+            };
             let Some(provider_model) = self
                 .storage
                 .provider_models()
-                .find(&target.provider_id, &target.model)
+                .find(&target.provider_id, model)
                 .await?
             else {
                 continue;
@@ -214,7 +255,7 @@ mod tests {
             id: format!("target-{provider}"),
             model_id: "route".into(),
             provider_id: provider.into(),
-            model: "model".into(),
+            model: Some("model".into()),
             enabled: true,
             priority,
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
@@ -232,7 +273,7 @@ mod tests {
             display_name: None,
             balance: "traffic_equalization".into(),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             is_enabled: true,
             created_at: String::new(),
             supported_thinking_levels: sqlx::types::Json(Vec::new()),
@@ -526,6 +567,10 @@ mod tests {
     }
 
     impl Storage for FixtureStorage {
+        fn vendor_plugins(&self) -> &crate::plugin::PluginStore {
+            self.delegate.vendor_plugins()
+        }
+
         fn providers(&self) -> &dyn ProviderStore {
             self.delegate.providers()
         }
@@ -720,6 +765,29 @@ mod tests {
             .await
             .expect("select with parent");
         assert_eq!(consultations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn independent_selection_carries_provider_only_target_without_generation_hints() {
+        let consultations = Arc::new(AtomicUsize::new(0));
+        let fixture = fixture(
+            memory(),
+            Arc::new(CountingContinuation(Arc::clone(&consultations))),
+        );
+        let mut provider_only = target("research", 0);
+        provider_only.model = None;
+        let route = route(vec![provider_only]);
+
+        let mut policy = fixture
+            .selector
+            .select_independent(&principal(), &route, 12_345, None)
+            .await
+            .expect("independent selection");
+        let selected = policy.next_healthy().expect("Provider-only Target");
+
+        assert_eq!(consultations.load(Ordering::SeqCst), 0);
+        assert_eq!(selected.provider_id, "research");
+        assert!(selected.model.is_none());
     }
 
     #[tokio::test]

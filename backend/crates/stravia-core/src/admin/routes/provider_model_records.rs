@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::provider_catalog::CatalogError;
 use crate::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
     ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
@@ -62,8 +61,9 @@ impl AdminService {
             .map(ProviderModelDetail::from)
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         super::thinking_map::hide_unwritable_generated_controls(
+            self,
             &provider,
-            &detail.id,
+            &detail.metadata,
             &mut detail.thinking_level_map,
         );
         Ok(detail)
@@ -86,7 +86,7 @@ impl AdminService {
         model_id: &str,
         template_id: Option<&str>,
     ) -> anyhow::Result<PreparedProviderModel> {
-        let provider = self.get_provider(provider_id).await?;
+        self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         if self
             .gw
@@ -106,17 +106,6 @@ impl AdminService {
                     .canonical_model(template_id)
                     .await?;
                 metadata_from_canonical_template(&model_id, template)?
-            }
-            // Devin 手动添加没有 catalog 成员可查:按单个 id 生成占位
-            // metadata,canonical 模板可命中时补齐名称与描述。请求侧对无
-            // selector 表的记录回落到规则改写。
-            None if provider.vendor.as_deref() == Some("devin") => {
-                let canonical = self
-                    .gw
-                    .provider_catalog
-                    .canonical_model_matching_upstream_id(&model_id)
-                    .await;
-                crate::provider::devin::family::manual_model_metadata(&model_id, canonical.as_ref())
             }
             None => match self
                 .gw
@@ -154,9 +143,16 @@ impl AdminService {
         input: CreateManualProviderModel,
     ) -> anyhow::Result<ProviderModelDetail> {
         let provider = self.get_provider(provider_id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
+        let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
         apply_provider_model_mutation(
+            self,
             self.gw
                 .storage
                 .provider_models()
@@ -182,6 +178,12 @@ impl AdminService {
         input: UpdateProviderModel,
     ) -> anyhow::Result<ProviderModelDetail> {
         let provider = self.get_provider(provider_id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
+        let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -196,6 +198,7 @@ impl AdminService {
         metadata.status = existing.metadata.status;
         metadata.extensions = existing.metadata.extensions;
         apply_provider_model_mutation(
+            self,
             self.gw
                 .storage
                 .provider_models()
@@ -213,8 +216,15 @@ impl AdminService {
         input: UpdateProviderModelSelection,
     ) -> anyhow::Result<ProviderModelDetail> {
         let provider = self.get_provider(provider_id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
+        let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         apply_provider_model_mutation(
+            self,
             self.gw
                 .storage
                 .provider_models()
@@ -232,6 +242,12 @@ impl AdminService {
         revision: i64,
     ) -> anyhow::Result<ProviderModelDetail> {
         let provider = self.get_provider(provider_id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
+        let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -254,6 +270,7 @@ impl AdminService {
             .refresh_generated_thinking_maps(provider_id, &model_id, &metadata, false)
             .await?;
         let detail = apply_provider_model_mutation(
+            self,
             self.gw
                 .storage
                 .provider_models()
@@ -273,7 +290,13 @@ impl AdminService {
         provider_id: &str,
         model_id: &str,
     ) -> anyhow::Result<()> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
+        let vendor = provider
+            .vendor
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
+        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
+        let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         if self
             .gw
@@ -300,7 +323,7 @@ impl AdminService {
         provider_id: &str,
     ) -> anyhow::Result<ProviderModelSyncSummary> {
         let provider = self.get_provider(provider_id).await?;
-        let sources = self.discover_provider_model_sources(&provider).await?;
+        let (sources, _publication_guard) = self.discover_provider_model_sources(&provider).await?;
         if sources.is_empty() {
             anyhow::bail!("Provider model discovery returned an empty list");
         }
@@ -343,22 +366,34 @@ impl AdminService {
                 let fill_specification = current.metadata.lacks_registered_specification()
                     && (!metadata.lacks_registered_specification()
                         || current.metadata.is_identity_only());
-                // Devin 发现记录的 metadata 全部由 selector+catalog 系统生成
-                // (bare 占位不在 lacks_registered_specification 覆盖内),任何
-                // 字段差异——reasoning_options、label、context、provider——都
-                // 回填,让已同步过的存量记录在下次 sync 拿到完整规格。
-                let fill_devin =
-                    provider.vendor.as_deref() == Some("devin") && current.metadata != metadata;
+                // Fields hidden from the manual editor remain guest-owned and
+                // are refreshed on every discovery. User-editable labels,
+                // limits and capability overrides are retained once a record
+                // has a registered specification.
+                let generated_changed = current.metadata.provider != metadata.provider
+                    || current.metadata.experimental != metadata.experimental
+                    || current.metadata.extensions != metadata.extensions;
+                let refreshed_metadata = if fill_specification {
+                    Some(metadata.clone())
+                } else if generated_changed {
+                    let mut merged = current.metadata.clone();
+                    merged.status = metadata.status.clone();
+                    merged.provider = metadata.provider.clone();
+                    merged.experimental = metadata.experimental.clone();
+                    merged.extensions = metadata.extensions.clone();
+                    Some(merged)
+                } else {
+                    None
+                };
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
-                    || fill_specification
-                    || fill_devin
+                    || refreshed_metadata.is_some()
                 {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
                         presence: ProviderModelPresence::Present,
                         lifecycle_status: metadata.status.clone(),
-                        metadata: (fill_specification || fill_devin).then_some(metadata),
+                        metadata: refreshed_metadata,
                     });
                 }
                 continue;
@@ -395,10 +430,20 @@ impl AdminService {
             }
         }
 
+        let latest_provider = self.get_provider(provider_id).await?;
+        anyhow::ensure!(
+            same_discovery_provider(&provider, &latest_provider),
+            "Provider changed while synchronizing discovered models"
+        );
         self.gw
             .storage
             .provider_models()
             .apply_reconciliation(provider_id, reconciliation)
+            .await?;
+        self.gw
+            .vendor_plugins
+            .store
+            .recovered(provider_id, "models")
             .await?;
         Ok(summary)
     }
@@ -406,159 +451,199 @@ impl AdminService {
     async fn discover_provider_model_sources(
         &self,
         provider: &Provider,
-    ) -> anyhow::Result<BTreeMap<String, DiscoveredModelSource>> {
-        if uses_catalog_inventory(provider) {
-            let provider_id = provider
-                .preset_key
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Catalog Provider is missing its catalog ID"))?;
-            let channel_id = provider.channel.as_deref().unwrap_or("default");
-            let sources = self
+    ) -> anyhow::Result<(
+        BTreeMap<String, DiscoveredModelSource>,
+        tokio::sync::OwnedRwLockReadGuard<()>,
+    )> {
+        let discovered =
+            super::model_discovery::discover_provider_models(self, &provider.id).await?;
+        // Hold the vendor publication fence until the single Provider Model
+        // reconciliation has committed.
+        let publication_guard = discovered.write_fence().await?;
+        let mut catalog_sources = BTreeMap::new();
+        if let Some(catalog_provider_id) = provider.preset_key.as_deref() {
+            let scope = match self
                 .gw
                 .provider_catalog
-                .model_sources(provider_id, channel_id)
-                .await?;
-            let mut discovered = BTreeMap::new();
-            for source in sources {
-                let model_id = source
-                    .metadata
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("Provider Catalog Entry is missing id"))?
-                    .to_string();
-                if !retain_discovered_model_id(provider, &model_id) {
-                    continue;
-                }
-                let metadata =
-                    ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
-                discovered.insert(
-                    model_id,
-                    DiscoveredModelSource {
-                        metadata,
-                        metadata_source_provider_id: Some(source.provider_id),
-                    },
-                );
-            }
-            return Ok(discovered);
-        }
-
-        // Devin records are built straight from the `GetCliModelConfigs`
-        // catalog: selectors become model ids and each entry carries display
-        // metadata (label, image support, context window, upstream provider).
-        if provider.vendor.as_deref() == Some("devin") {
-            return self.discover_devin_model_sources(provider).await;
-        }
-        let ids = self.test_provider_models(&provider.id).await?;
-        let mut sources = BTreeMap::new();
-        for id in ids {
-            if !retain_discovered_model_id(provider, &id) {
-                continue;
-            }
-            let model_id = normalize_model_id(&id)?;
-            let catalog_source = match provider.preset_key.as_deref() {
-                // 编译期并入的内置服务没有远端 Provider Catalog scope;
-                // 元数据由 canonical 模板或裸记录提供,不做 scope 富化。
-                Some(catalog_provider_id)
-                    if !crate::provider_catalog::is_builtin_catalog_provider(
-                        catalog_provider_id,
-                    ) =>
-                {
-                    match self
-                        .gw
-                        .provider_catalog
-                        .model_source(catalog_provider_id, &model_id)
-                        .await
-                    {
-                        Ok(source) => Some(source),
-                        Err(error)
-                            if matches!(
-                                error.downcast_ref::<CatalogError>(),
-                                Some(CatalogError::EntryNotFound { .. })
-                            ) =>
-                        {
-                            None
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                _ => None,
-            };
-            let discovered = if let Some(source) = catalog_source {
-                DiscoveredModelSource {
-                    metadata: ProviderModelMetadata::from_source_value(&model_id, source.metadata)?,
-                    metadata_source_provider_id: Some(source.provider_id),
-                }
-            } else if let Some(template) = self
-                .gw
-                .provider_catalog
-                .canonical_model_matching_upstream_id(&model_id)
+                .provider_scope(catalog_provider_id)
                 .await
             {
-                DiscoveredModelSource {
-                    metadata: metadata_from_canonical_template(&model_id, template)?,
-                    metadata_source_provider_id: None,
+                Ok(scope) => Some(scope),
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::provider_catalog::CatalogError>(),
+                        Some(crate::provider_catalog::CatalogError::ProviderNotFound { .. })
+                    ) =>
+                {
+                    None
                 }
-            } else {
-                DiscoveredModelSource {
-                    metadata: ProviderModelMetadata::bare(&model_id),
-                    metadata_source_provider_id: None,
-                }
+                Err(error) => return Err(error),
             };
-            sources.insert(model_id, discovered);
-        }
-        Ok(sources)
-    }
-
-    /// Devin discovery goes through `GetCliModelConfigs` directly (not the
-    /// HTTP-JSON `test_provider_models` path). The catalog collapses to one
-    /// record per upstream family — the record id is the family alias and its
-    /// `extensions["devin"]` carries the whole callable selector set, which is
-    /// what `build_request` resolves thinking controls against. A failed or
-    /// empty probe falls back to the preset selector list, folded by the same
-    /// rules — sync must not break over a metadata probe.
-    async fn discover_devin_model_sources(
-        &self,
-        provider: &Provider,
-    ) -> anyhow::Result<BTreeMap<String, DiscoveredModelSource>> {
-        let runtime = self.resolve_provider_runtime(provider).await?;
-        let entries = super::model_discovery::discover_devin_catalog(self, provider, &runtime)
-            .await
-            .unwrap_or_default();
-        let selectors = super::model_discovery::static_model_union(
-            &runtime,
-            provider,
-            entries.iter().map(|entry| entry.selector.clone()).collect(),
-        );
-        let families = crate::provider::devin::family::group_families(&selectors, &entries);
-        let mut sources = BTreeMap::new();
-        for family in &families {
-            if !retain_discovered_model_id(provider, &family.id) {
-                continue;
+            if let Some(scope) = scope {
+                for source in scope.models {
+                    let source_id = source
+                        .metadata
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("Provider Catalog Entry is missing id"))?;
+                    catalog_sources.insert(normalize_model_id(source_id)?, source);
+                }
             }
-            let model_id = normalize_model_id(&family.id)?;
-            let canonical = self
-                .gw
-                .provider_catalog
-                .canonical_model_matching_upstream_id(&family.id)
-                .await;
+        }
+
+        let mut sources = BTreeMap::new();
+        for model in discovered.models {
+            let model_id = normalize_model_id(&model.id)?;
+            let catalog_source = catalog_sources.remove(&model_id);
+            let (template, metadata_source_provider_id) = match catalog_source {
+                Some(source) => (Some(source.metadata), Some(source.provider_id)),
+                None => (
+                    self.gw
+                        .provider_catalog
+                        .canonical_model_matching_upstream_id(&model_id)
+                        .await,
+                    None,
+                ),
+            };
+            let metadata = metadata_from_discovered_model(&model_id, model, template)?;
             sources.insert(
-                model_id.clone(),
+                model_id,
                 DiscoveredModelSource {
-                    metadata: crate::provider::devin::family::family_metadata(
-                        family,
-                        canonical.as_ref(),
-                    ),
-                    metadata_source_provider_id: None,
+                    metadata,
+                    metadata_source_provider_id,
                 },
             );
         }
-        Ok(sources)
+        Ok((sources, publication_guard))
     }
 }
 
 struct DiscoveredModelSource {
     metadata: ProviderModelMetadata,
     metadata_source_provider_id: Option<String>,
+}
+
+fn same_discovery_provider(left: &Provider, right: &Provider) -> bool {
+    left.id == right.id
+        && left.vendor == right.vendor
+        && left.protocol == right.protocol
+        && left.base_url == right.base_url
+        && left.preset_key == right.preset_key
+        && left.channel == right.channel
+        && left.models_source == right.models_source
+        && left.static_models == right.static_models
+        && left.api_key == right.api_key
+        && left.adapter_credentials == right.adapter_credentials
+        && left.vendor_options == right.vendor_options
+        && left.auth_mode == right.auth_mode
+        && left.use_proxy == right.use_proxy
+        && left.is_enabled == right.is_enabled
+        && left.updated_at == right.updated_at
+}
+
+fn metadata_from_discovered_model(
+    model_id: &str,
+    mut model: stravia_vendor_sdk::DiscoveredModel,
+    canonical: Option<Value>,
+) -> anyhow::Result<ProviderModelMetadata> {
+    let has_canonical = canonical.is_some();
+    if has_canonical && model.display_name.trim() == model_id {
+        model.metadata.remove("name");
+    }
+    let base = match canonical {
+        Some(value) => value,
+        None => ProviderModelMetadata::bare(model_id).to_value()?,
+    };
+    let mut object = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Canonical Model metadata must be an object"))?;
+    object.extend(model.metadata);
+    object.insert("id".into(), Value::String(model_id.to_owned()));
+    let discovered_name = model.display_name.trim();
+    if !has_canonical || discovered_name != model_id {
+        object.insert("name".into(), Value::String(discovered_name.to_owned()));
+    }
+    if let Some(family) = model
+        .family
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        object.insert("family".into(), Value::String(family));
+    }
+    if let Some(selector) = model
+        .selector
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        object.insert("selector".into(), Value::String(selector));
+    }
+    let capabilities = model
+        .capabilities
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    if !capabilities.is_empty() {
+        object.insert(
+            "capabilities".into(),
+            Value::Array(capabilities.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !capabilities.is_empty() {
+        for (field, names) in [
+            ("tool_call", ["tools", "tool_call"]),
+            ("reasoning", ["reasoning", "reasoning"]),
+            ("attachment", ["image_input", "image_input"]),
+            (
+                "structured_output",
+                ["structured_output", "structured_output"],
+            ),
+        ] {
+            if object.get(field).is_none_or(Value::is_null)
+                && names.iter().any(|name| capabilities.contains(*name))
+            {
+                object.insert(field.into(), Value::Bool(true));
+            }
+        }
+    }
+    if capabilities.contains("image_input") {
+        ensure_discovered_modality(&mut object, "input", "image")?;
+    }
+    if capabilities.contains("image_output") {
+        ensure_discovered_modality(&mut object, "output", "image")?;
+    }
+    if let Some(context) = object.get("context_window").and_then(Value::as_u64) {
+        let limit = object
+            .entry("limit")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let limit = limit
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Discovered Model limit metadata must be an object"))?;
+        limit.entry("context").or_insert(Value::from(context));
+    }
+    ProviderModelMetadata::from_source_value(model_id, Value::Object(object))
+}
+
+fn ensure_discovered_modality(
+    metadata: &mut serde_json::Map<String, Value>,
+    direction: &str,
+    modality: &str,
+) -> anyhow::Result<()> {
+    let modalities = metadata
+        .entry("modalities")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Discovered Model modalities metadata must be an object"))?;
+    let values = modalities
+        .entry(direction)
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("Discovered Model modality list must be an array"))?;
+    if !values.iter().any(|value| value.as_str() == Some(modality)) {
+        values.push(Value::String(modality.to_owned()));
+    }
+    Ok(())
 }
 
 fn metadata_from_canonical_template(
@@ -573,6 +658,7 @@ fn metadata_from_canonical_template(
 }
 
 fn apply_provider_model_mutation(
+    admin: &AdminService,
     mutation: ProviderModelMutation,
     provider: &Provider,
     model_id: &str,
@@ -581,8 +667,9 @@ fn apply_provider_model_mutation(
         ProviderModelMutation::Applied(model) => {
             let mut detail = ProviderModelDetail::from(*model);
             super::thinking_map::hide_unwritable_generated_controls(
+                admin,
                 provider,
-                &detail.id,
+                &detail.metadata,
                 &mut detail.thinking_level_map,
             );
             Ok(detail)

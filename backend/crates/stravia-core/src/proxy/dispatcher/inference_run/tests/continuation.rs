@@ -32,7 +32,7 @@ impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
                 model_id: input.request.model.clone(),
                 provider_id: target.into(),
                 target_id: target.into(),
-                egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
             },
             input.request,
             [Ok(
@@ -1042,7 +1042,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         &gateway,
         model,
         &[first_url, second_url],
-        "test-http",
+        "protocol-openai-chat-completions",
         "openai-compatible",
     )
     .await;

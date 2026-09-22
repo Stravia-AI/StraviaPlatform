@@ -15,7 +15,7 @@ mod types;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
-pub(crate) use redaction::{redact_text, redact_url, redact_value};
+pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;
 
@@ -953,6 +953,7 @@ impl IngressObserver {
             debug_enabled,
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
+            event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
             gap_reported: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
@@ -1053,6 +1054,13 @@ impl Drop for IngressObserver {
 pub(crate) struct RunObserver {
     inner: Arc<RunObserverInner>,
 }
+
+/// A committed asynchronous publication may outlive the request future that
+/// started it. Holding the shared observer keeps finalization behind that publication.
+pub(crate) struct RunPublicationGuard {
+    inner: Arc<RunObserverInner>,
+}
+
 struct RunObserverInner {
     observation: InteractionObservation,
     run_id: String,
@@ -1060,6 +1068,7 @@ struct RunObserverInner {
     debug_enabled: bool,
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
+    event_boundary: Mutex<()>,
     gap: AtomicBool,
     gap_reported: AtomicBool,
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
@@ -1195,8 +1204,14 @@ impl RunObserver {
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
         self.inner.protected.register(secrets);
     }
-    pub(crate) fn debug_enabled(&self) -> bool {
-        self.inner.debug_enabled
+    pub(crate) fn protected_secrets(&self) -> ProtectedSecrets {
+        self.inner.protected.clone()
+    }
+    pub(crate) fn publication_guard(&self) -> Option<RunPublicationGuard> {
+        let _boundary = self.inner.event_boundary.lock();
+        (!self.inner.terminal.load(Ordering::Acquire)).then(|| RunPublicationGuard {
+            inner: self.inner.clone(),
+        })
     }
     pub(crate) fn record_failure(&self, error: FailureDiagnostic) {
         self.record(RunEvent::RequestFailed { error });
@@ -1343,6 +1358,9 @@ impl RunObserver {
         }
     }
     fn send_event(&self, mut event: RunEvent) {
+        // Keep concurrently produced activity ordered with Finish without rejecting
+        // meaningful background events that arrive after client delivery.
+        let _boundary = self.inner.event_boundary.lock();
         if matches!(event, RunEvent::ClientToolResult { .. }) {
             self.send_tool_results(vec![event]);
             return;
@@ -1478,6 +1496,7 @@ impl RunObserver {
             self.inner.protected.text(reason);
         }
         redaction::redact_run_outcome(&mut outcome);
+        let _boundary = self.inner.event_boundary.lock();
         let mut generation_commit_fences = self.inner.generation_commit_fences.lock();
         if !self.inner.terminal.swap(true, Ordering::AcqRel) {
             let command = WriterCommand::Finish {
@@ -1516,6 +1535,39 @@ impl RunObserver {
         }
     }
 }
+
+impl RunPublicationGuard {
+    pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
+        self.inner.protected.register(secrets);
+    }
+
+    pub(crate) fn credential_mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
+        let _boundary = self.inner.event_boundary.lock();
+        let mut event = RunEvent::CredentialMappingsCreated { discoveries };
+        self.inner.protected.event(&mut event);
+        redaction::redact_run_event(&mut event);
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::Event {
+                run_id: self.inner.run_id.clone(),
+                event,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .record(&self.inner.run_id, writer::now());
+        }
+    }
+}
+
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
         for ((model_turn_id, attempt_id), mut state) in
@@ -3178,7 +3230,6 @@ mod snapshot_tests {
                     ..facts(Vec::new())
                 },
             );
-        assert!(!observer.debug_enabled());
         observer.capture_client_tool_results(&[
             AiItem::output_text("not a received tool result"),
             AiItem::function_call_output("plain", serde_json::json!("restored-tool-secret")),

@@ -12,6 +12,7 @@ import ImagePlusIcon from '@lucide/svelte/icons/image-plus'
 import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard'
 import ListTreeIcon from '@lucide/svelte/icons/list-tree'
 import PanelLeftIcon from '@lucide/svelte/icons/panel-left'
+import PackageOpenIcon from '@lucide/svelte/icons/package-open'
 import PlugZapIcon from '@lucide/svelte/icons/plug-zap'
 import RadioTowerIcon from '@lucide/svelte/icons/radio-tower'
 import ScrollTextIcon from '@lucide/svelte/icons/scroll-text'
@@ -112,7 +113,13 @@ const navigationGroups = [
       { href: '/allowances', label: m.app_shell_nav_allowances, icon: GaugeIcon },
     ],
   },
-  { label: m.app_shell_nav_system, items: [{ href: '/settings', label: m.app_shell_nav_settings, icon: CogIcon }] },
+  {
+    label: m.app_shell_nav_system,
+    items: [
+      { href: '/vendor-plugins', label: m.app_shell_nav_vendor_plugins, icon: PackageOpenIcon },
+      { href: '/settings', label: m.app_shell_nav_settings, icon: CogIcon },
+    ],
+  },
 ] as const
 
 type NavigationItem = (typeof navigationGroups)[number]['items'][number]

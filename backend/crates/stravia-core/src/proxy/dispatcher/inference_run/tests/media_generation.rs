@@ -28,7 +28,7 @@ impl Drop for GenerationHttpFixture {
 }
 
 fn response_resource(id: &str, output: Vec<Value>) -> Value {
-    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+    stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
         id,
         "provider-model",
         "completed",
@@ -53,30 +53,32 @@ fn image_generation_sse() -> String {
         "result": PNG,
         "output_format": "png"
     });
-    let in_progress = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_image",
-        "gpt-5.4",
-        "in_progress",
-        Vec::new(),
-        Value::Null,
-        Value::Null,
-        Value::Null,
-    );
-    let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_image",
-        "gpt-5.4",
-        "completed",
-        vec![image.clone()],
-        Value::Null,
-        Value::Null,
-        json!({
-            "input_tokens": 10,
-            "output_tokens": 20,
-            "total_tokens": 30,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens_details": {"reasoning_tokens": 0}
-        }),
-    );
+    let in_progress =
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+            "resp_image",
+            "gpt-5.4",
+            "in_progress",
+            Vec::new(),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        );
+    let completed =
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+            "resp_image",
+            "gpt-5.4",
+            "completed",
+            vec![image.clone()],
+            Value::Null,
+            Value::Null,
+            json!({
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+        );
     let events = [
         json!({
             "type": "response.created",
@@ -222,7 +224,7 @@ async fn generation_http_fixture(
         &gateway,
         PARENT_MODEL,
         &[format!("{base_url}/v1")],
-        "test-http",
+        "protocol-open-responses",
         "open-responses",
     )
     .await;
@@ -232,7 +234,7 @@ async fn generation_http_fixture(
         .providers()
         .create(CreateProviderRecord {
             name: "Local Codex image fixture".into(),
-            vendor: Some("openai".into()),
+            vendor: Some("openai-codex".into()),
             protocol: "open-responses".into(),
             base_url: base_url.clone(),
             preset_key: Some("openai".into()),
@@ -253,7 +255,7 @@ async fn generation_http_fixture(
         .upsert(
             &generation_provider.id,
             UpsertOAuthCredential {
-                driver_key: "codex".into(),
+                driver_key: "openai-codex".into(),
                 scheme: "oauth_auth_code_pkce".into(),
                 access_token: "local-test-not-a-production-credential".into(),
                 resource_url: Some(base_url),
@@ -271,7 +273,9 @@ async fn generation_http_fixture(
                 metadata: json!({
                     "id": "gpt-5.4",
                     "name": "Local GPT",
+                    "attachment": true,
                     "tool_call": true,
+                    "capabilities": ["media_image"],
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
             },
@@ -285,10 +289,10 @@ async fn generation_http_fixture(
             display_name: Some("Local image generation".into()),
             balance: None,
             target_provider: generation_provider.id.clone(),
-            target_model: "gpt-5.4".into(),
+            target_model: Some("gpt-5.4".into()),
             targets: vec![CreateTarget {
                 provider_id: generation_provider.id,
-                model: "gpt-5.4".into(),
+                model: Some("gpt-5.4".into()),
                 enabled: true,
                 priority: Some(0),
                 first_token_timeout_ms: None,

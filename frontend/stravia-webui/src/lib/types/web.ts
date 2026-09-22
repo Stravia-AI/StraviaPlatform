@@ -43,8 +43,7 @@ export interface WebAccessSettings {
 }
 
 export type WebSearchBackend =
-  | { kind: 'local'; model_id?: string | null }
-  | { kind: 'codex'; provider_id?: string | null; upstream_model?: string | null }
+  { kind: 'local'; model_id?: string | null } | { kind: 'external'; route_id?: string | null }
 
 export interface WebSearchConfig {
   revision: number
@@ -81,10 +80,11 @@ export interface EligibleMediaModel {
   supported_thinking_levels: ThinkingLevel[]
 }
 
-export interface CompatibleCodexProvider {
+export interface ExternalSearchRoute {
   id: string
-  name: string
-  models: { id: string }[]
+  model_id: string
+  display_name: string
+  available: boolean
 }
 
 export type MediaUnderstandingState = 'disabled' | 'unavailable' | 'available'

@@ -25,7 +25,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     .expect("Gateway");
     let parent_provider = create_test_provider_with_model(
         &gateway, "Read scope parent", parent_url, "vision",
-        serde_json::json!({"id":"vision", "tool_call":true, "modalities":{"input":["text","image"],"output":["text"]}}),
+        serde_json::json!({"id":"vision", "attachment":true, "tool_call":true, "modalities":{"input":["text","image"],"output":["text"]}}),
     ).await;
     let admin = gateway.admin();
     let parent = admin
@@ -34,7 +34,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             display_name: None,
             balance: None,
             target_provider: parent_provider.id,
-            target_model: "vision".into(),
+            target_model: Some("vision".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -141,8 +141,9 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .create_provider(CreateProvider {
             name: Some("Text Parent".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: parent_url,
                 models_source: None,
                 static_models: None,
@@ -150,6 +151,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "parent-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -174,7 +176,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             display_name: None,
             balance: None,
             target_provider: parent_provider.id,
-            target_model: "parent".into(),
+            target_model: Some("parent".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -184,8 +186,9 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .create_provider(CreateProvider {
             name: Some("Visual Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: media_url,
                 models_source: None,
                 static_models: None,
@@ -193,6 +196,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "media-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -204,6 +208,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             crate::provider_models::CreateManualProviderModel {
                 metadata: serde_json::json!({
                     "id": "vision",
+                    "attachment": true,
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
             },
@@ -216,7 +221,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             display_name: None,
             balance: None,
             target_provider: media_provider.id,
-            target_model: "vision".into(),
+            target_model: Some("vision".into()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -471,6 +476,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
         "native",
         serde_json::json!({
             "id": "native",
+            "attachment": true,
             "tool_call": false,
             "modalities": {"input": ["text", "image"], "output": ["text"]}
         }),
@@ -507,11 +513,11 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             display_name: None,
             balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![
                 CreateTarget {
                     provider_id: bridge.id,
-                    model: "bridge".into(),
+                    model: Some("bridge".into()),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
@@ -521,7 +527,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
                 },
                 CreateTarget {
                     provider_id: native.id,
-                    model: "native".into(),
+                    model: Some("native".into()),
                     enabled: true,
                     priority: Some(2),
                     first_token_timeout_ms: None,
@@ -541,7 +547,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             display_name: None,
             balance: None,
             target_provider: no_tools.id,
-            target_model: "unsupported".into(),
+            target_model: Some("unsupported".into()),
             targets: vec![],
             default_thinking_level: None,
         })

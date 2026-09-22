@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use super::*;
 
 pub(crate) struct HistoryMarkerExecutionJob {

@@ -15,7 +15,7 @@ struct ClientModelCapabilities {
 pub struct RouteTargetStatus {
     pub target_id: String,
     pub provider_id: String,
-    pub model: String,
+    pub model: Option<String>,
     pub state: TargetRuntimeState,
     pub cooldown_remaining_ms: Option<u64>,
 }
@@ -48,7 +48,10 @@ impl AdminService {
                 let status = self
                     .gw
                     .route_policy_state
-                    .target_status(&format!("{}:{}", target.provider_id, target.model));
+                    .target_status(&crate::router::target_key(
+                        &target.provider_id,
+                        target.model.as_deref(),
+                    ));
                 RouteTargetStatus {
                     target_id: target.id,
                     provider_id: target.provider_id,
@@ -194,7 +197,10 @@ impl RouteModule<'_> {
 
         for route in &mut *routes {
             for target in route.targets.iter().filter(|target| target.enabled) {
-                let key = format!("{}\u{0}{}", target.provider_id, target.model);
+                let Some(model) = target.model.as_deref() else {
+                    continue;
+                };
+                let key = format!("{}\u{0}{model}", target.provider_id);
                 if capabilities_by_target.contains_key(&key) {
                     continue;
                 }
@@ -203,7 +209,7 @@ impl RouteModule<'_> {
                     .gw
                     .storage
                     .provider_models()
-                    .find(&target.provider_id, &target.model)
+                    .find(&target.provider_id, model)
                     .await?
                 else {
                     continue;
@@ -251,7 +257,8 @@ fn target_capabilities<'a>(
     target: &Target,
     capabilities_by_target: &'a BTreeMap<String, ClientModelCapabilities>,
 ) -> Option<&'a ClientModelCapabilities> {
-    capabilities_by_target.get(&format!("{}\u{0}{}", target.provider_id, target.model))
+    let model = target.model.as_deref()?;
+    capabilities_by_target.get(&format!("{}\u{0}{model}", target.provider_id))
 }
 
 fn common_target_limit(

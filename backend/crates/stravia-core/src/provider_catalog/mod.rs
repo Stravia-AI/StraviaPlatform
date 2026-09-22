@@ -23,7 +23,6 @@ mod persist;
 mod source;
 
 use parse::*;
-pub(crate) use parse::{is_builtin_catalog_provider, opencode_zen_free_tier_model};
 use persist::*;
 pub use source::{CatalogSource, HttpCatalogSource};
 
@@ -107,13 +106,87 @@ impl ProviderCatalog {
         }
     }
 
-    pub async fn providers(&self) -> CatalogProviderList {
+    pub(crate) async fn contains_provider(&self, provider_id: &str) -> bool {
+        self.snapshot
+            .read()
+            .await
+            .providers
+            .iter()
+            .any(|provider| provider.id == provider_id)
+    }
+
+    /// Render the catalog against the provider profiles actually available in
+    /// this instance. A profile's `provider_id` is the selectable connection
+    /// identity; `catalog_id` only links it to upstream branding and model
+    /// metadata. Refreshing the remote catalog never mutates saved Providers.
+    pub async fn providers(
+        &self,
+        descriptors: &[stravia_vendor_sdk::ProviderDescriptor],
+    ) -> CatalogProviderList {
         let snapshot = self.snapshot.read().await;
+        let catalog_by_id = snapshot
+            .providers
+            .iter()
+            .map(|catalog| (catalog.id.as_str(), catalog))
+            .collect::<BTreeMap<_, _>>();
+        let mut providers = descriptors
+            .iter()
+            .map(|descriptor| {
+                descriptor
+                    .catalog_id
+                    .as_deref()
+                    .and_then(|catalog_id| catalog_by_id.get(catalog_id).copied())
+                    .map_or_else(
+                        || provider_from_descriptor(descriptor),
+                        |catalog| bind_catalog_provider(catalog, descriptor),
+                    )
+            })
+            .collect::<Vec<_>>();
+        providers.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
         CatalogProviderList {
             revision: snapshot.version.revision.clone(),
             generated_at: snapshot.version.generated_at.clone(),
-            providers: snapshot.providers.clone(),
+            providers,
         }
+    }
+
+    pub async fn resolve_channel(
+        &self,
+        provider_id: &str,
+        channel_id: &str,
+        fingerprint: &str,
+        descriptors: &[stravia_vendor_sdk::ProviderDescriptor],
+    ) -> anyhow::Result<(CatalogProvider, CatalogChannel)> {
+        let providers = self.providers(descriptors).await;
+        let provider = providers
+            .providers
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
+            .ok_or_else(|| CatalogError::ProviderNotFound {
+                provider_id: provider_id.to_owned(),
+            })?;
+        let channel = provider
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .cloned()
+            .ok_or_else(|| CatalogError::ChannelNotFound {
+                provider_id: provider_id.to_owned(),
+                channel_id: channel_id.to_owned(),
+            })?;
+        if channel.fingerprint != fingerprint {
+            return Err(CatalogError::ChannelChanged {
+                provider_id: provider_id.to_owned(),
+                channel_id: channel_id.to_owned(),
+            }
+            .into());
+        }
+        Ok((provider, channel))
     }
 
     pub async fn canonical_models(&self) -> CanonicalModelList {
@@ -220,9 +293,6 @@ impl ProviderCatalog {
         let mut models = scope
             .models
             .into_iter()
-            .filter(|source| {
-                catalog_model_included(provider_id, channel_id, catalog_source_model_id(source))
-            })
             .map(|source| parse_catalog_model(provider_id, &provider.protocol, &source.metadata))
             .collect::<anyhow::Result<Vec<_>>>()?;
         models.sort_by(model_sort_order);
@@ -238,13 +308,7 @@ impl ProviderCatalog {
         channel_id: &str,
     ) -> anyhow::Result<Vec<CatalogModelSource>> {
         let (_, scope) = self.resolve_provider_scope(provider_id, channel_id).await?;
-        Ok(scope
-            .models
-            .into_iter()
-            .filter(|source| {
-                catalog_model_included(provider_id, channel_id, catalog_source_model_id(source))
-            })
-            .collect())
+        Ok(scope.models)
     }
 
     pub async fn model_source(
@@ -281,40 +345,6 @@ impl ProviderCatalog {
                 provider_id: provider_id.to_string(),
             })?;
         parse_catalog_model(provider_id, &provider.protocol, &source.metadata)
-    }
-
-    pub async fn resolve_channel(
-        &self,
-        provider_id: &str,
-        channel_id: &str,
-        fingerprint: &str,
-    ) -> anyhow::Result<(CatalogProvider, CatalogChannel)> {
-        let snapshot = self.snapshot.read().await;
-        let provider = snapshot
-            .providers
-            .iter()
-            .find(|provider| provider.id == provider_id)
-            .cloned()
-            .ok_or_else(|| CatalogError::ProviderNotFound {
-                provider_id: provider_id.to_string(),
-            })?;
-        let channel = provider
-            .channels
-            .iter()
-            .find(|channel| channel.id == channel_id)
-            .cloned()
-            .ok_or_else(|| CatalogError::ChannelNotFound {
-                provider_id: provider_id.to_string(),
-                channel_id: channel_id.to_string(),
-            })?;
-        if channel.fingerprint != fingerprint {
-            return Err(CatalogError::ChannelChanged {
-                provider_id: provider_id.to_string(),
-                channel_id: channel_id.to_string(),
-            }
-            .into());
-        }
-        Ok((provider, channel))
     }
 
     pub async fn refresh(&self) -> anyhow::Result<CatalogRefreshSummary> {
@@ -421,6 +451,119 @@ impl ProviderCatalog {
             model_count: snapshot.canonical_models.len(),
             changed,
         }
+    }
+}
+
+fn descriptor_auth_mode(
+    channel: &stravia_vendor_sdk::ChannelDescriptor,
+) -> Option<CatalogAuthMode> {
+    channel.auth.as_ref().map(|auth| match auth.flow {
+        stravia_vendor_sdk::AuthFlow::AuthorizationCode
+        | stravia_vendor_sdk::AuthFlow::DeviceCode => CatalogAuthMode::OAuth,
+        stravia_vendor_sdk::AuthFlow::Manual => CatalogAuthMode::SetupToken,
+    })
+}
+
+fn bind_catalog_provider(
+    catalog: &CatalogProvider,
+    descriptor: &stravia_vendor_sdk::ProviderDescriptor,
+) -> CatalogProvider {
+    let channels = descriptor
+        .channels
+        .iter()
+        .map(|definition| {
+            let catalog_channel = catalog
+                .channels
+                .iter()
+                .find(|channel| channel.id == definition.id);
+            let protocol = definition
+                .protocol
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    catalog_channel
+                        .map(|channel| channel.protocol.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            let base_url = definition
+                .default_base_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    catalog_channel
+                        .map(|channel| channel.base_url.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            let auth_mode =
+                descriptor_auth_mode(definition).unwrap_or(CatalogAuthMode::OptionalApiKey);
+            channel(
+                &descriptor.provider_id,
+                &definition.id,
+                &definition.name,
+                &protocol,
+                &base_url,
+                auth_mode,
+            )
+        })
+        .collect::<Vec<_>>();
+    let protocol = channels
+        .first()
+        .map(|channel| channel.protocol.clone())
+        .unwrap_or_else(|| catalog.protocol.clone());
+    let base_url = channels
+        .first()
+        .map(|channel| channel.base_url.clone())
+        .unwrap_or_else(|| catalog.base_url.clone());
+    CatalogProvider {
+        id: descriptor.provider_id.clone(),
+        catalog_id: Some(catalog.id.clone()),
+        name: descriptor.display_name.clone(),
+        documentation_url: catalog.documentation_url.clone(),
+        npm: catalog.npm.clone(),
+        protocol,
+        base_url,
+        channels,
+    }
+}
+
+fn provider_from_descriptor(
+    descriptor: &stravia_vendor_sdk::ProviderDescriptor,
+) -> CatalogProvider {
+    let channels = descriptor
+        .channels
+        .iter()
+        .map(|definition| {
+            channel(
+                &descriptor.provider_id,
+                &definition.id,
+                &definition.name,
+                definition.protocol.as_deref().unwrap_or_default(),
+                definition.default_base_url.as_deref().unwrap_or_default(),
+                descriptor_auth_mode(definition).unwrap_or(CatalogAuthMode::OptionalApiKey),
+            )
+        })
+        .collect::<Vec<_>>();
+    CatalogProvider {
+        id: descriptor.provider_id.clone(),
+        catalog_id: descriptor.catalog_id.clone(),
+        name: descriptor.display_name.clone(),
+        documentation_url: None,
+        npm: String::new(),
+        protocol: channels
+            .first()
+            .map(|channel| channel.protocol.clone())
+            .unwrap_or_default(),
+        base_url: channels
+            .first()
+            .map(|channel| channel.base_url.clone())
+            .unwrap_or_default(),
+        channels,
     }
 }
 

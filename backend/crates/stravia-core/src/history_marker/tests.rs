@@ -956,7 +956,7 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
     let owner = principal("owner");
     let source = ThinkingSource {
         namespace: "provider:model".into(),
-        protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+        protocol: Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24.into()),
         actual_model: "actual-model".into(),
         target_id: "original-target".into(),
     };
@@ -1031,7 +1031,7 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
     assert_eq!(ThinkingSource::from_item(&request.items[1]), None);
     let mut response = stravia_runtime_contract::protocol::ir::AiResponse::new("response", "model");
     response.items = request.items.clone();
-    let wire = crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter
+    let wire = stravia_protocol_codec::codec::open_responses::formatter::ResponsesResponseFormatter
         .format_response(&response);
     assert!(!wire.to_string().contains("__stravia_thinking_source"));
     assert!(!wire.to_string().contains("original-target"));
@@ -1269,6 +1269,27 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
         request.items[0].thinking_ref(),
         Some(("visible", None))
     ));
+}
+
+#[test]
+fn thinking_source_round_trips_unknown_guest_protocol_identity() {
+    let source = ThinkingSource {
+        namespace: "opaque-target".into(),
+        protocol: Some(
+            stravia_runtime_contract::protocol::ids::ProtocolIdentity::new(
+                "acme/private-inference-v7",
+            ),
+        ),
+        actual_model: "model".into(),
+        target_id: "target".into(),
+    };
+
+    let encoded = serde_json::to_value(&source).expect("serialize Thinking source");
+    assert_eq!(encoded["protocol"], "acme/private-inference-v7");
+    assert_eq!(
+        serde_json::from_value::<ThinkingSource>(encoded).expect("deserialize Thinking source"),
+        source
+    );
 }
 
 #[tokio::test]

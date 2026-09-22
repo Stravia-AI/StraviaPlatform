@@ -7,7 +7,7 @@ use crate::WebSearchBackendDraft;
 use crate::{
     MAX_SEARCH_SECONDS, MAX_SEARCH_TURNS, MIN_SEARCH_SECONDS, MIN_SEARCH_TURNS,
     ResolvedWebSearchBackend, SettingsWebSearchConfigStore, WebSearchConfig, WebSearchConfigStore,
-    codex_provider_contract, resolve_enabled_config,
+    resolve_enabled_config,
 };
 
 pub struct SearchAdmin {
@@ -43,15 +43,11 @@ pub struct EligibleSearchModel {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CompatibleCodexModel {
+pub struct ExternalSearchRoute {
     pub id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CompatibleCodexProvider {
-    pub id: String,
-    pub name: String,
-    pub models: Vec<CompatibleCodexModel>,
+    pub model_id: String,
+    pub display_name: String,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -139,45 +135,35 @@ impl SearchAdmin {
         Ok(eligible)
     }
 
-    pub async fn list_compatible_codex_search_providers(
+    pub async fn list_external_search_routes(
         &self,
-    ) -> Result<Vec<CompatibleCodexProvider>, WebSearchConfigError> {
-        let providers = self
-            .host
-            .providers()
-            .await
-            .map_err(|_| invalid_codex_provider())?;
-        let mut compatible = Vec::new();
-        for provider in providers {
-            if !codex_provider_contract(&provider) {
-                continue;
-            }
-            let credential = self
+    ) -> Result<Vec<ExternalSearchRoute>, WebSearchConfigError> {
+        let routes = self.host.models().await.map_err(|_| {
+            WebSearchConfigError::new(
+                "WEB_SEARCH_ROUTE_UNAVAILABLE",
+                "External Search Routes are unavailable",
+            )
+        })?;
+        let mut external = Vec::new();
+        for route in routes.into_iter().filter(|route| route.is_enabled) {
+            let available = self
                 .host
-                .credential(&provider.id)
+                .validate_external_route(&route.model_id)
                 .await
-                .map_err(|_| invalid_codex_provider())?;
-            if !credential.as_ref().is_some_and(effective_oauth_credential) {
-                continue;
-            }
-            let mut models = self
-                .host
-                .models_for_provider(&provider.id)
-                .await
-                .map_err(|_| missing_codex_model())?
-                .into_iter()
-                .filter(ProviderModelRecord::effective_available)
-                .map(|model| CompatibleCodexModel { id: model.model_id })
-                .collect::<Vec<_>>();
-            models.sort_by(|left, right| left.id.cmp(&right.id));
-            compatible.push(CompatibleCodexProvider {
-                id: provider.id,
-                name: provider.name,
-                models,
+                .is_ok();
+            external.push(ExternalSearchRoute {
+                id: route.id,
+                model_id: route.model_id,
+                display_name: route.display_name,
+                available,
             });
         }
-        compatible.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
-        Ok(compatible)
+        external.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.model_id.cmp(&right.model_id))
+        });
+        Ok(external)
     }
 
     pub async fn update_web_search_config(
@@ -224,13 +210,16 @@ impl SearchAdmin {
                 self.validate_local_binding(&model_id).await?;
                 self.validate_local_sources().await
             }
-            ResolvedWebSearchBackend::Codex {
-                provider_id,
-                upstream_model,
-            } => {
-                self.validate_codex_binding(&provider_id, &upstream_model)
-                    .await
-            }
+            ResolvedWebSearchBackend::External { route_id } => self
+                .host
+                .validate_external_route(&route_id)
+                .await
+                .map_err(|_| {
+                    WebSearchConfigError::new(
+                        "WEB_SEARCH_ROUTE_UNAVAILABLE",
+                        "External Search Route is unavailable or incompatible",
+                    )
+                }),
         }
     }
 
@@ -260,7 +249,7 @@ impl SearchAdmin {
         &self,
         model: &crate::host::SearchRoute,
     ) -> Result<(), WebSearchConfigError> {
-        for target in &model.targets {
+        for target in model.targets.iter().filter(|target| target.enabled) {
             let Some(provider) = self.host.provider(&target.provider_id).await.map_err(|_| {
                 WebSearchConfigError::new(
                     "WEB_SEARCH_MODEL_INELIGIBLE",
@@ -270,12 +259,15 @@ impl SearchAdmin {
             else {
                 continue;
             };
-            if !provider.is_enabled || !provider.function_calling {
+            if !provider.is_enabled {
                 continue;
             }
+            let Some(model) = target.model.as_deref() else {
+                continue;
+            };
             let provider_model = self
                 .host
-                .provider_model(&target.provider_id, &target.model)
+                .provider_model(&target.provider_id, model)
                 .await
                 .map_err(|_| {
                     WebSearchConfigError::new(
@@ -305,12 +297,12 @@ impl SearchAdmin {
         let has_search = settings.search_provider_ids.iter().any(|id| {
             providers
                 .iter()
-                .any(|provider| provider.id == *id && provider.kind != "codex" && provider.search)
+                .any(|provider| provider.id == *id && provider.search)
         });
         let has_fetch = settings.fetch_provider_ids.iter().any(|id| {
             providers
                 .iter()
-                .any(|provider| provider.id == *id && provider.kind != "codex" && provider.fetch)
+                .any(|provider| provider.id == *id && provider.fetch)
         });
         if has_search && has_fetch {
             Ok(())
@@ -318,45 +310,6 @@ impl SearchAdmin {
             Err(sources_unavailable())
         }
     }
-
-    async fn validate_codex_binding(
-        &self,
-        provider_id: &str,
-        upstream_model: &str,
-    ) -> Result<(), WebSearchConfigError> {
-        let provider = self
-            .host
-            .provider(provider_id)
-            .await
-            .map_err(|_| invalid_codex_provider())?
-            .ok_or_else(invalid_codex_provider)?;
-        if !codex_provider_contract(&provider) {
-            return Err(invalid_codex_provider());
-        }
-        self.host
-            .credential(provider_id)
-            .await
-            .map_err(|_| invalid_codex_provider())?
-            .filter(effective_oauth_credential)
-            .ok_or_else(invalid_codex_provider)?;
-        let model = self
-            .host
-            .provider_model(provider_id, upstream_model)
-            .await
-            .map_err(|_| missing_codex_model())?
-            .filter(|model| model.effective_available())
-            .ok_or_else(missing_codex_model)?;
-        if model.model_id != upstream_model {
-            return Err(missing_codex_model());
-        }
-        Ok(())
-    }
-}
-
-fn effective_oauth_credential(credential: &crate::host::SearchCredential) -> bool {
-    credential.connected
-        && credential.has_access_token
-        && (credential.expiry_valid || credential.has_refresh_token)
 }
 
 fn eligible_provider_model(model: &ProviderModelRecord) -> bool {
@@ -381,19 +334,5 @@ fn sources_unavailable() -> WebSearchConfigError {
     WebSearchConfigError::new(
         "WEB_SEARCH_SOURCES_UNAVAILABLE",
         "Local Search requires available Search and Fetch sources",
-    )
-}
-
-fn invalid_codex_provider() -> WebSearchConfigError {
-    WebSearchConfigError::new(
-        "WEB_SEARCH_CODEX_PROVIDER_INVALID",
-        "Codex Search requires an enabled Codex OAuth Responses Provider",
-    )
-}
-
-fn missing_codex_model() -> WebSearchConfigError {
-    WebSearchConfigError::new(
-        "WEB_SEARCH_CODEX_MODEL_NOT_FOUND",
-        "Configured Codex upstream model is unavailable",
     )
 }

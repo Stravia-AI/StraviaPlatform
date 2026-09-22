@@ -76,11 +76,6 @@ pub(crate) fn provider_snapshot(provider: &crate::db::models::Provider) -> Searc
         id: provider.id.clone(),
         name: provider.name.clone(),
         is_enabled: provider.is_enabled,
-        channel: provider.channel.clone(),
-        auth_mode: provider.auth_mode.clone(),
-        protocol: provider.protocol.clone(),
-        function_calling: crate::protocol::registry::ProtocolRegistry::global()
-            .protocol_supports_function_calling(&provider.protocol),
     }
 }
 fn model_snapshot(model: crate::provider_models::ProviderModelRecord) -> SearchModel {
@@ -90,107 +85,97 @@ fn model_snapshot(model: crate::provider_models::ProviderModelRecord) -> SearchM
         tool_call: model.metadata.tool_call,
     }
 }
-struct ProviderSession {
-    gateway: crate::Gateway,
-    provider: crate::db::models::Provider,
-    snapshot: SearchProvider,
-}
 #[async_trait]
-impl CodexHost for SearchHost {
-    async fn provider(
+impl ExternalSearchHost for SearchHost {
+    async fn execute_external_search(
         &self,
-        provider_id: &str,
-    ) -> Result<Option<Arc<dyn CodexSession>>, WebSearchError> {
-        self.0
+        principal: &Principal,
+        route_id: &str,
+        request: stravia_vendor_sdk::SearchRequest,
+        cancellation: stravia_runtime_contract::CancellationToken,
+        deadline: std::time::Instant,
+    ) -> Result<ExternalSearchExecution, WebSearchError> {
+        let route = self
+            .0
             .storage
-            .providers()
-            .get(provider_id)
-            .await
-            .map(|provider| {
-                provider.map(|provider| {
-                    Arc::new(ProviderSession {
-                        snapshot: provider_snapshot(&provider),
-                        provider,
-                        gateway: self.0.clone(),
-                    }) as Arc<dyn CodexSession>
-                })
-            })
-            .map_err(|_| {
-                WebSearchError::backend(
-                    stravia_web_search::WebSearchBackendKind::Codex,
-                    "provider_unavailable",
-                    "Codex Provider is unavailable",
-                )
-            })
-    }
-}
-#[async_trait]
-impl CodexSession for ProviderSession {
-    fn provider(&self) -> &SearchProvider {
-        &self.snapshot
-    }
-    async fn model(&self, model_id: &str) -> Result<Option<SearchModel>, WebSearchError> {
-        self.gateway
-            .storage
-            .provider_models()
-            .find(&self.provider.id, model_id)
-            .await
-            .map(|model| model.map(model_snapshot))
-            .map_err(|_| {
-                WebSearchError::backend(
-                    stravia_web_search::WebSearchBackendKind::Codex,
-                    "model_unavailable",
-                    "Codex model is unavailable",
-                )
-            })
-    }
-    async fn transport(&self) -> Result<CodexTransport, WebSearchError> {
-        let credential = self
-            .gateway
-            .storage
-            .oauth_credentials()
-            .get(&self.provider.id)
+            .routes()
+            .get(route_id)
             .await
             .map_err(|_| {
-                WebSearchError::backend(
-                    stravia_web_search::WebSearchBackendKind::Codex,
-                    "oauth_unavailable",
-                    "Codex OAuth credential is unavailable",
-                )
+                external_error("route_unavailable", "External Search Route is unavailable")
+            })?
+            .ok_or_else(|| {
+                external_error("route_unavailable", "External Search Route is unavailable")
             })?;
-        let runtime = self
-            .gateway
-            .admin()
-            .resolve_provider_runtime_from_snapshot(&self.provider, credential.as_ref())
+        let execution = self
+            .0
+            .execute_vendor_route(
+                principal,
+                &route,
+                crate::plugin::VendorRequest::Search(request),
+                crate::plugin::VendorCallContext::new(cancellation.clone(), deadline),
+            )
             .await
-            .map_err(|_| {
-                WebSearchError::backend(
-                    stravia_web_search::WebSearchBackendKind::Codex,
-                    "oauth_unavailable",
-                    "Codex OAuth credential is unavailable",
-                )
-            })?;
-        let client = self
-            .gateway
-            .http_client_for_provider(self.provider.use_proxy)
+            .map_err(external_execution_error)?;
+        let guard = execution
+            .publication
+            .write_fence()
             .await
-            .map_err(|_| {
-                WebSearchError::backend(
-                    stravia_web_search::WebSearchBackendKind::Codex,
-                    "transport_unavailable",
-                    "Codex transport is unavailable",
-                )
-            })?;
-        Ok(CodexTransport {
-            client,
-            access_token: runtime.access_token,
-            extra_headers: runtime.binding.extra_headers,
-            endpoint: runtime
-                .binding
-                .base_url_override
-                .unwrap_or_else(|| self.provider.base_url.clone()),
+            .map_err(|_| external_publication_error(&cancellation, deadline))?;
+        let stravia_vendor_sdk::OperationOutput::Search(response) = execution.output else {
+            return Err(external_error(
+                "invalid_report",
+                "External Search Vendor returned an invalid result",
+            ));
+        };
+        Ok(ExternalSearchExecution {
+            response,
+            publication: SearchPublicationGuard::new(Box::new(guard)),
+            provider_id: execution.provider_id,
+            upstream_model: execution.upstream_model,
+            target_id: execution.target_id,
         })
     }
+}
+
+fn external_execution_error(error: anyhow::Error) -> WebSearchError {
+    match error.downcast_ref::<stravia_vendor_runtime::RuntimeError>() {
+        Some(stravia_vendor_runtime::RuntimeError::Cancelled)
+        | Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::Cancelled,
+            ..
+        }) => external_error("cancelled", "External Search was cancelled"),
+        Some(stravia_vendor_runtime::RuntimeError::DeadlineExceeded)
+        | Some(stravia_vendor_runtime::RuntimeError::Plugin {
+            kind: stravia_vendor_sdk::ErrorKind::DeadlineExceeded,
+            ..
+        }) => external_error("deadline_exceeded", "External Search deadline exceeded"),
+        _ => external_error("upstream_failed", "External Search execution failed"),
+    }
+}
+
+fn external_publication_error(
+    cancellation: &stravia_runtime_contract::CancellationToken,
+    deadline: std::time::Instant,
+) -> WebSearchError {
+    if std::time::Instant::now() >= deadline {
+        external_error("deadline_exceeded", "External Search deadline exceeded")
+    } else if cancellation.is_cancelled() {
+        external_error("cancelled", "External Search was cancelled")
+    } else {
+        external_error(
+            "cancelled",
+            "External Search result can no longer be published",
+        )
+    }
+}
+
+fn external_error(code: &'static str, message: &'static str) -> WebSearchError {
+    WebSearchError::backend(
+        stravia_web_search::WebSearchBackendKind::External,
+        code,
+        message,
+    )
 }
 #[async_trait]
 impl SearchAdminHost for SearchHost {
@@ -221,6 +206,7 @@ impl SearchAdminHost for SearchHost {
                                 .map(|target| SearchRouteTarget {
                                     provider_id: target.provider_id,
                                     model: target.model,
+                                    enabled: target.enabled,
                                 })
                                 .collect(),
                         }
@@ -247,36 +233,6 @@ impl SearchAdminHost for SearchHost {
             .map(|provider| provider.as_ref().map(provider_snapshot))
             .map_err(|_| ())
     }
-    async fn credential(&self, id: &str) -> Result<Option<SearchCredential>, ()> {
-        self.0
-            .storage
-            .oauth_credentials()
-            .get(id)
-            .await
-            .map(|credential| {
-                credential.map(|credential| SearchCredential {
-                    connected: credential.status == "connected",
-                    has_access_token: !credential.access_token.trim().is_empty(),
-                    expiry_valid: credential.expires_at.as_deref().is_none_or(|expires_at| {
-                        crate::proxy::security::is_key_expired(expires_at) == Ok(false)
-                    }),
-                    has_refresh_token: credential
-                        .refresh_token
-                        .as_deref()
-                        .is_some_and(|token| !token.trim().is_empty()),
-                })
-            })
-            .map_err(|_| ())
-    }
-    async fn models_for_provider(&self, id: &str) -> Result<Vec<SearchModel>, ()> {
-        self.0
-            .storage
-            .provider_models()
-            .list_for_provider(id)
-            .await
-            .map(|models| models.into_iter().map(model_snapshot).collect())
-            .map_err(|_| ())
-    }
     async fn provider_model(
         &self,
         provider_id: &str,
@@ -288,6 +244,20 @@ impl SearchAdminHost for SearchHost {
             .find(provider_id, model)
             .await
             .map(|model| model.map(model_snapshot))
+            .map_err(|_| ())
+    }
+    async fn validate_external_route(&self, route_id: &str) -> Result<(), ()> {
+        let route = self
+            .0
+            .storage
+            .routes()
+            .get(route_id)
+            .await
+            .map_err(|_| ())?
+            .ok_or(())?;
+        self.0
+            .validate_vendor_route_capability(&route, stravia_vendor_sdk::Capability::Search)
+            .await
             .map_err(|_| ())
     }
     async fn sources(&self) -> Result<Option<SearchSources>, ()> {
@@ -304,7 +274,6 @@ impl SearchAdminHost for SearchHost {
                 let capabilities = provider.capabilities();
                 SearchSourceProvider {
                     id: provider.id,
-                    kind: provider.kind,
                     search: capabilities.as_ref().is_some_and(|value| value.search),
                     fetch: capabilities.as_ref().is_some_and(|value| value.fetch),
                 }

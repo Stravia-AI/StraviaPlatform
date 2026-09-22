@@ -72,7 +72,7 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-or `nix run github:Stravia-AI/StraviaPlatform`, or a platform archive from Releases (verify against `SHA256SUMS`).
+Alternatively, download a platform archive from Releases (verify against `SHA256SUMS`).
 
 **First run (both):**
 
@@ -118,16 +118,22 @@ When an upstream service is temporarily unavailable, Stravia retries or switches
 ### Platform tools and built-in agent runtime
 
 - `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
-- **Web Search** — an agent loop searches and reads pages for the model, using the embedded Moli engine, Exa, or Zhipu — or a Codex search binding.
+- **Web Search** — use the Local agent loop with Moli, Exa, or Zhipu sources, or bind an External Route whose Vendor plugin returns a complete cited report.
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
-- **Media Generation** — generate or edit one image through an existing Codex OAuth Route, then reuse its Artifact Reference in later tools.
+- **Media Generation** — generate or edit an image through a saved Route backed by a capable Vendor plugin, then reuse its Artifact Reference in later tools.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
 
 #### Image generation
 
-In **Advanced Features → Media Generation**, bind a Codex OAuth model route that supports image generation and enable the capability. Generate or edit images through MCP or compatible model requests, then reuse the results in later operations.
+In **Advanced Features → Media Generation**, bind a saved Route whose enabled targets support image generation, then enable the capability. Bundled Codex OAuth and image-only plugins use the same Route mechanism; actual availability remains subject to upstream account and model support.
 
 Availability depends on upstream account and model support. Size preferences do not guarantee exact dimensions, and retries may consume additional quota. See the [Media Generation documentation](docs/design/media-generation.md) for configuration, examples, and limits.
+
+### Vendor plugins
+
+All model Vendors run as self-contained Wasm Components. Stravia bundles exactly five packages: one base Vendor for existing integrations other than Codex, Grok, Command Code, and Devin, plus four dedicated packages for those identities. Dedicated packages own their full supplier identity and never fall back to the base package.
+
+Bundled plugins are ready on first use, and **Vendor Plugins** can inspect them or import a local `.wasm` replacement without a marketplace. A plugin is trusted with the selected connection's upstream credentials and approved network destinations, so review its source and requested origins before use. See the [plugin design](docs/design/vendor-plugins.md) for supported capabilities, isolation, updates, and lifecycle details.
 
 ### Keys, usage, and request history
 
@@ -150,7 +156,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 ### Storage and deployment
 
 - SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3.
-- Instance data lives in one directory for easier management. Before migrating or upgrading, review the [deployment and storage documentation](docs/design/architecture.md) for backup and version compatibility requirements.
+- Instance data lives in one directory for easier management. Back up its database and local files—including installed plugin Components—together; a remote PostgreSQL backup alone is incomplete. Before migrating or upgrading, review the [deployment and storage documentation](docs/design/architecture.md) for backup and version compatibility requirements.
 - One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
 
 ## Deployment modes
@@ -160,7 +166,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 | Form          | Tauri app with integrated management UI             | Single headless binary or container image   |
 | Best for      | Individual developers; writes client config locally | Self-hosted and shared team deployments     |
 | Storage       | Local SQLite                                        | SQLite or PostgreSQL                        |
-| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image · Nix flake       |
+| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image                  |
 
 The same Rust core powers both; the management surface is the same WebUI.
 

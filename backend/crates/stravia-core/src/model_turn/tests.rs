@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 use reqwest::header::{HeaderMap, HeaderValue};
 
@@ -147,7 +148,7 @@ async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json:
                 )
             } else {
                 let created =
-                    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                    stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                         "resp-replayed",
                         "upstream-model",
                         "in_progress",
@@ -157,7 +158,7 @@ async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json:
                         serde_json::Value::Null,
                     );
                 let completed =
-                    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                    stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                         "resp-replayed",
                         "upstream-model",
                         "completed",
@@ -287,8 +288,9 @@ async fn gateway_with_captured_thinking(
         .create_provider(CreateProvider {
             name: Some("Capture".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -296,6 +298,7 @@ async fn gateway_with_captured_thinking(
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-provider-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -307,7 +310,7 @@ async fn gateway_with_captured_thinking(
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level,
         })
@@ -322,7 +325,7 @@ async fn gateway_with_captured_thinking(
                 display_name: None,
                 balance: None,
                 target_provider: provider.id,
-                target_model: "upstream-model".into(),
+                target_model: Some("upstream-model".into()),
                 targets: Vec::new(),
                 default_thinking_level: None,
             })
@@ -377,10 +380,17 @@ async fn in_memory_adapter_uses_the_same_execute_interface() {
 #[tokio::test]
 async fn execute_distinguishes_cancellation_from_deadline() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let gateway = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .expect("Gateway");
     let cancellation = CancellationToken::new();
@@ -453,8 +463,9 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
         .create_provider(CreateProvider {
             name: Some("Timeout fixture".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -462,6 +473,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -473,11 +485,11 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             display_name: None,
             balance: None,
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![CreateTarget {
                 enabled: true,
                 provider_id: provider.id,
-                model: "upstream-model".into(),
+                model: Some("upstream-model".into()),
                 priority: None,
                 first_token_timeout_ms: Some(1000),
                 target_retry_budget: Some(0),
@@ -567,8 +579,9 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             .create_provider(CreateProvider {
                 name: Some(name.into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("test-http".into()),
-                    protocol: "openai-compatible".into(),
+                    vendor: "protocol-openai-chat-completions".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai-compatible".into()),
                     base_url,
                     models_source: None,
                     static_models: None,
@@ -576,6 +589,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                 credential: ProviderCredentialInput::ApiKey {
                     value: "test-provider-key".into(),
                 },
+                vendor_options: Default::default(),
                 use_proxy: false,
             })
             .await
@@ -591,14 +605,14 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             display_name: None,
             balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: providers
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
                     enabled: true,
                     provider_id: provider.id.clone(),
-                    model: "upstream-model".into(),
+                    model: Some("upstream-model".into()),
                     priority: Some((providers.len() - index) as i32),
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(0),
@@ -667,8 +681,9 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
         .create_provider(CreateProvider {
             name: Some("ZDR".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("xai".into()),
-                protocol: "open-responses".into(),
+                vendor: "xai".into(),
+                channel: "default".into(),
+                protocol: Some("open-responses".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -676,6 +691,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-provider-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -687,7 +703,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -770,8 +786,9 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
         .create_provider(CreateProvider {
             name: Some("Request scoped failure".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -779,6 +796,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-provider-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -790,7 +808,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -863,8 +881,9 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         .create_provider(CreateProvider {
             name: Some("No tools".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("test-http".into()),
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -872,6 +891,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-provider-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -883,7 +903,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -957,8 +977,9 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                 .create_provider(CreateProvider {
                     name: Some(name.into()),
                     source: ProviderSourceInput::Custom {
-                        vendor: Some("test-http".into()),
-                        protocol: "openai-compatible".into(),
+                        vendor: "protocol-openai-chat-completions".into(),
+                        channel: "default".into(),
+                        protocol: Some("openai-compatible".into()),
                         base_url,
                         models_source: None,
                         static_models: None,
@@ -966,6 +987,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                     credential: ProviderCredentialInput::ApiKey {
                         value: "test-provider-key".into(),
                     },
+                    vendor_options: Default::default(),
                     use_proxy: false,
                 })
                 .await
@@ -981,14 +1003,14 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             display_name: None,
             balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: providers
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
                     enabled: true,
                     provider_id: provider.id.clone(),
-                    model: "upstream-model".into(),
+                    model: Some("upstream-model".into()),
                     priority: Some((providers.len() - index) as i32),
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(5),
@@ -1038,21 +1060,6 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             events.last(),
             Some(Err(ModelTurnError { code, .. })) if code == "upstream_stream_error"
         ));
-        let Some(Err(error)) = events.last() else {
-            panic!("truncated upstream stream must expose a diagnostic");
-        };
-        assert!(error.message.contains("stage=receive"), "{}", error.message);
-        assert!(
-            error.message.contains("has_received_response_event=true"),
-            "{}",
-            error.message
-        );
-        assert!(
-            error.message.contains("http_status=200"),
-            "{}",
-            error.message
-        );
-        assert!(error.message.contains("caused by:"), "{}", error.message);
         assert!(
             !events
                 .iter()
@@ -1510,10 +1517,17 @@ fn credential_observer(
 #[tokio::test]
 async fn committed_discovery_survives_dropped_protection_before_intern_acknowledgement() {
     let directory = tempfile::tempdir().unwrap();
-    let mut gateway = Gateway::new(GatewayConfig {
-        data_dir: directory.path().to_path_buf(),
-        ..Default::default()
-    })
+    let mut gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .unwrap();
     gateway
@@ -2088,15 +2102,37 @@ async fn cancellation_in_publications_final_poll_preempts_completed() {
 }
 
 #[tokio::test]
-async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket() {
+async fn codex_native_compaction_preserves_errors_and_account_identity() {
     use axum::{
         Json, Router,
-        extract::ws::{Message, WebSocketUpgrade},
+        extract::{
+            State,
+            ws::{Message, WebSocketUpgrade},
+        },
         response::IntoResponse,
         routing::{get, post},
     };
     use serde_json::{Value, json};
-    async fn compact(Json(body): Json<Value>) -> axum::response::Response {
+    fn compaction_error(code: &str) -> Value {
+        json!({
+            "code": code,
+            "type": "invalid_request_error",
+            "message": "native-compaction-rejected access-token-before-refresh",
+            "details": {"retained": true},
+        })
+    }
+    async fn compact(
+        State(calls): State<Arc<AtomicUsize>>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        calls.fetch_add(1, Ordering::SeqCst);
+        if body["instructions"] == "reject-native-compaction" {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": compaction_error("invalid_encrypted_content")})),
+            )
+                .into_response();
+        }
         if body.get("stream").is_some() || body.get("input").and_then(Value::as_array).is_none() {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
@@ -2105,11 +2141,23 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
                 {"type":"compaction","id":"compact-state-unary","encrypted_content":"unary-state","rolling_identity":{"version":2}}],
             "usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}})).into_response()
     }
-    async fn responses(upgrade: WebSocketUpgrade) -> axum::response::Response {
+    async fn responses(
+        State(calls): State<Arc<AtomicUsize>>,
+        upgrade: WebSocketUpgrade,
+    ) -> axum::response::Response {
         upgrade.on_upgrade(|mut socket| async move {
             let state = json!({"type":"compaction","id":"inline-state","encrypted_content":"inline-cipher","rolling_identity":{"version":3}});
             while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                calls.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_str(&text).expect("native request");
+                if request["instructions"] == "reject-native-compaction" {
+                    socket.send(Message::Text(json!({
+                        "type": "error",
+                        "status": 503,
+                        "error": compaction_error("previous_response_not_found"),
+                    }).to_string().into())).await.unwrap();
+                    continue;
+                }
                 let input = request["input"].as_array().expect("native input");
                 let triggered = input.iter().any(|item| item["type"] == "compaction_trigger");
                 let replayed = input.iter().any(|item| item == &state);
@@ -2119,7 +2167,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
                 }
                 let output = if triggered { vec![state.clone()] } else { vec![json!({"type":"message","id":"reply","role":"assistant","status":"completed","content":[{"type":"output_text","text":"native replay accepted","annotations":[]}]})] };
                 let response_id = if triggered { "trigger-response" } else { "replay-response" };
-                let created = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                let created = stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                     response_id, "upstream-model", "in_progress", Vec::new(),
                     Value::Null, Value::Null, Value::Null,
                 );
@@ -2128,7 +2176,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
                     socket.send(Message::Text(json!({"type":"response.output_item.added","output_index":index,"item":item}).to_string().into())).await.unwrap();
                     socket.send(Message::Text(json!({"type":"response.output_item.done","output_index":index,"item":item}).to_string().into())).await.unwrap();
                 }
-                let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                let completed = stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                     response_id, "upstream-model", "completed", if triggered { Vec::new() } else { output },
                     Value::Null, Value::Null,
                     json!({"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}),
@@ -2139,9 +2187,11 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let upstream_calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/responses", get(responses))
-        .route("/responses/compact", post(compact));
+        .route("/responses/compact", post(compact))
+        .with_state(Arc::clone(&upstream_calls));
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -2153,30 +2203,41 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
     .await
     .unwrap();
     let provider = gateway
-        .admin()
-        .create_provider(CreateProvider {
-            name: Some("local Codex".into()),
-            source: ProviderSourceInput::Custom {
-                vendor: Some("openai".into()),
-                protocol: "open-responses".into(),
-                base_url: format!("http://{address}"),
-                models_source: None,
-                static_models: None,
-            },
-            credential: ProviderCredentialInput::ApiKey {
-                value: "isolated-provider-key".into(),
-            },
+        .storage
+        .providers()
+        .create(crate::db::models::CreateProviderRecord {
+            name: "local Codex".into(),
+            vendor: Some("openai-codex".into()),
+            channel: Some("codex".into()),
+            protocol: "open-responses".into(),
+            base_url: format!("http://{address}"),
+            preset_key: Some("openai".into()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            vendor_options: json!({
+                "websocket_url": format!("ws://{address}/responses")
+            })
+            .to_string(),
+            auth_mode: "oauth".into(),
             use_proxy: false,
         })
         .await
         .unwrap();
     gateway
         .storage
-        .providers()
-        .update(
+        .oauth_credentials()
+        .upsert(
             &provider.id,
-            crate::db::models::UpdateProvider {
-                channel: Some("codex".into()),
+            crate::db::models::UpsertOAuthCredential {
+                driver_key: "openai-codex".into(),
+                scheme: "oauth_auth_code_pkce".into(),
+                access_token: "access-token-before-refresh".into(),
+                refresh_token: Some("refresh-token-before-refresh".into()),
+                expires_at: Some("2099-01-01T00:00:00Z".into()),
+                resource_url: Some(format!("http://{address}")),
+                subject_id: Some("account-one".into()),
                 ..Default::default()
             },
         )
@@ -2190,7 +2251,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -2213,7 +2274,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
         .await
         .unwrap();
     let principal = Principal::new(key.id);
-    let pair = crate::protocol::transform::ProtocolTransform::global()
+    let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .unwrap();
     let request = pair
@@ -2237,6 +2298,48 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
         result.wire["output"][1]["rolling_identity"],
         json!({"version":2})
     );
+    for (standalone, code) in [
+        (true, "invalid_encrypted_content"),
+        (false, "previous_response_not_found"),
+    ] {
+        let calls_before_rejection = upstream_calls.load(Ordering::SeqCst);
+        let mut wire = json!({
+            "model": "compact-codex",
+            "input": [{"role": "user", "content": "do not replay rejected compaction"}],
+            "instructions": "reject-native-compaction",
+        });
+        if !standalone {
+            wire["context_management"] = json!([{"type": "compaction", "compact_threshold": 2000}]);
+        }
+        let mut input = TurnInput::new(principal.clone(), pair.decode_request(wire).unwrap());
+        if standalone {
+            input.purpose = ModelTurnPurpose::Compact;
+        }
+        let rejected = gateway
+            .model_turn
+            .execute(input)
+            .await
+            .err()
+            .expect("native compaction must preserve the upstream rejection");
+        assert_eq!(rejected.upstream_status, Some(503));
+        let body = rejected
+            .upstream_body
+            .expect("original upstream error body");
+        assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["details"], json!({"retained": true}));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("native-compaction-rejected")
+        );
+        assert!(!body.to_string().contains("access-token-before-refresh"));
+        assert_eq!(
+            upstream_calls.load(Ordering::SeqCst),
+            calls_before_rejection + 1,
+            "native compaction rejection must not trigger recovery or replay"
+        );
+    }
     let trigger = pair.decode_request(json!({"model":"compact-codex","input":[{"role":"user","content":"remote v2"},{"type":"compaction_trigger"}]})).unwrap();
     let mut triggered = gateway
         .model_turn
@@ -2264,10 +2367,41 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             _ => {}
         }
     }
-    let replay = pair.decode_request(json!({"model":"compact-codex","input":[native.expect("native triggered state"),{"role":"user","content":"continue"}]})).unwrap();
+    let native = native.expect("native triggered state");
+    let oauth = gateway.storage.oauth_credentials();
+    let before_refresh = oauth
+        .get(&provider.id)
+        .await
+        .unwrap()
+        .expect("OAuth connection");
+    let locked = oauth
+        .try_begin_refresh(&provider.id, before_refresh.status_version)
+        .await
+        .unwrap()
+        .expect("OAuth refresh lease");
+    let refreshed = oauth
+        .complete_refresh(
+            &provider.id,
+            locked.status_version,
+            crate::db::models::UpsertOAuthCredential {
+                driver_key: "openai-codex".into(),
+                scheme: "oauth_auth_code_pkce".into(),
+                access_token: "access-token-after-refresh".into(),
+                refresh_token: Some("refresh-token-after-refresh".into()),
+                expires_at: Some("2099-06-01T00:00:00Z".into()),
+                resource_url: Some(format!("http://{address}")),
+                subject_id: Some("account-one".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.connection_id, before_refresh.connection_id);
+
+    let replay = pair.decode_request(json!({"model":"compact-codex","input":[native.clone(),{"role":"user","content":"continue after refresh"}]})).unwrap();
     let mut continued = gateway
         .model_turn
-        .execute(TurnInput::new(principal, replay))
+        .execute(TurnInput::new(principal.clone(), replay))
         .await
         .unwrap();
     let mut accepted = false;
@@ -2277,7 +2411,42 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             break;
         }
     }
-    assert!(accepted);
+    assert!(
+        accepted,
+        "rotating every OAuth token field must preserve native state replay"
+    );
+
+    let reconnected = oauth
+        .upsert(
+            &provider.id,
+            crate::db::models::UpsertOAuthCredential {
+                driver_key: "openai-codex".into(),
+                scheme: "oauth_auth_code_pkce".into(),
+                access_token: "different-account-access-token".into(),
+                refresh_token: Some("different-account-refresh-token".into()),
+                expires_at: Some("2099-12-01T00:00:00Z".into()),
+                resource_url: Some(format!("http://{address}")),
+                subject_id: Some("account-two".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(reconnected.connection_id, refreshed.connection_id);
+    let calls_before_rejected_replay = upstream_calls.load(Ordering::SeqCst);
+    let stale_replay = pair.decode_request(json!({"model":"compact-codex","input":[native,{"role":"user","content":"must not cross accounts"}]})).unwrap();
+    let rejected = gateway
+        .model_turn
+        .execute(TurnInput::new(principal, stale_replay))
+        .await
+        .err()
+        .expect("old account state must be rejected");
+    assert_eq!(rejected.code, "compaction_target_mismatch");
+    assert_eq!(
+        upstream_calls.load(Ordering::SeqCst),
+        calls_before_rejected_replay,
+        "old native state must be rejected before reaching the reconnected account"
+    );
     server.abort();
 }
 

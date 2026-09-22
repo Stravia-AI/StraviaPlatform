@@ -1,0 +1,25 @@
+[package]
+name = "stravia-protocol-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Standard protocol codecs and extensible canonical transforms shared by the Stravia host and Wasm vendor plugins"
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-runtime-contract = { workspace = true }
+http = { workspace = true }
+inventory = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+tracing = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
+
+[dev-dependencies]
+jsonschema = { version = "0.51.0", default-features = false }
+sha2 = { workspace = true }

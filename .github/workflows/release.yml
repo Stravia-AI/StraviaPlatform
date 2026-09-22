@@ -270,6 +270,7 @@ jobs:
         if: matrix.libc == 'musl'
         shell: bash
         run: |
+          task build:vendors
           task build:web
           # Moli 链接 Fontconfig；不能把 runner 的 glibc 库混入静态 musl 产物。
           sysroot="${RUNNER_TEMP}/stravia-musl-libs"
@@ -591,50 +592,6 @@ jobs:
             org.opencontainers.image.licenses=AGPL-3.0-only
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
 
-  nix-build:
-    name: Nix (${{ matrix.system }})
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            system: x86_64-linux
-          - runner: ubuntu-24.04-arm
-            system: aarch64-linux
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ github.token }}
-
-      - name: Configure Cachix for validation
-        if: needs.prepare.outputs.publish != 'true'
-        uses: cachix/cachix-action@v17
-        with:
-          name: stravia-platform
-          skipPush: true
-
-      - name: Validate Cachix credentials
-        if: needs.prepare.outputs.publish == 'true'
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-        run: test -n "${CACHIX_AUTH_TOKEN}"
-
-      - name: Configure Cachix for release
-        if: needs.prepare.outputs.publish == 'true'
-        uses: cachix/cachix-action@v17
-        with:
-          name: stravia-platform
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Build Nix package
-        run: nix build --print-build-logs .#server
-
   collect-assets:
     name: Collect release assets
     needs:
@@ -686,7 +643,6 @@ jobs:
       - prepare
       - collect-assets
       - docker-build
-      - nix-build
     runs-on: ubuntu-24.04
     permissions:
       contents: write

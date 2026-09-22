@@ -9,6 +9,8 @@ mod extensions;
 mod history_marker_executions;
 mod lifecycle;
 mod runtime;
+#[cfg(test)]
+mod vendor_auxiliary_tests;
 
 pub use builder::GatewayBuilder;
 use extensions::configure_gateway_extensions;
@@ -21,7 +23,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use parking_lot::Mutex;
@@ -45,12 +47,6 @@ type StorageRuntime = (
     Option<Pool<Postgres>>,
 );
 
-#[derive(Clone, Debug)]
-pub struct CapabilityCacheEntry {
-    pub capabilities: Vec<String>,
-    pub cached_at: Instant,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeStorageKind {
     Memory,
@@ -62,18 +58,19 @@ pub struct Gateway {
     pub config: GatewayConfig,
     pub storage: DynStorage,
     pub storage_kind: RuntimeStorageKind,
-    pub http_client: reqwest::Client,
-    responses_websocket_client: reqwest::Client,
+    pub(crate) http_client: reqwest::Client,
+    vendor_http_client: reqwest::Client,
+    vendor_websocket_client: reqwest::Client,
+    pub(crate) vendor_plugins: Arc<crate::plugin::manager::VendorPlugins>,
+    pub(crate) vendor_websocket_pool: Arc<crate::plugin::network::VendorWebSocketPool>,
     pub provider_catalog: provider_catalog::ProviderCatalog,
     pub(crate) provider_allowance_state: admin::provider_allowance::ProviderAllowanceState,
     pub(crate) allowance_samples: admin::provider_allowance::AllowanceSampleStore,
-    proxy_client_cache: Arc<tokio::sync::RwLock<Option<ProxyClientCache>>>,
-    pub(crate) responses_websockets: proxy::client::ResponsesWebSocketRegistry,
+    vendor_client_cache: Arc<tokio::sync::RwLock<[Option<VendorClientCache>; 2]>>,
     pub(crate) principal_admission: Arc<admission::PrincipalAdmission>,
     pub model_cache: Arc<tokio::sync::RwLock<router::RouteCache>>,
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
     pub(crate) route_policy_state: router::RoutePolicyState,
-    pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
     pub(crate) observation: interaction_observation::InteractionObservation,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
@@ -113,17 +110,18 @@ impl Gateway {
             storage: Arc::clone(&self.storage),
             storage_kind: self.storage_kind,
             http_client: self.http_client.clone(),
-            responses_websocket_client: self.responses_websocket_client.clone(),
+            vendor_http_client: self.vendor_http_client.clone(),
+            vendor_websocket_client: self.vendor_websocket_client.clone(),
+            vendor_plugins: Arc::clone(&self.vendor_plugins),
+            vendor_websocket_pool: Arc::clone(&self.vendor_websocket_pool),
             provider_catalog: self.provider_catalog.clone(),
             provider_allowance_state: self.provider_allowance_state.clone(),
             allowance_samples: self.allowance_samples.clone(),
-            proxy_client_cache: Arc::clone(&self.proxy_client_cache),
+            vendor_client_cache: Arc::clone(&self.vendor_client_cache),
             principal_admission: Arc::clone(&self.principal_admission),
-            responses_websockets: self.responses_websockets.clone(),
             model_cache: Arc::clone(&self.model_cache),
             cache_affinity: self.cache_affinity.clone(),
             route_policy_state: self.route_policy_state.clone(),
-            ollama_capability_cache: Arc::clone(&self.ollama_capability_cache),
             observation: self.observation.clone(),
             auth_sessions: Arc::clone(&self.auth_sessions),
             agent_definitions: self.agent_definitions.clone(),
@@ -185,8 +183,14 @@ impl Drop for Gateway {
     }
 }
 
+pub(crate) struct VendorClientSnapshot {
+    pub(crate) http: reqwest::Client,
+    pub(crate) websocket: reqwest::Client,
+    pub(crate) websocket_reuse_identity: String,
+}
+
 #[derive(Clone)]
-struct ProxyClientCache {
+struct VendorClientCache {
     cache_key: String,
     client: reqwest::Client,
 }

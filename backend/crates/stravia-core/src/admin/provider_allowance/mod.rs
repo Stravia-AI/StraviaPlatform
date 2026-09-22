@@ -1,22 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-mod parsers;
 mod samples;
 mod service;
 
-use parsers::{
-    CommandCodeSubscription, ParsedAllowance, commandcode_billing_cycle, parse_commandcode_org_id,
-    parse_commandcode_subscription, parse_commandcode_summary_cost, parse_minimax_fallback,
-    parse_monitor_response,
-};
 pub(crate) use samples::AllowanceSampleStore;
-#[cfg(test)]
-use service::{
-    AllowanceHttpRequest, AllowanceHttpResponse, AllowanceTransport, TransportFailure,
-    fetch_monitor, get_provider_allowance_with_transport,
-    list_provider_allowance_targets_with_transport, list_provider_allowances_with_transport,
-    monitor_requests, refresh_provider_allowance_with_transport,
-};
 pub(crate) use service::{ProviderAllowanceState, SAMPLE_INTERVAL};
 
 /// One eligible provider's entry in the non-blocking allowance list: identity
@@ -143,50 +130,3 @@ pub enum ProviderAllowanceErrorCategory {
     UpstreamUnavailable,
     InvalidResponse,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MonitorKind {
-    AnthropicClaudeCode,
-    OpenAiCodex,
-    GitHubCopilot,
-    KimiForCoding,
-    NanoGpt,
-    ZaiCodingPlan,
-    ZhipuAiCodingPlan,
-    MiniMaxCodingPlan,
-    MiniMaxCnCodingPlan,
-    Wafer,
-    OpenCodeGo,
-    Crof,
-    DeepSeek,
-    NeuralWatt,
-    XaiGrok,
-    CommandCode,
-    Devin,
-}
-
-fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
-    match (preset_key, channel) {
-        ("anthropic", "claude-code") => Some(MonitorKind::AnthropicClaudeCode),
-        ("openai", "codex") => Some(MonitorKind::OpenAiCodex),
-        ("github-copilot", "default") => Some(MonitorKind::GitHubCopilot),
-        ("kimi-for-coding", "default") => Some(MonitorKind::KimiForCoding),
-        ("nano-gpt", "default") => Some(MonitorKind::NanoGpt),
-        ("zai-coding-plan", "default") => Some(MonitorKind::ZaiCodingPlan),
-        ("zhipuai-coding-plan", "default") => Some(MonitorKind::ZhipuAiCodingPlan),
-        ("minimax-coding-plan", "default") => Some(MonitorKind::MiniMaxCodingPlan),
-        ("minimax-cn-coding-plan", "default") => Some(MonitorKind::MiniMaxCnCodingPlan),
-        ("wafer.ai", "default") => Some(MonitorKind::Wafer),
-        ("opencode-go", "default") => Some(MonitorKind::OpenCodeGo),
-        ("crof", "default") => Some(MonitorKind::Crof),
-        ("deepseek", "default") => Some(MonitorKind::DeepSeek),
-        ("neuralwatt", "default") => Some(MonitorKind::NeuralWatt),
-        ("xai", "grok") => Some(MonitorKind::XaiGrok),
-        ("command-code", "default") => Some(MonitorKind::CommandCode),
-        ("devin", "devin") => Some(MonitorKind::Devin),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests;

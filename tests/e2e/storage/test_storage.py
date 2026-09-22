@@ -296,6 +296,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                         "source": {
                             "type": "custom",
                             "vendor": "custom",
+                            "channel": "default",
                             "protocol": "openai",
                             "base_url": f"http://127.0.0.1:{upstream_port}/v1",
                         },
@@ -303,6 +304,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                             "type": "api_key",
                             "value": "dummy-key",
                         },
+                        "vendor_options": {},
                     },
                     headers=headers,
                 )
@@ -382,6 +384,10 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
             finally:
                 stop_stravia_server(proc, logs)
 
+            # 插件二进制属于实例文件，重连旧数据库时须一并迁移。
+            plugin_dir = work_dir / "postgres-reconnect-plugins"
+            (Path(data_dir) / "plugins").rename(plugin_dir)
+
         schema_report = run_schema_action(
             "inspect_observation", work_dir=work_dir, pg_url=pg_url, schema=schema
         )
@@ -392,6 +398,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
         reconnect_port = find_free_port()
         reconnect_base = f"http://127.0.0.1:{reconnect_port}"
         with tempfile.TemporaryDirectory(prefix="stravia-postgres-reconnect-e2e-") as reconnect_dir:
+            plugin_dir.rename(Path(reconnect_dir) / "plugins")
             reconnect_proc, reconnect_logs = start_stravia_server(
                 stravia_binary=stravia_binary,
                 args=[

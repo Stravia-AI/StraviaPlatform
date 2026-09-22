@@ -368,7 +368,11 @@ fn classify_targets(model: &Route) -> (Vec<String>, Vec<String>, Vec<String>) {
     for target in &model.targets {
         let supports_image = super::platform::supports_image(&target.input_modalities);
         let supports_tools = target.tool_call == Some(true);
-        let target_key = format!("{}:{}", target.provider_id, target.model);
+        let target_key = format!(
+            "{}:{}",
+            target.provider_id,
+            target.model.as_deref().unwrap_or_default()
+        );
         if supports_image {
             native_targets.push(target_key.clone());
         }

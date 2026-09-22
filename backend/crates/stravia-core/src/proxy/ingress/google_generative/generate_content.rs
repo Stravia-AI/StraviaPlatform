@@ -9,10 +9,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::Gateway;
-use crate::protocol::codec::google::gemini::decoder::GoogleDecoder;
 use crate::proxy::context::RequestContext;
 use crate::proxy::dispatcher::dispatch_pipeline;
 use crate::proxy::ingress::observation;
+use stravia_protocol_codec::codec::google::gemini::decoder::GoogleDecoder;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ir::RawEnvelope;
 

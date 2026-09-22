@@ -87,11 +87,18 @@ impl ProviderStore for PostgresProviderStore {
             .transpose()?
             .unwrap_or(current.vendor_options);
         let api_key = input.api_key.unwrap_or_else(|| {
-            serde_json::from_str::<std::collections::BTreeMap<String, String>>(&adapter_credentials)
-                .ok()
-                .and_then(|values| values.get("apiKey").cloned())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(current_api_key)
+            serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(
+                &adapter_credentials,
+            )
+            .ok()
+            .and_then(|values| {
+                values
+                    .get("apiKey")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(current_api_key)
         });
         let auth_mode = input.auth_mode.unwrap_or(current.auth_mode);
         if !is_valid_provider_auth_mode(&auth_mode) {

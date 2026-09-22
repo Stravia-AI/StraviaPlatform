@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::transform::ProtocolTransform;
+use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::Principal;
-use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ids::{ProtocolId, ProtocolIdentity};
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
@@ -42,8 +42,8 @@ use project::*;
 use store::*;
 
 pub(crate) use project::{
-    generation_node_is_completed, generation_session_fingerprint, project_client_history,
-    set_generation_session_id,
+    apply_provider_effective_response, generation_node_is_completed,
+    generation_session_fingerprint, project_client_history, set_generation_session_id,
 };
 pub(crate) use store::{
     hydrate_response_artifact_references, request_has_item_references,
@@ -98,7 +98,7 @@ pub(crate) struct GenerationChainWrite {
 pub(crate) enum GenerationSource {
     Target {
         namespace: String,
-        protocol: ProtocolId,
+        protocol: Option<ProtocolIdentity>,
         actual_model: String,
         selected_target_key: String,
     },
@@ -117,7 +117,7 @@ impl GenerationSource {
                 selected_target_key,
             } => Some(crate::history_marker::ThinkingSource {
                 namespace: namespace.clone(),
-                protocol: *protocol,
+                protocol: protocol.clone(),
                 actual_model: actual_model.clone(),
                 target_id: selected_target_key.clone(),
             }),
@@ -674,10 +674,9 @@ impl crate::router::ContinuationLookup for GenerationChainContinuationLookup {
         request: &mut AiRequest,
     ) -> Option<String> {
         let parent_id = crate::router::parent_id_from_request(request)?;
-        let mut candidate_state =
+        let candidate_state =
             GenerationChainState::from_request(request, target.namespace, target.protocol)
                 .with_provider_model(target.actual_model);
-        candidate_state.model = target.logical_model.to_owned();
         if self
             .chain
             .store
@@ -721,14 +720,17 @@ impl GenerationChainState {
     pub(crate) fn from_request(
         request: &AiRequest,
         target_namespace: &str,
-        egress: ProtocolId,
+        egress: impl Into<Option<ProtocolId>>,
     ) -> Self {
+        let egress = egress.into();
         let mut state = Self {
             context_fingerprint: history_context_fingerprint(&request.items),
             context_messages: request.items.len(),
             provider_model: request.model.clone(),
             target_namespace: target_namespace.to_owned(),
-            protocol: egress.to_string(),
+            protocol: egress
+                .map(|protocol| protocol.to_string())
+                .unwrap_or_default(),
             ..Default::default()
         };
         state.refresh_request_semantics(request);
@@ -737,14 +739,10 @@ impl GenerationChainState {
 
     pub(crate) fn refresh_request_semantics(&mut self, request: &AiRequest) {
         self.model.clone_from(&request.model);
-        let mut canonical_request = request.clone();
-        if canonical_request.tools.as_ref().is_some_and(Vec::is_empty) {
-            canonical_request.tools = None;
-        }
         self.canonical_controls_fingerprint =
             stravia_runtime_contract::protocol::ir::canonical::hash_hex(
                 &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
-                    &canonical_request,
+                    request,
                 ),
             );
         // Keep writing the legacy proof fields until every durable v1-v3 node has
@@ -765,6 +763,11 @@ impl GenerationChainState {
     }
     pub(crate) fn with_provider_model(mut self, provider_model: &str) -> Self {
         self.provider_model = provider_model.to_owned();
+        self
+    }
+
+    pub(crate) fn with_protocol_identity(mut self, protocol: Option<&ProtocolIdentity>) -> Self {
+        self.protocol = protocol.map(ToString::to_string).unwrap_or_default();
         self
     }
 

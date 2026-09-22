@@ -112,15 +112,11 @@ pub fn resolve_enabled_config(
                 model_id: model_id.clone(),
             })
         }
-        Some(WebSearchBackendDraft::Codex {
-            provider_id: Some(provider_id),
-            upstream_model: Some(upstream_model),
-        }) if !provider_id.trim().is_empty() && !upstream_model.trim().is_empty() => {
-            Ok(ResolvedWebSearchBackend::Codex {
-                provider_id: provider_id.clone(),
-                upstream_model: upstream_model.clone(),
-            })
-        }
+        Some(WebSearchBackendDraft::External {
+            route_id: Some(route_id),
+        }) if !route_id.trim().is_empty() => Ok(ResolvedWebSearchBackend::External {
+            route_id: route_id.clone(),
+        }),
         _ => Err(WebSearchError::new(
             "invalid_config",
             "Enabled Web Search requires a complete backend binding",

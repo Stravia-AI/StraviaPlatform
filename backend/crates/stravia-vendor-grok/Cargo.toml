@@ -1,0 +1,27 @@
+[package]
+name = "stravia-vendor-grok"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dedicated xAI Grok OAuth Wasm vendor guest"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+stravia-vendor-common = { workspace = true }
+stravia-protocol-codec = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+url = { workspace = true }
+urlencoding = { workspace = true }

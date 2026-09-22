@@ -261,19 +261,19 @@ impl CountingBackend {
         }
     }
 
-    fn codex() -> Self {
+    fn external() -> Self {
         Self {
             calls: AtomicUsize::new(0),
-            kind: WebSearchBackendKind::Codex,
+            kind: WebSearchBackendKind::External,
             delay: Duration::ZERO,
             inputs: Mutex::new(Vec::new()),
         }
     }
 
-    fn delayed_codex(delay: Duration) -> Self {
+    fn delayed_external(delay: Duration) -> Self {
         Self {
             delay,
-            ..Self::codex()
+            ..Self::external()
         }
     }
 }
@@ -314,9 +314,13 @@ impl SearchBackend for CountingBackend {
                 url: source_url,
                 title: Some("Verified".into()),
             }]),
-            usage: Default::default(),
+            usage: Some(Default::default()),
             model_turns: 1,
             tool_calls: 2,
+            publication: None,
+            provider_id: None,
+            upstream_model: None,
+            target_id: None,
         })
     }
 }
@@ -337,7 +341,7 @@ fn enabled_local_config() -> WebSearchConfig {
 #[tokio::test]
 async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
     let local = Arc::new(CountingBackend::local());
-    let codex = Arc::new(CountingBackend::codex());
+    let external = Arc::new(CountingBackend::external());
     let config = WebSearchConfig {
         enabled: false,
         ..enabled_local_config()
@@ -346,7 +350,7 @@ async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
         Arc::new(MemoryWebSearchConfigStore::new(config)),
         Arc::new(crate::turn_chain::test_store().await),
         local.clone(),
-        codex.clone(),
+        external.clone(),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -367,7 +371,7 @@ async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
         matches!(events.last(), Some(WebSearchEvent::Failed(error)) if error.code == "disabled")
     );
     assert_eq!(local.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(codex.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(external.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -407,7 +411,7 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
         turns.clone(),
         backend,
-        Arc::new(CountingBackend::codex()),
+        Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -447,18 +451,17 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
 }
 
 #[tokio::test]
-async fn codex_uses_the_request_deadline_instead_of_saved_local_time_limit() {
+async fn external_uses_the_request_deadline_instead_of_saved_local_time_limit() {
     let mut config = enabled_local_config();
-    config.backend = Some(WebSearchBackendDraft::Codex {
-        provider_id: Some("codex-provider".into()),
-        upstream_model: Some("gpt-5".into()),
+    config.backend = Some(WebSearchBackendDraft::External {
+        route_id: Some("external-search".into()),
     });
     config.total_time_seconds = 0;
     let runner = WebSearchRunner::new(
         Arc::new(MemoryWebSearchConfigStore::new(config)),
         Arc::new(crate::turn_chain::test_store().await),
         Arc::new(CountingBackend::local()),
-        Arc::new(CountingBackend::delayed_codex(Duration::from_millis(20))),
+        Arc::new(CountingBackend::delayed_external(Duration::from_millis(20))),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -493,14 +496,14 @@ async fn completed(
 #[tokio::test]
 async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branches() {
     let local = Arc::new(CountingBackend::local());
-    let codex = Arc::new(CountingBackend::codex());
+    let external = Arc::new(CountingBackend::external());
     let config = Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config()));
     let turns = Arc::new(crate::turn_chain::test_store().await);
     let runner = WebSearchRunner::new(
         config.clone(),
         turns.clone(),
         local.clone(),
-        codex.clone(),
+        external.clone(),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -543,7 +546,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
 
     assert_ne!(inherited.turn_id, replaced.turn_id);
     assert_eq!(local.calls.load(Ordering::SeqCst), 3);
-    assert_eq!(codex.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(external.calls.load(Ordering::SeqCst), 0);
     {
         let inputs = local.inputs.lock();
         assert_eq!(inputs[1].ancestors.len(), 1);
@@ -587,7 +590,7 @@ async fn continuation_is_principal_scoped_and_never_uses_an_implicit_latest_turn
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
         Arc::new(crate::turn_chain::test_store().await),
         backend.clone(),
-        Arc::new(CountingBackend::codex()),
+        Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -682,9 +685,13 @@ impl SearchBackend for RelaxingBackend {
                 url: source_url,
                 title: Some("Verified".into()),
             }]),
-            usage: Default::default(),
+            usage: Some(Default::default()),
             model_turns: 1,
             tool_calls: 2,
+            publication: None,
+            provider_id: None,
+            upstream_model: None,
+            target_id: None,
         })
     }
 }
@@ -700,7 +707,7 @@ async fn continuation_report_cannot_relax_the_inherited_allowed_domains() {
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
         turns.clone(),
         backend.clone(),
-        Arc::new(CountingBackend::codex()),
+        Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -802,7 +809,7 @@ async fn backend_failure_does_not_commit_a_search_turn() {
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
         turns.clone(),
         Arc::new(FailingBackend),
-        Arc::new(CountingBackend::codex()),
+        Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
@@ -1004,7 +1011,7 @@ fn pending_runner(
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
         turns,
         Arc::new(PendingBackend),
-        Arc::new(CountingBackend::codex()),
+        Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
         authorizer,

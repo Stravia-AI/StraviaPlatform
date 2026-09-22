@@ -129,10 +129,12 @@ def _configure_proxy_routes(
                 "source": {
                     "type": "custom",
                     "vendor": "custom",
+                    "channel": "default",
                     "protocol": PROVIDER_PROTOCOL[protocol],
                     "base_url": f"http://127.0.0.1:{port}{suffix}",
                 },
                 "credential": {"type": "api_key", "value": "replay"},
+                "vendor_options": {},
             },
             headers=admin_headers,
         )
@@ -325,7 +327,7 @@ def stravia_proxy_base(
     base = f"http://127.0.0.1:{server_port}"
     admin_base = base
     try:
-        wait_until_ready(f"{admin_base}/api/v1/auth/state", timeout=30.0)
+        wait_until_ready(f"{admin_base}/api/v1/auth/state")
         setup_token = wait_for_setup_token(logs, proc)
         session = initialize_server(
             admin_base,
@@ -342,7 +344,7 @@ def stravia_proxy_base(
             headers=session.auth_headers(),
         )
         assert status == 200, f"enable replay Debug capture failed: {status} {body}"
-        wait_until_ready(f"{base}/v1/chat/completions", timeout=30.0)
+        wait_until_ready(f"{base}/v1/chat/completions")
         yield {
             "base": base,
             "api_key": api_key,

@@ -1,0 +1,22 @@
+[package]
+name = "stravia-vendor-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared request, response, error, URL, and thinking utilities for Stravia vendor guests"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+stravia-protocol-codec = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+http = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }

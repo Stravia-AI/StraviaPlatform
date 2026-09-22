@@ -4,6 +4,7 @@ use super::*;
 enum MidStreamFailure {
     Transport,
     Protocol,
+    Quota,
 }
 
 struct MidStreamFailureExecutor {
@@ -31,13 +32,21 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
                 "protocol_lossy_rejected",
                 "private provider payload could not be normalized",
             ),
+            MidStreamFailure::Quota => {
+                let mut error = ModelTurnError::new(
+                    "upstream_stream_error",
+                    "private upstream quota diagnostic",
+                );
+                error.upstream_status = Some(529);
+                error
+            }
         };
         let request = input.request;
         let route = stravia_runtime_contract::hook::RouteContext {
             model_id: request.model.clone(),
             provider_id: "mid-stream-provider".into(),
             target_id: "mid-stream-target".into(),
-            egress: OPEN_RESPONSES_2026_04_24,
+            egress: Some(OPEN_RESPONSES_2026_04_24),
         };
         let mut turn = crate::model_turn::ModelTurn::in_memory(
             route,
@@ -82,7 +91,7 @@ impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
                 model_id: input.request.model.clone(),
                 provider_id: "completed-provider".into(),
                 target_id: "completed-target".into(),
-                egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
             },
             input.request,
             [
@@ -124,6 +133,11 @@ async fn mid_stream_failures_preserve_public_retry_classification() {
             MidStreamFailure::Protocol,
             "invalid_request",
             "private provider payload could not be normalized",
+        ),
+        (
+            MidStreamFailure::Quota,
+            "quota_exceeded",
+            "private upstream quota diagnostic",
         ),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -396,7 +410,7 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         &gateway,
         "failing-live-protected-reasoning",
         &[upstream_url],
-        "test-http",
+        "protocol-open-responses",
         "open-responses",
     )
     .await;
@@ -447,12 +461,12 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
         &gateway,
         "late-encrypted-summary",
         &[upstream_url],
-        "test-http",
+        "protocol-open-responses",
         "open-responses",
     )
     .await;
 
-    let request = crate::protocol::transform::ProtocolTransform::global()
+    let request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("Open Responses pair")
         .decode_request(serde_json::json!({
@@ -912,18 +926,12 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .build()
     .await
     .expect("collected gateway init");
-    configure_route_with_vendor(
-        &gateway,
-        "normalizing-unary",
-        &[unary_url],
-        "normalizing-test",
-    )
-    .await;
+    configure_route(&gateway, "normalizing-unary", &[unary_url]).await;
     configure_route_with_protocol(
         &gateway,
         "normalizing-forced-stream",
         &[forced_stream_url],
-        "normalizing-test",
+        "custom",
         "open-responses",
     )
     .await;
@@ -939,13 +947,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .build()
     .await
     .expect("live gateway init");
-    configure_route_with_vendor(
-        &live_gateway,
-        "normalizing-live-stream",
-        &[live_stream_url],
-        "normalizing-test",
-    )
-    .await;
+    configure_route(&live_gateway, "normalizing-live-stream", &[live_stream_url]).await;
 
     let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _) = ExposeOrderedToolHook::counting();
@@ -961,11 +963,10 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .build()
     .await
     .expect("buffered gateway init");
-    configure_route_with_vendor(
+    configure_route(
         &buffered_gateway,
         "normalizing-buffered-stream",
         &[buffered_stream_url],
-        "normalizing-test",
     )
     .await;
 
@@ -979,7 +980,6 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     )
     .await;
     let live_stream = execute_stream(live_gateway, "normalizing-live-stream").await;
-    let buffered_stream = execute_stream(buffered_gateway, "normalizing-buffered-stream").await;
 
     let mut live_chunks = live_stream.into_body().into_data_stream();
     let live_prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -991,7 +991,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
                 .expect("live stream ended before content")
                 .expect("live stream chunk");
             prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 live stream prefix"));
-            if prefix.contains("normalized:original") {
+            if prefix.contains("original") {
                 break prefix;
             }
         }
@@ -1013,6 +1013,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
         "{live_prefix}{}",
         String::from_utf8(live_suffix.to_vec()).expect("UTF-8 live stream suffix")
     );
+    let buffered_stream = execute_stream(buffered_gateway, "normalizing-buffered-stream").await;
 
     let bodies = [
         (
@@ -1039,7 +1040,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
             "rewritten",
             false,
         ),
-        ("live-stream", live_body, "normalized:original", true),
+        ("live-stream", live_body, "original", true),
         (
             "buffered-platform-stream",
             String::from_utf8(
@@ -1067,10 +1068,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     }
     let observed_live_responses = observed_live_responses.lock();
     assert_eq!(observed_live_responses.len(), 1);
-    assert_eq!(
-        observed_live_responses[0].output_text(),
-        "normalized:original"
-    );
+    assert_eq!(observed_live_responses[0].output_text(), "original");
     assert_eq!(
         observed_live_responses[0].stop_reason.as_deref(),
         Some("stop")
@@ -1327,16 +1325,11 @@ async fn dropping_unpolled_live_body_closes_provider_leg() {
 
 #[tokio::test]
 async fn run_deadline_cancels_forced_stream_collection() {
-    let first_event = format!(
-        "event: response.output_text.delta\ndata: {}\n\n",
-        serde_json::json!({
-            "type": "response.output_text.delta",
-            "item_id": "msg-1",
-            "output_index": 0,
-            "content_index": 0,
-            "delta": "before deadline"
-        })
-    );
+    let complete_stream = openai_responses_sse("before deadline");
+    let terminal_offset = complete_stream
+        .find("event: response.content_part.done")
+        .expect("Open Responses fixture has post-delta events");
+    let first_event = complete_stream[..terminal_offset].to_owned();
     let (base_url, provider_calls) = serve_stalling_sse_with_event(first_event).await;
     let config = crate::config::GatewayConfig {
         data_dir: std::env::temp_dir().join(format!(

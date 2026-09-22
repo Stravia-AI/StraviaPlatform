@@ -103,7 +103,7 @@ pub struct RouteContext {
     pub model_id: String,
     pub provider_id: String,
     pub target_id: String,
-    pub egress: ProtocolId,
+    pub egress: Option<ProtocolId>,
 }
 pub enum HookEvent<'a> {
     Request {

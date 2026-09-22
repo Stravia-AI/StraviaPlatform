@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use stravia_core::Gateway;
-use stravia_core::admin::CopyProviderOptions;
+use stravia_core::admin::{CopyProviderOptions, ProviderConfigurationPreviewInput};
 use stravia_core::config::GatewayConfig;
 use stravia_core::db::models::*;
 use stravia_core::provider_catalog::{
@@ -14,7 +14,7 @@ use stravia_core::provider_models::{
     ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
     UpdateProviderModel, UpdateProviderModelSelection,
 };
-use stravia_core::storage::Storage as _;
+use stravia_core::storage::{MemoryStorage, Storage as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::{Duration, timeout};
@@ -71,7 +71,7 @@ impl CatalogSource for TestCatalogSource {
 #[tokio::test]
 async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
-    let catalog = gw.provider_catalog.providers().await;
+    let catalog = gw.admin().catalog_choices().await;
     let openai = catalog
         .providers
         .iter()
@@ -94,17 +94,20 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
                 base_url_override: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await?;
 
     assert_eq!(provider.name, "OpenAI");
     assert_eq!(provider.vendor.as_deref(), Some("openai"));
-    assert_eq!(provider.protocol, "open-responses");
+    assert_eq!(provider.protocol, "openai-compatible");
     assert_eq!(provider.base_url, "https://api.openai.com/v1");
     assert_eq!(provider.preset_key.as_deref(), Some("openai"));
     assert_eq!(provider.channel.as_deref(), Some("default"));
     assert_eq!(provider.models_source.as_deref(), Some("catalog"));
+    assert!(provider.api_key.is_empty());
+    assert_eq!(provider.adapter_credentials, "{}");
 
     let stale = gw
         .admin()
@@ -117,6 +120,7 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
                 base_url_override: None,
             },
             credential: ProviderCredentialInput::None,
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -127,7 +131,7 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
 }
 
 #[tokio::test]
-async fn catalog_provider_creation_uses_npm_vendor_and_assembled_azure_url() -> anyhow::Result<()> {
+async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
     let groq = gw
         .admin()
@@ -137,60 +141,118 @@ async fn catalog_provider_creation_uses_npm_vendor_and_assembled_azure_url() -> 
     assert_eq!(groq.preset_key.as_deref(), Some("groq"));
     assert_eq!(groq.base_url, "https://api.groq.com/openai/v1");
 
-    let catalog = gw.provider_catalog.providers().await;
-    let azure = catalog
+    let catalog = gw.admin().catalog_choices().await;
+    let azure_choice = catalog
         .providers
         .iter()
         .find(|provider| provider.id == "azure-cognitive-services")
         .expect("built-in Catalog must contain Azure Cognitive Services");
-    let channel = azure
+    let azure_channel = azure_choice
         .channels
         .iter()
         .find(|channel| channel.id == "default")
         .expect("Azure must expose its default channel");
+    let azure_options = std::collections::BTreeMap::from([(
+        "resourceName".to_string(),
+        serde_json::Value::String("MyRes".to_string()),
+    )]);
+    let azure_credentials = std::collections::BTreeMap::from([(
+        "apiKey".to_string(),
+        serde_json::Value::String("k".to_string()),
+    )]);
+    let azure_preview = gw
+        .admin()
+        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+            provider_id: None,
+            vendor_id: azure_choice.id.clone(),
+            channel: azure_channel.id.clone(),
+            base_url: String::new(),
+            options: azure_options.clone(),
+            credentials: azure_credentials.clone(),
+        })
+        .await?;
+    assert!(azure_preview.issues.is_empty());
+    assert_eq!(
+        azure_preview.base_url,
+        "https://myres.openai.azure.com/openai/v1"
+    );
+
     let azure = gw
         .admin()
         .create_provider(CreateProvider {
             name: Some("Azure catalog".to_string()),
             source: ProviderSourceInput::Catalog {
-                provider_id: azure.id.clone(),
-                channel_id: channel.id.clone(),
-                fingerprint: channel.fingerprint.clone(),
-                base_url_override: None,
+                provider_id: azure_choice.id.clone(),
+                channel_id: azure_channel.id.clone(),
+                fingerprint: azure_channel.fingerprint.clone(),
+                base_url_override: Some(azure_preview.base_url.clone()),
             },
             credential: ProviderCredentialInput::Fields {
-                values: std::collections::BTreeMap::from([
-                    ("resourceName".to_string(), "MyRes".to_string()),
-                    ("apiKey".to_string(), "k".to_string()),
-                ]),
+                values: azure_credentials,
             },
+            vendor_options: azure_options.into_iter().collect(),
             use_proxy: false,
         })
         .await?;
-    assert_eq!(azure.vendor.as_deref(), Some("azure"));
-    assert_eq!(azure.base_url, "https://myres.openai.azure.com/openai/v1");
-    assert_eq!(azure.api_key, "k");
+    assert_eq!(azure.vendor.as_deref(), Some("azure-cognitive-services"));
+    assert_eq!(azure.base_url, azure_preview.base_url);
     assert_eq!(
-        azure.adapter_credentials,
-        r#"{"apiKey":"k","resourceName":"MyRes"}"#
+        gw.admin()
+            .configured_provider_credential_fields(&azure)
+            .await?,
+        vec!["apiKey".to_string()]
     );
+
     let azure = gw
         .admin()
         .update_provider(
             &azure.id,
             UpdateProvider {
-                base_url: Some(azure.base_url),
-                adapter_credentials: Some(std::collections::BTreeMap::from([
-                    ("resourceName".to_string(), "next-resource".to_string()),
-                    ("apiKey".to_string(), "next-key".to_string()),
-                ])),
+                vendor_options: Some(
+                    [("resourceName".to_string(), "next-resource".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                adapter_credentials: Some(std::collections::BTreeMap::from([(
+                    "apiKey".to_string(),
+                    "next-key".into(),
+                )])),
                 ..UpdateProvider::default()
             },
         )
         .await?;
-    assert_eq!(
-        azure.base_url,
-        "https://next-resource.openai.azure.com/openai/v1"
+    assert_eq!(azure.base_url, "https://myres.openai.azure.com/openai/v1");
+    let updated_options: serde_json::Value = serde_json::from_str(&azure.vendor_options)?;
+    assert_eq!(updated_options["resourceName"], "next-resource");
+    let retained_preview = gw
+        .admin()
+        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+            provider_id: Some(azure.id.clone()),
+            vendor_id: "azure-cognitive-services".to_string(),
+            channel: "default".to_string(),
+            base_url: azure.base_url.clone(),
+            options: std::collections::BTreeMap::from([(
+                "resourceName".to_string(),
+                "next-resource".into(),
+            )]),
+            credentials: Default::default(),
+        })
+        .await?;
+    assert_eq!(retained_preview.base_url, azure.base_url);
+    assert!(
+        retained_preview
+            .network_permissions
+            .iter()
+            .any(|permission| {
+                permission.connection_scoped
+                    && permission.origin == "https://myres.openai.azure.com"
+            })
+    );
+    assert!(
+        retained_preview
+            .network_permissions
+            .iter()
+            .all(|permission| !permission.origin.contains("next-resource"))
     );
 
     let azure = gw
@@ -199,10 +261,11 @@ async fn catalog_provider_creation_uses_npm_vendor_and_assembled_azure_url() -> 
             &azure.id,
             UpdateProvider {
                 base_url: Some("https://azure-proxy.example.test/openai/v1".to_string()),
-                adapter_credentials: Some(std::collections::BTreeMap::from([
-                    ("resourceName".to_string(), "ignored-resource".to_string()),
-                    ("apiKey".to_string(), "latest-key".to_string()),
-                ])),
+                vendor_options: Some(
+                    [("resourceName".to_string(), "ignored-resource".into())]
+                        .into_iter()
+                        .collect(),
+                ),
                 ..UpdateProvider::default()
             },
         )
@@ -213,80 +276,147 @@ async fn catalog_provider_creation_uses_npm_vendor_and_assembled_azure_url() -> 
         .update_provider(
             &azure.id,
             UpdateProvider {
-                adapter_credentials: Some(std::collections::BTreeMap::from([
-                    ("resourceName".to_string(), "still-ignored".to_string()),
-                    ("apiKey".to_string(), "final-key".to_string()),
-                ])),
+                vendor_options: Some(
+                    [("resourceName".to_string(), "still-ignored".into())]
+                        .into_iter()
+                        .collect(),
+                ),
                 ..UpdateProvider::default()
             },
         )
         .await?;
     assert_eq!(azure.base_url, "https://azure-proxy.example.test/openai/v1");
 
-    let sap = catalog
+    let sap_choice = catalog
         .providers
         .iter()
         .find(|provider| provider.id == "sap-ai-core")
         .expect("built-in Catalog must contain SAP AI Core");
-    let channel = sap
+    let sap_channel = sap_choice
         .channels
         .iter()
         .find(|channel| channel.id == "default")
         .expect("SAP AI Core must expose its default channel");
+    let sap_options = std::collections::BTreeMap::from([
+        (
+            "deploymentUrl".to_string(),
+            "https://deployment.example.test/".into(),
+        ),
+        (
+            "tokenUrl".to_string(),
+            "https://auth.example.test/oauth/token".into(),
+        ),
+        ("resourceGroup".to_string(), "production".into()),
+    ]);
+    let sap_credentials = std::collections::BTreeMap::from([
+        ("clientId".to_string(), "client-id".into()),
+        ("clientSecret".to_string(), "client-secret".into()),
+    ]);
+    let sap_preview = gw
+        .admin()
+        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+            provider_id: None,
+            vendor_id: sap_choice.id.clone(),
+            channel: sap_channel.id.clone(),
+            base_url: String::new(),
+            options: sap_options.clone(),
+            credentials: sap_credentials.clone(),
+        })
+        .await?;
+    assert!(sap_preview.issues.is_empty());
+    assert_eq!(sap_preview.base_url, "https://deployment.example.test");
+    assert!(sap_preview.network_permissions.iter().any(|permission| {
+        permission.configuration_field.as_deref() == Some("tokenUrl")
+            && permission.origin == "https://auth.example.test"
+    }));
+
     let sap = gw
         .admin()
         .create_provider(CreateProvider {
             name: Some("SAP AI Core catalog".to_string()),
             source: ProviderSourceInput::Catalog {
-                provider_id: sap.id.clone(),
-                channel_id: channel.id.clone(),
-                fingerprint: channel.fingerprint.clone(),
-                base_url_override: None,
+                provider_id: sap_choice.id.clone(),
+                channel_id: sap_channel.id.clone(),
+                fingerprint: sap_channel.fingerprint.clone(),
+                base_url_override: Some(sap_preview.base_url),
             },
             credential: ProviderCredentialInput::Fields {
-                values: std::collections::BTreeMap::from([
-                    (
-                        "deploymentUrl".to_string(),
-                        "https://deployment.example.test".to_string(),
-                    ),
-                    (
-                        "tokenUrl".to_string(),
-                        "https://auth.example.test/oauth/token".to_string(),
-                    ),
-                    ("clientId".to_string(), "client-id".to_string()),
-                    ("clientSecret".to_string(), "client-secret".to_string()),
-                    ("resourceGroup".to_string(), "production".to_string()),
-                ]),
+                values: sap_credentials,
             },
+            vendor_options: sap_options.into_iter().collect(),
             use_proxy: false,
         })
         .await?;
     assert_eq!(sap.vendor.as_deref(), Some("sap-ai-core"));
     assert_eq!(sap.base_url, "https://deployment.example.test");
-    assert_eq!(sap.api_key, "");
+    let sap_options: serde_json::Value = serde_json::from_str(&sap.vendor_options)?;
+    assert_eq!(sap_options["resourceGroup"], "production");
     assert_eq!(
-        sap.adapter_credentials,
-        r#"{"clientId":"client-id","clientSecret":"client-secret","deploymentUrl":"https://deployment.example.test","resourceGroup":"production","tokenUrl":"https://auth.example.test/oauth/token"}"#
+        gw.admin()
+            .configured_provider_credential_fields(&sap)
+            .await?,
+        vec!["clientId".to_string(), "clientSecret".to_string()]
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn provider_base_url_preview_matches_vendor_assembly() -> anyhow::Result<()> {
+async fn provider_configuration_preview_uses_real_cloudflare_validation() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
-    let preview = gw.admin().preview_provider_base_url(
-        "cloudflare-ai-gateway",
-        std::collections::BTreeMap::from([
-            ("accountId".to_string(), "account_1".to_string()),
-            ("gatewayId".to_string(), "gateway_1".to_string()),
-        ]),
-        None,
-    )?;
+    let missing_fields = gw
+        .admin()
+        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+            provider_id: None,
+            vendor_id: "cloudflare-ai-gateway".into(),
+            channel: "default".into(),
+            base_url: String::new(),
+            options: Default::default(),
+            credentials: std::collections::BTreeMap::from([(
+                "apiToken".into(),
+                "test-token".into(),
+            )]),
+        })
+        .await?;
+    for field in ["accountId", "gatewayId"] {
+        assert!(
+            missing_fields
+                .issues
+                .iter()
+                .any(|issue| issue.field.as_deref() == Some(field))
+        );
+    }
+    assert!(
+        missing_fields
+            .network_permissions
+            .iter()
+            .all(|permission| !permission.connection_scoped)
+    );
+    let preview = gw
+        .admin()
+        .preview_provider_configuration(ProviderConfigurationPreviewInput {
+            provider_id: None,
+            vendor_id: "cloudflare-ai-gateway".to_string(),
+            channel: "default".to_string(),
+            base_url: String::new(),
+            options: std::collections::BTreeMap::from([
+                ("accountId".to_string(), "account_1".into()),
+                ("gatewayId".to_string(), "gateway_1".into()),
+            ]),
+            credentials: std::collections::BTreeMap::from([(
+                "apiToken".to_string(),
+                "test-token".into(),
+            )]),
+        })
+        .await?;
 
+    assert!(preview.issues.is_empty());
     assert_eq!(
-        preview,
+        preview.base_url,
         "https://gateway.ai.cloudflare.com/v1/account_1/gateway_1/compat"
     );
+    assert!(preview.network_permissions.iter().any(|permission| {
+        permission.connection_scoped && permission.origin == "https://gateway.ai.cloudflare.com"
+    }));
     Ok(())
 }
 
@@ -514,7 +644,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
-            target_model: "private/model".to_string(),
+            target_model: Some("private/model".to_string()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -571,7 +701,7 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
             models_source: Some(format!("http://{address}/models")),
             static_models: None,
             api_key: "sk-test".to_string(),
-            adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
@@ -631,7 +761,7 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
             protocol: "openai-compatible".to_string(),
             base_url: format!("http://{address}/v1"),
             preset_key: None,
-            channel: None,
+            channel: Some("default".to_string()),
             models_source: Some(format!("http://{address}/v1/models")),
             static_models: None,
             api_key: "sk-test".to_string(),
@@ -723,7 +853,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             protocol: "openai-compatible".to_string(),
             base_url: format!("http://{address}/v1"),
             preset_key: None,
-            channel: None,
+            channel: Some("default".to_string()),
             models_source: Some(format!("http://{address}/v1/models")),
             static_models: None,
             api_key: "sk-test".to_string(),
@@ -834,6 +964,62 @@ async fn copy_provider_creates_disabled_provider_with_copy_suffix() -> anyhow::R
 }
 
 #[tokio::test]
+async fn upgraded_cloud_provider_can_be_edited_and_copied_with_separated_fields()
+-> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let original = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "upgraded-azure".into(),
+            vendor: Some("azure".into()),
+            protocol: "openai-compatible".into(),
+            base_url: "https://legacy-resource.openai.azure.com/openai/v1".into(),
+            preset_key: Some("azure".into()),
+            channel: Some("default".into()),
+            models_source: Some("catalog".into()),
+            static_models: None,
+            api_key: "fixture-secret".into(),
+            adapter_credentials: r#"{"apiKey":"fixture-secret"}"#.into(),
+            vendor_options:
+                r#"{"apiVersion":"2025-04-01-preview","resourceName":"legacy-resource"}"#.into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+        })
+        .await?;
+
+    let updated = gw
+        .admin()
+        .update_provider(
+            &original.id,
+            UpdateProvider {
+                name: Some("edited-upgraded-azure".into()),
+                ..UpdateProvider::default()
+            },
+        )
+        .await?;
+    let copied = gw.admin().copy_provider(&updated.id).await?;
+
+    assert_eq!(updated.name, "edited-upgraded-azure");
+    assert_eq!(copied.name, "edited-upgraded-azure_Copy");
+    assert!(!copied.is_enabled);
+    for provider in [&updated, &copied] {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&provider.adapter_credentials)?,
+            serde_json::json!({"apiKey": "fixture-secret"})
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&provider.vendor_options)?,
+            serde_json::json!({
+                "apiVersion": "2025-04-01-preview",
+                "resourceName": "legacy-resource"
+            })
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_update_keeps_the_selected_option_immutable() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
     let provider = gw
@@ -915,11 +1101,11 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets: vec![
                 CreateTarget {
                     provider_id: original.id.clone(),
-                    model: "source-upstream-model".to_string(),
+                    model: Some("source-upstream-model".to_string()),
                     enabled: true,
                     priority: Some(100_000),
                     first_token_timeout_ms: None,
@@ -929,7 +1115,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                 },
                 CreateTarget {
                     provider_id: fallback.id.clone(),
-                    model: "fallback-upstream-model".to_string(),
+                    model: Some("fallback-upstream-model".to_string()),
                     enabled: true,
                     priority: Some(0),
                     first_token_timeout_ms: None,
@@ -977,21 +1163,24 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
     assert_eq!(updated_model.model_id, "source-model");
     assert_eq!(updated_model.balance, "traffic_equalization");
     assert_eq!(updated_model.target_provider, original.id);
-    assert_eq!(updated_model.target_model, "source-upstream-model");
+    assert_eq!(
+        updated_model.target_model.as_deref(),
+        Some("source-upstream-model")
+    );
     assert_eq!(updated_model.targets.len(), 3);
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == original.id
-            && target.model == "source-upstream-model"
+            && target.model.as_deref() == Some("source-upstream-model")
             && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == copied.id
-            && target.model == "source-upstream-model"
+            && target.model.as_deref() == Some("source-upstream-model")
             && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == fallback.id
-            && target.model == "fallback-upstream-model"
+            && target.model.as_deref() == Some("fallback-upstream-model")
             && target.priority == 0
     }));
 
@@ -1013,7 +1202,7 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
             display_name: None,
             balance: None,
             target_provider: original.id.clone(),
-            target_model: "source-upstream-model".to_string(),
+            target_model: Some("source-upstream-model".to_string()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -1112,7 +1301,7 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
             models_source: Some("catalog".to_string()),
             static_models: None,
             api_key: "sk-test".to_string(),
-            adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
@@ -1136,46 +1325,16 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
     Ok(())
 }
 
-#[tokio::test]
-async fn catalog_capabilities_use_the_catalog_scope_not_vendor_channel() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
-    let provider = gw
-        .storage
-        .providers()
-        .create(CreateProviderRecord {
-            name: "vertex-catalog-capabilities".to_string(),
-            vendor: Some("google-vertex".to_string()),
-            protocol: "google-gemini".to_string(),
-            base_url: "https://aiplatform.googleapis.com".to_string(),
-            preset_key: Some("vertexai".to_string()),
-            channel: Some("native".to_string()),
-            models_source: None,
-            static_models: None,
-            api_key: "{}".to_string(),
-            adapter_credentials: r#"{"credentials":"{}"}"#.to_string(),
-            vendor_options: "{}".into(),
-            auth_mode: "apikey".to_string(),
-            use_proxy: false,
-        })
-        .await?;
-
-    let capabilities = gw
-        .admin()
-        .get_model_capabilities(&provider.id, "gpt-5.4")
-        .await?;
-
-    assert_eq!(capabilities.provider, "google");
-    assert_eq!(capabilities.model_id, "gpt-5.4");
-    assert_eq!(capabilities.context_window, 272_000);
-    Ok(())
-}
-
 async fn build_gateway() -> anyhow::Result<Gateway> {
     let config = GatewayConfig {
         data_dir: test_data_dir(),
         ..Default::default()
     };
-    let mut gw = Gateway::new(config).await?;
+    let mut gw = Gateway::from_storage(
+        config,
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await?;
     gw.provider_catalog =
         ProviderCatalog::with_source(&gw.config.data_dir, Arc::new(TestCatalogSource))?;
     Ok(gw)
@@ -1227,7 +1386,7 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
-            target_model: "gpt-4".to_string(),
+            target_model: Some("gpt-4".to_string()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -1264,7 +1423,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
-            target_model: "gpt-4".to_string(),
+            target_model: Some("gpt-4".to_string()),
             targets: vec![],
             default_thinking_level: None,
         })
@@ -1324,7 +1483,11 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
 
 #[tokio::test]
 async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let gw = Gateway::new(GatewayConfig {
+        data_dir: test_data_dir(),
+        ..Default::default()
+    })
+    .await?;
     let health = gw.storage.bootstrap().health().await?;
     assert!(
         health.can_connect,
@@ -1368,7 +1531,7 @@ fn test_data_dir() -> PathBuf {
 fn oauth_provider_record() -> CreateProviderRecord {
     CreateProviderRecord {
         name: format!("oauth-provider-{}", Uuid::new_v4()),
-        vendor: Some("openai".to_string()),
+        vendor: Some("openai-codex".to_string()),
         protocol: "open-responses".to_string(),
         base_url: CODEX_RUNTIME_URL.to_string(),
         preset_key: Some("openai".to_string()),
@@ -1387,8 +1550,9 @@ fn api_key_provider_input(name: &str) -> CreateProvider {
     CreateProvider {
         name: Some(name.to_string()),
         source: ProviderSourceInput::Custom {
-            vendor: Some("openai".to_string()),
-            protocol: "openai-compatible".to_string(),
+            vendor: "openai".to_string(),
+            channel: "default".to_string(),
+            protocol: Some("openai-compatible".to_string()),
             base_url: "https://api.openai.com/v1".to_string(),
             models_source: Some("https://api.openai.com/v1/models".to_string()),
             static_models: Some("gpt-test\ntext-test".to_string()),
@@ -1396,6 +1560,7 @@ fn api_key_provider_input(name: &str) -> CreateProvider {
         credential: ProviderCredentialInput::ApiKey {
             value: "sk-test".to_string(),
         },
+        vendor_options: Default::default(),
         use_proxy: true,
     }
 }
@@ -1409,7 +1574,7 @@ async fn catalog_provider_input_for(
     name: &str,
     provider_id: &str,
 ) -> anyhow::Result<CreateProvider> {
-    let catalog = gw.provider_catalog.providers().await;
+    let catalog = gw.admin().catalog_choices().await;
     let provider = catalog
         .providers
         .iter()
@@ -1431,6 +1596,7 @@ async fn catalog_provider_input_for(
         credential: ProviderCredentialInput::ApiKey {
             value: "sk-test".to_string(),
         },
+        vendor_options: Default::default(),
         use_proxy: true,
     })
 }
@@ -1446,7 +1612,7 @@ async fn seed_oauth_credential(
         .upsert(
             provider_id,
             UpsertOAuthCredential {
-                driver_key: "codex".to_string(),
+                driver_key: "openai-codex".to_string(),
                 scheme: "oauth_auth_code_pkce".to_string(),
                 access_token: access_token.to_string(),
                 refresh_token: Some(refresh_token.to_string()),

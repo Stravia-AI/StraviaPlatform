@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
+members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
 # 与 dev:server 保持相同的依赖特性图，避免裸 build 先构建桌面特性并集。
 default-members = ["backend/apps/stravia-server"]
 
@@ -13,6 +13,15 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 stravia-core = { path = "backend/crates/stravia-core" }
 stravia-runtime-contract = { path = "backend/crates/stravia-runtime-contract" }
+stravia-protocol-codec = { path = "backend/crates/stravia-protocol-codec" }
+stravia-vendor-sdk = { path = "backend/crates/stravia-vendor-sdk" }
+stravia-vendor-runtime = { path = "backend/crates/stravia-vendor-runtime" }
+stravia-vendor-common = { path = "backend/crates/stravia-vendor-common" }
+stravia-vendor-base = { path = "backend/crates/stravia-vendor-base" }
+stravia-vendor-codex = { path = "backend/crates/stravia-vendor-codex" }
+stravia-vendor-grok = { path = "backend/crates/stravia-vendor-grok" }
+stravia-vendor-command-code = { path = "backend/crates/stravia-vendor-command-code" }
+stravia-vendor-devin = { path = "backend/crates/stravia-vendor-devin" }
 stravia-media = { path = "backend/crates/stravia-media" }
 stravia-web-search = { path = "backend/crates/stravia-web-search" }
 stravia-credential-protection = { path = "backend/crates/stravia-credential-protection" }
@@ -25,11 +34,14 @@ axum = { version = "0.8", default-features = false }
 rmcp = { version = "=3.1.4", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 reqwest-websocket = "0.6"
+tungstenite = { version = "0.28", default-features = false }
 tower-http = { version = "0.6.11", features = ["cors", "trace"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
+wasmtime = { version = "=48.0.0", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation"] }
+wasmtime-wasi = { version = "=48.0.0", default-features = false, features = ["p2"] }
 serde-saphyr = "1"
 json5 = "1"
 async-trait = "0.1"
@@ -47,13 +59,14 @@ futures = { version = "0.3", default-features = false, features = ["async-await"
 http-body-util = "0.1"
 htmd = "0.5"
 bytes = "1"
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 dirs = "6"
 dom_smoothie = "0.18"
 base64 = "0.23"
 rand = "0.10"
 sha2 = "0.11"
 argon2 = { version = "0.6", features = ["getrandom"] }
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", default-features = false }
 rpassword = "7.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 office_oxide = "0.1.11"
@@ -61,7 +74,6 @@ cfb = "0.7"
 zip = { version = "8.6", default-features = false }
 dashmap = "6"
 inventory = "0.3"
-gcp_auth = "0.12.7"
 aws-credential-types = "1.3.0"
 aws-sigv4 = "1.5.1"
 maud = "0.27.0"

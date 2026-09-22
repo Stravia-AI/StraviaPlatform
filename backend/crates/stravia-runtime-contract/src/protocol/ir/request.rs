@@ -922,13 +922,13 @@ pub struct SafetySettings {
 
 // ── Request metadata ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaRoutingMode {
     Native,
     Bridge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRoutingPlan {
     pub mode: MediaRoutingMode,
     pub target_keys: Vec<String>,
@@ -948,18 +948,18 @@ where
         .serialize(serializer)
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestMetadata {
     /// The protocol the client spoke.
     #[serde(serialize_with = "serialize_optional_protocol")]
     pub source_protocol: Option<ProtocolId>,
     /// Raw envelope preserved for pass-through / audit, never part of canonical identity.
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub raw: Option<RawEnvelope>,
     /// Three-segment vendor extension bag.
     pub vendor: VendorExtensions,
     pub media_routing: Option<MediaRoutingPlan>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub redaction: crate::redaction::RedactionTrace,
 }
 
@@ -985,7 +985,7 @@ pub struct EmbeddingRequest {
 ///
 /// Fields are annotated with the FIELD_HOMING.md category that they belong to:
 /// `[IR]` = core, `[OAIChat]` = OpenAIChatExt, etc.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiRequest {
     // ── Core ──────────────────────────────────────────────────────────────────
     /// [IR] The model identifier as received from the client.

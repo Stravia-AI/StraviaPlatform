@@ -40,10 +40,6 @@ pub struct SearchProvider {
     pub id: String,
     pub name: String,
     pub is_enabled: bool,
-    pub channel: Option<String>,
-    pub auth_mode: String,
-    pub protocol: String,
-    pub function_calling: bool,
 }
 #[derive(Clone)]
 pub struct SearchModel {
@@ -56,30 +52,43 @@ impl SearchModel {
         self.available
     }
 }
-pub struct CodexTransport {
-    pub client: reqwest::Client,
-    pub access_token: String,
-    pub extra_headers: std::collections::HashMap<String, String>,
-    pub endpoint: String,
+
+/// Opaque host publication lease held across report validation and Turn commit.
+pub struct SearchPublicationGuard {
+    _guard: Box<dyn Send>,
 }
-#[async_trait]
-pub trait CodexSession: Send + Sync {
-    fn provider(&self) -> &SearchProvider;
-    async fn model(&self, model_id: &str) -> Result<Option<SearchModel>, WebSearchError>;
-    async fn transport(&self) -> Result<CodexTransport, WebSearchError>;
+
+impl SearchPublicationGuard {
+    pub fn new(guard: Box<dyn Send>) -> Self {
+        Self { _guard: guard }
+    }
 }
+
+pub struct ExternalSearchExecution {
+    pub response: stravia_vendor_sdk::SearchResponse,
+    pub publication: SearchPublicationGuard,
+    pub provider_id: String,
+    pub upstream_model: Option<String>,
+    pub target_id: String,
+}
+
 #[async_trait]
-pub trait CodexHost: Send + Sync {
-    async fn provider(
+pub trait ExternalSearchHost: Send + Sync {
+    async fn execute_external_search(
         &self,
-        provider_id: &str,
-    ) -> Result<Option<Arc<dyn CodexSession>>, WebSearchError>;
+        principal: &Principal,
+        route_id: &str,
+        request: stravia_vendor_sdk::SearchRequest,
+        cancellation: stravia_runtime_contract::CancellationToken,
+        deadline: std::time::Instant,
+    ) -> Result<ExternalSearchExecution, WebSearchError>;
 }
 
 #[derive(Clone)]
 pub struct SearchRouteTarget {
     pub provider_id: String,
-    pub model: String,
+    pub model: Option<String>,
+    pub enabled: bool,
 }
 #[derive(Clone)]
 pub struct SearchRoute {
@@ -94,15 +103,8 @@ impl SearchRoute {
         &self.display_name
     }
 }
-pub struct SearchCredential {
-    pub connected: bool,
-    pub has_access_token: bool,
-    pub expiry_valid: bool,
-    pub has_refresh_token: bool,
-}
 pub struct SearchSourceProvider {
     pub id: String,
-    pub kind: String,
     pub search: bool,
     pub fetch: bool,
 }
@@ -121,12 +123,11 @@ pub trait SearchAdminHost: Send + Sync {
     async fn models(&self) -> Result<Vec<SearchRoute>, ()>;
     async fn providers(&self) -> Result<Vec<SearchProvider>, ()>;
     async fn provider(&self, id: &str) -> Result<Option<SearchProvider>, ()>;
-    async fn credential(&self, id: &str) -> Result<Option<SearchCredential>, ()>;
-    async fn models_for_provider(&self, id: &str) -> Result<Vec<SearchModel>, ()>;
     async fn provider_model(
         &self,
         provider_id: &str,
         model: &str,
     ) -> Result<Option<SearchModel>, ()>;
+    async fn validate_external_route(&self, route_id: &str) -> Result<(), ()>;
     async fn sources(&self) -> Result<Option<SearchSources>, ()>;
 }

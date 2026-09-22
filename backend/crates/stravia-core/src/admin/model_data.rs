@@ -21,7 +21,7 @@ pub(super) fn normalize_create_route_targets(
     if !input.targets.is_empty() {
         return Ok(input.targets.clone());
     }
-    if !input.target_provider.trim().is_empty() && !input.target_model.trim().is_empty() {
+    if !input.target_provider.trim().is_empty() {
         return Ok(vec![CreateTarget {
             provider_id: input.target_provider.clone(),
             model: input.target_model.clone(),
@@ -65,8 +65,14 @@ pub(super) fn normalize_update_route_targets(
         .target_model
         .clone()
         .unwrap_or_else(|| current.target_model.clone());
-    if provider.trim().is_empty() || model.trim().is_empty() {
-        anyhow::bail!("model backend cannot be empty");
+    if provider.trim().is_empty() {
+        anyhow::bail!("backend provider_id cannot be empty");
+    }
+    if model
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        anyhow::bail!("backend model cannot be empty");
     }
     Ok(vec![CreateTarget {
         provider_id: provider,
@@ -90,11 +96,11 @@ pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::R
     let mut targets = std::collections::BTreeSet::new();
     for backend in backends {
         let provider_id = backend.provider_id.trim();
-        let provider_model_id = backend.model.trim();
+        let provider_model_id = backend.model.as_deref().map(str::trim);
         if provider_id.is_empty() {
             anyhow::bail!("backend provider_id cannot be empty");
         }
-        if provider_model_id.is_empty() {
+        if provider_model_id.is_some_and(str::is_empty) {
             anyhow::bail!("backend model cannot be empty");
         }
         if !targets.insert((provider_id, provider_model_id)) {

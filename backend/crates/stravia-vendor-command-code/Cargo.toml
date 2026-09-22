@@ -1,0 +1,28 @@
+[package]
+name = "stravia-vendor-command-code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Self-contained Wasm guest for the Command Code provider"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+stravia-vendor-common = { workspace = true }
+stravia-protocol-codec = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+semver = { workspace = true }
+http = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
+uuid = { workspace = true }

@@ -35,7 +35,7 @@ mod tests {
             display_name: None,
             balance: "traffic_equalization".into(),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             is_enabled: true,
             created_at: String::new(),
             supported_thinking_levels: sqlx::types::Json(Vec::new()),

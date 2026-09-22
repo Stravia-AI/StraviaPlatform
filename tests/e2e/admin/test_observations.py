@@ -46,10 +46,12 @@ def _create_route(
             "source": {
                 "type": "custom",
                 "vendor": "custom",
+                "channel": "default",
                 "protocol": "openai",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "upstream-secret"},
+            "vendor_options": {},
         },
         headers=env["auth"],
     )
@@ -361,7 +363,11 @@ def test_failed_request_records_stream_error_after_http_success(
         lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
-    assert failure["error"]["message"] == "upstream failed after output"
+    assert "upstream failed after output" in failure["error"]["message"]
+    assert "upstream failed after output" in output
+    for secret in ("wire%2Bsecret", "wire+secret", "stream-wire-token"):
+        assert secret not in output
+        assert secret not in json.dumps(failure)
     detail = _detail(admin_env, failure["interaction_id"])
     assert detail["runs"][0]["status"] == "failed"
     assert detail["runs"][0]["generation_node_id"] is None
@@ -523,7 +529,21 @@ def test_failed_request_excludes_client_disconnect_during_stream(admin_env: dict
     try:
         with urlopen(request, timeout=15) as response:
             assert response.status == 200
-            response.read(1)
+            # 先消费真实内容；仅收到 SSE 注释或元数据就断开时，该 Run 会按契约隐藏。
+            while line := response.readline():
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == b"[DONE]":
+                    pytest.fail("stream completed before the expected partial output")
+                event = json.loads(payload)
+                if any(
+                    "partial" in (choice.get("delta", {}).get("content") or "")
+                    for choice in event.get("choices", [])
+                ):
+                    break
+            else:
+                pytest.fail("stream closed before the expected partial output")
         interaction = _wait_for(
             "cancelled streaming request",
             lambda: next((item for item in _route_interactions(admin_env, route_id) if item["status"] != "running"), None),

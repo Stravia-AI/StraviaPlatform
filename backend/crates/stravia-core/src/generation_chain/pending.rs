@@ -83,7 +83,7 @@ impl PendingGenerationCommits {
             .iter()
             .filter_map(AiItem::id_ref)
             .filter_map(
-                crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id,
+                stravia_protocol_codec::codec::open_responses::formatter::response_id_from_gateway_item_id,
             )
             .collect::<Vec<_>>();
         for pending in pending {

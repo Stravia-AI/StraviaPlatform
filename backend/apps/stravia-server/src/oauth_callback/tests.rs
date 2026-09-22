@@ -1,5 +1,20 @@
+use std::path::Path;
+use std::sync::Arc;
+
 use super::*;
 use axum::body::to_bytes;
+use stravia_core::storage::MemoryStorage;
+
+async fn memory_gateway(data_dir: &Path) -> anyhow::Result<Gateway> {
+    Gateway::from_storage(
+        stravia_core::config::GatewayConfig {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await
+}
 
 #[tokio::test]
 async fn callback_success_copy_uses_only_the_supported_locale_allow_list() -> anyhow::Result<()> {
@@ -47,14 +62,17 @@ async fn callback_success_copy_uses_only_the_supported_locale_allow_list() -> an
     Ok(())
 }
 
-fn fixed_policy(primary: u16, fallback: u16) -> OAuthCallbackPolicy {
-    OAuthCallbackPolicy {
-        bind_host: "127.0.0.1",
-        redirect_host: "localhost",
-        path: "/auth/callback",
-        port: OAuthCallbackPort::Fixed { primary, fallback },
-        manual_redirect_uri: "http://localhost:1457/auth/callback",
-        cancel_path: Some("/cancel"),
+fn fixed_policy(primary: u16, fallback: u16) -> AuthCallback {
+    AuthCallback {
+        bind_host: "127.0.0.1".into(),
+        redirect_host: "localhost".into(),
+        path: "/auth/callback".into(),
+        port: AuthCallbackPort::Fixed {
+            primary,
+            fallback: Some(fallback),
+        },
+        manual_redirect_uri: Some("http://localhost:1457/auth/callback".into()),
+        cancel_path: Some("/cancel".into()),
     }
 }
 
@@ -64,7 +82,8 @@ async fn unused_port() -> io::Result<u16> {
 }
 
 #[tokio::test]
-async fn fixed_callback_reclaims_a_stale_primary_listener_via_cancel() -> anyhow::Result<()> {
+async fn fixed_callback_reclaims_a_stale_primary_listener_via_declared_cancel_path()
+-> anyhow::Result<()> {
     let stale = TcpListener::bind(("127.0.0.1", 0)).await?;
     let primary = stale.local_addr()?.port();
     let fallback = unused_port().await?;
@@ -72,19 +91,78 @@ async fn fixed_callback_reclaims_a_stale_primary_listener_via_cancel() -> anyhow
         let (mut stream, _) = stale.accept().await?;
         let mut request = [0_u8; 128];
         let count = stream.read(&mut request).await?;
-        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /cancel HTTP/1.1"));
+        assert!(
+            String::from_utf8_lossy(&request[..count])
+                .starts_with("GET /oauth/cancel/custom HTTP/1.1")
+        );
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
             .await?;
         Ok::<_, io::Error>(())
     });
+    let mut policy = fixed_policy(primary, fallback);
+    policy.cancel_path = Some("/oauth/cancel/custom".into());
 
-    let binding = bind_callback_listener(fixed_policy(primary, fallback)).await?;
-    cancelled.await??;
+    let binding = bind_callback_listener(policy).await?;
     match binding {
         CallbackBinding::Listening { port, .. } => assert_eq!(port, primary),
         CallbackBinding::ManualFallback { .. } => panic!("primary should be reclaimed"),
     }
+    cancelled.await??;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fixed_callback_does_not_reclaim_primary_after_failed_cancel_response() -> anyhow::Result<()>
+{
+    let primary = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let primary_port = primary.local_addr()?.port();
+    let fallback_port = unused_port().await?;
+    let (release_primary, mut stop_primary) = tokio::sync::oneshot::channel();
+    let rejected_cancel = tokio::spawn(async move {
+        let (mut stream, _) = tokio::select! {
+            accepted = primary.accept() => accepted?,
+            _ = &mut stop_primary => return Ok::<_, io::Error>(()),
+        };
+        let mut request = [0_u8; 128];
+        let count = stream.read(&mut request).await?;
+        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /cancel HTTP/1.1"));
+        stream
+            .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        Ok::<_, io::Error>(())
+    });
+
+    let binding = bind_callback_listener(fixed_policy(primary_port, fallback_port)).await?;
+    let _ = release_primary.send(());
+    match binding {
+        CallbackBinding::Listening { port, .. } => assert_eq!(port, fallback_port),
+        CallbackBinding::ManualFallback { .. } => panic!("available fallback should be used"),
+    }
+    rejected_cancel.await??;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fixed_callback_without_cancel_path_does_not_contact_the_primary_listener()
+-> anyhow::Result<()> {
+    let primary = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let primary_port = primary.local_addr()?.port();
+    let fallback_port = unused_port().await?;
+    let mut policy = fixed_policy(primary_port, fallback_port);
+    policy.cancel_path = None;
+
+    let binding = bind_callback_listener(policy).await?;
+    match binding {
+        CallbackBinding::Listening { port, .. } => assert_eq!(port, fallback_port),
+        CallbackBinding::ManualFallback { .. } => panic!("available fallback should be used"),
+    }
+    assert_eq!(
+        primary.into_std()?.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
 
     Ok(())
 }
@@ -96,14 +174,21 @@ async fn fixed_callback_falls_back_to_manual_when_both_registered_ports_are_busy
     let fallback = TcpListener::bind(("127.0.0.1", 0)).await?;
     let primary_port = primary.local_addr()?.port();
     let fallback_port = fallback.local_addr()?.port();
-    let keep_primary_busy = tokio::spawn(async move {
-        let (mut stream, _) = primary.accept().await?;
+    let (release_primary, mut keep_primary_busy) = tokio::sync::oneshot::channel();
+    let occupied_primary = tokio::spawn(async move {
+        let (mut stream, _) = tokio::select! {
+            accepted = primary.accept() => accepted?,
+            _ = &mut keep_primary_busy => return Ok::<_, io::Error>(()),
+        };
         let mut request = [0_u8; 128];
-        let _ = stream.read(&mut request).await?;
+        let count = stream.read(&mut request).await?;
+        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /cancel HTTP/1.1"));
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await?;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        stream.shutdown().await?;
+        drop(stream);
+        let _ = keep_primary_busy.await;
         Ok::<_, io::Error>(())
     });
 
@@ -114,26 +199,47 @@ async fn fixed_callback_falls_back_to_manual_when_both_registered_ports_are_busy
         }
         CallbackBinding::Listening { .. } => panic!("occupied ports must use manual mode"),
     }
-    keep_primary_busy.abort();
+    let _ = release_primary.send(());
+    occupied_primary.await??;
     Ok(())
 }
 
+fn auth_candidate(vendor_id: &str, channel: &str, base_url: &str) -> AuthSessionCandidate {
+    AuthSessionCandidate {
+        vendor_id: vendor_id.into(),
+        channel: channel.into(),
+        provider_id: None,
+        base_url: base_url.into(),
+        protocol: None,
+        options: Default::default(),
+        credentials: Default::default(),
+        use_proxy: false,
+    }
+}
+
 #[tokio::test]
-async fn newest_session_replaces_an_active_listener_without_overwriting_the_reason()
--> anyhow::Result<()> {
+async fn concurrent_sessions_keep_independent_listener_lifetimes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(stravia_core::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let manager = OAuthCallbackManager::new(gateway.clone());
 
     let first = manager
-        .init_session("claude-code", false, OAuthCallbackMode::Auto, None)
+        .init_session(
+            auth_candidate("anthropic", "claude-code", "https://api.anthropic.com"),
+            OAuthCallbackMode::Auto,
+            None,
+        )
         .await?;
     let second = manager
-        .init_session("codex", false, OAuthCallbackMode::Manual, None)
+        .init_session(
+            auth_candidate(
+                "openai-codex",
+                "codex",
+                "https://chatgpt.com/backend-api/codex",
+            ),
+            OAuthCallbackMode::Manual,
+            None,
+        )
         .await?;
     let first_status = gateway
         .admin()
@@ -146,8 +252,7 @@ async fn newest_session_replaces_an_active_listener_without_overwriting_the_reas
 
     assert!(matches!(
         first_status,
-        stravia_core::auth::AuthSessionStatusData::Error { ref code, .. }
-            if code == "AUTH_SESSION_REPLACED"
+        stravia_core::auth::AuthSessionStatusData::Pending { .. }
     ));
     assert!(matches!(
         second_status,
@@ -161,16 +266,15 @@ async fn newest_session_replaces_an_active_listener_without_overwriting_the_reas
 async fn invalid_callback_keeps_the_listener_and_session_available_for_retry() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(stravia_core::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
+    let gateway = memory_gateway(data_dir.path()).await?;
     let init = gateway
         .admin()
         .init_oauth_session(
-            "codex",
-            false,
+            auth_candidate(
+                "openai-codex",
+                "codex",
+                "https://chatgpt.com/backend-api/codex",
+            ),
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
                 redirect_uri: "http://localhost:1457/auth/callback".to_string(),

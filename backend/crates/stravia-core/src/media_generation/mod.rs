@@ -1,6 +1,5 @@
 pub(crate) mod config;
 mod execution;
-pub(crate) use execution::{AspectRatio, Resolution};
 pub(crate) mod platform;
 
 pub use config::{

@@ -210,7 +210,7 @@ impl Plan {
             .iter()
             .any(|path| from.join(path).exists())
             || (!shared_webview_root
-                && ["cache", "diagnostics", "state"]
+                && ["cache", "diagnostics", "plugins", "state"]
                     .iter()
                     .any(|path| from.join(path).exists()));
         let legacy = [
@@ -291,6 +291,7 @@ impl Plan {
                 ("db", vec!["gateway.db", "gateway.db-wal", "gateway.db-shm"]),
                 ("cache", vec!["catalog"]),
                 ("diagnostics", vec!["observation-debug"]),
+                ("plugins", vec!["artifacts"]),
                 (
                     "state",
                     vec!["desktop-port.json", "web-access", "desktop-webview"],
@@ -1005,6 +1006,11 @@ mod tests {
         args.source_stopped = true;
         let first = args.to.clone();
         run(args).await?;
+        fs::create_dir_all(first.join("plugins/artifacts"))?;
+        fs::write(
+            first.join("plugins/artifacts/component.wasm"),
+            b"installed component",
+        )?;
         let second = temp.path().join("second");
         run(MigrateDataArgs {
             from: first.clone(),
@@ -1023,6 +1029,10 @@ mod tests {
         assert_eq!(
             fs::read(second.join("diagnostics/observation-debug/trace"))?,
             b"trace"
+        );
+        assert_eq!(
+            fs::read(second.join("plugins/artifacts/component.wasm"))?,
+            b"installed component"
         );
         let config: toml::Value = toml::from_str(&fs::read_to_string(second.join("server.toml"))?)?;
         assert!(config["database"].get("path").is_none());

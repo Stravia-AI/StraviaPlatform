@@ -15,7 +15,7 @@ use stravia_runtime_contract::protocol::ir::ProtocolExt;
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
     pub provider_id: String,
-    pub model: String,
+    pub model: Option<String>,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
@@ -431,7 +431,7 @@ impl RouteAttemptPolicy {
             if !target.enabled {
                 continue;
             }
-            let key = target_key(target);
+            let key = persisted_target_key(target);
             // Actively-cooling targets are ineligible. Half-open and probing
             // targets stay candidates: `next_healthy` is the single authority
             // that claims the one probe slot while actually selecting.
@@ -678,17 +678,17 @@ fn order_group<'a>(
             .iter()
             .filter(|target| {
                 snapshots
-                    .get(target_key(target).as_str())
+                    .get(persisted_target_key(target).as_str())
                     .is_some_and(|snapshot| latency_score(snapshot).is_some())
             })
             .count();
         if valid >= 2 {
             group.sort_by(|left, right| {
                 let left_score = snapshots
-                    .get(target_key(left).as_str())
+                    .get(persisted_target_key(left).as_str())
                     .and_then(|snapshot| latency_score(snapshot));
                 let right_score = snapshots
-                    .get(target_key(right).as_str())
+                    .get(persisted_target_key(right).as_str())
                     .and_then(|snapshot| latency_score(snapshot));
                 right_score
                     .partial_cmp(&left_score)
@@ -719,7 +719,11 @@ fn traffic_weights(
 ) -> TrafficWeights {
     let priced = group
         .iter()
-        .filter_map(|target| snapshots.get(target_key(target).as_str()).copied())
+        .filter_map(|target| {
+            snapshots
+                .get(persisted_target_key(target).as_str())
+                .copied()
+        })
         .filter(|snapshot| {
             snapshot.cost_input.is_some_and(|value| value > 0.0) && snapshot.cost_output.is_some()
         })
@@ -761,7 +765,7 @@ fn traffic_score(
     in_flight: &HashMap<String, u64>,
     weights: TrafficWeights,
 ) -> f64 {
-    let key = target_key(target);
+    let key = persisted_target_key(target);
     let (input, output, cache_read, cache_write) = snapshots
         .get(key.as_str())
         .map(|snapshot| {
@@ -838,12 +842,16 @@ pub fn conversation_identity(request: &AiRequest) -> Option<ConversationIdentity
         })
 }
 
-pub fn selected_target_key(target: &SelectedTarget) -> String {
-    format!("{}:{}", target.provider_id, target.model)
+pub(crate) fn target_key(provider_id: &str, model: Option<&str>) -> String {
+    format!("{provider_id}:{}", model.unwrap_or_default())
 }
 
-fn target_key(target: &Target) -> String {
-    format!("{}:{}", target.provider_id, target.model)
+pub fn selected_target_key(target: &SelectedTarget) -> String {
+    target_key(&target.provider_id, target.model.as_deref())
+}
+
+fn persisted_target_key(target: &Target) -> String {
+    target_key(&target.provider_id, target.model.as_deref())
 }
 
 fn to_selected(target: &Target) -> SelectedTarget {
@@ -870,7 +878,7 @@ mod tests {
             id: format!("target-{provider_id}"),
             model_id: "route".into(),
             provider_id: provider_id.into(),
-            model: "model".into(),
+            model: Some("model".into()),
             enabled: true,
             priority,
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
@@ -879,6 +887,16 @@ mod tests {
             created_at: String::new(),
             thinking_level_map: sqlx::types::Json(Vec::new()),
         }
+    }
+
+    #[test]
+    fn target_keys_preserve_model_identity_and_distinguish_provider_only() {
+        assert_eq!(target_key("provider", Some("model")), "provider:model");
+        assert_eq!(target_key("provider", None), "provider:");
+        assert_ne!(
+            target_key("provider", Some("model")),
+            target_key("provider", None)
+        );
     }
 
     fn context(now_ms: u64) -> RouteAttemptContext {

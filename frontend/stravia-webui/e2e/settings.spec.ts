@@ -259,9 +259,11 @@ test('advanced features keep separate media and web search surfaces', async ({ p
       json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] },
     })
   })
-  await page.route('**/api/v1/web-search/codex-providers', async (route) => {
+  await page.route('**/api/v1/web-search/external-routes', async (route) => {
     await route.fulfill({
-      json: { data: [{ id: 'provider-codex', name: 'Codex account', models: [{ id: 'gpt-5' }] }] },
+      json: {
+        data: [{ id: 'route-external', model_id: 'external-search', display_name: 'External search', available: true }],
+      },
     })
   })
   await page.route('**/api/v1/media-understanding', async (route) => {
@@ -298,9 +300,12 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await localTurns.fill('9')
 
   await page.locator('#search-backend').click()
-  await page.getByRole('option', { name: 'Use Codex web search' }).click()
-  await expect(page.getByText('Codex account', { exact: true })).toBeVisible()
-  await expect(page.getByText('Codex model', { exact: true })).toBeVisible()
+  await page.getByRole('option', { name: 'External Route' }).click()
+  await expect(page.getByText('Search Route', { exact: true })).toBeVisible()
+  await expect(page.locator('#search-external-route')).toHaveText('Select a Search Route')
+  await page.locator('#search-external-route').click()
+  await page.getByRole('option', { name: 'External search' }).click()
+  await expect(page.locator('#search-external-route')).toHaveText('External search')
   await expect(page.locator('#web-search-sources')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toHaveCount(0)
 
@@ -561,11 +566,11 @@ test('source save failures preserve selection and drafts before the single searc
   await expect(searchSwitch).toBeDisabled()
 })
 
-test('Codex search activation does not depend on Local sources', async ({ page }) => {
+test('External Route search activation does not depend on Local sources', async ({ page }) => {
   let config = {
     revision: 1,
     enabled: false,
-    backend: { kind: 'codex', provider_id: 'provider-codex', upstream_model: 'gpt-5' },
+    backend: { kind: 'external', route_id: 'external-search' },
     max_turns: 6,
     total_time_seconds: 180,
     updated_at: '2026-09-01T00:00:00Z',
@@ -577,8 +582,12 @@ test('Codex search activation does not depend on Local sources', async ({ page }
     }
     await route.fulfill({ json: { data: config } })
   })
-  await page.route('**/api/v1/web-search/codex-providers', (route) =>
-    route.fulfill({ json: { data: [{ id: 'provider-codex', name: 'Codex account', models: [{ id: 'gpt-5' }] }] } }),
+  await page.route('**/api/v1/web-search/external-routes', (route) =>
+    route.fulfill({
+      json: {
+        data: [{ id: 'route-external', model_id: 'external-search', display_name: 'External search', available: true }],
+      },
+    }),
   )
   await page.route('**/api/v1/web-access/**', (route) =>
     route.fulfill({ status: 503, json: { error: 'Fixture Local sources unavailable' } }),

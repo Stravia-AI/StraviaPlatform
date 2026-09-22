@@ -4,22 +4,21 @@ import type { ThinkingLevelMapping } from './route'
 export interface Provider {
   id: string
   name: string
+  /** Supplier profile type ID (for example, `openai-codex`), not a plugin package ID. */
   vendor?: string | null
   protocol: string
   base_url: string
-  api_key?: string
   use_proxy: boolean
-  auth_mode?: 'apikey' | 'oauth'
   oauth_status?: ProviderOAuthStatus
   oauth_expires_at?: string | null
   oauth_last_error?: string | null
   oauth_updated_at?: string | null
   preset_key?: string | null
   channel?: string | null
-  models_source?: string | null
-  static_models?: string | null
-  /** Non-secret vendor behavior options (e.g. command-code zdr). */
+  /** Non-secret values declared by the installed Vendor plugin. */
   vendor_options?: Record<string, unknown>
+  /** Descriptor-declared secret keys that have saved values; values are never returned. */
+  configured_credential_fields?: string[]
   is_enabled: boolean
   created_at: string
   updated_at: string
@@ -51,46 +50,6 @@ export interface ModelCapabilities {
   reasoning: boolean
   input_modalities: string[]
   output_modalities: string[]
-}
-
-export type ProviderProtocol =
-  | 'openai-compatible'
-  | 'open-responses'
-  | 'anthropic-messages'
-  | 'google-gemini'
-  | 'bedrock-converse'
-  | 'cohere-chat'
-  | 'watsonx-text-chat'
-  | 'gateway-language-model'
-  | 'command-code'
-  | 'devin-connect'
-
-export type CatalogAuthMode = 'optional_api_key' | 'oauth' | 'setup_token'
-
-export interface CatalogChannel {
-  id: string
-  label: string
-  protocol: ProviderProtocol
-  base_url: string
-  auth_mode: CatalogAuthMode
-  fingerprint: string
-}
-
-export interface CatalogProvider {
-  id: string
-  name: string
-  documentation_url?: string | null
-  npm: string
-  vendor_id: string
-  protocol: ProviderProtocol
-  base_url: string
-  channels: CatalogChannel[]
-}
-
-export interface CatalogProviderList {
-  revision: string
-  generated_at: string
-  providers: CatalogProvider[]
 }
 
 export interface CanonicalModelSummary {
@@ -214,72 +173,147 @@ export interface ProviderModelSyncSummary {
   deprecated: number
 }
 
-export interface CatalogRefreshSummary {
-  revision: string
-  generated_at: string
-  provider_count: number
-  model_count: number
-  changed: boolean
-}
-
 export interface CreateProvider {
   name?: string
-  source:
-    | { type: 'catalog'; provider_id: string; channel_id: string; fingerprint: string; base_url_override?: string }
-    | {
-        type: 'custom'
-        vendor?: string
-        protocol: string
-        base_url: string
-        models_source?: string
-        static_models?: string
-      }
+  source: { type: 'custom'; vendor: string; channel: string; protocol?: string; base_url: string }
   credential:
     | { type: 'api_key'; value: string }
     | { type: 'setup_token'; value: string }
-    | { type: 'fields'; values: Record<string, string> }
+    | { type: 'fields'; values: Record<string, unknown> }
     | { type: 'none' }
+  vendor_options?: Record<string, unknown>
   use_proxy?: boolean
 }
 
-export interface VendorCredentialField {
-  key: string
+export type VendorCapability =
+  'infer' | 'compact' | 'search' | 'media_image' | 'auth_oauth' | 'model_discovery' | 'allowance' | 'config_validation'
+
+export type VendorAuthCallbackPort = { kind: 'fixed'; primary: number; fallback?: number | null } | { kind: 'dynamic' }
+
+export interface VendorAuthCallback {
+  bind_host: string
+  redirect_host: string
+  path: string
+  port: VendorAuthCallbackPort
+  manual_redirect_uri?: string | null
+  cancel_path?: string | null
+}
+
+export interface VendorAuthManualInput {
+  type: 'text' | 'callback_url'
   label: string
+  description?: string | null
   secret: boolean
-  required: boolean
-  input: 'text' | 'password' | 'textarea'
 }
 
-export interface VendorOptionField {
+export interface VendorAuthDescriptor {
+  flow: 'authorization_code' | 'device_code' | 'manual'
+  callback?: VendorAuthCallback | null
+  manual_input?: VendorAuthManualInput | null
+}
+
+export interface VendorChannelDescriptor {
+  id: string
+  name: string
+  description?: string | null
+  auth?: VendorAuthDescriptor | null
+  /** Optional host egress protocol; custom vendor wire protocols may omit it. */
+  protocol?: string | null
+  /** Initial connection URL proposed by the plugin; saving still requires preview. */
+  default_base_url?: string | null
+  /** Discovery source selected when a new connection does not provide one. */
+  default_models_source?: 'catalog' | null
+  capabilities: VendorCapability[]
+  model_capabilities?: string[]
+  search_model_required: boolean
+}
+
+export type VendorConfigFieldKind =
+  | { type: 'bool' }
+  | { type: 'string'; multiline: boolean }
+  | { type: 'int' }
+  | { type: 'decimal' }
+  | { type: 'enum'; options: Array<{ value: string; label: string }> }
+
+export interface VendorConfigField {
   key: string
   label: string
-  input: 'toggle'
-  /** Value used when the stored vendor_options JSON omits the key. */
-  defaultOn: boolean
+  description?: string | null
+  kind: VendorConfigFieldKind
+  required: boolean
+  default_json?: unknown
+  group?: string | null
+  secret: boolean
+  min?: number | null
+  max?: number | null
+  max_length?: number | null
+  pattern?: string | null
+  visible_when?: { field: string; equals: unknown } | null
 }
 
-export interface VendorMetadata {
-  id: string
-  label: { zh: string; en: string }
-  icon: string
-  defaultProtocol: ProviderProtocol
-  credentialFields: VendorCredentialField[]
-  optionFields?: VendorOptionField[]
+export interface VendorNetworkDeclaration {
+  base_url_field?: string | null
+  extra_origins: Array<{ scheme: string; host: string; port?: number | null }>
+  field_origins: string[]
+}
+
+export interface VendorDataCompatibility {
+  config_fields_format: number
+  private_state_format: number
+  credentials_format: number
+  model_metadata_format: number
+}
+
+export interface ProviderDescriptor {
+  /** Stable supplier profile identity. This is not a saved connection UUID. */
+  provider_id: string
+  /** Optional catalog identity used for related model metadata and provider branding. */
+  catalog_id: string | null
+  display_name: string
+  description: string | null
+  channels: VendorChannelDescriptor[]
+  capabilities: VendorCapability[]
+  config_fields: VendorConfigField[]
+  network: VendorNetworkDeclaration
+  data_compat: VendorDataCompatibility
+}
+
+export interface ProviderConfigurationPreviewInput {
+  /** Saved connection UUID when reviewing an existing connection. */
+  provider_id?: string
+  /** Supplier profile type ID; the backend field name remains `vendor_id`. */
+  vendor_id: string
+  channel: string
+  base_url: string
+  options: Record<string, unknown>
+  credentials: Record<string, unknown>
+}
+
+export interface ProviderValidationIssue {
+  field: string | null
+  code: string
+  message: string
+}
+
+export interface ProviderNetworkPermission {
+  origin: string
+  configuration_field: string | null
+  connection_scoped: boolean
+}
+
+export interface ProviderConfigurationPreview {
+  base_url: string
+  issues: ProviderValidationIssue[]
+  network_permissions: ProviderNetworkPermission[]
 }
 
 export interface UpdateProvider {
   name?: string
-  vendor?: string
-  protocol?: string
   base_url?: string
   use_proxy?: boolean
-  auth_mode?: 'apikey' | 'oauth'
-  preset_key?: string
-  channel?: string
-  models_source?: string
-  static_models?: string
-  api_key?: string
-  /** Replaces all vendor options when present; omitted keys use vendor defaults. */
+  /** Submitted secret keys replace those values; omitted keys keep their saved values. */
+  adapter_credentials?: Record<string, unknown>
+  /** Replaces all non-secret Vendor configuration values when present. */
   vendor_options?: Record<string, unknown>
   is_enabled?: boolean
 }
