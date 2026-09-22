@@ -410,6 +410,12 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并获取根
 | `__emb_*` | Embeddings 已知字段（input / dimensions / encoding_format / user） |
 | `__vendor_ingress` | 未知 vendor 字段集合（由 VendorFieldPolicy 决定是否转发） |
 
+### 3.4 Devin Connect 回放与工具说明
+
+Devin 请求编码只在目标协议边界恢复连续助手段，不改写 canonical 历史。Responses 分开的正文、单个带签名思考块和并行工具调用合入同一 `ChatMessagePrompt`；用户输入和工具结果截断合并。原生 `thinking`、`signature`、`signature_type`、`output_id` 是单值字段，因此独立签名块保留各自身份与 prompt 边界，不拼接签名或以最后一个覆盖前面的签名。调用结果仍按 call ID 紧跟对应的调用 prompt。
+
+工具顶层说明在 system prompt 的工具说明区按自然语言句子和列表条目连续编号，代码围栏与完整 JSON 段保留结构，最后执行 XML 转义。此处理不补回参数 schema 内的说明；原有 ToolDef 名称占位和 schema 注释剥离策略保持不变。
+
 ---
 
 ## 4. 请求生命周期与 HookRuntime

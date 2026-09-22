@@ -12,6 +12,7 @@ pub(crate) mod proto;
 pub(crate) mod request;
 pub(crate) mod sanitize;
 pub(crate) mod stream;
+mod tool_description;
 
 pub(crate) use connect::wrap_request;
 pub(crate) use request::ASSIGN_MODEL_PATH;

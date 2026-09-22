@@ -9,7 +9,7 @@
 //!                        #4 language, #5 platform, #7 client_version,
 //!                        #12 client_name, #28 ide_type, #31 fingerprint (732 hex chars) }
 //!   #2  system prompt
-//!   #3  repeated ChatMessage { #1 uuid, #2 source, #3 text,
+//!   #3  repeated ChatMessagePrompt { #1 uuid, #2 source, #3 prompt,
 //!                              #6 ChatToolCall{#1 id,#2 name,#3 args_json},
 //!                              #7 tool_call_id, #10 ImageData{#1 b64,#2 mime},
 //!                              #11 thinking, #12 signature, #13 redacted,
@@ -32,7 +32,7 @@
 //! canned `unavailable: third-party model provider` trailer — a permanent
 //! failure disguised as a transient one.
 //!
-//! ChatMessage.source: 1 = user, 2 = assistant, 4 = tool result.
+//! ChatMessagePrompt.source: 1 = user, 2 = assistant, 4 = tool result.
 //!
 //! Two wire behaviors from the reference are load-bearing and copied on
 //! purpose:
@@ -619,10 +619,8 @@ struct ChatMsg {
     source: u64,
     text: String,
     images: Vec<Vec<u8>>,
-    /// Repeated #6 — one assistant prompt carries every tool call of the
-    /// turn, so the upstream sees the call set followed by the matching
-    /// source=4 results. Splitting calls across consecutive assistant
-    /// prompts breaks the alternation strict validation expects.
+    /// 同一助手段的调用共用 repeated #6，后接对应 source=4 结果；
+    /// 独立签名块仍需单独的 prompt，不能覆盖原生单值签名字段。
     tool_calls: Vec<Vec<u8>>,
     tool_call_id: Option<String>,
     /// #9 — tool result carried an error (`is_error` on the source block).
@@ -633,12 +631,15 @@ struct ChatMsg {
 }
 
 impl ChatMsg {
+    fn has_thinking(&self) -> bool {
+        !self.thinking.is_empty() || self.thinking_replay.is_some() || self.thinking_redacted
+    }
+
     fn is_text_only(&self) -> bool {
         self.tool_calls.is_empty()
             && self.tool_call_id.is_none()
             && self.images.is_empty()
-            && self.thinking.is_empty()
-            && self.thinking_replay.is_none()
+            && !self.has_thinking()
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -684,19 +685,30 @@ impl ChatMsg {
     }
 }
 
-fn push_message(out: &mut Vec<ChatMsg>, message: ChatMsg) {
-    // The upstream rejects long runs of consecutive same-source turns; fold
-    // text-only user/assistant messages into the previous one.
-    if message.is_text_only()
-        && matches!(message.source, SOURCE_USER | SOURCE_ASSISTANT)
-        && let Some(last) = out.last_mut()
+fn push_message(out: &mut Vec<ChatMsg>, mut message: ChatMsg) {
+    // Responses 把正文、reasoning 和每个 call 拆成独立项；这里只恢复上游回合，
+    // 不修改 canonical 历史。原生签名为单值，两个思考块不能拼接或相互覆盖。
+    if let Some(last) = out.last_mut()
         && last.source == message.source
-        && last.is_text_only()
-    {
-        if !last.text.is_empty() {
-            last.text.push_str("\n\n");
+        && match message.source {
+            SOURCE_ASSISTANT => !last.has_thinking() || !message.has_thinking(),
+            SOURCE_USER => last.is_text_only() && message.is_text_only(),
+            _ => false,
         }
-        last.text.push_str(&message.text);
+    {
+        if message.has_thinking() {
+            last.thinking = message.thinking;
+            last.thinking_replay = message.thinking_replay;
+            last.thinking_redacted = message.thinking_redacted;
+        }
+        last.tool_calls.append(&mut message.tool_calls);
+        last.images.append(&mut message.images);
+        if last.text.is_empty() {
+            last.text = message.text;
+        } else if !message.text.is_empty() {
+            last.text.push_str("\n\n");
+            last.text.push_str(&message.text);
+        }
         return;
     }
     out.push(message);
@@ -877,8 +889,8 @@ fn encode_user_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()>
 }
 
 fn encode_assistant_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
-    // 带签名的思考块独立编码，避免把多个签名拼到同一 #12；
-    // 同一普通助手项的全部工具调用仍共用一个 prompt，保持结果配对。
+    // 思考块先保留各自身份，再由 push_message 与相邻正文/调用合并；
+    // 独立思考块之间仍有边界，不能将多个签名拼到同一 #12。
     let mut msg = ChatMsg {
         source: SOURCE_ASSISTANT,
         ..ChatMsg::default()
@@ -1165,7 +1177,8 @@ fn with_tool_descriptions(system_prompt: &str, descriptions: &[(String, String)]
         section.push_str("\n<tool name=\"");
         escape_xml_into(name, true, &mut section);
         section.push_str("\">\n");
-        escape_xml_into(description, false, &mut section);
+        let formatted = super::tool_description::format_tool_description(description);
+        escape_xml_into(&formatted, false, &mut section);
         section.push_str("\n</tool>");
     }
     let trimmed = system_prompt.trim_end();
@@ -1558,6 +1571,170 @@ mod tests {
         parse_fields(bytes).unwrap()
     }
 
+    fn responses_prompts(input: Value) -> Vec<Vec<ProtoField<'static>>> {
+        let request = crate::protocol::transform::ProtocolTransform::global()
+            .bind(
+                stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+                stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            )
+            .unwrap()
+            .decode_request(serde_json::json!({"model":"swe-2","input":input}))
+            .unwrap();
+        top_level(&request)
+            .into_iter()
+            .filter(|field| field.number == 3)
+            .map(|field| parse_fields(field.bytes).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn responses_turn_keeps_text_thinking_and_parallel_calls_together() {
+        let replay = ThinkingReplay {
+            signature: "signed-thought".into(),
+            signature_type: "sealed".into(),
+            output_id: "output-1".into(),
+            ..Default::default()
+        };
+        let prompts = responses_prompts(serde_json::json!([
+            {"role":"user","content":"Inspect both fixtures."},
+            {"type":"reasoning","summary":[],
+             "content":[{"type":"reasoning_text","text":"Compare both fixtures."}],
+             "encrypted_content":replay.encode()},
+            {"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"I will read both fixtures."}
+            ]},
+            {"type":"function_call","call_id":"call-a","name":"read","arguments":"{\"path\":\"a\"}"},
+            {"type":"function_call","call_id":"call-b","name":"read","arguments":"{\"path\":\"b\"}"},
+            {"type":"function_call_output","call_id":"call-b","output":"fixture B"},
+            {"type":"function_call_output","call_id":"call-a","output":"fixture A"},
+            {"role":"assistant","content":"Both fixtures agree."},
+            {"role":"user","content":"Now inspect another fixture."},
+            {"role":"assistant","content":"This is a separate turn."}
+        ]));
+        let sources: Vec<_> = prompts
+            .iter()
+            .map(|prompt| {
+                prompt
+                    .iter()
+                    .find(|field| field.number == 2)
+                    .unwrap()
+                    .scalar
+            })
+            .collect();
+        assert_eq!(sources, [1, 2, 4, 4, 2, 1, 2]);
+        let assistant = &prompts[1];
+        for (number, value) in [
+            (3, "I will read both fixtures."),
+            (11, "Compare both fixtures."),
+            (12, "signed-thought"),
+            (15, "output-1"),
+            (18, "sealed"),
+        ] {
+            assert!(
+                assistant
+                    .iter()
+                    .any(|field| { field.number == number && field.bytes == value.as_bytes() })
+            );
+        }
+        assert_eq!(
+            assistant.iter().filter(|field| field.number == 6).count(),
+            2
+        );
+        for (index, id, arguments, result) in [
+            (0, "call-a", r#"{"path":"a"}"#, "fixture A"),
+            (1, "call-b", r#"{"path":"b"}"#, "fixture B"),
+        ] {
+            let call = sub_message(assistant, 6, index);
+            assert!(
+                call.iter()
+                    .any(|field| field.number == 1 && field.bytes == id.as_bytes())
+            );
+            assert!(
+                call.iter()
+                    .any(|field| field.number == 3 && field.bytes == arguments.as_bytes())
+            );
+            assert!(
+                prompts[index + 2]
+                    .iter()
+                    .any(|field| field.number == 7 && field.bytes == id.as_bytes())
+            );
+            assert!(
+                prompts[index + 2]
+                    .iter()
+                    .any(|field| field.number == 3 && field.bytes == result.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn responses_turn_keeps_distinct_signed_blocks_with_their_text_and_calls() {
+        let replay = |signature: &str| {
+            ThinkingReplay {
+                signature: signature.into(),
+                signature_type: "sealed".into(),
+                output_id: "shared-output".into(),
+                ..Default::default()
+            }
+            .encode()
+        };
+        let prompts = responses_prompts(serde_json::json!([
+            {"role":"user","content":"Inspect the fixtures."},
+            {"type":"reasoning","summary":[],
+             "content":[{"type":"reasoning_text","text":"First thought."}],
+             "encrypted_content":replay("signature-a")},
+            {"role":"assistant","content":"Inspecting A."},
+            {"type":"function_call","call_id":"call-a","name":"read","arguments":"{\"path\":\"a\"}"},
+            {"type":"reasoning","summary":[],
+             "content":[{"type":"reasoning_text","text":"Second thought."}],
+             "encrypted_content":replay("signature-b")},
+            {"role":"assistant","content":"Inspecting B."},
+            {"type":"function_call","call_id":"call-b","name":"read","arguments":"{\"path\":\"b\"}"},
+            {"type":"function_call_output","call_id":"call-a","output":"fixture A"},
+            {"type":"function_call_output","call_id":"call-b","output":"fixture B"}
+        ]));
+        let signed: Vec<_> = prompts
+            .iter()
+            .filter(|prompt| prompt.iter().any(|field| field.number == 12))
+            .collect();
+        assert_eq!(signed.len(), 2);
+        for (index, thought, signature, text, call_id) in [
+            (
+                0,
+                "First thought.",
+                "signature-a",
+                "Inspecting A.",
+                "call-a",
+            ),
+            (
+                1,
+                "Second thought.",
+                "signature-b",
+                "Inspecting B.",
+                "call-b",
+            ),
+        ] {
+            let prompt = signed[index];
+            for (number, value) in [
+                (3, text),
+                (11, thought),
+                (12, signature),
+                (15, "shared-output"),
+                (18, "sealed"),
+            ] {
+                assert!(
+                    prompt
+                        .iter()
+                        .any(|field| field.number == number && field.bytes == value.as_bytes())
+                );
+            }
+            let call = sub_message(prompt, 6, 0);
+            assert!(
+                call.iter()
+                    .any(|field| field.number == 1 && field.bytes == call_id.as_bytes())
+            );
+        }
+    }
+
     #[test]
     fn request_carries_metadata_system_and_model() {
         let req = AiRequest::new(
@@ -1696,32 +1873,16 @@ mod tests {
             ..Default::default()
         };
         // Responses 客户端可能在 function_call 之后回传较晚封口的 reasoning。
-        let req = AiRequest::new(
-            "swe-2",
-            vec![
-                text_item(Role::User, "Read the fixture."),
-                AiItem::function_call(ToolCall {
-                    id: "call-1#output-1".into(),
-                    name: "read".into(),
-                    arguments: r#"{"path":"fixture.json"}"#.into(),
-                }),
-                AiItem::reasoning(
-                    Vec::new(),
-                    vec!["Inspect the fixture.".into()],
-                    Some(replay.encode()),
-                ),
-                AiItem {
-                    tool_call_id: Some("call-1#output-1".into()),
-                    ..text_item(Role::Tool, r#"{"fixture_code":"RIVER-593"}"#)
-                },
-            ],
-        );
-        let fields = top_level(&req);
-        let prompts: Vec<_> = fields
-            .iter()
-            .filter(|field| field.number == 3 && field.wire_type == 2)
-            .map(|field| parse_fields(field.bytes).unwrap())
-            .collect();
+        let prompts = responses_prompts(serde_json::json!([
+            {"role":"user","content":"Read the fixture."},
+            {"type":"function_call","call_id":"call-1#output-1",
+             "name":"read","arguments":"{\"path\":\"fixture.json\"}"},
+            {"type":"reasoning","summary":[],
+             "content":[{"type":"reasoning_text","text":"Inspect the fixture."}],
+             "encrypted_content":replay.encode()},
+            {"type":"function_call_output","call_id":"call-1#output-1",
+             "output":"{\"fixture_code\":\"RIVER-593\"}"}
+        ]));
         let call_index = prompts
             .iter()
             .position(|prompt| prompt.iter().any(|field| field.number == 6))
@@ -1740,11 +1901,6 @@ mod tests {
         assert!(result.iter().any(|field| {
             field.number == 3 && field.bytes == br#"{"fixture_code":"RIVER-593"}"#
         }));
-        let thinking = prompts
-            .iter()
-            .position(|prompt| prompt.iter().any(|field| field.number == 12))
-            .unwrap();
-        assert!(thinking < call_index);
         for (number, value) in [
             (11, b"Inspect the fixture.".as_slice()),
             (12, b"signed-thought".as_slice()),
@@ -1752,7 +1908,7 @@ mod tests {
             (18, b"native".as_slice()),
         ] {
             assert!(
-                prompts[thinking]
+                prompts[call_index]
                     .iter()
                     .any(|field| field.number == number && field.bytes == value)
             );
@@ -2001,8 +2157,10 @@ mod tests {
         assert!(system.starts_with("be brief"));
         assert!(system.contains("# tools descriptions"));
         assert!(system.contains("<tool name=\"grep\">"));
-        // XML-escaped so the description can't break the section markup.
-        assert!(system.contains("Find text in files &amp; folders. Returns &lt;matches&gt;."));
+        // 编号不改变描述内容；XML 边界字符不能成为外层工具标签。
+        assert!(
+            system.contains("1. Find text in files &amp; folders.\n2. Returns &lt;matches&gt;.")
+        );
         // The wire ToolDef itself still carries only the name.
         let def_fields = sub_message(&fields, 10, 0);
         assert!(

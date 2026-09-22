@@ -27,6 +27,7 @@
 - Wire Debug capture preserves each observed application-protocol chunk, including malformed, incomplete, and non-UTF-8 bytes, without JSON/SSE/NDJSON reassembly or media externalization; complete and partial Trace status remains tied to capture/storage boundaries rather than protocol parseability.
 - Responses streams now close indexed reasoning items on their authoritative `ItemDone`, preserving late signatures and preventing already-completed thinking from being replayed after subsequent tool calls by OMP. Terminal responses retain the same items without duplicate completion events.
 - Devin multi-turn tool continuations preserve signed thinking without separating tool calls from their matching results, fixing `invalid_argument` failures with OMP Responses history. Historical user images and images returned by client tools remain attached to their original messages instead of being replaced or silently discarded.
+- Devin request encoding groups Responses assistant text, signed reasoning, and parallel tool calls into native prompts without combining independent signature identities. Top-level tool descriptions use numbered sentences and list items while preserving fenced code and JSON paragraphs, followed by XML escaping.
 
 ## [0.3.0] - 2026-09-19
 

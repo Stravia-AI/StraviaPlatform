@@ -1178,6 +1178,133 @@ mod tests {
     }
 
     #[test]
+    fn devin_semantics_responses_roundtrip_keeps_signed_turns_and_parallel_calls() {
+        let pair = crate::protocol::transform::ProtocolTransform::global()
+            .bind(
+                stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+                stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            )
+            .unwrap();
+        let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
+        let mut frames = Vec::new();
+        for (thought, signature, text) in [
+            ("First thought.", "signature-first", "First observation."),
+            (
+                "Second thought.",
+                "signature-",
+                "I will read both fixtures.",
+            ),
+        ] {
+            let mut payload = Vec::new();
+            write_string_field(&mut payload, 15, "shared-output");
+            write_string_field(&mut payload, 9, thought);
+            write_string_field(&mut payload, 10, signature);
+            write_string_field(&mut payload, 21, "sealed");
+            frames.push(data_frame(&payload));
+            frames.push(data_frame(&text_payload(text)));
+        }
+        for (id, arguments) in [("call-a", r#"{"path":"a"}"#), ("call-b", r#"{"path":"b"}"#)] {
+            let mut call = Vec::new();
+            write_string_field(&mut call, 1, id);
+            write_string_field(&mut call, 2, "read");
+            write_string_field(&mut call, 3, arguments);
+            let mut payload = Vec::new();
+            write_message_field(&mut payload, 6, &call);
+            frames.push(data_frame(&payload));
+        }
+        let mut late = Vec::new();
+        write_string_field(&mut late, 10, "second");
+        write_varint_field(&mut late, 5, 10);
+        frames.push(data_frame(&late));
+        frames.push(trailer_frame("{}"));
+
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(
+                encoder
+                    .encode_deltas(&decoder.decode_chunk(&frame).unwrap())
+                    .unwrap(),
+            );
+        }
+        events.extend(encoder.encode_deltas(&decoder.finish().unwrap()).unwrap());
+        let events: Vec<Value> = events
+            .iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("Responses completion");
+        let output = completed["response"]["output"].as_array().unwrap();
+        let done_items: BTreeMap<_, _> = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| {
+                (
+                    event["output_index"].as_u64().unwrap(),
+                    event["item"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(done_items.into_values().collect::<Vec<_>>(), *output);
+
+        let mut input = vec![serde_json::json!({"role":"user","content":"Inspect both fixtures."})];
+        input.extend(output.iter().cloned());
+        input.extend([
+            serde_json::json!({"type":"function_call_output","call_id":"call-b","output":"fixture B"}),
+            serde_json::json!({"type":"function_call_output","call_id":"call-a","output":"fixture A"}),
+        ]);
+        let mut request = pair
+            .decode_request(serde_json::json!({"model":"swe-2","input":input}))
+            .unwrap();
+        crate::protocol::transform::prepare_thinking_replay(
+            &mut request,
+            stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            |_| true,
+        );
+        let body = super::super::request::encode_get_chat_message_request(
+            &request,
+            "test-token",
+            &super::super::request::session_shape(&request, "test-token"),
+            None,
+        )
+        .unwrap();
+        let fields = parse_fields(&body).unwrap();
+        let prompts: Vec<_> = fields.iter().filter(|field| field.number == 3).collect();
+        assert_eq!(prompts.len(), 5);
+        for (index, thought, signature, text) in [
+            (1, "First thought.", "signature-first", "First observation."),
+            (
+                2,
+                "Second thought.",
+                "signature-second",
+                "I will read both fixtures.",
+            ),
+        ] {
+            let prompt = prompts[index].bytes;
+            assert_eq!(field_text(prompt, 3), text);
+            assert_eq!(field_text(prompt, 11), thought);
+            assert_eq!(field_text(prompt, 12), signature);
+            assert_eq!(field_text(prompt, 15), "shared-output");
+            assert_eq!(field_text(prompt, 18), "sealed");
+        }
+        let call_fields = parse_fields(prompts[2].bytes).unwrap();
+        let calls: Vec<_> = call_fields
+            .iter()
+            .filter(|field| field.number == 6)
+            .collect();
+        assert_eq!(calls.len(), 2);
+        for (index, id, arguments) in [
+            (0, "call-a", r#"{"path":"a"}"#),
+            (1, "call-b", r#"{"path":"b"}"#),
+        ] {
+            assert_eq!(field_text(calls[index].bytes, 1), id);
+            assert_eq!(field_text(calls[index].bytes, 3), arguments);
+            assert_eq!(field_text(prompts[index + 3].bytes, 7), id);
+        }
+    }
+
+    #[test]
     fn devin_semantics_redacted_thinking_replays_without_public_text() {
         let mut parser = DevinConnectStreamParser::new();
         let mut payload = Vec::new();
