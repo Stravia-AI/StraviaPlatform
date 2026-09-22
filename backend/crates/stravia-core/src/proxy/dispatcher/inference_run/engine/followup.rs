@@ -33,8 +33,6 @@ pub(super) struct HookRespondParts<'a> {
     pub generation: &'a mut GenerationChainRun,
     pub ledger: &'a RunLedger,
     pub phase: &'a mut PhaseTracker,
-    /// When set, emits the visible-leg response checkpoints around projection.
-    pub observer: Option<&'a crate::interaction_observation::RunObserver>,
 }
 
 /// Shared Hook response leg preparation: hook routing, client-output hooks,
@@ -51,7 +49,6 @@ pub(super) async fn prepare_hook_response(
         generation,
         ledger,
         phase,
-        observer,
     } = parts;
     inference_run.set_route(stravia_runtime_contract::hook::RouteContext {
         model_id: request.model.clone(),
@@ -77,26 +74,10 @@ pub(super) async fn prepare_hook_response(
         inference_run.exposed_tool_names(),
         None,
     );
-    if let Some(observer) = observer {
-        observer.record_debug(|| RunEvent::Content {
-            stage: "response_after_hook".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: checkpoint_payload(observer, &response),
-        });
-    }
     let staged_delivery = projection
         .project_staged(&mut response, &[])
         .await
         .map_err(|error| HookRespondError::Failure(error.to_string()))?;
-    if let Some(observer) = observer {
-        observer.record_debug(|| RunEvent::Content {
-            stage: "client_projection_content".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: checkpoint_payload(observer, &response),
-        });
-    }
     let pending_generation_chain = generation.write.take().and_then(|mut write| {
         write.observe_effective(request.clone());
         let mut staged_response = response.clone();
@@ -195,7 +176,6 @@ pub(super) async fn acquire_followup_model_turn(
                     generation,
                     ledger,
                     phase,
-                    observer: None,
                 },
             )
             .await;

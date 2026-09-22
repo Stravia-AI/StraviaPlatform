@@ -41,14 +41,6 @@ impl Gateway {
                         .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone())),
                 ),
             });
-            if observer.debug_enabled() {
-                observer.record_debug(|| RunEvent::Content {
-                    stage: "platform_tool_call".into(),
-                    model_turn_id: Some(job.model_turn_id.clone()),
-                    attempt_id: None,
-                    payload: serde_json::json!(&call),
-                });
-            }
         }
         let remaining_ms = job
             .execution_deadline_unix_ms
@@ -98,20 +90,6 @@ impl Gateway {
                 duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
                 content: Some(result.content.clone()),
             });
-            if observer.debug_enabled() {
-                observer.record_debug(|| RunEvent::Content {
-                    stage: "platform_tool_result".into(),
-                    model_turn_id: Some(job.model_turn_id),
-                    attempt_id: None,
-                    payload: serde_json::json!({
-                        "tool_id": result.tool_id.as_str(),
-                        "call_id": result.call_id,
-                        "content": result.content,
-                        "is_error": result.is_error,
-                        "metadata": result.metadata,
-                    }),
-                });
-            }
         }
         RawHistoryMarkerExecution { call, result }
     }

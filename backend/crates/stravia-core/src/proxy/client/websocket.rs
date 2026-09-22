@@ -19,10 +19,52 @@ pub(crate) struct ResponsesWebSocketTrace<'a> {
     pub transport_attempt: &'a str,
 }
 
+pub(crate) type WebSocketRequestObserver = std::sync::Arc<dyn Fn(&reqwest::Request) + Send + Sync>;
+
 pub(crate) struct ResponsesWebSocketRequest<'a> {
     pub url: &'a str,
     pub headers: HeaderMap,
-    pub on_connect_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    pub on_connect_start: Option<WebSocketRequestObserver>,
+}
+
+struct ObservedWebSocketClient {
+    inner: reqwest::Client,
+    on_execute: WebSocketRequestObserver,
+}
+
+impl reqwest_websocket::Client for ObservedWebSocketClient {
+    async fn execute(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, reqwest_websocket::Error> {
+        (self.on_execute)(&request);
+        self.inner.execute(request).await.map_err(Into::into)
+    }
+}
+
+struct ObservedWebSocketRequestBuilder {
+    inner: reqwest::RequestBuilder,
+    on_execute: WebSocketRequestObserver,
+}
+
+impl reqwest_websocket::RequestBuilder for ObservedWebSocketRequestBuilder {
+    type Client = ObservedWebSocketClient;
+
+    fn build_split(
+        self,
+    ) -> (
+        Self::Client,
+        Result<reqwest::Request, reqwest_websocket::Error>,
+    ) {
+        let (client, request) = self.inner.build_split();
+        (
+            ObservedWebSocketClient {
+                inner: client,
+                on_execute: self.on_execute,
+            },
+            request.map_err(Into::into),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -374,16 +416,15 @@ impl ResponsesWebSocketRegistry {
         let thread_id = connection_value("thread-id");
         let window_id = connection_value("x-codex-window-id");
 
-        if let Some(on_connect_start) = on_connect_start {
-            on_connect_start();
-        }
         let response = {
-            use reqwest_websocket::Upgrade as _;
-            client
-                .get(url)
-                .version(reqwest::Version::HTTP_11)
-                .headers(headers)
-                .upgrade()
+            let request_builder = ObservedWebSocketRequestBuilder {
+                inner: client
+                    .get(url)
+                    .version(reqwest::Version::HTTP_11)
+                    .headers(headers),
+                on_execute: on_connect_start.unwrap_or_else(|| std::sync::Arc::new(|_| {})),
+            };
+            reqwest_websocket::Upgrade::upgrade(request_builder)
                 .send()
                 .await
         };

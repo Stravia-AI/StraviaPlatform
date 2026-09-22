@@ -63,13 +63,13 @@ _避免使用_：在组件内维护平行的拍平逻辑、把 DOM 操作带进�
 
 ## Wire Debug Capture
 
-Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；凭据值永久脱敏，结构化媒体内容以 Artifact 引用与必要元数据代替并明确标记已外置，其他内容保留。媒体部分不承诺原始 wire 字节保真，内容恢复受 Artifact 保留期约束。
-_避免使用_：Network Capture、Packet Capture、Raw Credential Dump
+Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；仅对 Authorization header 值永久脱敏（header 名不区分大小写），媒体保留捕获内容，不因媒体类型替换为 Artifact 引用，其他内容原样保留。
+_避免使用_：Network Capture、Packet Capture
 
 ## Inference Run Debug Trace
 
-Inference Run Debug Trace 是单个 Inference Run 准入时按当前进程级 Debug 开关独立决定是否生成的完整诊断，由该 Run 的 Wire Debug Capture 与关键 canonical 语义阶段记录组成。Trace 与所属请求记录采用相同保留期并一起删除；Debug 开关不跨进程重启保持。
-_避免使用_：Request Log、Wire Debug Capture（当指包含 canonical 阶段的完整诊断）
+Inference Run Debug Trace 是单个 Inference Run 准入时按当前进程级 Debug 开关独立决定是否生成的完整诊断，由该 Run 的四方向 Wire Debug Capture 组成，仅保留 wire 载荷、Run 关联与捕获完整性所需元数据，不保留独立 canonical 阶段或其他独立内部诊断阶段内容。Trace 与所属请求记录采用相同保留期并一起删除；Debug 开关不跨进程重启保持。Debug 捕获独立于普通 Observation 的按 item 收口内容；普通 Observation 的生命周期、用量与工具事件仍按既有契约记录。
+_避免使用_：Request Log、Wire Debug Capture（当指包含 Run 关联与捕获完整度信息的完整诊断）
 
 ## Interaction Debug Bundle
 
@@ -142,6 +142,10 @@ Inference Run 是处理一次客户端生成请求直到一个响应完整交付
 ## Model Turn
 
 Model Turn 是一次完整的规范化模型交互，可以包含同一逻辑模型路由内的上游重试，但不包含平台工具执行；工具结果引发的下一次模型交互属于新的 Model Turn。其成功终态表示该轮规范化输出与所需可逆脱敏映射发布均已完成，不再有后续输出或失败，也不表示客户端已完整收到响应。
+
+## Canonical Item（规范化内容项）
+
+Canonical Item 是一次规范化交互中具有独立身份与语义边界的有序内容单元。同一项的流式增量不形成多个 Canonical Item；不同项不因类型相同而合并，项内内容分段保持不变。
 
 ## Effective Model Request
 

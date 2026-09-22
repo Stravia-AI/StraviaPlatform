@@ -109,27 +109,6 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 route_id,
                 model_display_name,
             });
-            if observer.debug_enabled() {
-                match serde_json::to_value(&input.request) {
-                    Ok(payload) => {
-                        observer.record(RunEvent::Content {
-                            stage: "artifact_normalized_request".into(),
-                            model_turn_id: Some(model_turn_id.clone()),
-                            attempt_id: None,
-                            payload: payload.clone(),
-                        });
-                        observer.record(RunEvent::Content {
-                            stage: "canonical_request".into(),
-                            model_turn_id: Some(model_turn_id.clone()),
-                            attempt_id: None,
-                            payload,
-                        });
-                    }
-                    Err(_) => observer.record(RunEvent::ObservationGap {
-                        reason: "canonical_request_serialization_failed".into(),
-                    }),
-                }
-            }
         }
         let mut terminal = Some(ModelTurnTerminal {
             observer: observer.clone(),
@@ -620,19 +599,6 @@ async fn execute_inner(
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut last_error = None;
     while let Some(target) = attempts.next_healthy() {
-        if let Some(observer) = &input.observer {
-            observer.record_debug(|| RunEvent::TargetSelected {
-                model_turn_id: model_turn_id.clone(),
-                payload: serde_json::json!({
-                    "target_id": selected_target_key(&target),
-                    "provider_id": target.provider_id,
-                    "model": target.model,
-                    "priority": target.priority,
-                    "half_open_probe": attempts.current_is_probe(),
-                    "selection": if last_error.is_some() { "failover" } else { "initial" },
-                }),
-            });
-        }
         let mut omit_protected_thinking = false;
         loop {
             // The target may have been re-cooled by another request while this
@@ -1277,14 +1243,6 @@ async fn prepare_attempt(
         provider_request.reasoning.target_control = None;
     }
     provider_request.model.clone_from(&route.model_id);
-    if let Some(observer) = &input.observer {
-        observer.record_debug(|| RunEvent::Content {
-            stage: "artifact_normalized_request".into(),
-            model_turn_id: Some(model_turn_id.to_owned()),
-            attempt_id: None,
-            payload: serde_json::to_value(&provider_request).unwrap_or_default(),
-        });
-    }
     let artifact_transfers = crate::media::ingest::materialize_request(
         gateway,
         &input.principal,
@@ -1723,12 +1681,9 @@ async fn begin_attempt(
         );
         policy.record_success(target);
         call.attempt.confirm_usage(&response.usage);
-        call.attempt
-            .capture_content("canonical_terminal_response", &response);
         let canonical_deltas = ai_response_to_deltas(&response);
         for delta in &canonical_deltas {
             call.attempt.observe_delta(delta);
-            call.attempt.capture_content("canonical_content", delta);
         }
         call.attempt.finish(
             "completed",
@@ -2134,9 +2089,6 @@ async fn begin_attempt(
         route_policy_state.record_success(&attempt_context, &health_target_key, attempt_epoch);
         reservation.complete();
         provider_stream.attempt().confirm_usage(&response.usage);
-        provider_stream
-            .attempt()
-            .capture_content("canonical_terminal_response", &response);
         provider_stream.attempt().finish(
             "completed",
             Some(provider_stream.status),
@@ -2169,7 +2121,6 @@ async fn send_deltas(
         attempt.observe_delta(delta);
     }
     for delta in deltas {
-        attempt.capture_content("canonical_content", &delta);
         tx.send(Ok(CanonicalEvent::Delta(delta)))
             .await
             .map_err(|_| ())?;

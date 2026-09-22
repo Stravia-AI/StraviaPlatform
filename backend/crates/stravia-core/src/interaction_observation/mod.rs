@@ -285,6 +285,10 @@ impl InteractionObservation {
     pub(crate) async fn get_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
         self.inner.store.get_rejection(id).await
     }
+    pub(crate) fn debug_enabled(&self) -> bool {
+        self.inner.debug.load(Ordering::Acquire)
+    }
+
     pub(crate) fn debug_state(&self) -> DebugState {
         let active_partial = self
             .inner
@@ -817,8 +821,51 @@ pub(crate) struct IngressCapture {
     trace: TraceHandle,
 }
 
+pub(crate) fn wire_bytes_value(bytes: &[u8]) -> serde_json::Value {
+    std::str::from_utf8(bytes)
+        .map(|text| serde_json::Value::String(text.to_owned()))
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "encoding": "base64",
+                "data": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                ),
+            })
+        })
+}
+
+pub(crate) fn wire_headers_value(headers: &axum::http::HeaderMap) -> serde_json::Value {
+    let mut encoded = serde_json::Map::new();
+    for (name, value) in headers {
+        let value = value
+            .to_str()
+            .map(|value| serde_json::Value::String(value.to_owned()))
+            .unwrap_or_else(|_| wire_bytes_value(value.as_bytes()));
+        match encoded.entry(name.as_str().to_owned()) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+            serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                serde_json::Value::Array(values) => values.push(value),
+                existing => {
+                    let first = std::mem::replace(existing, serde_json::Value::Null);
+                    *existing = serde_json::Value::Array(vec![first, value]);
+                }
+            },
+        }
+    }
+    serde_json::Value::Object(encoded)
+}
+
+pub(crate) fn wire_headers_value_for_async(headers: &axum::http::HeaderMap) -> serde_json::Value {
+    let mut encoded = wire_headers_value(headers);
+    trace::redact_authorization_headers(&mut encoded);
+    encoded
+}
+
 impl IngressCapture {
-    // 捕获请求体的内存缓冲上限；不是落盘容量配额。
+    // 单个请求体的 Wire 捕获总量上限；不是 Trace 落盘容量配额。
     pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
     pub(crate) fn record(&self, event: RunEvent) {
@@ -855,6 +902,13 @@ impl IngressObserver {
     pub(crate) fn record_debug(&self, event: impl FnOnce() -> RunEvent) {
         if self.debug_enabled {
             self.record(event());
+        }
+    }
+    pub(crate) fn record_debug_at(&self, recorded_at: i64, event: impl FnOnce() -> RunEvent) {
+        if self.debug_enabled
+            && let Some(trace) = &self.trace
+        {
+            record_trace_observed_at(trace, None, None, event(), 0, recorded_at);
         }
     }
     pub(crate) fn record(&self, event: RunEvent) {
@@ -1160,12 +1214,7 @@ impl RunObserver {
         }
     }
     pub(crate) fn record(&self, event: RunEvent) {
-        if !self.inner.debug_enabled
-            && matches!(
-                event,
-                RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
-            )
-        {
+        if !self.inner.debug_enabled && matches!(event, RunEvent::Wire { .. }) {
             return;
         }
         if let RunEvent::ModelThinkingDelta {
@@ -1298,23 +1347,10 @@ impl RunObserver {
             self.send_tool_results(vec![event]);
             return;
         }
-        self.inner.protected.event(&mut event);
-        redaction::redact_run_event(&mut event);
-        if let RunEvent::RequestFailed { error } = &event {
-            *self.inner.failure.lock() = Some(error.clone());
-        }
-        if matches!(event, RunEvent::ObservationGap { .. })
-            && let Some(trace) = &self.inner.trace
-        {
-            trace.mark_partial("observation_gap", false);
-        }
-        if matches!(
-            event,
-            RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
-        ) {
+        if matches!(event, RunEvent::Wire { .. }) {
             if let Some(trace) = &self.inner.trace {
-                // Trace owns its queue. The next durable observation boundary includes this
-                // record; already published snapshot cutoffs cannot include future capture.
+                // Wire Debug applies its Authorization-only policy inside the Trace queue.
+                // Ordinary Observation redaction must not rewrite raw wire content first.
                 let sequence = self
                     .inner
                     .observation
@@ -1325,6 +1361,16 @@ impl RunObserver {
                 record_trace_at(trace, Some(&self.inner.run_id), None, event, sequence);
             }
             return;
+        }
+        self.inner.protected.event(&mut event);
+        redaction::redact_run_event(&mut event);
+        if let RunEvent::RequestFailed { error } = &event {
+            *self.inner.failure.lock() = Some(error.clone());
+        }
+        if matches!(event, RunEvent::ObservationGap { .. })
+            && let Some(trace) = &self.inner.trace
+        {
+            trace.mark_partial("observation_gap", false);
         }
         if self.inner.gap.load(Ordering::Acquire)
             && !self.inner.gap_reported.swap(true, Ordering::AcqRel)
@@ -1774,9 +1820,25 @@ pub(super) fn record_trace_at(
     event: RunEvent,
     sequence: i64,
 ) {
-    let diagnostic = matches!(&event, RunEvent::TargetSelected { .. });
-    let (
-        stage,
+    record_trace_observed_at(
+        trace,
+        run,
+        rejection,
+        event,
+        sequence,
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
+fn record_trace_observed_at(
+    trace: &TraceHandle,
+    run: Option<&str>,
+    rejection: Option<&str>,
+    event: RunEvent,
+    sequence: i64,
+    recorded_at: i64,
+) {
+    let RunEvent::Wire {
         direction,
         transport,
         protocol,
@@ -1787,66 +1849,9 @@ pub(super) fn record_trace_at(
         payload,
         model_turn_id,
         attempt_id,
-    ) = match event {
-        RunEvent::TargetSelected {
-            model_turn_id,
-            payload,
-        } => (
-            Some("target_selected".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            serde_json::Value::Null,
-            payload,
-            Some(model_turn_id),
-            None,
-        ),
-        RunEvent::Content {
-            stage,
-            payload,
-            model_turn_id,
-            attempt_id,
-        } => (
-            Some(stage),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            serde_json::Value::Null,
-            payload,
-            model_turn_id,
-            attempt_id,
-        ),
-        RunEvent::Wire {
-            direction,
-            transport,
-            protocol,
-            message_type,
-            status_code,
-            url,
-            headers,
-            payload,
-            model_turn_id,
-            attempt_id,
-        } => (
-            None,
-            Some(direction),
-            Some(transport),
-            Some(protocol),
-            Some(message_type),
-            status_code,
-            url,
-            headers,
-            payload,
-            model_turn_id,
-            attempt_id,
-        ),
-        _ => return,
+    } = event
+    else {
+        return;
     };
     let (payload_encoding, payload) = match payload {
         serde_json::Value::Object(mut object)
@@ -1862,24 +1867,18 @@ pub(super) fn record_trace_at(
     let _ = trace.record(TraceRecord {
         schema_version: TRACE_SCHEMA_VERSION,
         sequence,
-        recorded_at: chrono::Utc::now().timestamp_millis(),
+        recorded_at,
         interaction_id: None,
         run_id: run.map(str::to_owned),
         rejection_id: rejection.map(str::to_owned),
         model_turn_id,
         attempt_id,
-        layer: if direction.is_some() {
-            "wire".into()
-        } else if diagnostic {
-            "canonical".into()
-        } else {
-            "content".into()
-        },
-        direction,
-        stage,
-        transport,
-        protocol,
-        message_type,
+        layer: "wire".into(),
+        direction: Some(direction),
+        stage: None,
+        transport: Some(transport),
+        protocol: Some(protocol),
+        message_type: Some(message_type),
         representation: "json".into(),
         status: None,
         status_code,
@@ -1897,6 +1896,45 @@ mod snapshot_tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[test]
+    fn async_wire_headers_mask_only_authorization() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer boundary-secret"),
+        );
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("session=boundary-secret"),
+        );
+
+        let encoded = wire_headers_value_for_async(&headers);
+        assert_eq!(encoded["authorization"], "***");
+        assert_eq!(encoded["cookie"], "session=boundary-secret");
+    }
+
+    #[test]
+    fn wire_headers_preserve_duplicate_and_non_utf8_values() {
+        assert_eq!(
+            wire_bytes_value(b"\xff\0"),
+            serde_json::json!({"encoding": "base64", "data": "/wA="}),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(
+            "x-opaque",
+            axum::http::HeaderValue::from_bytes(b"\xff").expect("opaque header"),
+        );
+        headers.append("x-opaque", axum::http::HeaderValue::from_static("plain"));
+
+        assert_eq!(
+            wire_headers_value(&headers)["x-opaque"],
+            serde_json::json!([
+                {"encoding": "base64", "data": "/w=="},
+                "plain",
+            ])
+        );
+    }
 
     /// Every test admission crosses the same one-call boundary as production.
     fn facts(items: Vec<stravia_runtime_contract::protocol::ir::AiItem>) -> AdmissionFacts {
@@ -2384,6 +2422,13 @@ mod snapshot_tests {
     async fn trace_only_capture_flushes_at_durable_cutoffs_without_replay_gaps()
     -> anyhow::Result<()> {
         use tokio_stream::StreamExt;
+        fn wire_markers(records: &[serde_json::Value]) -> Vec<&str> {
+            records
+                .iter()
+                .filter_map(|record| record["payload"]["marker"].as_str())
+                .collect()
+        }
+
         let directory = tempfile::tempdir()?;
         let pool = crate::db::init_pool(directory.path()).await?;
         crate::migrations::migrate_sqlite(&pool).await?;
@@ -2412,28 +2457,28 @@ mod snapshot_tests {
                 );
             observation.flush().await?;
             let admitted = observation.inner.store.max_sequence().await?;
-            let checkpoint = |stage: &str| RunEvent::Content {
-                stage: stage.into(),
+            let wire = |marker: &str| RunEvent::Wire {
+                direction: "platform_to_client".into(),
+                transport: "http".into(),
+                protocol: "responses".into(),
+                message_type: "body_chunk".into(),
                 model_turn_id: None,
                 attempt_id: None,
-                payload: serde_json::json!({"stage":stage}),
+                status_code: Some(200),
+                url: None,
+                headers: Value::Null,
+                payload: serde_json::json!({"marker":marker}),
             };
-            observer.record(checkpoint("before-cutoff"));
+            observer.record(wire("before-cutoff"));
             observation.flush().await?;
             let cutoff = observation.inner.store.max_sequence().await?;
-            observer.record(checkpoint("after-cutoff"));
+            observer.record(wire("after-cutoff"));
             let trace = observer.inner.trace.clone();
             if let Some(trace) = &trace {
                 let old = load_trace_values(trace.snapshot(cutoff).await?).await?;
-                assert_eq!(
-                    old.iter()
-                        .filter_map(|record| record["stage"].as_str())
-                        .collect::<Vec<_>>(),
-                    ["before-cutoff"]
-                );
+                assert_eq!(wire_markers(&old), ["before-cutoff"]);
                 assert!(
-                    load_trace_values(trace.snapshot(admitted).await?)
-                        .await?
+                    wire_markers(&load_trace_values(trace.snapshot(admitted).await?).await?)
                         .is_empty()
                 );
             } else {
@@ -2446,10 +2491,7 @@ mod snapshot_tests {
             if let Some(trace) = &trace {
                 let final_records = load_trace_values(trace.snapshot(terminal).await?).await?;
                 assert_eq!(
-                    final_records
-                        .iter()
-                        .filter_map(|record| record["stage"].as_str())
-                        .collect::<Vec<_>>(),
+                    wire_markers(&final_records),
                     ["before-cutoff", "after-cutoff"]
                 );
                 assert_eq!(trace.manifest().status, "complete");

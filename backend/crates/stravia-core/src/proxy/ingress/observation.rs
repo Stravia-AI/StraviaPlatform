@@ -1,5 +1,4 @@
 use axum::body::Body;
-use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -62,7 +61,7 @@ pub(crate) fn reject(
         attempt_id: None,
         status_code: Some(status_code),
         url: None,
-        headers: header_value(response.headers()),
+        headers: crate::interaction_observation::wire_headers_value(response.headers()),
         payload: Value::Null,
     });
     let (parts, body) = response.into_parts();
@@ -79,7 +78,7 @@ pub(crate) fn reject(
                 status_code: Some(status_code),
                 url: None,
                 headers: Value::Null,
-                payload: Value::String(String::from_utf8_lossy(bytes).into_owned()),
+                payload: crate::interaction_observation::wire_bytes_value(bytes),
             }),
             Err(_) => observer.record(RunEvent::ObservationGap {
                 reason: "rejection_delivery_failed".into(),
@@ -96,18 +95,4 @@ pub(crate) fn take_rejection_observer(response: &mut Response) -> Option<Ingress
         .remove::<Arc<Mutex<Option<IngressObserver>>>>()?;
 
     pending.lock().take()
-}
-
-fn header_value(headers: &HeaderMap) -> Value {
-    Value::Object(
-        headers
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_owned(), Value::String(value.to_owned())))
-            })
-            .collect(),
-    )
 }

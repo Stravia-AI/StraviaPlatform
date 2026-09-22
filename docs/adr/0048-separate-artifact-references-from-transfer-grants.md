@@ -18,7 +18,9 @@ Artifact Reference 保留现有 Principal 归属边界：引用本身不授予�
 
 真实 Artifact Upload Grant 只在客户端交付时出现，不进入模型上下文或平台历史、日志及诊断记录；这些记录使用 `<stravia-upload-key>` 占位符。客户端回传平台签发的真实凭据时，平台必须在发送给 Provider 前恢复为占位符，已过期凭据也适用，且该保护不依赖可逆脱敏开关。历史回传本身不续期或签发新凭据；只有新的输出交付命中上述允许替换的位置时，才进行凭据替换。上传授权的校验与必要生命周期元数据不等于保存真实凭据，具体表示方式留待实现设计。
 
-该规则对上传凭据优先于 Wire Debug Capture 的一般正文保留约定：诊断记录不得因追求 wire 原文完整性而保存真实上传凭据。
+该规则对上传凭据优先于当时 Wire Debug Capture 的一般正文保留约定：诊断记录不得因追求 wire 原文完整性而保存真实上传凭据。
+
+> **局部被取代。** [ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 仅对显式开启的 Debug Wire 取代上一段的诊断例外：Wire 只遮盖 HTTP `Authorization`，因此其他位置的真实 Artifact Upload Grant 也可能按原始传输内容保留。模型上下文、普通 Observation、历史、日志及业务侧凭据保护仍完整遵守本 ADR，不因 Debug Wire 的例外而放宽。
 
 ## 上传授权有效期与消费规则
 

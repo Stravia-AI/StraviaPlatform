@@ -220,10 +220,10 @@ struct BundleManifest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     rejected_request: Option<CaptureManifest<'a>>,
     redaction: RedactionDeclaration,
+    capture_policy: &'static str,
+    historical_records: &'static str,
     fidelity: &'static str,
-    media_content: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    externalized_media: Option<&'a Value>,
+    media_content_policy: &'static str,
 }
 
 #[derive(Serialize)]
@@ -243,8 +243,8 @@ struct CaptureManifest<'a> {
 struct RedactionDeclaration {
     permanent: bool,
     replacement: &'static str,
-    categories: [&'static str; 5],
-    opaque_binary: &'static str,
+    categories: [&'static str; 1],
+    binary_payloads: &'static str,
 }
 
 impl<'a> BundleManifest<'a> {
@@ -283,18 +283,13 @@ impl<'a> BundleManifest<'a> {
             redaction: RedactionDeclaration {
                 permanent: true,
                 replacement: "***",
-                categories: [
-                    "credential_headers",
-                    "url_userinfo",
-                    "credential_query_values",
-                    "recursive_structured_credential_fields",
-                    "credential_patterns_in_errors",
-                ],
-                opaque_binary: "new_uninterpretable_binary_omitted_legacy_records_unchanged",
+                categories: ["http_authorization_header_values"],
+                binary_payloads: "captured_as_observed_bytes_without_decoding_or_externalization",
             },
+            capture_policy: "current_capture_authorization_header_values_only",
+            historical_records: "per_record_metadata_authoritative_legacy_records_exported_unchanged",
             fidelity: "application_protocol_capture_not_packet_capture",
-            media_content: "references_only_not_complete_media_capture",
-            externalized_media: snapshot.summary.get("externalized_media"),
+            media_content_policy: "current_capture_raw_wire_bytes_embedded_without_artifact_externalization",
         }
     }
 }
@@ -326,16 +321,7 @@ fn bundle_completeness(snapshot: &BundleSnapshot) -> &'static str {
         snapshot.resource_status.as_str(),
         "running" | "waiting_client"
     );
-    let unrecoverable = snapshot
-        .summary
-        .get("externalized_media")
-        .and_then(Value::as_array)
-        .is_some_and(|media| {
-            media.iter().any(|item| {
-                item.get("content_capture").and_then(Value::as_str) == Some("unrecoverable")
-            })
-        });
-    if terminal && !unrecoverable && statuses.iter().all(|status| *status == "complete") {
+    if terminal && statuses.iter().all(|status| *status == "complete") {
         "complete"
     } else {
         "partial"
@@ -426,7 +412,7 @@ impl Write for ChunkWriter {
     }
 }
 
-const README: &str = "Stravia Interaction Debug Bundle\n\nSchema version: 1\n\nThis archive contains application-protocol observations captured at Stravia adapter boundaries. It is not a packet capture and does not preserve TLS records, TCP packets, HTTP/2 frames, or operating-system network framing. HTTP body chunks, SSE bytes, and WebSocket messages reflect the application adapters' observed boundaries.\n\nCredential headers, URL userinfo, credential-like query values, recursive structured credential fields, and recognizable credential patterns in errors are permanently replaced with *** before persistence. Credential patterns in business text are interpreted within each application message, not by joining text across multiple messages. Reserved upload grants are always replaced with <stravia-upload-key>, including expired grants, independently of reversible redaction. New structured media captures contain externalized Artifact references and metadata, not media base64 or original wire bytes. When normalization is unavailable, media is explicitly omitted as unrecoverable. New uninterpretable binary payloads are omitted; legacy records remain unchanged. Artifact availability at export is declared in externalized_media; expired or unavailable content is unrecoverable. Reference-only captures are not complete media captures and the bundle does not embed file bodies. Other prompts, tool arguments/results, and business content may remain sensitive.\n\nCompleteness is declared in manifest.json. complete means every applicable Debug trace for a terminal resource is present. partial includes running point-in-time snapshots, mixed Debug enablement, writer/capacity/storage gaps, and missing applicable records. none means no applicable Debug trace is available. Each run entry gives its own capture status, byte counts, and stable reasons. The export is fixed through through_event_sequence; later activity is not included.\n";
+const README: &str = "Stravia Interaction Debug Bundle\n\nSchema version: 1\n\nThis archive contains application-protocol observations captured at Stravia transport boundaries. It is not a packet capture and does not preserve TLS records, TCP packets, HTTP/2 frames, or operating-system network framing. HTTP headers, body chunks, SSE bytes, WebSocket handshake metadata, and application messages reflect observed application boundaries.\n\nOnly HTTP Authorization header values (case-insensitive header name) are permanently replaced with *** before any queue or storage. Other headers, URL and query values, prompts, tool content, credentials in other locations, and media remain as captured. For current captures, binary and media payloads remain raw wire bytes; they are not decoded, scanned, reassembled, or externalized as Artifact references. Ping and Pong payloads are metadata-only. Legacy records are exported unchanged: their per-record redaction and media metadata remain authoritative, and prior redaction or externalization cannot be reversed. Treat this bundle as sensitive diagnostic data that may contain credentials.\n\nCompleteness is declared in manifest.json. complete means every applicable Debug trace for a terminal resource is present. partial includes running point-in-time snapshots, mixed Debug enablement, writer/capacity/storage gaps, and missing applicable records. none means no applicable Debug trace is available. Each run entry gives its own capture status, byte counts, and stable reasons. The export is fixed through through_event_sequence; later activity is not included.\n";
 
 #[cfg(test)]
 mod tests {

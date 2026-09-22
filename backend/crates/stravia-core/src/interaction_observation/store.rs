@@ -814,10 +814,7 @@ impl ObservationStore {
             {
                 continue;
             }
-            if matches!(
-                run_event,
-                RunEvent::Content { .. } | RunEvent::TargetSelected { .. } | RunEvent::Wire { .. }
-            ) {
+            if matches!(run_event, RunEvent::Wire { .. }) {
                 continue;
             }
             let mut payload = serde_json::to_value(run_event)?;

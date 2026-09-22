@@ -111,6 +111,9 @@ impl RunLedger {
     /// visible response about to complete.
     pub(super) fn apply_hidden_rounds(&self, response: &mut AiResponse) {
         let state = lock(&self.hidden_rounds);
+        if state.round_count == 0 {
+            return;
+        }
         if !state.items.is_empty() {
             response.items.splice(0..0, state.items.iter().cloned());
         }

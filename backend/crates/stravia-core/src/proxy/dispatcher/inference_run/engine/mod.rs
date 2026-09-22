@@ -107,34 +107,6 @@ fn reject_before_admission(
     response
 }
 
-trait ObservationRecorder {
-    fn record_event(&self, event: RunEvent);
-}
-
-impl ObservationRecorder for IngressObserver {
-    fn record_event(&self, event: RunEvent) {
-        self.record(event);
-    }
-}
-
-impl ObservationRecorder for crate::interaction_observation::RunObserver {
-    fn record_event(&self, event: RunEvent) {
-        self.record(event);
-    }
-}
-
-fn checkpoint_payload<R: ObservationRecorder, T: serde::Serialize + ?Sized>(
-    recorder: &R,
-    value: &T,
-) -> serde_json::Value {
-    serde_json::to_value(value).unwrap_or_else(|error| {
-        recorder.record_event(RunEvent::ObservationGap {
-            reason: format!("checkpoint_serialization: {error}"),
-        });
-        serde_json::json!({ "unavailable": "checkpoint_serialization" })
-    })
-}
-
 fn visible_delta_text(
     delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
 ) -> Option<&str> {
@@ -284,17 +256,6 @@ pub(super) async fn orchestrate(
         .take::<IngressObserver>()
         .expect("Inference Run ingress observer");
     ingress_observer.set_model(&request.model);
-    ingress_observer.record_debug(|| RunEvent::Content {
-        stage: "decoded_request".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        payload: request.debug_value().unwrap_or_else(|_| {
-            ingress_observer.record(RunEvent::ObservationGap {
-                reason: "decoded_request_serialization".into(),
-            });
-            serde_json::json!({ "unavailable": "decoded_request_serialization" })
-        }),
-    });
     let mut request = request;
     if let Some(session_id) = client_session_id(&headers, &request) {
         crate::generation_chain::set_generation_session_id(&mut request, session_id);
@@ -363,12 +324,6 @@ pub(super) async fn orchestrate(
         );
     }
     client_request.clone_from(&request);
-    ingress_observer.record_debug(|| RunEvent::Content {
-        stage: "artifact_normalized_request".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        payload: checkpoint_payload(&ingress_observer, &request),
-    });
     ctx.auth_subject = Some(crate::proxy::context::AuthSubject {
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
@@ -551,18 +506,6 @@ pub(super) async fn orchestrate(
             attachment_ingest_error_response(error),
         );
     }
-    ingress_observer.record_debug(|| RunEvent::Content {
-        stage: "artifact_normalized_request".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        payload: checkpoint_payload(&ingress_observer, &request),
-    });
-    ingress_observer.record_debug(|| RunEvent::Content {
-        stage: "restored_request".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        payload: checkpoint_payload(&ingress_observer, &request),
-    });
     ctx.deadline = crate::proxy::context::Deadline::from_now(execution_window);
     let admission = if marker_resolution.restored_platform_segments > 0 {
         tokio::select! {
@@ -935,7 +878,6 @@ async fn dispatch_round(
                         generation: generation_chain,
                         ledger,
                         phase,
-                        observer: Some(&observer),
                     },
                 )
                 .await
@@ -1047,16 +989,6 @@ async fn acquire_turn(
     generation: &mut GenerationChainRun,
 ) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
-        let observer = request_context
-            .extensions
-            .get::<crate::interaction_observation::RunObserver>()
-            .expect("admitted Inference Run observer");
-        observer.record_debug(|| RunEvent::Content {
-            stage: "effective_model_request".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: checkpoint_payload(&observer, &effective_request),
-        });
         let mut input = TurnInput::new(generation.principal.clone(), effective_request)
             .with_execution(
                 request_context.cancellation.clone(),

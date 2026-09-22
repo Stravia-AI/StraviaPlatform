@@ -77,9 +77,22 @@ pub(crate) fn write_message_field(out: &mut Vec<u8>, field: u32, message: &[u8])
 /// Unknown wire types and truncated fields are hard errors: callers decide
 /// whether a malformed upstream frame aborts the stream or is skipped.
 pub(crate) fn parse_fields(payload: &[u8]) -> anyhow::Result<Vec<ProtoField<'_>>> {
+    let mut remaining = usize::MAX;
+    parse_fields_limited(payload, &mut remaining)
+}
+
+/// 诊断展开必须在分配字段向量前限制节点数，避免未知子消息放大内存占用。
+pub(crate) fn parse_fields_limited<'a>(
+    payload: &'a [u8],
+    remaining: &mut usize,
+) -> anyhow::Result<Vec<ProtoField<'a>>> {
     let mut fields = Vec::new();
     let mut pos = 0usize;
     while pos < payload.len() {
+        if *remaining == 0 {
+            bail!("protobuf field count exceeds capture limit");
+        }
+        *remaining -= 1;
         let (tag, used) = read_varint(&payload[pos..]).context("protobuf tag")?;
         pos += used;
         let number = (tag >> 3) as u32;

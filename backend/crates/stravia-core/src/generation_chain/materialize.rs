@@ -37,6 +37,20 @@ pub(super) fn decode_response_node(
     Ok((node.id, persisted))
 }
 
+fn fold_client_history(client_items: &mut Vec<AiItem>, persisted: &mut PersistedResponseNode) {
+    match persisted.client_history_mutation.take() {
+        Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
+        Some(EffectiveHistoryMutation::Replace { items }) => *client_items = items,
+        None => client_items.append(&mut persisted.client_delta.messages),
+    }
+    client_items.extend(
+        persisted
+            .client_output
+            .take()
+            .unwrap_or_else(|| generic_client_history_output(&persisted.effective_output)),
+    );
+}
+
 pub(super) fn materialize_generation_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
@@ -53,37 +67,27 @@ pub(super) fn materialize_generation_nodes(
     for node in nodes {
         let node_version = node.payload_version;
         let (_, mut persisted) = decode_response_node(node)?;
-        match persisted.client_history_mutation {
-            Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
-            Some(EffectiveHistoryMutation::Replace { items }) => client_items = items,
-            None => client_items.extend(persisted.client_delta.messages.clone()),
-        }
-        match persisted.effective_history_mutation {
+        match persisted.effective_history_mutation.take() {
             Some(EffectiveHistoryMutation::Append { items }) => effective_items.extend(items),
             Some(EffectiveHistoryMutation::Replace { items }) => effective_items = items,
             None if node_version == LEGACY_RESPONSE_PAYLOAD_VERSION => {
-                effective_items = persisted.effective_input;
+                effective_items = std::mem::take(&mut persisted.effective_input);
             }
-            None => effective_items.extend(persisted.client_delta.messages.clone()),
+            None => effective_items.extend_from_slice(&persisted.client_delta.messages),
         }
         if !persisted.trusted_media_turn_ids.is_empty() {
             media_turn_messages.push((
                 effective_items.len(),
-                persisted.trusted_media_turn_ids.clone(),
+                std::mem::take(&mut persisted.trusted_media_turn_ids),
             ));
         }
-        effective_items.extend(persisted.effective_output.items.clone());
+        fold_client_history(&mut client_items, &mut persisted);
+        effective_items.append(&mut persisted.effective_output.items);
         if node_version == LEGACY_RESPONSE_PAYLOAD_VERSION {
             persisted.effective_state.context_fingerprint =
                 history_context_fingerprint(&effective_items);
             persisted.effective_state.context_messages = effective_items.len();
         }
-        client_items.extend(
-            persisted
-                .client_output
-                .take()
-                .unwrap_or_else(|| generic_client_history_output(&persisted.effective_output)),
-        );
         client_history = persisted.client_history;
         effective_request = persisted.effective_request;
         effective_system = persisted.effective_system.or(persisted.client_delta.system);
@@ -156,24 +160,19 @@ pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) 
         .saturating_add(std::mem::size_of::<MaterializedGeneration>())
 }
 
-pub(crate) fn client_items_from_payloads(
-    payloads: Vec<serde_json::Value>,
-) -> Result<Vec<AiItem>, String> {
-    let mut client_items = Vec::new();
-    for payload in payloads {
-        let mut persisted: PersistedResponseNode = serde_json::from_value(payload)
-            .map_err(|_| "invalid generation payload".to_string())?;
-        match persisted.client_history_mutation {
-            Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
-            Some(EffectiveHistoryMutation::Replace { items }) => client_items = items,
-            None => client_items.extend(persisted.client_delta.messages.clone()),
-        }
-        client_items.extend(
-            persisted
-                .client_output
-                .take()
-                .unwrap_or_else(|| generic_client_history_output(&persisted.effective_output)),
-        );
+pub(super) fn visit_client_items_from_nodes(
+    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+    mut visit: impl FnMut(&str, &[AiItem]),
+) -> Result<(), String> {
+    let mut decoded = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        decoded.push(decode_response_node(node)?);
     }
-    Ok(client_items)
+
+    let mut client_items = Vec::new();
+    for (node_id, mut persisted) in decoded {
+        fold_client_history(&mut client_items, &mut persisted);
+        visit(node_id.as_str(), &client_items);
+    }
+    Ok(())
 }

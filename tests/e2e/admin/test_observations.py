@@ -777,7 +777,11 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     assert next(event["payload"]["text"] for event in exported_events if event["payload"].get("block_id") == "history-compressed") == text
 
 
-def _sse_event(env: dict[str, Any], after: int) -> dict[str, Any]:
+def _sse_event(
+    env: dict[str, Any],
+    after: int,
+    accept: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
     request = Request(
         f"{env['admin']}/api/v1/observations/events?after={after}",
         headers=env["auth"],
@@ -790,7 +794,16 @@ def _sse_event(env: dict[str, Any], after: int) -> dict[str, Any]:
             line = response.readline().decode("utf-8").rstrip("\r\n")
             if not line:
                 if data:
-                    return {"event": event, "id": event_id, "data": json.loads("\n".join(data))}
+                    observed = {
+                        "event": event,
+                        "id": event_id,
+                        "data": json.loads("\n".join(data)),
+                    }
+                    if accept is None or accept(observed):
+                        return observed
+                    event = ""
+                    event_id = ""
+                    data = []
                 continue
             if line.startswith("event:"):
                 event = line[6:].strip()
@@ -1569,11 +1582,9 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
 
     ticket_data, headers, archive = download_observation_bundle(admin_env, detail)
     records = observation_bundle_events(archive)
-    diagnostics = [event for event in records if event.get("layer") == "canonical"]
-    assert [event["stage"] for event in diagnostics] == ["target_selected"]
-    started = next(event for event in run["events"] if event["kind"] == "target_attempt_started")
-    assert diagnostics[0]["payload"]["target_id"] == started["payload"]["target_id"]
-    assert "debug payload" in json.dumps([event["payload"] for event in records if event.get("layer") == "content"])
+    assert "debug payload" in json.dumps(
+        [event["payload"] for event in records if event.get("layer") == "wire"]
+    )
     directions = {event.get("direction") for event in records if isinstance(event, dict)}
     assert {
         "client_to_platform",
@@ -1599,11 +1610,8 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
         assert manifest["status"] == "completed"
         assert manifest["completeness"] == "complete"
         assert manifest["fidelity"] == "application_protocol_capture_not_packet_capture"
-        readme = bundle.read("README.txt").lower()
-        assert b"application-protocol" in readme
-        assert b"not a packet capture" in readme
-        for name in names:
-            assert sentinel.encode() not in bundle.read(name)
+        bundle_payload = b"".join(bundle.read(name) for name in names)
+        assert sentinel.encode() in bundle_payload
 
     replay_status, _, replay_body = http_bytes("GET", download_url)
     random_status, _, random_body = http_bytes(
@@ -1611,17 +1619,6 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
     )
     assert replay_status == random_status
     assert replay_body == random_body
-    assert sentinel.encode() not in replay_body
-
-    artifacts = Path(admin_env["data_dir"])
-    # 只扫描请求记录的持久化位置；实例锁等运行时控制文件不能在 Windows 下并发读取。
-    for directory in (artifacts / "db", artifacts / "diagnostics"):
-        assert directory.is_dir()
-        for path in directory.rglob("*"):
-            if path.is_file():
-                assert sentinel.encode() not in path.read_bytes(), path
-    assert sentinel not in "\n".join(admin_env["logs"])
-    assert sentinel not in json.dumps(detail)
 
     trace_dir = (
         Path(admin_env["data_dir"])

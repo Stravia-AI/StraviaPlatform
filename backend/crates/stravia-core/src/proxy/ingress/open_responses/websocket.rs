@@ -91,26 +91,27 @@ fn handshake_ingress(
         attempt_id: None,
         status_code: None,
         url: Some("/v1/responses".into()),
-        headers: serde_json::Value::Object(
-            headers
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_owned(), Value::String(value.to_owned())))
-                })
-                .collect(),
-        ),
+        headers: crate::interaction_observation::wire_headers_value(headers),
         payload: Value::Null,
     });
     observer
 }
 
+struct PendingHandshakeRequest {
+    recorded_at: i64,
+    headers: Value,
+}
+
+struct PendingHandshake {
+    request: PendingHandshakeRequest,
+    response_recorded_at: i64,
+    response_status: u16,
+    response_headers: Value,
+}
+
 fn websocket_ingress(
     gateway: &Gateway,
-    headers: &HeaderMap,
-    handshake_response: &Value,
+    pending_handshake: Option<PendingHandshake>,
 ) -> crate::interaction_observation::IngressObserver {
     let observer =
         gateway
@@ -121,46 +122,36 @@ fn websocket_ingress(
                 path: "/v1/responses".into(),
                 protocol: OPEN_RESPONSES_2026_04_24.to_string(),
             });
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
-        direction: "client_to_platform".into(),
-        transport: "http".into(),
-        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
-        message_type: "handshake_request".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        status_code: None,
-        url: Some("/v1/responses".into()),
-        headers: serde_json::Value::Object(
-            headers
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_owned(), Value::String(value.to_owned())))
-                })
-                .collect(),
-        ),
-        payload: Value::Null,
-    });
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
-        direction: "platform_to_client".into(),
-        transport: "http".into(),
-        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
-        message_type: "handshake_response".into(),
-        model_turn_id: None,
-        attempt_id: None,
-        status_code: handshake_response
-            .get("status")
-            .and_then(Value::as_u64)
-            .map(|status| status as u16),
-        url: Some("/v1/responses".into()),
-        headers: handshake_response
-            .get("headers")
-            .cloned()
-            .unwrap_or(Value::Null),
-        payload: Value::Null,
-    });
+    if let Some(handshake) = pending_handshake {
+        observer.record_debug_at(handshake.request.recorded_at, || {
+            crate::interaction_observation::RunEvent::Wire {
+                direction: "client_to_platform".into(),
+                transport: "http".into(),
+                protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+                message_type: "handshake_request".into(),
+                model_turn_id: None,
+                attempt_id: None,
+                status_code: None,
+                url: Some("/v1/responses".into()),
+                headers: handshake.request.headers,
+                payload: Value::Null,
+            }
+        });
+        observer.record_debug_at(handshake.response_recorded_at, || {
+            crate::interaction_observation::RunEvent::Wire {
+                direction: "platform_to_client".into(),
+                transport: "http".into(),
+                protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+                message_type: "handshake_response".into(),
+                model_turn_id: None,
+                attempt_id: None,
+                status_code: Some(handshake.response_status),
+                url: Some("/v1/responses".into()),
+                headers: handshake.response_headers,
+                payload: Value::Null,
+            }
+        });
+    }
     observer
 }
 
@@ -170,6 +161,14 @@ pub async fn handler(
     headers: HeaderMap,
     origins: Option<Extension<AllowedWebSocketOrigins>>,
 ) -> Response {
+    let pending_handshake_request =
+        gateway
+            .observation
+            .debug_enabled()
+            .then(|| PendingHandshakeRequest {
+                recorded_at: chrono::Utc::now().timestamp_millis(),
+                headers: crate::interaction_observation::wire_headers_value_for_async(&headers),
+            });
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -196,19 +195,22 @@ pub async fn handler(
         );
     }
 
-    let handshake_response = Arc::new(Mutex::new(Value::Null));
-    let serve_handshake_response = handshake_response.clone();
+    let (handshake_sender, handshake_receiver) = tokio::sync::oneshot::channel();
     let response = ws
         .max_message_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve(socket, gateway, headers, serve_handshake_response));
-    *handshake_response.lock() = serde_json::json!({
-        "status": response.status().as_u16(),
-        "headers": response.headers().iter().filter_map(|(name, value)| {
-            value.to_str().ok().map(|value| {
-                (name.as_str().to_owned(), Value::String(value.to_owned()))
-            })
-        }).collect::<serde_json::Map<String, Value>>(),
+        .on_upgrade(move |socket| async move {
+            let pending_handshake = handshake_receiver.await.unwrap_or(None);
+            serve(socket, gateway, headers, pending_handshake).await;
+        });
+    let pending_handshake = pending_handshake_request.map(|request| PendingHandshake {
+        request,
+        response_recorded_at: chrono::Utc::now().timestamp_millis(),
+        response_status: response.status().as_u16(),
+        response_headers: crate::interaction_observation::wire_headers_value_for_async(
+            response.headers(),
+        ),
     });
+    let _ = handshake_sender.send(pending_handshake);
     response
 }
 
@@ -253,9 +255,8 @@ async fn serve(
     socket: WebSocket,
     gateway: Gateway,
     headers: HeaderMap,
-    handshake_response: Arc<Mutex<Value>>,
+    mut pending_handshake: Option<PendingHandshake>,
 ) {
-    let handshake_response = handshake_response.lock().clone();
     let (mut sink, mut source) = socket.split();
     let (outgoing, mut outgoing_rx) = mpsc::channel::<OutgoingMessage>(OUTGOING_QUEUE_CAPACITY);
     let terminal_started = Arc::new(AtomicBool::new(false));
@@ -305,7 +306,7 @@ async fn serve(
                     request_context
                         .extensions
                         .insert(connection_observation.clone());
-                    let ingress = websocket_ingress(&gateway, &headers, &handshake_response);
+                    let ingress = websocket_ingress(&gateway, pending_handshake.take());
                     ingress.record_debug(|| {
                         ws_wire(
                             "client_to_platform",
@@ -605,7 +606,7 @@ async fn serve(
                     break;
                 }
                 Message::Binary(payload) => {
-                    let ingress = websocket_ingress(&gateway, &headers, &handshake_response);
+                    let ingress = websocket_ingress(&gateway, pending_handshake.take());
                     ingress.record_debug(|| ws_wire(
                         "client_to_platform",
                         "binary",

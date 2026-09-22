@@ -241,9 +241,7 @@ fn devin_parses_user_status_protobuf() {
 
 #[test]
 fn devin_reports_negative_overage_balance() {
-    use crate::protocol::codec::devin_connect::proto::{
-        write_message_field, write_varint_field,
-    };
+    use crate::protocol::codec::devin_connect::proto::{write_message_field, write_varint_field};
 
     // 回归：余额为负的 Pro 账户线上返回 int64 -730000（-$0.73），按 u64
     // 解读会得到 ~1.8e19 的幽灵余额。

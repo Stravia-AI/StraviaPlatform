@@ -2288,3 +2288,224 @@ fn changed_url_media_disables_upstream_reuse() {
         &original, &changed
     ));
 }
+
+fn observation_payload(
+    client_delta: Vec<AiItem>,
+    client_history_mutation: Option<EffectiveHistoryMutation>,
+    client_output: Option<Vec<AiItem>>,
+    effective_output_text: &str,
+) -> serde_json::Value {
+    let mut effective_output = AiResponse::new("private-upstream", "model");
+    effective_output.push_output_text(effective_output_text);
+    serde_json::to_value(PersistedResponseNode {
+        client_delta: RequestDelta {
+            messages: client_delta,
+            system: None,
+        },
+        client_output,
+        client_history_mutation,
+        compaction_record_ids: Vec::new(),
+        effective_history_mutation: None,
+        effective_system: None,
+        effective_output,
+        effective_input: Vec::new(),
+        client_history: None,
+        trusted_media_turn_ids: Vec::new(),
+        upstream_response_id: None,
+        effective_state: GenerationChainState::default(),
+        effective_request: None,
+    })
+    .expect("observation payload")
+}
+
+async fn commit_observation_node(
+    store: &dyn TurnChainStore,
+    owner: &Principal,
+    id: &str,
+    parent: Option<&str>,
+    payload: serde_json::Value,
+    idle_ttl: Duration,
+) {
+    store
+        .commit(TurnCommit {
+            id: TurnNodeId::new(id),
+            kind: TurnNodeKind::Response,
+            parent_id: parent.map(TurnNodeId::new),
+            principal: owner.clone(),
+            payload_version: RESPONSE_PAYLOAD_VERSION,
+            payload,
+            idle_ttl,
+            reusable_prefix: None,
+        })
+        .await
+        .expect("commit observation node");
+}
+
+#[tokio::test]
+async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history() {
+    let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
+    let chain =
+        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let owner = principal("observation-owner");
+
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "observation-root",
+        None,
+        observation_payload(
+            vec![user_message("root question")],
+            None,
+            Some(vec![AiItem::output_text("public root")]),
+            "private root",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "observation-append",
+        Some("observation-root"),
+        observation_payload(
+            Vec::new(),
+            Some(EffectiveHistoryMutation::Append {
+                items: vec![user_message("follow up")],
+            }),
+            None,
+            "fallback answer",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "observation-replace",
+        Some("observation-append"),
+        observation_payload(
+            Vec::new(),
+            Some(EffectiveHistoryMutation::Replace {
+                items: vec![user_message("edited question")],
+            }),
+            Some(vec![AiItem::output_text("public replacement")]),
+            "private replacement",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+
+    let mut snapshots = Vec::new();
+    let available = chain
+        .visit_ancestor_client_items(&owner, "observation-replace", |node, items| {
+            snapshots.push((
+                node.to_owned(),
+                items
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({"role": item.role, "content": item.content.to_text()})
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .await
+        .expect("visit complete chain");
+
+    assert!(available);
+    assert_eq!(
+        serde_json::to_value(snapshots).expect("public history snapshots"),
+        serde_json::json!([
+            ["observation-root", [
+                {"role": "user", "content": "root question"},
+                {"role": "assistant", "content": "public root"}
+            ]],
+            ["observation-append", [
+                {"role": "user", "content": "root question"},
+                {"role": "assistant", "content": "public root"},
+                {"role": "user", "content": "follow up"},
+                {"role": "assistant", "content": "fallback answer"}
+            ]],
+            ["observation-replace", [
+                {"role": "user", "content": "edited question"},
+                {"role": "assistant", "content": "public replacement"}
+            ]]
+        ])
+    );
+}
+
+#[tokio::test]
+async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partial_evidence() {
+    let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
+    let chain =
+        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let owner = principal("unavailable-observation-owner");
+
+    let mut visited = Vec::new();
+    assert!(
+        !chain
+            .visit_ancestor_client_items(&owner, "missing-node", |node, _| {
+                visited.push(node.to_owned())
+            })
+            .await
+            .expect("missing chain declines")
+    );
+    assert!(visited.is_empty());
+
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "expired-observation",
+        None,
+        observation_payload(vec![user_message("expired")], None, None, "expired answer"),
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(
+        !chain
+            .visit_ancestor_client_items(&owner, "expired-observation", |node, _| {
+                visited.push(node.to_owned())
+            })
+            .await
+            .expect("expired chain declines")
+    );
+    assert!(visited.is_empty());
+}
+
+#[tokio::test]
+async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root() {
+    let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
+    let chain =
+        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let owner = principal("invalid-observation-owner");
+
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "valid-observation-root",
+        None,
+        observation_payload(vec![user_message("valid")], None, None, "answer"),
+        Duration::from_secs(60),
+    )
+    .await;
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "invalid-observation-tail",
+        Some("valid-observation-root"),
+        serde_json::json!({"invalid": true}),
+        Duration::from_secs(60),
+    )
+    .await;
+
+    let mut visited = Vec::new();
+    assert!(
+        chain
+            .visit_ancestor_client_items(&owner, "invalid-observation-tail", |node, _| {
+                visited.push(node.to_owned())
+            })
+            .await
+            .is_err()
+    );
+    assert!(visited.is_empty());
+}

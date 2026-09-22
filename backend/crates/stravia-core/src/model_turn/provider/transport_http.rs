@@ -12,28 +12,22 @@ impl ProviderCall {
             .or_insert(reqwest::header::HeaderValue::from_static(
                 "application/json",
             ));
-        let attempt = self
-            .adapter
-            .begin_attempt("http", &outbound.url, &request_headers, || {
-                bytes_value(&request_body)
-            });
+        let attempt = self.adapter.begin_attempt("http", &outbound.url);
         let result = self
             .client
-            .call_non_stream_raw(&outbound.url, request_headers, request_body)
+            .call_non_stream_raw(
+                &outbound.url,
+                request_headers,
+                request_body,
+                attempt.http_wire_observer(),
+            )
             .await;
-        let (raw, status, headers, response_body) = match result {
+        let (raw, status, headers, _response_body) = match result {
             Ok(response) => response,
             Err(error) => {
                 let diagnostic = if let Some(decode) =
                     error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
                 {
-                    attempt.wire_lazy(
-                        "upstream_response",
-                        "http_response",
-                        Some(decode.status),
-                        Some(&decode.headers),
-                        || bytes_value(&decode.body),
-                    );
                     attempt.finish(
                         "failed",
                         Some(decode.status),
@@ -76,18 +70,10 @@ impl ProviderCall {
                     );
                     diagnostic
                 };
-                attempt.transport_failure(&diagnostic);
                 let safe = diagnostic.to_string();
                 return Err(error.context(safe));
             }
         };
-        attempt.wire_lazy(
-            "upstream_response",
-            "http_response",
-            Some(status),
-            Some(&headers),
-            || bytes_value(&response_body),
-        );
         Ok((raw, status, headers, attempt))
     }
 
@@ -171,26 +157,18 @@ impl ProviderCall {
             .or_insert(reqwest::header::HeaderValue::from_static(
                 "application/json",
             ));
-        let attempt = self
-            .adapter
-            .begin_attempt("sse", &outbound.url, &request_headers, || {
-                bytes_value(&request_body)
-            });
+        let attempt = self.adapter.begin_attempt("sse", &outbound.url);
         match self
             .client
-            .call_stream_raw(&outbound.url, request_headers, request_body)
+            .call_stream_raw(
+                &outbound.url,
+                request_headers,
+                request_body,
+                attempt.http_wire_observer(),
+            )
             .await
         {
-            Ok((response, status)) => {
-                attempt.wire(
-                    "upstream_response",
-                    "http_headers",
-                    Some(status),
-                    Some(response.headers()),
-                    Value::Null,
-                );
-                Ok((response, status, attempt))
-            }
+            Ok((response, status)) => Ok((response, status, attempt)),
             Err(error) => {
                 let diagnostic = error
                     .downcast_ref::<crate::proxy::client::UpstreamTransportError>()
@@ -205,7 +183,6 @@ impl ProviderCall {
                             error.as_ref(),
                         )
                     });
-                attempt.transport_failure(&diagnostic);
                 attempt.finish(
                     "failed",
                     diagnostic.http_status,
@@ -238,21 +215,32 @@ impl ProviderCall {
             }
             let headers = response.headers().clone();
             if status >= 400 {
-                let body_bytes = response.bytes().await.map_err(|error| {
-                    let diagnostic = crate::proxy::client::TransportDiagnostic::from_reqwest(
-                        "receive",
-                        false,
-                        Some(status),
-                        &error,
-                    );
-                    attempt.transport_failure(&diagnostic);
-                    anyhow::Error::new(error).context(diagnostic.to_string())
-                });
-                if let Ok(bytes) = &body_bytes {
-                    attempt.wire_lazy("upstream_response", "http_body", Some(status), None, || {
-                        bytes_value(bytes)
-                    });
+                let mut body_buffer = bytes::BytesMut::new();
+                let mut body_stream = response.bytes_stream();
+                let body_bytes = async {
+                    while let Some(chunk) = body_stream.next().await {
+                        let chunk = chunk.map_err(|error| {
+                            let diagnostic =
+                                crate::proxy::client::TransportDiagnostic::from_reqwest(
+                                    "receive",
+                                    !body_buffer.is_empty(),
+                                    Some(status),
+                                    &error,
+                                );
+                            anyhow::Error::new(error).context(diagnostic.to_string())
+                        })?;
+                        attempt.wire_lazy(
+                            "upstream_response",
+                            "body_chunk",
+                            Some(status),
+                            None,
+                            || bytes_value(&chunk),
+                        );
+                        body_buffer.extend_from_slice(&chunk);
+                    }
+                    Ok::<bytes::Bytes, anyhow::Error>(body_buffer.freeze())
                 }
+                .await;
                 let body = body_bytes.and_then(|bytes| {
                     serde_json::from_slice(&bytes).map_err(|error| {
                         let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
@@ -263,7 +251,6 @@ impl ProviderCall {
                             None,
                             &error,
                         );
-                        attempt.transport_failure(&diagnostic);
                         anyhow::Error::new(error).context(diagnostic.to_string())
                     })
                 });

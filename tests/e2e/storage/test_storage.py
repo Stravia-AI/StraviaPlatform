@@ -667,9 +667,9 @@ def test_observation_tool_replay_and_trace_survive_restart(
         assert {record.get("direction") for record in records if record.get("layer") == "wire"} == {
             "client_to_platform", "upstream_request", "upstream_response", "platform_to_client",
         }
-        content = json.dumps([record["payload"] for record in records if record.get("layer") == "content"])
+        wire = json.dumps([record["payload"] for record in records if record.get("layer") == "wire"])
         for result in ("result-0", "result-1", "result-2"):
-            assert result in content
+            assert result in wire
     finally:
         if process is not None:
             stop_stravia_server(process, logs)

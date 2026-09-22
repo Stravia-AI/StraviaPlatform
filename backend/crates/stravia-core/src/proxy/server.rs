@@ -138,20 +138,7 @@ async fn observe_inference_ingress(
             attempt_id: None,
             status_code: None,
             url: Some(request.uri().to_string()),
-            headers: serde_json::Value::Object(
-                request
-                    .headers()
-                    .iter()
-                    .filter_map(|(name, value)| {
-                        value.to_str().ok().map(|value| {
-                            (
-                                name.as_str().to_owned(),
-                                serde_json::Value::String(value.to_owned()),
-                            )
-                        })
-                    })
-                    .collect(),
-            ),
+            headers: crate::interaction_observation::wire_headers_value(request.headers()),
             payload: serde_json::Value::Null,
         });
         if let Some(capture) = observer.capture() {
@@ -164,12 +151,11 @@ async fn observe_inference_ingress(
     next.run(request).await
 }
 
-// 先收齐应用层请求体再统一脱敏，避免单独持久化分块时泄露跨块凭据。
 struct CapturedBodyStream {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
     capture: IngressCapture,
     protocol: String,
-    bytes: Vec<u8>,
+    captured_bytes: usize,
     overflowed: bool,
     finalized: bool,
 }
@@ -180,7 +166,7 @@ impl CapturedBodyStream {
             inner: Box::pin(body.into_data_stream()),
             capture,
             protocol,
-            bytes: Vec::new(),
+            captured_bytes: 0,
             overflowed: false,
             finalized: false,
         }
@@ -190,56 +176,37 @@ impl CapturedBodyStream {
         if self.overflowed {
             return;
         }
-        if self
-            .bytes
-            .len()
-            .checked_add(chunk.len())
-            .is_some_and(|length| {
-                length <= PROXY_JSON_BODY_LIMIT_BYTES.min(IngressCapture::MAX_BODY_BYTES)
-            })
-        {
-            self.bytes.extend_from_slice(chunk);
-        } else {
+        let limit = PROXY_JSON_BODY_LIMIT_BYTES.min(IngressCapture::MAX_BODY_BYTES);
+        let remaining = limit.saturating_sub(self.captured_bytes);
+        let captured = &chunk[..chunk.len().min(remaining)];
+        if !captured.is_empty() {
+            self.captured_bytes += captured.len();
+            self.capture.record(RunEvent::Wire {
+                direction: "client_to_platform".into(),
+                transport: "http".into(),
+                protocol: self.protocol.clone(),
+                message_type: "body_chunk".into(),
+                model_turn_id: None,
+                attempt_id: None,
+                status_code: None,
+                url: None,
+                headers: serde_json::Value::Null,
+                payload: crate::interaction_observation::wire_bytes_value(captured),
+            });
+        }
+        if captured.len() != chunk.len() {
             self.overflowed = true;
-            self.bytes = Vec::new();
+            self.capture.mark_partial("run_size_limit");
         }
     }
 
     fn finish_complete(&mut self) {
-        if self.finalized {
-            return;
-        }
         self.finalized = true;
-        if self.overflowed {
-            self.capture.mark_partial("run_size_limit");
-            return;
-        }
-        let payload = match String::from_utf8(std::mem::take(&mut self.bytes)) {
-            Ok(text) => serde_json::Value::String(text),
-            Err(error) => serde_json::json!({
-                "capture_fidelity": "body_unavailable",
-                "reason": "invalid_utf8",
-                "byte_count": error.as_bytes().len(),
-            }),
-        };
-        self.capture.record(RunEvent::Wire {
-            direction: "client_to_platform".into(),
-            transport: "http".into(),
-            protocol: self.protocol.clone(),
-            message_type: "request_body".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            status_code: None,
-            url: None,
-            headers: serde_json::Value::Null,
-            payload,
-        });
     }
 
     fn finish_partial(&mut self, reason: &'static str) {
         if !self.finalized {
             self.finalized = true;
-            self.bytes = Vec::new();
             self.capture.mark_partial(reason);
         }
     }

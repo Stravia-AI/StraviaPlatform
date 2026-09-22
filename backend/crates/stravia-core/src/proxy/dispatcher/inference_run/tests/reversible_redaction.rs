@@ -396,13 +396,16 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
                 records.extend(text.lines().map(|line| serde_json::from_str(line).unwrap()));
             }
         }
-        let checkpoint = records
+        let wire_payloads = records
             .iter()
-            .find(|event| event["stage"] == "platform_tool_call")
-            .expect("platform execution argument checkpoint");
-        let recorded_arguments: serde_json::Value =
-            serde_json::from_str(checkpoint["payload"]["arguments"].as_str().unwrap()).unwrap();
-        assert_eq!(recorded_arguments, serde_json::json!({"value": "***"}));
+            .filter(|event| event["layer"] == "wire")
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            wire_payloads.iter().any(|event| event.contains("***")),
+            "wire capture should retain ordinary redaction without semantic checkpoints"
+        );
     } else {
         assert!(
             detail

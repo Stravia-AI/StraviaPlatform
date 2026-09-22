@@ -182,15 +182,6 @@ pub(crate) async fn generate(
     )
     .await;
     if standalone {
-        observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
-            stage: "mcp_tool_result".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: match &result {
-                Ok(value) => value.clone(),
-                Err(error) => json!({"error":{"code":error.code,"message":error.message}}),
-            },
-        });
         observer.finish(crate::interaction_observation::RunOutcome {
             delivery_completed_at: None,
             status: match &result {

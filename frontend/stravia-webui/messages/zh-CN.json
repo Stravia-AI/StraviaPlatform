@@ -1561,7 +1561,7 @@
   "observation_debug_status_writing": "正在保存",
   "observation_debug_disable_retains": "关闭 Debug 只影响之后开始的请求；已有记录会保留至到期。",
   "observation_debug_retained": "当前已保存：{retained}。",
-  "observation_debug_warning": "即使开启凭据保护，Debug 仍可能保存提示词、工具参数、结果和业务数据；由多条消息文本拼接而成的凭据也可能被保留。记录保留 {retention_days} 天。每次开启都需要确认。",
+  "observation_debug_warning": "Debug 会保存原始应用协议 Wire 数据。只有 HTTP Authorization 请求头的值（请求头名称不区分大小写）会在入队前替换；其他请求头、URL、查询参数、正文、提示词、工具内容、媒体和其他凭据都会按捕获内容保留，可能包含敏感信息。媒体不会外置为 Artifact。记录保留 {retention_days} 天。每次开启都需要确认。",
   "observation_delivery": "交付",
   "observation_details": "观测详情",
   "observation_details_unavailable": "详情不可用",

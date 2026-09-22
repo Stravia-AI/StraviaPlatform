@@ -169,9 +169,6 @@ impl ProtectedSecrets {
                     self.value(value);
                 }
             }
-            RunEvent::Content { payload, .. } | RunEvent::TargetSelected { payload, .. } => {
-                self.value(payload)
-            }
             RunEvent::Wire {
                 direction,
                 payload,
@@ -619,10 +616,6 @@ pub(crate) struct RedactionReport {
 }
 
 impl RedactionReport {
-    pub(crate) fn into_kinds(self) -> impl Iterator<Item = RedactionKind> {
-        self.kinds.into_iter()
-    }
-
     pub(crate) fn merge(&mut self, other: Self) {
         self.kinds.extend(other.kinds);
     }
@@ -630,13 +623,6 @@ impl RedactionReport {
     fn record(&mut self, kind: RedactionKind) {
         self.kinds.insert(kind);
     }
-}
-
-pub(crate) fn redact_headers(headers: &mut Value) -> RedactionReport {
-    crate::agent::upload_grant::scrub_upload_grant_value(headers);
-    let mut report = RedactionReport::default();
-    redact_header_node(headers, &mut report);
-    report
 }
 
 pub(crate) fn redact_value(value: &mut Value) -> RedactionReport {
@@ -782,10 +768,6 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
 
 pub(crate) fn redact_text(message: &str) -> String {
     redact_text_with_report(message).0
-}
-
-pub(crate) fn redact_error(message: &str) -> (String, RedactionReport) {
-    redact_text_with_report(message)
 }
 
 fn redact_string(value: &mut String, report: &mut RedactionReport) {
@@ -1241,343 +1223,6 @@ fn append_redacted_credential_fragment(
     }
 }
 
-fn redact_header_node(value: &mut Value, report: &mut RedactionReport) {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            Value::Object(object) => {
-                for (key, value) in object {
-                    if is_credential_header(key) {
-                        *value = Value::String(REDACTED.to_owned());
-                        report.record(RedactionKind::CredentialHeader);
-                    } else {
-                        pending.push(value);
-                    }
-                }
-            }
-            Value::Array(values) => pending.extend(values.iter_mut()),
-            Value::String(text) => *text = redact_credential_text(text, report),
-            _ => {}
-        }
-    }
-}
-
-/// Parse transport envelopes only at the adapter boundary. Business strings and tool
-/// arguments are credential-scrubbed separately and never interpreted as media.
-pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionReport {
-    let mut report = RedactionReport::default();
-    if wire && let Value::String(text) = value {
-        if let Ok(mut envelope) = serde_json::from_str::<Value>(text) {
-            externalize_envelope(&mut envelope, &mut report);
-            if !report.kinds.is_empty() {
-                *text = envelope.to_string();
-            }
-        } else if text.starts_with("data:") || text.starts_with("event:") || text.starts_with(':') {
-            let mut output = String::with_capacity(text.len());
-            for line in text.split_inclusive('\n') {
-                if let Some(data) = line.strip_prefix("data:")
-                    && data.trim_start().starts_with(['{', '['])
-                {
-                    let mut payload = Value::String(data.trim().to_owned());
-                    let line_report = externalize_capture(&mut payload, true);
-                    if !line_report.kinds.is_empty() {
-                        output.push_str("data: ");
-                        output.push_str(payload.as_str().expect("wire capture remains text"));
-                        if line.ends_with('\n') {
-                            output.push('\n');
-                        }
-                        report.merge(line_report);
-                        continue;
-                    }
-                }
-                output.push_str(line);
-            }
-            if !report.kinds.is_empty() {
-                *text = output;
-            }
-        } else if text.trim_start().starts_with(['{', '['])
-            && ([
-                "\"image_url\"",
-                "\"input_audio\"",
-                "\"inlineData\"",
-                "\"inline_data\"",
-                "\"file_data\"",
-                "\"base64\"",
-                "\"base64_pdf\"",
-                "\"image_generation_call\"",
-                "\"partial_image_b64\"",
-            ]
-            .iter()
-            .any(|key| text.contains(key))
-                || (text.contains("\"image\"")
-                    && text.contains("\"source\"")
-                    && text.contains("\"bytes\"")))
-        {
-            *text = serde_json::json!({"media_externalized":true, "original_wire_bytes":false,
-                    "content_capture":"unrecoverable", "reason":"malformed_structured_media"})
-            .to_string();
-            report.record(RedactionKind::MediaUnrecoverable);
-        }
-        return report;
-    }
-    externalize_envelope(value, &mut report);
-    report
-}
-
-fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
-    if let Value::Array(envelopes) = value {
-        // Adapter response batches and client projection batches contain envelopes,
-        // never recursively decoded business strings or tool argument values.
-        for envelope in envelopes {
-            externalize_envelope(envelope, report);
-        }
-        return;
-    }
-    let Value::Object(object) = value else { return };
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    // Tool arguments/results, provider function payloads, text and reasoning are opaque
-    // business values. Only explicit content-block arrays may contain media blocks.
-    if matches!(
-        kind,
-        "text"
-            | "input_text"
-            | "output_text"
-            | "tool_use"
-            | "function_call"
-            | "function_call_output"
-            | "thinking"
-            | "reasoning"
-            | "tool_result"
-    ) {
-        return;
-    }
-    if matches!(
-        kind,
-        "response.audio.delta"
-            | "response.output_audio.delta"
-            | "response.image_generation_call.partial_image"
-            | "image_generation_call"
-    ) {
-        externalize_media(value, report);
-        return;
-    }
-    let anthropic_media = matches!(kind, "content_block_start" | "content_block_stop");
-    if object.get("kind").and_then(Value::as_str) == Some("item_done")
-        && let Some(item) = object.get_mut("data").and_then(|data| data.get_mut("item"))
-    {
-        externalize_envelope(item, report);
-    }
-    if anthropic_media && let Some(block) = object.get_mut("content_block") {
-        externalize_media(block, report);
-    }
-    for key in ["content", "parts"] {
-        if let Some(Value::Array(blocks)) = object.get_mut(key) {
-            for block in blocks {
-                externalize_media(block, report);
-            }
-        }
-    }
-    if object
-        .get("audio")
-        .and_then(|audio| audio.get("data"))
-        .is_some()
-    {
-        externalize_media(value, report);
-    }
-    let Value::Object(object) = value else { return };
-    for key in [
-        "messages",
-        "items",
-        "contents",
-        "input",
-        "output",
-        "choices",
-        "candidates",
-    ] {
-        if let Some(Value::Array(items)) = object.get_mut(key) {
-            for item in items {
-                // Responses input/output arrays mix messages with explicit media blocks.
-                externalize_media(item, report);
-                externalize_envelope(item, report);
-            }
-        }
-    }
-    for key in [
-        "message",
-        "content",
-        "delta",
-        "response",
-        "request",
-        "canonical_request",
-        "canonical_response",
-        "item",
-    ] {
-        if let Some(nested) = object.get_mut(key) {
-            externalize_envelope(nested, report);
-        }
-    }
-}
-
-// Called exclusively for a known protocol media block, never arbitrary business JSON.
-fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
-    let Value::Object(object) = value else { return };
-    if object.get("type").and_then(Value::as_str) == Some("unknown")
-        && let Some(raw) = object.get_mut("raw")
-        && raw.get("type").and_then(Value::as_str) == Some("image_generation_call")
-    {
-        externalize_media(raw, report);
-        return;
-    }
-    if object.get("type").and_then(Value::as_str) == Some("tool_result") {
-        if object.get("content_kind").and_then(Value::as_str) != Some("json")
-            && let Some(Value::Array(blocks)) = object.get_mut("content")
-        {
-            for block in blocks {
-                externalize_media(block, report);
-            }
-        }
-        return;
-    }
-    // Bedrock Converse's currently supported image block has no type discriminator.
-    // This function is called only for a protocol content block, not tool input JSON.
-    if let Some(image) = object.get_mut("image").and_then(Value::as_object_mut)
-        && image
-            .get("source")
-            .and_then(|source| source.get("bytes"))
-            .is_some()
-    {
-        image.insert(
-            "source".into(),
-            serde_json::json!({
-                "media_externalized": true, "original_wire_bytes": false,
-                "content_capture": "unrecoverable", "reason": "artifact_not_available_at_capture"
-            }),
-        );
-        report.record(RedactionKind::MediaUnrecoverable);
-    }
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let media = matches!(
-        kind,
-        "image"
-            | "audio"
-            | "video"
-            | "file"
-            | "document"
-            | "image_url"
-            | "input_image"
-            | "input_audio"
-            | "input_file"
-            | "output_audio"
-            | "base64"
-            | "base64_pdf"
-            | "response.audio.delta"
-            | "response.output_audio.delta"
-            | "response.image_generation_call.partial_image"
-            | "image_generation_call"
-    ) || object.contains_key("inlineData")
-        || object.contains_key("inline_data")
-        || object.contains_key("fileData")
-        || object.contains_key("file_data")
-        || object
-            .get("audio")
-            .and_then(|audio| audio.get("data"))
-            .is_some();
-    if !media {
-        return;
-    }
-    // Plain-text documents and nested document blocks are not binary media.
-    if object
-        .get("source")
-        .and_then(|source| source.get("type"))
-        .and_then(Value::as_str)
-        .is_some_and(|kind| matches!(kind, "plain_text" | "blocks"))
-    {
-        return;
-    }
-    for key in [
-        "source",
-        "image_url",
-        "input_audio",
-        "inlineData",
-        "inline_data",
-        "fileData",
-        "file_data",
-        "data",
-        "url",
-        "file_url",
-        "file_id",
-        "audio",
-        "delta",
-        "partial_image_b64",
-        "result",
-    ] {
-        let Some(source) = object.get_mut(key) else {
-            continue;
-        };
-        if source.is_null() {
-            continue;
-        }
-        let reference = source
-            .as_str()
-            .or_else(|| source.get("url").and_then(Value::as_str))
-            .or_else(|| source.get("file_id").and_then(Value::as_str))
-            .or_else(|| source.get("fileUri").and_then(Value::as_str))
-            .or_else(|| source.get("file_uri").and_then(Value::as_str))
-            .or_else(|| source.get("artifact_reference").and_then(Value::as_str))
-            .or_else(|| source.pointer("/reference/stravia").and_then(Value::as_str))
-            .filter(|url| {
-                stravia_runtime_contract::artifact::ArtifactId::from_reference(url).is_ok()
-            })
-            .map(str::to_owned);
-        let mut metadata = serde_json::Map::new();
-        if let Some(fields) = source.as_object() {
-            for name in [
-                "media_type",
-                "mimeType",
-                "mime_type",
-                "filename",
-                "size",
-                "format",
-                "detail",
-                "id",
-                "transcript",
-                "expires_at",
-            ] {
-                if let Some(field) = fields.get(name) {
-                    metadata.insert(name.to_owned(), field.clone());
-                }
-            }
-        }
-        metadata.insert("media_externalized".into(), Value::Bool(true));
-        metadata.insert("original_wire_bytes".into(), Value::Bool(false));
-        if let Some(reference) = reference {
-            metadata.insert("artifact_reference".into(), Value::String(reference));
-            metadata.insert(
-                "content_capture".into(),
-                Value::String("reference_only".into()),
-            );
-            report.record(RedactionKind::MediaExternalized);
-        } else {
-            metadata.insert(
-                "content_capture".into(),
-                Value::String("unrecoverable".into()),
-            );
-            metadata.insert(
-                "reason".into(),
-                Value::String("artifact_not_available_at_capture".into()),
-            );
-            report.record(RedactionKind::MediaUnrecoverable);
-        }
-        *source = Value::Object(metadata);
-    }
-}
-
 fn redact_value_node(value: &mut Value, report: &mut RedactionReport) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
@@ -2000,7 +1645,7 @@ mod tests {
             "serialized": format!(r#"{{"outer":{{"api_key":"{sentinel}"}},"content":"preserve"}}"#),
             "prompt": "keep this business content"
         });
-        redact_headers(&mut headers);
+        redact_value(&mut headers);
         redact_value(&mut body);
         let error = redact_text(&format!(
             "upstream https://user:{sentinel}@example.test/path?api_key={sentinel} Authorization: Bearer {sentinel}"
@@ -2350,7 +1995,7 @@ mod tests {
             format!("before/{}/after", redaction_marker())
         );
         assert_eq!(
-            report.into_kinds().collect::<Vec<_>>(),
+            report.kinds.into_iter().collect::<Vec<_>>(),
             vec![RedactionKind::CredentialField]
         );
     }
@@ -2434,80 +2079,5 @@ mod tests {
             report.kinds.into_iter().collect::<Vec<_>>(),
             vec![RedactionKind::CredentialField]
         );
-    }
-
-    #[test]
-    fn structured_artifact_sources_remain_recoverable_after_externalization() {
-        let reference = format!(
-            "sa:{}",
-            "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN)
-        );
-        let mut payload = serde_json::json!({
-            "items": [{
-                "role": "user",
-                "content": [{
-                    "type": "image",
-                    "source": {
-                        "type": "file_id",
-                        "file_id": reference,
-                        "detail": "high"
-                    }
-                }]
-            }],
-            "contents": [{
-                "parts": [{
-                    "fileData": {
-                        "mimeType": "image/png",
-                        "fileUri": reference
-                    }
-                }]
-            }],
-            "messages": [{
-                "content": [{
-                    "type": "file",
-                    "data": {
-                        "type": "reference",
-                        "reference": {"stravia": reference}
-                    }
-                }]
-            }]
-        });
-
-        let report = externalize_capture(&mut payload, false);
-
-        for source in [
-            payload.pointer("/items/0/content/0/source"),
-            payload.pointer("/contents/0/parts/0/fileData"),
-            payload.pointer("/messages/0/content/0/data"),
-        ] {
-            let source = source.expect("externalized media source");
-            assert_eq!(source["artifact_reference"], reference);
-            assert_eq!(source["content_capture"], "reference_only");
-            assert_eq!(source["media_externalized"], true);
-            assert!(source.get("reason").is_none());
-        }
-        assert_eq!(
-            payload["items"][0]["content"][0]["source"]["detail"],
-            "high"
-        );
-        assert_eq!(
-            payload["contents"][0]["parts"][0]["fileData"]["mimeType"],
-            "image/png"
-        );
-        assert_eq!(
-            report.into_kinds().collect::<Vec<_>>(),
-            vec![RedactionKind::MediaExternalized]
-        );
-    }
-
-    #[test]
-    fn absent_structured_media_bytes_do_not_create_a_partial_capture() {
-        let original = r#"{"type":"image_generation_call","status":"in_progress","result":null}"#;
-        let mut payload = Value::String(original.to_owned());
-
-        let report = externalize_capture(&mut payload, true);
-
-        assert_eq!(payload, Value::String(original.to_owned()));
-        assert!(report.kinds.is_empty());
     }
 }

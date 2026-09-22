@@ -4,6 +4,8 @@ status: accepted
 
 # 在 Generation Chain 之外拥有 Interaction Observation
 
+> **部分被取代。** [ADR-0062](0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 取代本 ADR 所链接设计 §5.1 的诊断文本按时间/大小封块边界；[ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 取代本 ADR 的 Wire/canonical Debug payload 与凭据统一脱敏约束，并取代所链接设计 §6.2 的媒体外置、不可恢复与 omission 规则。两项目标契约均已接受；ADR-0063 的原始四方向 Wire 已迁移，ADR-0062 的 Canonical Item 持久化仍待公共 payload 确认与实现。本 ADR 其余关于 Observation 所有权、Generation Chain 隔离、保留、清理与失败不影响推理的决策仍为 accepted。下文保留原始决策背景，不应把已取代条款视为当前目标。
+
 Stravia 以 crate-private `InteractionObservation` 深模块拥有 Connect Client Interaction、Inference Run、Model Turn、Target attempt、Platform Tool、Delivery、Confirmed Upstream Usage 与 Debug Trace 的诊断投影。Inference Run 等执行模块只提交 typed observation event；Generation Chain 仍只保存完整交付的 `completed` / `incomplete` 模型历史，并仅向 Observation 提供已确认的 parent/root 关联。这样进行中、失败、取消、断线和拒绝请求可以实时展示并保留，而不会把可变运行状态塞进模型历史事实源。
 
 普通事件和查询投影保存在 SQLite/PostgreSQL；大体积 Wire/canonical Debug payload 保存在 `data_dir` 下的受管分段文件，数据库只保存 manifest 与索引。Debug 在每个 Inference Run 准入时快照当前进程级开关，允许同一 Interaction 部分捕获；任何观察或抓包失败只标记 gap/partial，不得阻塞或改变推理结果。Admin 通过同一模块查询时间窗 forest、订阅带 cursor 的 SSE、清理历史并签发单次流式 ZIP 下载票据；Server 与 Desktop 不解释分组、Trace 或导出规则。
@@ -21,6 +23,6 @@ Stravia 以 crate-private `InteractionObservation` 深模块拥有 Connect Clien
 - 旧 `request_logs`、`LogStore`、`STRAVIA_WIRE_CAPTURE_DIR` 与 `/api/v1/logs` contract 干净删除；升级不迁移旧请求记录。
 - 用量分析及 Route Scheduling Strategy 原来依赖 `request_logs` 的聚合改读 Model Turn/Target attempt Observation，避免双写与两套 usage 事实。
 - Observation 与 Debug Trace 跟随同一保留期；清理用 tombstone 和启动回收保证数据库索引与本地分段文件最终一致。
-- Debug Trace 是应用协议级消息与稳定 canonical checkpoint，不是 packet capture；凭据在落盘前统一脱敏。
+- Debug Trace 只保存四方向应用协议传输边界的原始内容，不是 packet capture；只在入队前替换 HTTP `Authorization` header 值，其他 header、URL、body、message 与媒体原样保留。Canonical Item 内容属于普通 Observation，不复制为 Debug checkpoint。
 - 当前只承诺单 Gateway 实例实时行为。多实例通知、共享 Debug payload storage 和集群级易失开关需要另行决策，不能由 PostgreSQL 共享表暗示已经支持。
 - 完整接口、状态、存储、Admin contract、画布和验收场景见 [`docs/design/interaction-observation.md`](../design/interaction-observation.md)。

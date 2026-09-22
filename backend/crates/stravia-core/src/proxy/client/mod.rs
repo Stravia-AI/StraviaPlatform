@@ -7,6 +7,7 @@
 //! connection-affinity, and lifetime state.
 
 use anyhow::Result;
+use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
@@ -171,6 +172,23 @@ pub struct ProxyClient {
     pub responses_websocket: reqwest::Client,
 }
 
+pub(crate) enum UpstreamWireEvent<'a> {
+    Request {
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+    },
+    ResponseHeaders {
+        status: u16,
+        headers: &'a HeaderMap,
+    },
+    ResponseBody {
+        status: u16,
+        bytes: &'a [u8],
+    },
+}
+
+pub(crate) type UpstreamWireObserver = dyn for<'a> Fn(UpstreamWireEvent<'a>) + Send + Sync;
+
 #[derive(Debug, thiserror::Error)]
 #[error("error decoding response body: {source}")]
 pub struct UpstreamResponseDecodeError {
@@ -210,8 +228,13 @@ impl ProxyClient {
         headers: HeaderMap,
         body: Value,
     ) -> Result<(Value, u16, HeaderMap, bytes::Bytes)> {
-        self.call_non_stream_raw(url, headers, bytes::Bytes::from(serde_json::to_vec(&body)?))
-            .await
+        self.call_non_stream_raw(
+            url,
+            headers,
+            bytes::Bytes::from(serde_json::to_vec(&body)?),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn call_non_stream_raw(
@@ -219,34 +242,46 @@ impl ProxyClient {
         url: &str,
         mut headers: HeaderMap,
         body: bytes::Bytes,
+        observer: Option<std::sync::Arc<UpstreamWireObserver>>,
     ) -> Result<(Value, u16, HeaderMap, bytes::Bytes)> {
         headers.entry(reqwest::header::CONTENT_TYPE).or_insert(
             reqwest::header::HeaderValue::from_static("application/json"),
         );
-        let resp = self
+        let request = self
             .http
             .post(url)
             .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(|source| {
-                let stage = if source.is_connect() {
-                    "connect"
-                } else {
-                    "send"
-                };
-                UpstreamTransportError {
-                    diagnostic: TransportDiagnostic::from_reqwest(stage, false, None, &source),
-                    source,
-                }
-            })?;
-        let status = resp.status().as_u16();
-        let resp_headers = resp.headers().clone();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|source| UpstreamTransportError {
+            .body(body.clone())
+            .build()?;
+        if let Some(observer) = &observer {
+            observer(UpstreamWireEvent::Request {
+                headers: request.headers(),
+                body: body.as_ref(),
+            });
+        }
+        let response = self.http.execute(request).await.map_err(|source| {
+            let stage = if source.is_connect() {
+                "connect"
+            } else {
+                "send"
+            };
+            UpstreamTransportError {
+                diagnostic: TransportDiagnostic::from_reqwest(stage, false, None, &source),
+                source,
+            }
+        })?;
+        let status = response.status().as_u16();
+        let response_headers = response.headers().clone();
+        if let Some(observer) = &observer {
+            observer(UpstreamWireEvent::ResponseHeaders {
+                status,
+                headers: &response_headers,
+            });
+        }
+        let mut response_body = bytes::BytesMut::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| UpstreamTransportError {
                 diagnostic: TransportDiagnostic::from_reqwest(
                     "receive",
                     false,
@@ -255,14 +290,24 @@ impl ProxyClient {
                 ),
                 source,
             })?;
-        let json: Value =
-            serde_json::from_slice(&bytes).map_err(|source| UpstreamResponseDecodeError {
+            if let Some(observer) = &observer {
+                observer(UpstreamWireEvent::ResponseBody {
+                    status,
+                    bytes: &chunk,
+                });
+            }
+            response_body.extend_from_slice(&chunk);
+        }
+        let response_body = response_body.freeze();
+        let json: Value = serde_json::from_slice(&response_body).map_err(|source| {
+            UpstreamResponseDecodeError {
                 source,
                 status,
-                headers: resp_headers.clone(),
-                body: bytes.clone(),
-            })?;
-        Ok((json, status, resp_headers, bytes))
+                headers: response_headers.clone(),
+                body: response_body.clone(),
+            }
+        })?;
+        Ok((json, status, response_headers, response_body))
     }
 
     pub async fn call_stream(
@@ -271,8 +316,13 @@ impl ProxyClient {
         headers: HeaderMap,
         body: Value,
     ) -> Result<(reqwest::Response, u16)> {
-        self.call_stream_raw(url, headers, bytes::Bytes::from(serde_json::to_vec(&body)?))
-            .await
+        self.call_stream_raw(
+            url,
+            headers,
+            bytes::Bytes::from(serde_json::to_vec(&body)?),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn call_stream_raw(
@@ -280,30 +330,43 @@ impl ProxyClient {
         url: &str,
         mut headers: HeaderMap,
         body: bytes::Bytes,
+        observer: Option<std::sync::Arc<UpstreamWireObserver>>,
     ) -> Result<(reqwest::Response, u16)> {
         headers.entry(reqwest::header::CONTENT_TYPE).or_insert(
             reqwest::header::HeaderValue::from_static("application/json"),
         );
-        let resp = self
+        let request = self
             .http
             .post(url)
             .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(|source| {
-                let stage = if source.is_connect() {
-                    "connect"
-                } else {
-                    "send"
-                };
-                UpstreamTransportError {
-                    diagnostic: TransportDiagnostic::from_reqwest(stage, false, None, &source),
-                    source,
-                }
-            })?;
-        let status = resp.status().as_u16();
-        Ok((resp, status))
+            .body(body.clone())
+            .build()?;
+        if let Some(observer) = &observer {
+            observer(UpstreamWireEvent::Request {
+                headers: request.headers(),
+                body: body.as_ref(),
+            });
+        }
+        let response = self.http.execute(request).await.map_err(|source| {
+            let stage = if source.is_connect() {
+                "connect"
+            } else {
+                "send"
+            };
+            UpstreamTransportError {
+                diagnostic: TransportDiagnostic::from_reqwest(stage, false, None, &source),
+                source,
+            }
+        })?;
+        let status = response.status().as_u16();
+        let response_headers = response.headers().clone();
+        if let Some(observer) = &observer {
+            observer(UpstreamWireEvent::ResponseHeaders {
+                status,
+                headers: &response_headers,
+            });
+        }
+        Ok((response, status))
     }
 }
 

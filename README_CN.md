@@ -134,7 +134,7 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 - API Key 支持自定义密钥、模型绑定、有效期，以及按 Key 的并发、MCP 访问和自动工具注入限制。
 - 请求记录：在可缩放的画布上实时看到每次交互 —— 模型调用、重试、工具调用 —— 失败的请求单独成列，单次对话可逐条查看。
 - 查看服务商实际上报的 token 用量与配额。
-- 打开 Debug 可捕获 HTTP/SSE/WebSocket 流量，按交互下载诊断包；凭据字段永远先脱敏。
+- 打开 Debug 可捕获 HTTP/SSE/WebSocket 流量并按交互下载诊断包；仅 HTTP `Authorization` 值会被遮盖，其他凭据、业务内容与媒体可能被保留。诊断包应按敏感数据处理，详见[请求记录设计](docs/design/interaction-observation.md)。
 
 ### 凭据保护
 

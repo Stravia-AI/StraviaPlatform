@@ -5,12 +5,13 @@
 //! persists and publishes. ADR-0053 fixes the decision semantics; this module
 //! owns where they are computed.
 
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::canonical;
-use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
 
 use super::{
     grouping::{AssignInput, DiagnosticKind, DiagnosticSource, GroupingIndex, ObservedParent},
@@ -68,6 +69,14 @@ pub(super) struct Attribution {
     pub fingerprint_gap: bool,
 }
 
+/// Materialized tail evidence for one requested source.
+#[derive(Clone)]
+pub(super) enum SourceWindow {
+    Captured(Window),
+    Unavailable,
+    ResourceLimit,
+}
+
 /// Persisted attribution evidence. `ObservationEvidence` is backed by the
 /// observation tables plus Generation Chain ancestor items; tests drive the
 /// same production merge path through an in-memory adapter.
@@ -90,15 +99,16 @@ pub(super) trait AttributionEvidence {
         now: i64,
     ) -> anyhow::Result<Vec<(String, String, Option<String>)>>;
 
-    /// Ancestor client items behind a persisted tail source. `node` comes from
-    /// the source row when present; the adapter resolves the source run's
-    /// recorded generation node otherwise. `None` declines the candidate.
-    async fn source_client_items(
+    /// Tail windows behind persisted sources, in exactly the requested order.
+    /// Missing node ids are resolved from their source runs. Generation Chain
+    /// visits shared ancestors once per materialized chain, while this seam
+    /// retains only windows belonging to the requested candidates.
+    async fn source_windows(
         &self,
         principal: &str,
-        source_run_id: &str,
-        node: Option<&str>,
-    ) -> anyhow::Result<Option<Vec<AiItem>>>;
+        sources: &[(&str, Option<&str>)],
+        preferred_head: Option<&str>,
+    ) -> anyhow::Result<Vec<SourceWindow>>;
 
     async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>>;
 
@@ -151,27 +161,98 @@ impl AttributionEvidence for ObservationEvidence {
             .await
     }
 
-    async fn source_client_items(
+    async fn source_windows(
         &self,
         principal: &str,
-        source_run_id: &str,
-        node: Option<&str>,
-    ) -> anyhow::Result<Option<Vec<AiItem>>> {
-        let node = match node {
-            Some(node) => Some(node.to_owned()),
-            None => self.store.tail_generation_node(source_run_id).await?,
-        };
-        let Some(node) = node else {
-            return Ok(None);
-        };
-        // Principal::new asserts an authenticated key identity; a principal that
-        // cannot form one declines the candidate instead of panicking the writer.
-        if principal.is_empty() || principal == "anonymous" {
-            return Ok(None);
+        sources: &[(&str, Option<&str>)],
+        preferred_head: Option<&str>,
+    ) -> anyhow::Result<Vec<SourceWindow>> {
+        let mut resolved_nodes = Vec::with_capacity(sources.len());
+        for (source_run_id, node) in sources {
+            resolved_nodes.push(match node {
+                Some(node) => Some(Cow::Borrowed(*node)),
+                None => self
+                    .store
+                    .tail_generation_node(source_run_id)
+                    .await?
+                    .map(Cow::Owned),
+            });
         }
-        self.generations
-            .ancestor_client_items(&Principal::new(principal), &node)
-            .await
+
+        let mut windows: Vec<Option<SourceWindow>> = resolved_nodes
+            .iter()
+            .map(|node| node.is_none().then_some(SourceWindow::Unavailable))
+            .collect();
+        // Principal::new asserts an authenticated key identity; a principal that
+        // cannot form one declines every candidate instead of panicking the writer.
+        if principal.is_empty() || principal == "anonymous" {
+            return Ok(windows
+                .into_iter()
+                .map(|window| window.unwrap_or(SourceWindow::Unavailable))
+                .collect());
+        }
+
+        let mut candidate_positions: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut visit_order = Vec::new();
+        for (index, node) in resolved_nodes.iter().enumerate() {
+            let Some(node) = node.as_deref() else {
+                continue;
+            };
+            candidate_positions
+                .entry(node)
+                .or_insert_with(|| {
+                    visit_order.push(node);
+                    Vec::new()
+                })
+                .push(index);
+        }
+        if let Some(preferred_head) = preferred_head
+            && let Some(index) = visit_order.iter().position(|node| *node == preferred_head)
+        {
+            let preferred = visit_order.remove(index);
+            visit_order.insert(0, preferred);
+        }
+
+        let principal = Principal::new(principal);
+        for node in visit_order {
+            let Some(positions) = candidate_positions.get(node) else {
+                continue;
+            };
+            if positions.iter().all(|index| windows[*index].is_some()) {
+                continue;
+            }
+            let available = self
+                .generations
+                .visit_ancestor_client_items(&principal, node, |visited_node, items| {
+                    let Some(positions) = candidate_positions.get(visited_node) else {
+                        return;
+                    };
+                    let Some((&last, duplicates)) = positions.split_last() else {
+                        return;
+                    };
+                    if windows[last].is_some() {
+                        return;
+                    }
+                    let captured = Window::capture(items)
+                        .map(SourceWindow::Captured)
+                        .unwrap_or(SourceWindow::ResourceLimit);
+                    for index in duplicates {
+                        windows[*index] = Some(captured.clone());
+                    }
+                    windows[last] = Some(captured);
+                })
+                .await?;
+            if !available || positions.iter().any(|index| windows[*index].is_none()) {
+                for index in positions {
+                    windows[*index] = Some(SourceWindow::Unavailable);
+                }
+            }
+        }
+
+        Ok(windows
+            .into_iter()
+            .map(|window| window.unwrap_or(SourceWindow::Unavailable))
+            .collect())
     }
 
     async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>> {
@@ -357,12 +438,16 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         let pending = if let Some(window) = self.tail.window(&run_id) {
             window.pending_tool_ids()?
         } else {
-            let items = self
+            let sources = [(run_id.as_str(), None)];
+            let windows = self
                 .evidence
-                .source_client_items(principal, &run_id, None)
+                .source_windows(principal, &sources, None)
                 .await
-                .ok()??;
-            Window::capture(&items)?.pending_tool_ids()?
+                .ok()?;
+            match windows.into_iter().next()? {
+                SourceWindow::Captured(window) => window.pending_tool_ids()?,
+                SourceWindow::Unavailable | SourceWindow::ResourceLimit => return None,
+            }
         };
         if !ids
             .iter()
@@ -410,6 +495,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             return (Some(source), None);
         }
         let mut loaded = Vec::new();
+        let mut unloaded = Vec::new();
         let mut seen = HashSet::new();
         for run in self.tail.fingerprint_runs(input, principal) {
             if !seen.insert(run.clone()) {
@@ -428,9 +514,6 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             .tail_sources_by_hashes(principal, run_id, &input.unit_hash_hexes(), now)
             .await
         {
-            Ok(rows) if rows.len() > MAX_CANDIDATES => {
-                return (None, Some(tail_status_event("resource_limit")));
-            }
             Ok(rows) => {
                 for (run, interaction, node) in rows {
                     if !seen.insert(run.clone()) {
@@ -438,18 +521,8 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                     }
                     if let Some(window) = self.tail.window(&run) {
                         loaded.push((run, interaction, window.clone()));
-                        continue;
-                    }
-                    match self
-                        .evidence
-                        .source_client_items(principal, &run, node.as_deref())
-                        .await
-                    {
-                        Ok(Some(items)) => match Window::capture(&items) {
-                            Some(window) => loaded.push((run, interaction, window)),
-                            None => return (None, Some(tail_status_event("resource_limit"))),
-                        },
-                        _ => return (None, Some(tail_status_event("index_unavailable"))),
+                    } else {
+                        unloaded.push((run, interaction, node));
                     }
                 }
             }
@@ -460,8 +533,33 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 return (None, Some(tail_status_event("index_unavailable")));
             }
         }
-        if loaded.len() > MAX_CANDIDATES {
+        if loaded.len() + unloaded.len() > MAX_CANDIDATES {
             return (None, Some(tail_status_event("resource_limit")));
+        }
+        if !unloaded.is_empty() {
+            let sources: Vec<_> = unloaded
+                .iter()
+                .map(|(run, _, node)| (run.as_str(), node.as_deref()))
+                .collect();
+            let windows = match self
+                .evidence
+                .source_windows(principal, &sources, generation_parent_id)
+                .await
+            {
+                Ok(windows) if windows.len() == unloaded.len() => windows,
+                _ => return (None, Some(tail_status_event("index_unavailable"))),
+            };
+            for ((run, interaction, _), window) in unloaded.into_iter().zip(windows) {
+                match window {
+                    SourceWindow::Captured(window) => loaded.push((run, interaction, window)),
+                    SourceWindow::Unavailable => {
+                        return (None, Some(tail_status_event("index_unavailable")));
+                    }
+                    SourceWindow::ResourceLimit => {
+                        return (None, Some(tail_status_event("resource_limit")));
+                    }
+                }
+            }
         }
         let refs: Vec<_> = loaded
             .iter()
@@ -531,7 +629,7 @@ fn tail_status_event(status: &str) -> RunEvent {
 mod tests {
     use std::collections::HashMap;
 
-    use stravia_runtime_contract::protocol::ir::{MessageContent, Role};
+    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
 
     use super::*;
 
@@ -598,17 +696,28 @@ mod tests {
                 .collect())
         }
 
-        async fn source_client_items(
+        async fn source_windows(
             &self,
             principal: &str,
-            source_run_id: &str,
-            _node: Option<&str>,
-        ) -> anyhow::Result<Option<Vec<AiItem>>> {
-            Ok(self
-                .tail_sources
-                .get(source_run_id)
-                .filter(|(owner, _, _, _)| owner == principal)
-                .and_then(|(_, _, _, items)| items.clone()))
+            sources: &[(&str, Option<&str>)],
+            _preferred_head: Option<&str>,
+        ) -> anyhow::Result<Vec<SourceWindow>> {
+            Ok(sources
+                .iter()
+                .map(|(source_run_id, _)| {
+                    let items = self
+                        .tail_sources
+                        .get(*source_run_id)
+                        .filter(|(owner, _, _, _)| owner == principal)
+                        .and_then(|(_, _, _, items)| items.as_deref());
+                    match items {
+                        Some(items) => Window::capture(items)
+                            .map(SourceWindow::Captured)
+                            .unwrap_or(SourceWindow::ResourceLimit),
+                        None => SourceWindow::Unavailable,
+                    }
+                })
+                .collect())
         }
 
         async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>> {
@@ -909,6 +1018,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_tool_continuation_uses_persisted_window() {
+        let source_items = vec![long_user("task"), tool_call("call-1")];
+        let mut evidence = MemoryEvidence::default();
+        evidence.pending_tools.push((
+            "call-1".into(),
+            "source-run".into(),
+            "source-interaction".into(),
+            "owner".into(),
+        ));
+        evidence.delivered.insert("source-run".into(), 1_000);
+        evidence.add_tail_source(
+            "owner",
+            "source-run",
+            "source-interaction",
+            &source_items,
+            Some(source_items.clone()),
+        );
+        let mut attribution = RunAttribution::new(evidence);
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &facts(vec![long_user("task"), tool_result("call-1")]),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_eq!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        assert!(assigned.diagnostic_event.is_none());
+    }
+
+    #[tokio::test]
     async fn current_tool_wins_over_a_retained_tail_match() {
         let mut evidence = MemoryEvidence::default();
         evidence.delivered.insert("tool-run".into(), 1_000);
@@ -1047,6 +1188,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_ancestor_candidates_select_the_stronger_source() {
+        let shared = vec![long_user("task"), long_answer("first")];
+        let mut head = shared.clone();
+        head.extend([long_user("follow up"), long_answer("final")]);
+        let mut evidence = MemoryEvidence::default();
+        evidence.add_tail_source(
+            "owner",
+            "ancestor-run",
+            "ancestor-interaction",
+            &shared,
+            Some(shared.clone()),
+        );
+        evidence.add_tail_source(
+            "owner",
+            "head-run",
+            "head-interaction",
+            &head,
+            Some(head.clone()),
+        );
+        evidence.parents.insert(
+            "head-run".into(),
+            (
+                "owner".into(),
+                observed_parent("confirmed-interaction", "confirmed-run", Some(100)),
+            ),
+        );
+        let mut attribution = RunAttribution::new(evidence);
+        let mut admitted = facts(head);
+        admitted.generation_parent_id = Some("head-run".into());
+        let assigned = attribution
+            .admit(&start("run"), &admitted, 20_000, 20_000)
+            .await;
+        assert_eq!(assigned.interaction_id, "confirmed-interaction");
+        assert!(matches!(
+            &assigned.diagnostic_event,
+            Some(RunEvent::RetainedTailAssociated {
+                status,
+                source_run_id: Some(run),
+                candidate_count: 1,
+                ..
+            }) if status == "inferred" && run == "head-run"
+        ));
+    }
+
+    #[tokio::test]
+    async fn tied_persisted_sources_remain_ambiguous() {
+        let source_items = vec![long_user("task"), long_answer("done")];
+        let mut evidence = MemoryEvidence::default();
+        for (run, interaction) in [("source-a", "interaction-a"), ("source-b", "interaction-b")] {
+            evidence.add_tail_source(
+                "owner",
+                run,
+                interaction,
+                &source_items,
+                Some(source_items.clone()),
+            );
+        }
+        let mut attribution = RunAttribution::new(evidence);
+        let assigned = attribution
+            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .await;
+        assert_eq!(assigned.grouping_reason, "new_root");
+        assert!(matches!(
+            &assigned.diagnostic_event,
+            Some(RunEvent::RetainedTailAssociated {
+                status,
+                source_run_id: None,
+                candidate_count: 2,
+                ..
+            }) if status == "ambiguous"
+        ));
+    }
+
+    #[tokio::test]
     async fn new_user_after_the_match_links_and_interrupts() {
         let source_items = vec![long_user("task"), long_answer("done")];
         let mut evidence = MemoryEvidence::default();
@@ -1176,6 +1391,29 @@ mod tests {
             assigned.diagnostic_event,
             Some(RunEvent::RetainedTailAssociated { ref status, .. })
                 if status == "index_unavailable"
+        ));
+        assert_eq!(assigned.grouping_reason, "new_root");
+    }
+
+    #[tokio::test]
+    async fn oversized_persisted_evidence_is_a_resource_limit() {
+        let source_items = vec![long_user("task"), long_answer("done")];
+        let mut evidence = MemoryEvidence::default();
+        evidence.add_tail_source(
+            "owner",
+            "source-run",
+            "source-interaction",
+            &source_items,
+            Some(vec![user(&"a".repeat(600 * 1024))]),
+        );
+        let mut attribution = RunAttribution::new(evidence);
+        let assigned = attribution
+            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .await;
+        assert!(matches!(
+            &assigned.diagnostic_event,
+            Some(RunEvent::RetainedTailAssociated { status, .. })
+                if status == "resource_limit"
         ));
         assert_eq!(assigned.grouping_reason, "new_root");
     }

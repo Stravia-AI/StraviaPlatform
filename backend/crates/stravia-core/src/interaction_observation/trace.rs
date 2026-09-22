@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, BufRead};
@@ -6,26 +5,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use super::redaction::{RedactionKind, redact_error, redact_headers, redact_url, redact_value};
+use super::redaction::{REDACTED, RedactionKind};
 use super::types::TraceManifest;
 
 pub(crate) const TRACE_SCHEMA_VERSION: u32 = 2;
-// 重组单条 wire 消息的内存缓冲上限；不是落盘容量配额，超限只影响该条消息。
-const WIRE_MESSAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const SEGMENT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const WRITE_BATCH_BYTES: usize = 64 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 const MANAGED_DIRECTORY: &str = "observation-debug";
 const WRITER_OVERFLOW: &str = "writer_overflow";
 const STORAGE_ERROR: &str = "storage_error";
-const CREDENTIAL_REDACTION_UNSUPPORTED: &str = "credential_redaction_unsupported";
-const COMMAND_CODE_PROTOCOL: &str = "command-code/generate/v1";
-const INCOMPLETE_STRUCTURED_WIRE_OMITTED: &str = "incomplete_structured_wire_omitted";
+const WIRE_CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const WIRE_CAPTURE_LIMIT: &str = "wire_capture_limit";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TraceRecord {
@@ -55,132 +50,67 @@ pub(crate) struct TraceRecord {
 }
 
 impl TraceRecord {
-    fn redact_before_queue(
-        &mut self,
-        protected: &super::redaction::ProtectedSecrets,
-    ) -> Result<(), &'static str> {
+    fn redact_before_queue(&mut self) {
         self.schema_version = TRACE_SCHEMA_VERSION;
-        let mut kinds = BTreeSet::new();
-        let protect = self.direction.as_deref() != Some("client_to_platform");
-        if protect {
-            protected.value(&mut self.headers);
+        let mut kinds: BTreeSet<_> = self.redactions.drain(..).collect();
+        if redact_authorization_headers(&mut self.headers) {
+            kinds.insert(RedactionKind::CredentialHeader);
         }
-        kinds.extend(redact_headers(&mut self.headers).into_kinds());
-        let wrapped_base64 = self
-            .payload
-            .get("encoding")
-            .and_then(Value::as_str)
-            .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
-            && self.payload.get("data").is_some_and(Value::is_string);
-        if wrapped_base64 {
-            let Some(data) = self
-                .payload
-                .as_object_mut()
-                .and_then(|object| object.remove("data"))
-            else {
-                return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
-            };
-            self.payload = data;
-        }
-        let binary_message = self
-            .message_type
-            .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("binary"));
         if self.transport.as_deref() == Some("websocket")
             && matches!(self.message_type.as_deref(), Some("ping" | "pong"))
         {
-            // 心跳载荷可以是任意字节，既不是媒体，也不能绕过凭据保护原样落盘。
+            // Ping/Pong are intentionally metadata-only. Their application payload is
+            // not a complete wire capture and must not be presented as one.
             self.payload_encoding = "json".into();
             self.payload = serde_json::json!({
                 "original_wire_bytes": false,
                 "content_capture": "omitted",
                 "reason": "control_frame_payload_omitted"
             });
-        } else if self.payload_encoding == "base64" || binary_message || wrapped_base64 {
-            self.payload_encoding = "base64".to_owned();
-            let Some(encoded) = self.payload.as_str() else {
-                return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
-            };
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|_| CREDENTIAL_REDACTION_UNSUPPORTED)?;
-            if let Ok(text) = String::from_utf8(decoded) {
-                let mut decoded_payload = Value::String(text);
-                if protect {
-                    protected.value(&mut decoded_payload);
-                }
-                kinds.extend(
-                    super::redaction::externalize_capture(&mut decoded_payload, true).into_kinds(),
-                );
-                kinds.extend(redact_value(&mut decoded_payload).into_kinds());
-                let Value::String(redacted_text) = decoded_payload else {
-                    return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
-                };
-                if kinds.contains(&RedactionKind::MediaExternalized)
-                    || kinds.contains(&RedactionKind::MediaUnrecoverable)
-                {
-                    self.payload_encoding = "json".into();
-                    self.payload = Value::String(redacted_text);
-                } else {
-                    self.payload = Value::String(
-                        base64::engine::general_purpose::STANDARD.encode(redacted_text.as_bytes()),
-                    );
-                }
-            } else {
-                self.payload_encoding = "json".into();
-                self.payload = serde_json::json!({
-                    "media_externalized": true,
-                    "original_wire_bytes": false,
-                    "content_capture": "unrecoverable",
-                    "reason": "opaque_binary_not_normalized"
-                });
-                kinds.insert(RedactionKind::MediaUnrecoverable);
-            }
-        } else {
-            if protect {
-                protected.value(&mut self.payload);
-            }
-            if self.direction.is_some()
-                || matches!(
-                    self.stage.as_deref(),
-                    Some(
-                        "artifact_normalized_request"
-                            | "decoded_request"
-                            | "restored_request"
-                            | "effective_model_request"
-                            | "canonical_terminal_response"
-                            | "canonical_content"
-                            | "response_after_hook"
-                            | "client_projection_content"
-                    )
-                )
-            {
-                kinds.extend(
-                    super::redaction::externalize_capture(
-                        &mut self.payload,
-                        self.direction.is_some(),
-                    )
-                    .into_kinds(),
-                );
-            }
-            kinds.extend(redact_value(&mut self.payload).into_kinds());
-        }
-        if let Some(url) = &mut self.url {
-            if protect {
-                protected.text(url);
-            }
-            let (redacted, report) = redact_url(url);
-            *url = redacted;
-            kinds.extend(report.into_kinds());
-        }
-        if let Some(error) = &mut self.error {
-            protected.text(error);
-            let (redacted, report) = redact_error(error);
-            *error = redacted;
-            kinds.extend(report.into_kinds());
         }
         self.redactions = kinds.into_iter().collect();
-        Ok(())
+    }
+}
+
+pub(super) fn redact_authorization_headers(headers: &mut Value) -> bool {
+    let Value::Object(headers) = headers else {
+        return false;
+    };
+    let mut redacted = false;
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        redact_header_value(value);
+        redacted = true;
+    }
+    redacted
+}
+
+fn redact_header_value(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                redact_header_value(value);
+            }
+        }
+        _ => *value = Value::String(REDACTED.to_owned()),
+    }
+}
+
+fn wire_value_size(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => 16,
+        Value::String(text) => text.len(),
+        Value::Array(values) => values
+            .iter()
+            .map(wire_value_size)
+            .fold(0, usize::saturating_add),
+        Value::Object(values) => values.iter().fold(0, |total, (key, value)| {
+            total
+                .saturating_add(key.len())
+                .saturating_add(wire_value_size(value))
+        }),
     }
 }
 
@@ -216,8 +146,46 @@ pub(crate) struct TraceManager {
 struct ManagerInner {
     root: PathBuf,
     tx: mpsc::Sender<WriterCommand>,
+    producer: parking_lot::Mutex<RecordProducer>,
     actual_retained: AtomicU64,
     available: bool,
+}
+
+#[derive(Default)]
+struct RecordProducer {
+    // 固定先锁生产端、再锁批次；writer 只持批次锁，避免与生产端互相等待。
+    appendable: Option<Arc<parking_lot::Mutex<QueuedRecordBatch>>>,
+}
+
+struct QueuedRecordBatch {
+    trace_id: Arc<str>,
+    state: Arc<TraceState>,
+    records: Vec<Vec<u8>>,
+    bytes: usize,
+    sealed: bool,
+}
+
+impl QueuedRecordBatch {
+    fn new(trace_id: Arc<str>, state: Arc<TraceState>, bytes: Vec<u8>) -> Self {
+        let byte_count = bytes.len();
+        Self {
+            trace_id,
+            state,
+            records: vec![bytes],
+            bytes: byte_count,
+            sealed: false,
+        }
+    }
+
+    fn can_append(&self, trace_id: &str, bytes: usize) -> bool {
+        !self.sealed
+            && self.trace_id.as_ref() == trace_id
+            && self.bytes.saturating_add(bytes) <= WRITE_BATCH_BYTES
+    }
+
+    fn seal(&mut self) {
+        self.sealed = true;
+    }
 }
 
 #[derive(Clone)]
@@ -230,8 +198,6 @@ pub(crate) struct TraceHandle {
 struct TraceState {
     // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
     queued_sequence: parking_lot::Mutex<i64>,
-    wire_pending: parking_lot::Mutex<std::collections::HashMap<String, StructuredWirePending>>,
-    ndjson_pending: parking_lot::Mutex<std::collections::HashMap<String, (Vec<u8>, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     event_count: AtomicU64,
@@ -240,102 +206,14 @@ struct TraceState {
     reasons: dashmap::DashSet<String>,
 }
 
-struct StructuredWirePending {
-    bytes: Vec<u8>,
-    template: TraceRecord,
-    json: JsonBoundary,
-}
-
-#[derive(Default)]
-struct JsonBoundary {
-    root: JsonRoot,
-    depth: u32,
-    in_string: bool,
-    escaped: bool,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum JsonRoot {
-    #[default]
-    Undetermined,
-    Composite,
-    String,
-    Scalar,
-    Closed,
-    NotJson,
-}
-
-impl JsonBoundary {
-    fn push(&mut self, fragment: &[u8]) {
-        for &byte in fragment {
-            match self.root {
-                JsonRoot::Undetermined => {
-                    if byte.is_ascii_whitespace() {
-                        continue;
-                    }
-                    match byte {
-                        b'{' | b'[' => {
-                            self.root = JsonRoot::Composite;
-                            self.depth = 1;
-                        }
-                        b'"' => {
-                            self.root = JsonRoot::String;
-                            self.in_string = true;
-                        }
-                        b't' | b'f' | b'n' | b'-' | b'0'..=b'9' => {
-                            self.root = JsonRoot::Scalar;
-                        }
-                        _ => self.root = JsonRoot::NotJson,
-                    }
-                }
-                JsonRoot::Composite | JsonRoot::String if self.in_string => {
-                    if self.escaped {
-                        self.escaped = false;
-                    } else if byte == b'\\' {
-                        self.escaped = true;
-                    } else if byte == b'"' {
-                        self.in_string = false;
-                        if self.root == JsonRoot::String {
-                            self.root = JsonRoot::Closed;
-                        }
-                    }
-                }
-                JsonRoot::Composite => match byte {
-                    b'"' => self.in_string = true,
-                    b'{' | b'[' => self.depth = self.depth.saturating_add(1),
-                    b'}' | b']' => {
-                        self.depth = self.depth.saturating_sub(1);
-                        if self.depth == 0 {
-                            self.root = JsonRoot::Closed;
-                        }
-                    }
-                    _ => {}
-                },
-                JsonRoot::Closed => {
-                    if !byte.is_ascii_whitespace() {
-                        self.root = JsonRoot::NotJson;
-                    }
-                }
-                JsonRoot::Scalar | JsonRoot::NotJson => {}
-                JsonRoot::String => unreachable!("root string is always in_string until closed"),
-            }
-        }
-    }
-
-    fn should_validate(&self) -> bool {
-        matches!(self.root, JsonRoot::Closed | JsonRoot::Scalar)
-    }
-}
-
 enum WriterCommand {
     Create {
         trace_id: String,
         state: Arc<TraceState>,
     },
-    Record {
-        trace_id: Arc<str>,
-        state: Arc<TraceState>,
-        bytes: Vec<u8>,
+    // The producer may append redacted records until the writer receives and seals the batch.
+    RecordBatch {
+        batch: Arc<parking_lot::Mutex<QueuedRecordBatch>>,
     },
     Flush {
         trace_id: Arc<str>,
@@ -359,6 +237,62 @@ enum WriterCommand {
     },
 }
 
+impl ManagerInner {
+    fn queue_record_batch(
+        &self,
+        trace_id: &Arc<str>,
+        state: &Arc<TraceState>,
+        bytes: Vec<u8>,
+    ) -> Result<(), ()> {
+        let mut producer = self.producer.lock();
+        if let Some(batch) = producer.appendable.as_ref() {
+            let mut batch = batch.lock();
+            if batch.can_append(trace_id, bytes.len()) {
+                batch.bytes = batch.bytes.saturating_add(bytes.len());
+                batch.records.push(bytes);
+                return Ok(());
+            }
+            batch.seal();
+        }
+        producer.appendable = None;
+
+        let batch = Arc::new(parking_lot::Mutex::new(QueuedRecordBatch::new(
+            Arc::clone(trace_id),
+            Arc::clone(state),
+            bytes,
+        )));
+        self.tx
+            .try_send(WriterCommand::RecordBatch {
+                batch: Arc::clone(&batch),
+            })
+            .map_err(|_| ())?;
+        producer.appendable = Some(batch);
+        Ok(())
+    }
+
+    fn seal_record_batch(producer: &mut RecordProducer) {
+        if let Some(batch) = producer.appendable.take() {
+            batch.lock().seal();
+        }
+    }
+
+    fn try_send_barrier(&self, command: WriterCommand) -> Result<(), ()> {
+        let mut producer = self.producer.lock();
+        Self::seal_record_batch(&mut producer);
+        self.tx.try_send(command).map_err(|_| ())
+    }
+
+    async fn send_barrier(&self, command: WriterCommand) -> io::Result<()> {
+        // 等待队列许可时不持生产端锁；取得许可后同步封口并发送，
+        // 确保没有记录插入末批封口与屏障入队之间。
+        let permit = self.tx.reserve().await.map_err(|_| writer_unavailable())?;
+        let mut producer = self.producer.lock();
+        Self::seal_record_batch(&mut producer);
+        permit.send(command);
+        Ok(())
+    }
+}
+
 impl TraceManager {
     pub(crate) fn new(data_dir: PathBuf) -> io::Result<Self> {
         let requested_root = data_dir.join(MANAGED_DIRECTORY);
@@ -369,6 +303,7 @@ impl TraceManager {
         let inner = Arc::new(ManagerInner {
             root,
             tx,
+            producer: parking_lot::Mutex::new(RecordProducer::default()),
             actual_retained: AtomicU64::new(retained),
             available: true,
         });
@@ -383,6 +318,7 @@ impl TraceManager {
             inner: Arc::new(ManagerInner {
                 root: PathBuf::new(),
                 tx,
+                producer: parking_lot::Mutex::new(RecordProducer::default()),
                 actual_retained: AtomicU64::new(0),
                 available: false,
             }),
@@ -393,8 +329,6 @@ impl TraceManager {
         let trace_id = stravia_runtime_contract::identifier::new_id();
         let state = Arc::new(TraceState {
             queued_sequence: parking_lot::Mutex::new(0),
-            wire_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            ndjson_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
@@ -411,8 +345,7 @@ impl TraceManager {
             handle.mark_partial(STORAGE_ERROR, true);
         } else if self
             .inner
-            .tx
-            .try_send(WriterCommand::Create { trace_id, state })
+            .try_send_barrier(WriterCommand::Create { trace_id, state })
             .is_err()
         {
             handle.mark_partial(WRITER_OVERFLOW, true);
@@ -435,14 +368,12 @@ impl TraceManager {
         validate_trace_id(trace_id)?;
         let (response, receive) = oneshot::channel();
         self.inner
-            .tx
-            .send(WriterCommand::Snapshot {
+            .send_barrier(WriterCommand::Snapshot {
                 trace_id: trace_id.to_owned(),
                 through_sequence,
                 response,
             })
-            .await
-            .map_err(|_| writer_unavailable())?;
+            .await?;
         receive.await.map_err(|_| writer_unavailable())?
     }
 
@@ -471,10 +402,8 @@ impl TraceManager {
         }
         let (response, receive) = oneshot::channel();
         self.inner
-            .tx
-            .send(WriterCommand::ClearAll { response })
-            .await
-            .map_err(|_| writer_unavailable())?;
+            .send_barrier(WriterCommand::ClearAll { response })
+            .await?;
         receive.await.map_err(|_| writer_unavailable())?
     }
 
@@ -485,8 +414,7 @@ impl TraceManager {
         let (response, receive) = oneshot::channel();
         if self
             .inner
-            .tx
-            .send(WriterCommand::Shutdown { response })
+            .send_barrier(WriterCommand::Shutdown { response })
             .await
             .is_ok()
             && let Err(error) = receive.await
@@ -527,221 +455,56 @@ impl TraceManager {
     }
 }
 
-fn is_command_code_ndjson(record: &TraceRecord) -> bool {
-    record.protocol.as_deref() == Some(COMMAND_CODE_PROTOCOL)
-        && record.direction.as_deref() == Some("upstream_response")
-        && matches!(
-            record.message_type.as_deref(),
-            Some("body_chunk" | "sse_chunk")
-        )
-}
-
-fn captured_payload_bytes<'a>(
-    payload: &'a Value,
-    payload_encoding: &str,
-) -> Result<Cow<'a, [u8]>, &'static str> {
-    if let Some(text) = payload.as_str() {
-        if payload_encoding.eq_ignore_ascii_case("base64") {
-            return base64::engine::general_purpose::STANDARD
-                .decode(text)
-                .map(Cow::Owned)
-                .map_err(|_| INCOMPLETE_STRUCTURED_WIRE_OMITTED);
-        }
-        return Ok(Cow::Borrowed(text.as_bytes()));
-    }
-    let Some(encoded) = payload
-        .as_object()
-        .filter(|object| object.get("encoding").and_then(Value::as_str) == Some("base64"))
-        .and_then(|object| object.get("data"))
-        .and_then(Value::as_str)
-    else {
-        return Err(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
-    };
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .map(Cow::Owned)
-        .map_err(|_| INCOMPLETE_STRUCTURED_WIRE_OMITTED)
-}
-
 impl TraceHandle {
     pub(crate) fn protected_secrets(&self) -> super::redaction::ProtectedSecrets {
         self.state.protected.clone()
     }
-    pub(crate) fn record(&self, mut record: TraceRecord) -> TraceWriteOutcome {
+    pub(crate) fn record(&self, record: TraceRecord) -> TraceWriteOutcome {
         if self.state.stopped.load(Ordering::Acquire) || self.state.finished.load(Ordering::Acquire)
         {
             return TraceWriteOutcome::Partial(STORAGE_ERROR);
         }
-        if is_command_code_ndjson(&record) {
-            let payload = std::mem::take(&mut record.payload);
-            return match captured_payload_bytes(&payload, &record.payload_encoding) {
-                Ok(bytes) => self.record_command_code_ndjson(&record, &bytes),
-                Err(reason) => {
-                    self.mark_partial(reason, false);
-                    TraceWriteOutcome::Partial(reason)
-                }
-            };
-        }
-        if matches!(
-            record.message_type.as_deref(),
-            Some("body_chunk" | "sse_chunk")
-        ) {
-            let bytes = match captured_payload_bytes(&record.payload, &record.payload_encoding) {
-                Ok(bytes) => bytes,
-                Err(reason) => {
-                    self.mark_partial(reason, false);
-                    return TraceWriteOutcome::Partial(reason);
-                }
-            };
-            let key = format!(
-                "{}:{}:{}",
-                record.direction.as_deref().unwrap_or_default(),
-                record.attempt_id.as_deref().unwrap_or_default(),
-                record.message_type.as_deref().unwrap_or_default()
-            );
-            let mut pending = self.state.wire_pending.lock();
-            let message = pending.entry(key.clone()).or_insert_with(|| {
-                let mut template = record.clone();
-                template.payload = Value::Null;
-                StructuredWirePending {
-                    bytes: Vec::new(),
-                    template,
-                    json: JsonBoundary::default(),
-                }
-            });
-            if message.bytes.len().saturating_add(bytes.len()) as u64 > WIRE_MESSAGE_LIMIT_BYTES {
-                pending.remove(&key);
-                self.mark_partial("structured_wire_capture_limit", false);
-                return TraceWriteOutcome::Partial("structured_wire_capture_limit");
-            }
-            message.bytes.extend_from_slice(&bytes);
-            message.json.push(&bytes);
-            let complete = (message.json.should_validate()
-                && serde_json::from_slice::<Value>(&message.bytes).is_ok())
-                || ((message.bytes.starts_with(b"data:")
-                    || message.bytes.starts_with(b"event:")
-                    || message.bytes.starts_with(b":"))
-                    && (message.bytes.ends_with(b"\n\n") || message.bytes.ends_with(b"\r\n\r\n")));
-            if !complete {
-                return TraceWriteOutcome::Queued;
-            }
-            let complete = pending.remove(&key).expect("complete wire message");
-            let Ok(text) = String::from_utf8(complete.bytes) else {
-                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                return TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
-            };
-            record.payload_encoding = "json".into();
-            record.payload = Value::String(text);
-            record.representation = "reassembled_application_message".into();
-        }
+        // Wire capture is deliberately transport-boundary based: queue the observed
+        // header/body/message record as-is without JSON, SSE, NDJSON, or Connect parsing.
         self.queue_record(record)
     }
 
-    fn record_command_code_ndjson(&self, record: &TraceRecord, chunk: &[u8]) -> TraceWriteOutcome {
-        let key = format!(
-            "{}:{}:{}:{}",
-            record.protocol.as_deref().unwrap_or_default(),
-            record.direction.as_deref().unwrap_or_default(),
-            record.attempt_id.as_deref().unwrap_or_default(),
-            record.message_type.as_deref().unwrap_or_default()
-        );
-        let mut chunk_template = record.clone();
-        chunk_template.payload = Value::Null;
-        let mut outcome = TraceWriteOutcome::Queued;
-        let mut limit_exceeded = false;
-        let mut pending = self.state.ndjson_pending.lock();
-        let (buffer, template) = pending
-            .entry(key.clone())
-            .or_insert_with(|| (Vec::new(), chunk_template.clone()));
-        for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
-            if buffer.len().saturating_add(fragment.len()) as u64 > WIRE_MESSAGE_LIMIT_BYTES {
-                limit_exceeded = true;
-                break;
-            }
-            buffer.extend_from_slice(fragment);
-            if fragment.last() != Some(&b'\n') {
-                continue;
-            }
-            let mut line = std::mem::take(buffer);
-            while line
-                .last()
-                .is_some_and(|byte| matches!(*byte, b'\n' | b'\r'))
-            {
-                line.pop();
-            }
-            let mut framed = template.clone();
-            *template = chunk_template.clone();
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let Ok(text) = String::from_utf8(line) else {
-                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                outcome = TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
-                continue;
-            };
-            if serde_json::from_str::<serde::de::IgnoredAny>(&text).is_err() {
-                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                outcome = TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
-                continue;
-            }
-            framed.payload_encoding = "json".into();
-            framed.payload = Value::String(text);
-            framed.representation = "reassembled_application_message".into();
-            if let partial @ TraceWriteOutcome::Partial(_) = self.queue_record(framed) {
-                outcome = partial;
-            }
-        }
-        if limit_exceeded || buffer.is_empty() {
-            pending.remove(&key);
-        }
-        drop(pending);
-        if limit_exceeded {
-            self.mark_partial("structured_wire_capture_limit", false);
-            if outcome == TraceWriteOutcome::Queued {
-                outcome = TraceWriteOutcome::Partial("structured_wire_capture_limit");
-            }
-        }
-        outcome
+    fn encode_record(
+        &self,
+        mut record: TraceRecord,
+        queued_sequence: &mut i64,
+    ) -> Result<Vec<u8>, &'static str> {
+        record.sequence = record.sequence.max(*queued_sequence);
+        *queued_sequence = record.sequence;
+        let mut bytes = serde_json::to_vec(&record).map_err(|_| {
+            self.mark_partial(STORAGE_ERROR, true);
+            STORAGE_ERROR
+        })?;
+        bytes.push(b'\n');
+        Ok(bytes)
     }
 
     fn queue_record(&self, mut record: TraceRecord) -> TraceWriteOutcome {
-        if let Err(reason) = record.redact_before_queue(&self.state.protected) {
-            self.mark_partial(reason, false);
-            return TraceWriteOutcome::Partial(reason);
-        }
-        let externalized = record.redactions.iter().any(|kind| {
-            matches!(
-                kind,
-                RedactionKind::MediaExternalized | RedactionKind::MediaUnrecoverable
-            )
-        });
-        if externalized {
-            record.representation = "artifact_externalized".into();
-            if record
-                .redactions
-                .contains(&RedactionKind::MediaUnrecoverable)
-            {
-                self.mark_partial("media_unrecoverable", false);
-            }
+        record.redact_before_queue();
+        if wire_value_size(&record.payload) > WIRE_CAPTURE_LIMIT_BYTES {
+            self.mark_partial(WIRE_CAPTURE_LIMIT, false);
+            return TraceWriteOutcome::Partial(WIRE_CAPTURE_LIMIT);
         }
         let mut queued_sequence = self.state.queued_sequence.lock();
-        record.sequence = record.sequence.max(*queued_sequence);
-        *queued_sequence = record.sequence;
-        let mut bytes = match serde_json::to_vec(&record) {
+        let bytes = match self.encode_record(record, &mut queued_sequence) {
             Ok(bytes) => bytes,
-            Err(_) => {
-                self.mark_partial(STORAGE_ERROR, true);
-                return TraceWriteOutcome::Partial(STORAGE_ERROR);
-            }
+            Err(reason) => return TraceWriteOutcome::Partial(reason),
         };
-        bytes.push(b'\n');
+        self.queue_encoded_record(bytes)
+    }
 
-        let command = WriterCommand::Record {
-            trace_id: Arc::clone(&self.trace_id),
-            state: Arc::clone(&self.state),
-            bytes,
-        };
-        if self.manager.inner.tx.try_send(command).is_err() {
+    fn queue_encoded_record(&self, bytes: Vec<u8>) -> TraceWriteOutcome {
+        if self
+            .manager
+            .inner
+            .queue_record_batch(&self.trace_id, &self.state, bytes)
+            .is_err()
+        {
             self.mark_partial(WRITER_OVERFLOW, false);
             return TraceWriteOutcome::Partial(WRITER_OVERFLOW);
         }
@@ -750,62 +513,11 @@ impl TraceHandle {
 
     pub(crate) async fn finish(&self) -> TraceManifest {
         if !self.state.finished.swap(true, Ordering::AcqRel) {
-            let ndjson_pending = std::mem::take(&mut *self.state.ndjson_pending.lock());
-            for (_, (bytes, mut record)) in ndjson_pending {
-                if bytes.iter().all(u8::is_ascii_whitespace) {
-                    continue;
-                }
-                let complete = serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_ok();
-                match String::from_utf8(bytes) {
-                    Ok(text) if complete => {
-                        record.payload_encoding = "json".into();
-                        record.payload = Value::String(text);
-                        record.representation = "reassembled_application_message".into();
-                        let _ = self.queue_record(record);
-                    }
-                    _ => self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false),
-                }
-            }
-            let pending = std::mem::take(&mut *self.state.wire_pending.lock());
-            for (
-                _,
-                StructuredWirePending {
-                    bytes,
-                    template: mut record,
-                    ..
-                },
-            ) in pending
-            {
-                let first = bytes
-                    .iter()
-                    .position(|byte| !byte.is_ascii_whitespace())
-                    .unwrap_or(bytes.len());
-                let trimmed = &bytes[first..];
-                if trimmed.starts_with(b"{")
-                    || trimmed.starts_with(b"[")
-                    || trimmed.starts_with(b"\"")
-                    || trimmed.starts_with(b":")
-                    || trimmed.starts_with(b"data:")
-                    || trimmed.starts_with(b"event:")
-                {
-                    self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                } else if let Ok(text) = String::from_utf8(bytes) {
-                    // Plain-text HTTP errors are complete at EOF, not at a JSON/SSE boundary.
-                    // Delay their redaction until now so split upload grants remain secret.
-                    record.payload_encoding = "json".into();
-                    record.payload = Value::String(text);
-                    record.representation = "reassembled_application_message".into();
-                    let _ = self.queue_record(record);
-                } else {
-                    self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                }
-            }
             let (response, receive) = oneshot::channel();
             let sent = self
                 .manager
                 .inner
-                .tx
-                .send(WriterCommand::Finish {
+                .send_barrier(WriterCommand::Finish {
                     trace_id: Arc::clone(&self.trace_id),
                     state: Arc::clone(&self.state),
                     response,
@@ -823,13 +535,11 @@ impl TraceHandle {
         let (response, receive) = oneshot::channel();
         self.manager
             .inner
-            .tx
-            .send(WriterCommand::Flush {
+            .send_barrier(WriterCommand::Flush {
                 trace_id: Arc::clone(&self.trace_id),
                 response,
             })
-            .await
-            .map_err(|_| writer_unavailable())?;
+            .await?;
         receive.await.map_err(|_| writer_unavailable())?
     }
 
@@ -891,14 +601,31 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                     }
                 }
             }
-            WriterCommand::Record {
-                trace_id,
-                state,
-                bytes,
-            } => {
-                let result = match writers.get_mut(trace_id.as_ref()) {
-                    Some(writer) => writer.write_record(&bytes, &inner.actual_retained).await,
-                    None => Err(WriteFailure),
+            WriterCommand::RecordBatch { batch } => {
+                let (trace_id, state, records) = {
+                    let mut batch = batch.lock();
+                    batch.seal();
+                    (
+                        Arc::clone(&batch.trace_id),
+                        Arc::clone(&batch.state),
+                        std::mem::take(&mut batch.records),
+                    )
+                };
+                let result = if let Some(writer) = writers.get_mut(trace_id.as_ref()) {
+                    let mut result = Ok(());
+                    for bytes in records {
+                        if writer
+                            .write_record(&bytes, &inner.actual_retained)
+                            .await
+                            .is_err()
+                        {
+                            result = Err(WriteFailure);
+                            break;
+                        }
+                    }
+                    result
+                } else {
+                    Err(WriteFailure)
                 };
                 if result.is_err() {
                     state.stopped.store(true, Ordering::Release);
@@ -921,20 +648,33 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                 through_sequence,
                 response,
             } => {
-                let flush = match writers.get_mut(&trace_id) {
-                    Some(writer) => writer.flush(&inner.actual_retained).await,
-                    None => Ok(()),
+                let flushed = match writers.get_mut(&trace_id) {
+                    Some(writer) => match writer.flush(&inner.actual_retained).await {
+                        Ok(()) => Ok(Some(SnapshotWatermark {
+                            last_segment: writer.segment,
+                            last_segment_bytes: writer.segment_bytes,
+                        })),
+                        Err(error) => Err(error),
+                    },
+                    None => Ok(None),
                 };
-                if let Err(error) = flush {
-                    writers.remove(&trace_id);
-                    let _ = response.send(Err(error));
-                } else {
-                    let root = inner.root.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result =
-                            snapshot_directory(&root, root.join(&trace_id), through_sequence);
-                        let _ = response.send(result);
-                    });
+                match flushed {
+                    Err(error) => {
+                        writers.remove(&trace_id);
+                        let _ = response.send(Err(error));
+                    }
+                    Ok(watermark) => {
+                        let root = inner.root.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = snapshot_directory(
+                                &root,
+                                root.join(&trace_id),
+                                through_sequence,
+                                watermark,
+                            );
+                            let _ = response.send(result);
+                        });
+                    }
                 }
             }
             WriterCommand::Finish {
@@ -1153,10 +893,17 @@ async fn open_segment(directory: &Path, segment: u32) -> io::Result<tokio::fs::F
         .await
 }
 
+#[derive(Clone, Copy)]
+struct SnapshotWatermark {
+    last_segment: u32,
+    last_segment_bytes: u64,
+}
+
 fn snapshot_directory(
     root: &Path,
     directory: PathBuf,
     through_sequence: i64,
+    watermark: Option<SnapshotWatermark>,
 ) -> io::Result<TraceSnapshot> {
     if !directory.exists() {
         return Err(io::Error::new(
@@ -1183,15 +930,34 @@ fn snapshot_directory(
     let mut total = 0u64;
     let mut reached_cutoff = false;
     for path in paths {
+        let segment = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(segment_number)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace segment"))?;
+        let byte_limit = match watermark {
+            Some(watermark) if segment > watermark.last_segment => break,
+            Some(watermark) if segment == watermark.last_segment => watermark.last_segment_bytes,
+            _ => u64::MAX,
+        };
         let file = fs::File::open(&path)?;
         let mut reader = io::BufReader::new(file);
         let mut bytes = 0u64;
         let mut line = Vec::new();
         loop {
+            if bytes >= byte_limit {
+                break;
+            }
             line.clear();
             let read = reader.read_until(b'\n', &mut line)?;
             if read == 0 {
                 break;
+            }
+            if bytes.saturating_add(read as u64) > byte_limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "snapshot watermark splits a trace record",
+                ));
             }
             let sequence = serde_json::from_slice::<Value>(&line)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "trace record is invalid"))?
@@ -1325,6 +1091,12 @@ fn is_segment_name(name: &str) -> bool {
         && name[8..14].bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn segment_number(name: &str) -> Option<u32> {
+    is_segment_name(name)
+        .then(|| name[8..14].parse().ok())
+        .flatten()
+}
+
 pub(crate) fn optimize_trace_directory(root: &Path) -> io::Result<Vec<(String, u64)>> {
     let mut reports = Vec::new();
     if !root.exists() {
@@ -1380,23 +1152,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn structural_trace_preserves_content_scope_and_snapshot_cutoffs() -> io::Result<()> {
+    async fn wire_snapshot_preserves_sequence_and_payload_boundaries() -> io::Result<()> {
         let root = tempfile::tempdir()?;
         let manager = TraceManager::new(root.path().to_owned())?;
         let trace = manager.create();
-        let payload = serde_json::json!({"text":"原文与空白\n ".repeat(10_000)});
         for sequence in 1..=3 {
-            let mut record = binary_record(String::new());
+            let mut record = TraceRecord {
+                schema_version: 0,
+                sequence,
+                recorded_at: sequence * 10,
+                interaction_id: None,
+                run_id: Some("run".to_owned()),
+                rejection_id: None,
+                model_turn_id: None,
+                attempt_id: None,
+                layer: "wire".into(),
+                direction: Some("upstream_to_platform".into()),
+                stage: None,
+                transport: Some("http".into()),
+                protocol: Some("openai".into()),
+                message_type: Some("body_chunk".into()),
+                representation: "wire".into(),
+                status: None,
+                status_code: Some(200),
+                url: None,
+                headers: Value::Null,
+                payload_encoding: "json".into(),
+                payload: Value::String(format!("chunk-{sequence}")),
+                error: None,
+                redactions: Vec::new(),
+            };
+            trace.record(record.clone());
             record.sequence = sequence;
-            record.recorded_at = sequence * 10;
-            record.payload = payload.clone();
-            record.payload_encoding = "json".into();
-            record.direction = None;
-            record.transport = None;
-            record.message_type = None;
-            record.stage = Some("canonical_content".into());
-            record.layer = "content".into();
-            trace.record(record);
         }
         trace.flush().await?;
         let snapshot = trace.snapshot(2).await?;
@@ -1408,97 +1195,45 @@ mod tests {
             })?;
         }
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["sequence"], 1);
-        assert_eq!(records[1]["sequence"], 2);
-        assert_eq!(records[1]["recorded_at"], 20);
-        assert_eq!(records[0]["payload"], payload);
-        assert_eq!(records[1]["payload"], payload);
-        let manifest = trace.finish().await;
-        assert_eq!(manifest.event_count, 3);
-        assert!(manifest.bytes_written < serde_json::to_vec(&payload)?.len() as u64 * 2);
+        assert_eq!(records[0]["payload"], "chunk-1");
+        assert_eq!(records[1]["payload"], "chunk-2");
+        assert_eq!(trace.finish().await.event_count, 3);
+        manager.shutdown().await;
         Ok(())
     }
 
-    fn binary_record(payload: String) -> TraceRecord {
-        TraceRecord {
-            schema_version: 0,
-            sequence: 1,
-            recorded_at: 0,
-            interaction_id: None,
-            run_id: Some("run".to_owned()),
-            rejection_id: None,
-            model_turn_id: None,
-            attempt_id: None,
-            layer: "wire".to_owned(),
-            direction: Some("upstream_to_platform".to_owned()),
-            stage: None,
-            transport: Some("websocket".to_owned()),
-            protocol: Some("openai_responses".to_owned()),
-            message_type: Some("binary".to_owned()),
-            representation: "wire".to_owned(),
-            status: None,
-            status_code: None,
-            url: None,
-            headers: Value::Null,
-            payload_encoding: "base64".to_owned(),
-            payload: Value::String(payload),
-            error: None,
-            redactions: Vec::new(),
-        }
-    }
-
     #[test]
-    fn websocket_control_payloads_are_omitted_without_media_gaps() {
+    fn websocket_control_payloads_are_metadata_only() {
         for message_type in ["ping", "pong"] {
-            for bytes in [b"\xff\x00\x81".as_slice(), b"api_key=never-persist-this"] {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let mut record = binary_record(encoded.clone());
-                record.message_type = Some(message_type.to_owned());
-                record.payload_encoding = "json".to_owned();
-                record.payload = serde_json::json!({"encoding": "base64", "data": encoded});
-                record
-                    .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
-                    .expect("control frame capture");
-                assert_eq!(record.payload["content_capture"], "omitted");
-                assert_eq!(record.payload["reason"], "control_frame_payload_omitted");
-                assert!(!record.payload.to_string().contains("never-persist-this"));
-                assert!(!record.payload.to_string().contains(&encoded));
-                assert!(
-                    !record
-                        .redactions
-                        .contains(&RedactionKind::MediaUnrecoverable)
-                );
-            }
+            let mut record = TraceRecord {
+                schema_version: 0,
+                sequence: 1,
+                recorded_at: 0,
+                interaction_id: None,
+                run_id: Some("run".into()),
+                rejection_id: None,
+                model_turn_id: None,
+                attempt_id: None,
+                layer: "wire".into(),
+                direction: Some("upstream_to_platform".into()),
+                stage: None,
+                transport: Some("websocket".into()),
+                protocol: Some("openai".into()),
+                message_type: Some(message_type.into()),
+                representation: "wire".into(),
+                status: None,
+                status_code: Some(101),
+                url: None,
+                headers: Value::Null,
+                payload_encoding: "base64".into(),
+                payload: Value::String("control-payload".into()),
+                error: None,
+                redactions: Vec::new(),
+            };
+            record.redact_before_queue();
+            assert_eq!(record.payload["content_capture"], "omitted");
+            assert_eq!(record.payload["reason"], "control_frame_payload_omitted");
+            assert!(!record.payload.to_string().contains("control-payload"));
         }
-    }
-
-    #[test]
-    fn opaque_binary_is_omitted_while_utf8_structured_bytes_are_redacted() {
-        let opaque = base64::engine::general_purpose::STANDARD.encode([0xff, 0x00, 0x81]);
-        let mut opaque_record = binary_record(opaque.clone());
-        assert!(
-            opaque_record
-                .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
-                .is_ok()
-        );
-        assert!(!opaque_record.payload.to_string().contains(&opaque));
-        assert_eq!(opaque_record.payload["content_capture"], "unrecoverable");
-
-        let sentinel = "never-persist-this";
-        let encoded_json = base64::engine::general_purpose::STANDARD
-            .encode(format!(r#"{{"api_key":"{sentinel}","content":"keep"}}"#));
-        let mut structured_record = binary_record(encoded_json);
-        assert!(
-            structured_record
-                .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
-                .is_ok()
-        );
-        let redacted = structured_record.payload.as_str().expect("base64 payload");
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(redacted)
-            .expect("valid base64");
-        let text = String::from_utf8(decoded).expect("UTF-8 JSON");
-        assert!(!text.contains(sentinel));
-        assert!(text.contains("keep"));
     }
 }

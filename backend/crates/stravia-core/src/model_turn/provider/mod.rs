@@ -21,7 +21,10 @@ use serde_json::Value;
 use crate::Gateway;
 use crate::db::models::Provider;
 use crate::error::GatewayError;
-use crate::interaction_observation::{ConfirmedUsage, RunEvent, RunObserver};
+use crate::interaction_observation::{
+    ConfirmedUsage, RunEvent, RunObserver, wire_bytes_value as bytes_value,
+    wire_headers_value as headers_value,
+};
 use crate::provider::inbound::InboundResponse;
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::vendor::{ProviderCtx, Vendor};
@@ -422,6 +425,62 @@ impl AttemptObservation {
             .is_some_and(RunObserver::debug_enabled)
     }
 
+    pub(crate) fn http_wire_observer(
+        &self,
+    ) -> Option<Arc<crate::proxy::client::UpstreamWireObserver>> {
+        let observer = self
+            .observer
+            .as_ref()
+            .filter(|observer| observer.debug_enabled())?
+            .clone();
+        let transport = self.transport.clone();
+        let protocol = self.protocol.clone();
+        let model_turn_id = self.model_turn_id.clone();
+        let attempt_id = self.id.clone();
+        let url = self.url.clone();
+        Some(Arc::new(move |event| {
+            let (direction, message_type, status_code, headers, payload) = match event {
+                crate::proxy::client::UpstreamWireEvent::Request { headers, body } => (
+                    "upstream_request",
+                    "request",
+                    None,
+                    headers_value(headers),
+                    bytes_value(body),
+                ),
+                crate::proxy::client::UpstreamWireEvent::ResponseHeaders { status, headers } => (
+                    "upstream_response",
+                    "http_headers",
+                    Some(status),
+                    headers_value(headers),
+                    Value::Null,
+                ),
+                crate::proxy::client::UpstreamWireEvent::ResponseBody { status, bytes } => (
+                    "upstream_response",
+                    if transport == "sse" {
+                        "sse_chunk"
+                    } else {
+                        "body_chunk"
+                    },
+                    Some(status),
+                    Value::Null,
+                    bytes_value(bytes),
+                ),
+            };
+            observer.record(RunEvent::Wire {
+                direction: direction.into(),
+                transport: transport.clone(),
+                protocol: protocol.clone(),
+                message_type: message_type.into(),
+                model_turn_id: Some(model_turn_id.clone()),
+                attempt_id: Some(attempt_id.clone()),
+                status_code,
+                url: Some(url.clone()),
+                headers,
+                payload,
+            });
+        }))
+    }
+
     pub(crate) fn wire_lazy(
         &self,
         direction: &str,
@@ -462,33 +521,6 @@ impl AttemptObservation {
             headers: headers.map(headers_value).unwrap_or(Value::Null),
             payload,
         });
-    }
-
-    pub(crate) fn transport_failure(&self, diagnostic: &crate::proxy::client::TransportDiagnostic) {
-        self.capture_content("transport_failure", diagnostic);
-    }
-
-    pub(crate) fn capture_content<T: serde::Serialize>(&self, stage: &str, payload: &T) {
-        let Some(observer) = self
-            .observer
-            .as_ref()
-            .filter(|observer| observer.debug_enabled())
-        else {
-            return;
-        };
-        match serde_json::to_value(payload) {
-            Ok(payload) => {
-                observer.record(RunEvent::Content {
-                    stage: stage.to_owned(),
-                    model_turn_id: Some(self.model_turn_id.clone()),
-                    attempt_id: Some(self.id.clone()),
-                    payload,
-                });
-            }
-            Err(_) => observer.record(RunEvent::ObservationGap {
-                reason: format!("{stage}_serialization_failed"),
-            }),
-        }
     }
 
     pub(crate) fn observe_delta(&self, delta: &AiStreamDelta) {
@@ -626,43 +658,6 @@ impl Drop for AttemptObservation {
     }
 }
 
-fn headers_value(headers: &HeaderMap) -> Value {
-    let mut values = serde_json::Map::new();
-    for (name, value) in headers {
-        let value = value
-            .to_str()
-            .map(|value| Value::String(value.to_owned()))
-            .unwrap_or_else(|_| bytes_value(value.as_bytes()));
-        match values.entry(name.as_str().to_owned()) {
-            serde_json::map::Entry::Vacant(entry) => {
-                entry.insert(value);
-            }
-            serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
-                Value::Array(existing) => existing.push(value),
-                existing => {
-                    let first = std::mem::replace(existing, Value::Null);
-                    *existing = Value::Array(vec![first, value]);
-                }
-            },
-        }
-    }
-    Value::Object(values)
-}
-
-fn bytes_value(bytes: &[u8]) -> Value {
-    std::str::from_utf8(bytes)
-        .map(|text| Value::String(text.to_owned()))
-        .unwrap_or_else(|_| {
-            serde_json::json!({
-                "encoding": "base64",
-                "data": base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes,
-                ),
-            })
-        })
-}
-
 fn confirmed_usage(usage: &stravia_runtime_contract::protocol::ir::Usage) -> ConfirmedUsage {
     ConfirmedUsage {
         input_tokens: usage
@@ -717,28 +712,9 @@ impl ProviderAdapter {
         }
     }
 
-    fn begin_attempt(
-        &self,
-        transport: &str,
-        url: &str,
-        headers: &HeaderMap,
-        body: impl FnOnce() -> Value,
-    ) -> AttemptObservation {
-        self.begin_attempt_with_message(transport, url, "request", headers, body)
-    }
-
-    fn begin_attempt_with_message(
-        &self,
-        transport: &str,
-        url: &str,
-        message_type: &str,
-        headers: &HeaderMap,
-        body: impl FnOnce() -> Value,
-    ) -> AttemptObservation {
+    fn begin_attempt(&self, transport: &str, url: &str) -> AttemptObservation {
         self.mark_upstream_started();
-        let attempt = AttemptObservation::new(self, transport, url);
-        attempt.wire_lazy("upstream_request", message_type, None, Some(headers), body);
-        attempt
+        AttemptObservation::new(self, transport, url)
     }
 
     pub(crate) fn bind(self, client: ProxyClient, outbound: OutboundRequest) -> ProviderCall {
@@ -895,7 +871,6 @@ impl ProviderStream {
                             Some(self.status),
                             &error,
                         );
-                        self.attempt.transport_failure(&diagnostic);
                         return Err(ProviderStreamError::Transport(diagnostic.to_string()));
                     }
                 }
@@ -928,18 +903,7 @@ impl ProviderStream {
             .adapter
             .normalize_stream_chunk(&raw)
             .await
-            .map_err(|error| {
-                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
-                    "protocol_normalize",
-                    "decode",
-                    true,
-                    Some(self.diagnostic_http_status()),
-                    None,
-                    &error,
-                );
-                self.attempt().transport_failure(&diagnostic);
-                ProviderStreamError::Normalize(error)
-            })?;
+            .map_err(ProviderStreamError::Normalize)?;
         let mut deltas = self
             .decoder
             .decode_chunk(&normalized)
@@ -952,7 +916,6 @@ impl ProviderStream {
                     None,
                     error,
                 );
-                self.attempt().transport_failure(&diagnostic);
                 tracing::debug!(
                     error = %diagnostic,
                     "failed to decode upstream event"
@@ -962,49 +925,17 @@ impl ProviderStream {
         self.adapter
             .normalize_stream_deltas(&mut deltas)
             .await
-            .map_err(|error| {
-                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
-                    "protocol_normalize",
-                    "decode",
-                    true,
-                    Some(self.diagnostic_http_status()),
-                    None,
-                    &error,
-                );
-                self.attempt().transport_failure(&diagnostic);
-                ProviderStreamError::Normalize(error)
-            })?;
+            .map_err(ProviderStreamError::Normalize)?;
         Ok(Some(ProviderStreamChunk { deltas }))
     }
 
     pub(crate) async fn finish(&mut self) -> Result<Vec<AiStreamDelta>, ProviderStreamError> {
-        let mut deltas = self.decoder.finish().inspect_err(|error| {
-            let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
-                "protocol_decode",
-                "decode",
-                self.response_event_seen,
-                Some(self.diagnostic_http_status()),
-                None,
-                error,
-            );
-            self.attempt().transport_failure(&diagnostic);
-        })?;
+        let mut deltas = self.decoder.finish().map_err(ProviderStreamError::Decode)?;
         self.reasoning.normalize(&mut deltas, true);
         self.adapter
             .normalize_stream_deltas(&mut deltas)
             .await
-            .map_err(|error| {
-                let diagnostic = crate::proxy::client::TransportDiagnostic::from_error(
-                    "protocol_normalize",
-                    "decode",
-                    self.response_event_seen,
-                    Some(self.diagnostic_http_status()),
-                    None,
-                    &error,
-                );
-                self.attempt().transport_failure(&diagnostic);
-                ProviderStreamError::Normalize(error)
-            })?;
+            .map_err(ProviderStreamError::Normalize)?;
         Ok(deltas)
     }
 }

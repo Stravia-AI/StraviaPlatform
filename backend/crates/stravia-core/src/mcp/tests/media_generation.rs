@@ -761,7 +761,7 @@ async fn generation_gate_controls_discovery_without_injection_permission() {
 }
 
 #[tokio::test]
-async fn generation_reports_usage_and_externalizes_media_in_debug_exports() {
+async fn generation_reports_usage_and_preserves_raw_media_in_debug_exports() {
     use futures::StreamExt;
     use std::io::Read;
     let fixture = generation_app().await;
@@ -774,10 +774,6 @@ async fn generation_reports_usage_and_externalizes_media_in_debug_exports() {
     )
     .await;
     assert_ne!(result.is_error, Some(true), "{result:?}");
-    let reference = result.structured_content.unwrap()["artifact_reference"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     admin.observation_flush().await.unwrap();
     let stats = admin.get_stats_overview(None).await.unwrap();
     assert_eq!(
@@ -816,22 +812,8 @@ async fn generation_reports_usage_and_externalizes_media_in_debug_exports() {
             .unwrap();
     }
     assert!(
-        exported.contains(&reference),
-        "debug export retains the generated result identity"
-    );
-    assert!(
-        exported.contains("media_externalized"),
-        "image payload is represented by external media metadata"
-    );
-    assert!(
-        !exported.contains(PNG),
-        "{}",
-        exported
-            .lines()
-            .filter(|line| line.contains(PNG))
-            .map(|line| line.replace(PNG, "<fixture-image>"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        exported.contains(PNG),
+        "current wire capture keeps the generated media payload in the bundle"
     );
     assert!(!exported.contains("local-test-not-a-production-credential"));
     assert!(!exported.contains(&fixture.app.token));

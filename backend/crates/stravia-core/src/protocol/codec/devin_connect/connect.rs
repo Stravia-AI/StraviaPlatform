@@ -72,8 +72,21 @@ impl ConnectFrameReader {
 
     /// Append bytes and yield every complete frame now available.
     pub(crate) fn push(&mut self, raw: &[u8]) -> anyhow::Result<Vec<ConnectFrame>> {
-        self.buffer.extend_from_slice(raw);
         let mut frames = Vec::new();
+        self.push_with(raw, |frame| {
+            frames.push(frame);
+            Ok(())
+        })?;
+        Ok(frames)
+    }
+
+    /// 诊断调用方可保留错误发生前的完整帧；执行解析仍使用原有原子返回接口。
+    pub(crate) fn push_with(
+        &mut self,
+        raw: &[u8],
+        mut visit: impl FnMut(ConnectFrame) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.buffer.extend_from_slice(raw);
         loop {
             if self.buffer.len() < HEADER_SIZE {
                 break;
@@ -100,13 +113,13 @@ impl ConnectFrameReader {
             } else {
                 payload
             };
-            frames.push(if flags & FLAG_END_STREAM != 0 {
+            visit(if flags & FLAG_END_STREAM != 0 {
                 ConnectFrame::EndStream(payload)
             } else {
                 ConnectFrame::Data(payload)
-            });
+            })?;
         }
-        Ok(frames)
+        Ok(())
     }
 
     pub(crate) fn is_empty(&self) -> bool {

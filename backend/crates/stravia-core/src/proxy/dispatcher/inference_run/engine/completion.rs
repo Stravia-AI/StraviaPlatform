@@ -589,12 +589,6 @@ pub(super) async fn complete_canonical_response(
         }
     }
     let observer = context.observer.clone();
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
-        stage: "response_after_hook".into(),
-        model_turn_id: Some(context.model_turn_id.clone()),
-        attempt_id: None,
-        payload: super::checkpoint_payload(&observer, &response),
-    });
     let classified = run.classify_tool_calls(&response);
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
@@ -659,12 +653,6 @@ pub(super) async fn complete_canonical_response(
             return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
         }
     };
-    observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
-        stage: "client_projection_content".into(),
-        model_turn_id: Some(context.model_turn_id.clone()),
-        attempt_id: None,
-        payload: super::checkpoint_payload(&observer, &response),
-    });
     if has_platform_calls && !has_client_calls {
         return CompletionOutcome::PlatformOnly {
             continuation: Box::new(PlatformOnlyContinuation {

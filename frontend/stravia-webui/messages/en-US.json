@@ -1564,7 +1564,7 @@
   "observation_debug_status_writing": "Saving",
   "observation_debug_disable_retains": "Turning Debug off only affects requests that start later. Existing recordings remain until they expire.",
   "observation_debug_retained": "Currently saved: {retained}.",
-  "observation_debug_warning": "Debug may still save prompts, tool arguments, results, and business data even with credential protection on. Credentials assembled from text across messages may remain. Recordings are kept for {retention_days} days. Confirm each time you turn it on.",
+  "observation_debug_warning": "Debug saves raw application-protocol wire data. Only HTTP Authorization header values (case-insensitive name) are replaced before queueing; other headers, URLs, query values, bodies, prompts, tool content, media, and other credentials remain as captured and may be sensitive. Media is not externalized. Recordings are kept for {retention_days} days. Confirm each time you turn it on.",
   "observation_delivery": "Delivery",
   "observation_details": "Observation details",
   "observation_details_unavailable": "Details are unavailable",

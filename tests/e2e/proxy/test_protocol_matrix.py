@@ -267,17 +267,19 @@ def test_protocol_matrix(
         "upstream_response",
         "platform_to_client",
     } <= directions
-    selected = {
-        event["payload"]["target_id"]
+    wire_attempts = {
+        event.get("attempt_id")
         for event in trace
-        if event.get("stage") == "target_selected"
+        if event.get("layer") == "wire" and event.get("attempt_id")
     }
-    attempted = {
-        event["payload"]["target_id"]
+    started_attempts = {
+        event["payload"].get("attempt_id")
         for event in run["events"]
-        if event["kind"] == "target_attempt_started"
+        if event["kind"] == "target_attempt_started" and event["payload"].get("attempt_id")
     }
-    assert selected == attempted
+    assert wire_attempts
+    assert started_attempts
+    assert started_attempts <= wire_attempts
 
 
 # ---------------------------------------------------------------------------

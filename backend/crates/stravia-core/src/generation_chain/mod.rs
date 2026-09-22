@@ -29,7 +29,7 @@ use stravia_runtime_contract::turn_chain::TurnNodeKind;
 use stravia_runtime_contract::turn_chain::TurnUnavailable;
 
 mod materialize;
-pub(crate) use materialize::{client_items_from_payloads, rebuilt_prefix};
+pub(crate) use materialize::rebuilt_prefix;
 mod pending;
 mod project;
 mod store;
@@ -371,14 +371,15 @@ impl GenerationChain {
         }
     }
 
-    /// Ancestor client items of a completed response node, for observation evidence.
-    /// Generation Chain owns its schema; callers get items, never node payloads.
-    /// An incomplete or expired chain declines rather than returning partial history.
-    pub(crate) async fn ancestor_client_items(
+    /// Visits cumulative ancestor client items of a completed response node.
+    /// Generation Chain owns its schema; callers borrow each root-to-head snapshot,
+    /// never node payloads. An incomplete or expired chain declines without visiting.
+    pub(crate) async fn visit_ancestor_client_items(
         &self,
         principal: &Principal,
         node: &str,
-    ) -> anyhow::Result<Option<Vec<AiItem>>> {
+        visit: impl FnMut(&str, &[AiItem]) + Send,
+    ) -> anyhow::Result<bool> {
         match self
             .store
             .turn_chain
@@ -386,11 +387,10 @@ impl GenerationChain {
             .await
         {
             Ok(nodes) => {
-                client_items_from_payloads(nodes.into_iter().map(|node| node.payload).collect())
-                    .map(Some)
-                    .map_err(anyhow::Error::msg)
+                visit_client_items_from_nodes(nodes, visit).map_err(anyhow::Error::msg)?;
+                Ok(true)
             }
-            Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Unavailable) => Ok(None),
+            Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Unavailable) => Ok(false),
             Err(error @ stravia_runtime_contract::turn_chain::TurnUnavailable::Storage(_)) => {
                 Err(anyhow::Error::new(error))
             }

@@ -1,6 +1,81 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_preserve_usage_certainty_without_hidden_rounds() {
+    use stravia_runtime_contract::protocol::ir::Usage;
+
+    let directory = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    let headers = authorized_headers(&gateway).await;
+    for (stream, known, input, output) in [
+        (true, true, 73_379, 211),
+        (false, true, 0, 0),
+        (true, false, 490, 0),
+    ] {
+        let mut model_response = AiResponse::new("usage-response", "in-memory-model");
+        model_response.push_output_text("finished");
+        model_response.stop_reason = Some("stop".into());
+        model_response.usage = Usage {
+            prompt_tokens: input,
+            completion_tokens: output,
+            total_tokens: input + output,
+            required_components_known: known,
+            ..Usage::default()
+        };
+        let mut request = AiRequest::new("in-memory-model", Vec::new());
+        request.stream.enabled = stream;
+        let response = execute(RunInput {
+            gateway: gateway.clone(),
+            executor: Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
+                model_response,
+            ])),
+            headers: headers.clone(),
+            envelope: RawEnvelope::new(
+                Some(serde_json::json!({"model": "in-memory-model", "stream": stream})),
+                HashMap::new(),
+                "POST",
+                "/v1/responses",
+            ),
+            request,
+            ingress: OPEN_RESPONSES_2026_04_24,
+            context: RequestContext::new(
+                OPEN_RESPONSES_2026_04_24,
+                std::time::Duration::from_secs(30),
+            ),
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let resource: serde_json::Value = if stream {
+            std::str::from_utf8(&bytes)
+                .expect("SSE text")
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                .find(|event| event["type"] == "response.completed")
+                .expect("completed response")["response"]
+                .clone()
+        } else {
+            serde_json::from_slice(&bytes).expect("response JSON")
+        };
+        if known {
+            assert_eq!(resource["usage"]["input_tokens"], input);
+            assert_eq!(resource["usage"]["output_tokens"], output);
+            assert_eq!(resource["usage"]["total_tokens"], input + output);
+        } else {
+            assert!(resource["usage"].is_null(), "{resource}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     let data_dir = std::env::temp_dir().join(format!(
         "stravia-protected-history-test-{}",
@@ -1127,6 +1202,10 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
     let body = String::from_utf8_lossy(&body);
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("final response"), "{body}");
+    let resource: serde_json::Value = serde_json::from_str(&body).expect("response JSON");
+    assert_eq!(resource["usage"]["prompt_tokens"], 2);
+    assert_eq!(resource["usage"]["completion_tokens"], 2);
+    assert_eq!(resource["usage"]["total_tokens"], 4);
     assert_eq!(
         body.matches("<!--sh:").count(),
         2,

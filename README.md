@@ -134,7 +134,7 @@ Availability depends on upstream account and model support. Size preferences do 
 - API keys with custom secrets, model bindings, expiry, and per-key limits for concurrency, MCP access, and automatic tool injection.
 - Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
 - See the token usage and provider quotas that services actually report.
-- Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
+- Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle; only HTTP `Authorization` values are masked, while other credentials, content, and media may be retained. Treat bundles as sensitive; see the [Request Records design](docs/design/interaction-observation.md).
 
 ### Credential protection
 

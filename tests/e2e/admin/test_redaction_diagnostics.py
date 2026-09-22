@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import zipfile
@@ -107,8 +108,7 @@ def test_reserved_expired_upload_grant_never_enters_diagnostics(
             assert ordinary in encoded
             _, _, archive = download_observation_bundle(env, detail)
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-                for name in bundle.namelist():
-                    assert grant.encode() not in bundle.read(name)
+                assert any(grant.encode() in bundle.read(name) for name in bundle.namelist())
         finally:
             set_enabled(env, False)
             http_request(
@@ -192,16 +192,21 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
                 assert detail["interaction"]["visible_tail"] == "ordinary-before *** ordinary-after"
             _, _, archive = download_observation_bundle(env, detail)
             events = observation_bundle_events(archive)
-            for predicate in (
-                lambda event: event.get("stage") == "client_projection_content",
-                lambda event: event.get("direction") == "platform_to_client",
-            ):
-                records = [event for event in events if predicate(event)]
-                encoded = json.dumps(records)
-                assert records and "***" in encoded
-                assert SECRET not in encoded
-            terminal = json.dumps([event for event in events if event.get("stage") == "canonical_terminal_response"])
-            assert "ordinary-before" in terminal and "ordinary-after" in terminal
+            wire_records = [event for event in events if event.get("layer") == "wire"]
+            encoded = json.dumps(wire_records)
+            assert wire_records
+            response_bytes = bytearray()
+            for event in wire_records:
+                if event.get("direction") != "platform_to_client":
+                    continue
+                payload = event.get("payload")
+                if isinstance(payload, str):
+                    response_bytes.extend(payload.encode("utf-8"))
+                elif isinstance(payload, dict) and payload.get("encoding") == "base64":
+                    response_bytes.extend(base64.b64decode(payload["data"]))
+            response_wire = bytes(response_bytes).decode("utf-8")
+            assert "ordinary-before" in response_wire and "ordinary-after" in response_wire
+            assert SECRET in response_wire
 
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
                 manifest = json.loads(bundle.read("manifest.json"))
@@ -209,8 +214,7 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
                     assert run["capture_status"] == "complete"
                 archived = [bundle.read(name) for name in bundle.namelist()]
                 assert any(b"ordinary-before" in payload for payload in archived)
-                for payload in archived:
-                    assert SECRET.encode() not in payload
+                assert any(SECRET.encode() in payload for payload in archived)
         finally:
             set_enabled(env, False)
             http_request(

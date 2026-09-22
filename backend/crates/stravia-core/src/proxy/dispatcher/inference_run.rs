@@ -239,12 +239,6 @@ impl WebSocketRunDelivery {
                     text: visible.to_owned(),
                 });
             }
-            self.observer.record_debug(|| RunEvent::Content {
-                stage: "client_projection_content".into(),
-                model_turn_id: None,
-                attempt_id: None,
-                payload: value,
-            });
         }
     }
 
@@ -276,12 +270,6 @@ impl WebSocketRunDelivery {
         let delivery_completed_at = (status == "delivered")
             .then_some(self.delivery_completed_at)
             .flatten();
-        self.observer.record_debug(|| RunEvent::Content {
-            stage: "delivery_terminal".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: serde_json::json!({ "status": status, "reason": reason.clone() }),
-        });
         self.observer.record(RunEvent::DeliveryFinished {
             status: status.to_owned(),
             reason: reason.clone(),
@@ -730,16 +718,6 @@ impl RunTerminalContext {
         reason: Option<String>,
         delivery_completed_at: Option<i64>,
     ) {
-        observer.record_debug(|| RunEvent::Content {
-            stage: "delivery_terminal".into(),
-            model_turn_id: None,
-            attempt_id: None,
-            payload: serde_json::json!({
-                "status": delivery_status,
-                "reason": reason.clone(),
-                "http_status": status_code,
-            }),
-        });
         observer.record(RunEvent::DeliveryFinished {
             status: delivery_status.to_owned(),
             reason: reason.clone(),
@@ -805,9 +783,7 @@ impl Stream for ObservedDeliveryStream {
                     status_code: Some(self.status_code),
                     url: None,
                     headers: serde_json::Value::Null,
-                    payload: serde_json::Value::String(
-                        String::from_utf8_lossy(&bytes).into_owned(),
-                    ),
+                    payload: crate::interaction_observation::wire_bytes_value(&bytes),
                 });
                 Poll::Ready(Some(Ok(bytes)))
             }
@@ -856,20 +832,7 @@ fn wrap_observed_delivery(
 ) -> Response {
     let status_code = response.status().as_u16();
     observer.record_debug(|| {
-        let headers = serde_json::Value::Object(
-            response
-                .headers()
-                .iter()
-                .filter_map(|(name, value)| {
-                    value.to_str().ok().map(|value| {
-                        (
-                            name.as_str().to_owned(),
-                            serde_json::Value::String(value.to_owned()),
-                        )
-                    })
-                })
-                .collect(),
-        );
+        let headers = crate::interaction_observation::wire_headers_value(response.headers());
         RunEvent::Wire {
             direction: "platform_to_client".into(),
             transport: "http".into(),

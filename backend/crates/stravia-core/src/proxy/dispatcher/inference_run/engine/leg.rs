@@ -65,11 +65,17 @@ impl LegFailure {
         match self {
             Self::ModelTurn(error) => {
                 let status = model_turn_error_status(error).as_u16();
+                // 只有真实上游失败（带 upstream 标记）才把 HTTP 状态映射为
+                // 语义化 kind；平台内部错误（存储、Hook、脱敏等）保持
+                // stream_mid_error，避免把本地故障误报为上游不可用。
                 let kind = match error.code.as_str() {
                     "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
                         AiErrorKind::InvalidRequest
                     }
-                    _ => AiError::kind_from_status(status, error.upstream_body.as_deref()),
+                    _ if error.upstream_status.is_some() || error.upstream_body.is_some() => {
+                        AiError::kind_from_status(status, error.upstream_body.as_deref())
+                    }
+                    _ => AiErrorKind::StreamMidError,
                 };
                 AiError::new(kind, error.message.clone()).with_status(status)
             }
@@ -192,7 +198,6 @@ pub(super) struct LiveLegOps<'a> {
     pub delivery: &'a mut DeliveryAdapter,
     pub ledger: &'a RunLedger,
     pub observer: &'a crate::interaction_observation::RunObserver,
-    pub model_turn_id: String,
     pub observe_delivery: bool,
 }
 
@@ -312,7 +317,6 @@ impl LiveLegOps<'_> {
             projection,
             self.ledger,
             self.observer,
-            &self.model_turn_id,
             self.observe_delivery,
             batch,
         )
@@ -837,15 +841,9 @@ pub(super) async fn deliver_projected(
     projection: &mut ClientProjectionSession,
     ledger: &RunLedger,
     observer: &crate::interaction_observation::RunObserver,
-    model_turn_id: &str,
     observe_delivery: bool,
     batch: ProjectedDeltaBatch,
 ) -> Result<(), ProjectedDeliveryFailure> {
-    let debug_payload = if observe_delivery && observer.debug_enabled() {
-        super::checkpoint_payload(observer, batch.deltas())
-    } else {
-        serde_json::Value::Null
-    };
     let visible_text = if observe_delivery {
         batch
             .deltas()
@@ -870,12 +868,6 @@ pub(super) async fn deliver_projected(
         })?;
     if progress == DeliveryProgress::Sent {
         if observe_delivery {
-            observer.record_debug(|| crate::interaction_observation::RunEvent::Content {
-                stage: "client_projection_content".into(),
-                model_turn_id: Some(model_turn_id.to_owned()),
-                attempt_id: None,
-                payload: debug_payload,
-            });
             for text in visible_text {
                 if !text.is_empty() {
                     observer.record(

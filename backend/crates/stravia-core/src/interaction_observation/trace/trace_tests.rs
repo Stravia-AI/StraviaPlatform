@@ -1,8 +1,8 @@
 use super::*;
 
-use base64::Engine;
+use serde_json::Value;
 
-fn command_code_chunk(sequence: i64, payload: Value) -> TraceRecord {
+fn wire_record(sequence: i64, message_type: &str, payload: Value) -> TraceRecord {
     TraceRecord {
         schema_version: 0,
         sequence,
@@ -15,9 +15,9 @@ fn command_code_chunk(sequence: i64, payload: Value) -> TraceRecord {
         layer: "wire".to_owned(),
         direction: Some("upstream_response".to_owned()),
         stage: None,
-        transport: Some("sse".to_owned()),
-        protocol: Some(COMMAND_CODE_PROTOCOL.to_owned()),
-        message_type: Some("sse_chunk".to_owned()),
+        transport: Some("http".to_owned()),
+        protocol: Some("openai-compatible".to_owned()),
+        message_type: Some(message_type.to_owned()),
         representation: "wire".to_owned(),
         status: None,
         status_code: Some(200),
@@ -28,26 +28,6 @@ fn command_code_chunk(sequence: i64, payload: Value) -> TraceRecord {
         error: None,
         redactions: Vec::new(),
     }
-}
-
-fn bytes_value(bytes: &[u8]) -> Value {
-    std::str::from_utf8(bytes)
-        .map(|text| Value::String(text.to_owned()))
-        .unwrap_or_else(|_| {
-            serde_json::json!({
-                "encoding": "base64",
-                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-            })
-        })
-}
-
-fn encoded_command_code_chunk(sequence: i64, bytes: &[u8]) -> TraceRecord {
-    let mut record = command_code_chunk(
-        sequence,
-        Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
-    );
-    record.payload_encoding = "base64".to_owned();
-    record
 }
 
 async fn persisted_records(handle: &TraceHandle) -> Vec<TraceRecord> {
@@ -64,256 +44,201 @@ async fn persisted_records(handle: &TraceHandle) -> Vec<TraceRecord> {
 }
 
 #[tokio::test]
-async fn command_code_ndjson_persists_every_record_and_complete_eof_finish() {
+async fn wire_chunks_are_exported_immediately_without_protocol_reassembly() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
 
     assert_eq!(
-        handle.record(command_code_chunk(
-            1,
-            Value::String(
-                "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"hello\"}\n{\"type\":\"fin"
-                    .to_owned(),
-            ),
-        )),
+        handle.record(wire_record(1, "sse_chunk", Value::String("data: {".into()))),
         TraceWriteOutcome::Queued
     );
+    let before_finish = handle.snapshot(i64::MAX).await.expect("running snapshot");
+    let mut running = Vec::new();
+    for segment in before_finish.segments {
+        super::super::trace_storage::visit(&segment.path, segment.bytes, |record| {
+            running.push(record);
+            Ok(())
+        })
+        .expect("read running snapshot");
+    }
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0]["payload"], "data: {");
+
     assert_eq!(
-        handle.record(command_code_chunk(
+        handle.record(wire_record(
             2,
-            Value::String("ish\",\"finishReason\":\"stop\"}".to_owned()),
+            "sse_chunk",
+            Value::String("not-json\n\n".into())
         )),
         TraceWriteOutcome::Queued
     );
-
     let manifest = handle.finish().await;
     assert_eq!(manifest.status, "complete");
-    assert!(manifest.reasons.is_empty());
-
     let records = persisted_records(&handle).await;
-    let payloads: Vec<&str> = records
-        .iter()
-        .map(|record| record.payload.as_str().expect("NDJSON text payload"))
-        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].payload, "data: {");
+    assert_eq!(records[1].payload, "not-json\n\n");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn debug_redacts_only_authorization_header_values() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let sentinel = "same-synthetic-marker";
+    let mut record = wire_record(1, "request_head", Value::String(sentinel.into()));
+    record.direction = Some("client_to_platform".into());
+    record.url = Some(format!("https://example.test/v1?token={sentinel}"));
+    record.headers = serde_json::json!({
+        "aUtHoRiZaTiOn": [sentinel, sentinel],
+        "x-api-key": sentinel,
+        "Cookie": sentinel
+    });
+
+    assert_eq!(handle.record(record), TraceWriteOutcome::Queued);
+    assert_eq!(handle.finish().await.status, "complete");
+    let records = persisted_records(&handle).await;
+    let record = &records[0];
     assert_eq!(
-        payloads,
-        [
-            "{\"type\":\"start\"}",
-            "{\"type\":\"text-delta\",\"text\":\"hello\"}",
-            "{\"type\":\"finish\",\"finishReason\":\"stop\"}",
-        ]
+        record.headers["aUtHoRiZaTiOn"],
+        serde_json::json!(["***", "***"])
     );
-    assert!(
-        records
-            .iter()
-            .all(|record| record.representation == "reassembled_application_message")
+    assert_eq!(record.headers["x-api-key"], sentinel);
+    assert_eq!(record.headers["Cookie"], sentinel);
+    assert_eq!(
+        record.url.as_deref(),
+        Some(format!("https://example.test/v1?token={sentinel}").as_str())
     );
-
+    assert_eq!(record.payload, sentinel);
+    assert_eq!(record.redactions, [RedactionKind::CredentialHeader]);
     manager.shutdown().await;
 }
 
 #[tokio::test]
-async fn command_code_ndjson_reassembles_base64_utf8_slices_before_redaction() {
+async fn malformed_complete_wire_is_complete_capture() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
-    let wire = "{\"type\":\"text-delta\",\"access_token\":\"split-secret\",\"text\":\"雪\"}\n"
-        .as_bytes()
-        .to_vec();
-    let snow = "雪".as_bytes();
-    let credential_split = wire
-        .windows(b"split-secret".len())
-        .position(|window| window == b"split-secret")
-        .expect("credential value")
-        + b"split-".len();
-    let utf8_split = wire
-        .windows(snow.len())
-        .position(|window| window == snow)
-        .expect("UTF-8 value")
-        + 1;
-
-    for (sequence, fragment) in [
-        &wire[..credential_split],
-        &wire[credential_split..utf8_split],
-        &wire[utf8_split..],
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        assert_eq!(
-            handle.record(command_code_chunk(
-                sequence as i64 + 1,
-                bytes_value(fragment)
-            )),
-            TraceWriteOutcome::Queued
-        );
-    }
-
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "complete");
-    let records = persisted_records(&handle).await;
-    assert_eq!(records.len(), 1);
-    let persisted = records[0].payload.as_str().expect("NDJSON text payload");
-    assert!(!persisted.contains("split-secret"));
-    assert!(!persisted.contains("split-"));
-    let payload: Value = serde_json::from_str(persisted).expect("redacted NDJSON record");
-    assert_eq!(payload["text"], "雪");
-    assert_ne!(payload["access_token"], "split-secret");
-
-    manager.shutdown().await;
-}
-
-#[tokio::test]
-async fn command_code_ndjson_decodes_declared_base64_before_reassembly() {
-    let directory = tempfile::tempdir().expect("trace directory");
-    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
-    let handle = manager.create();
-    let wire = b"{\"type\":\"text-delta\",\"text\":\"\xe9\x9b\xaa\"}\n";
-    let utf8 = wire
-        .windows("雪".len())
-        .position(|window| window == "雪".as_bytes())
-        .expect("UTF-8 value");
-
-    for (sequence, fragment) in [&wire[..utf8 + 1], &wire[utf8 + 1..]]
-        .into_iter()
-        .enumerate()
-    {
-        assert_eq!(
-            handle.record(encoded_command_code_chunk(sequence as i64 + 1, fragment)),
-            TraceWriteOutcome::Queued
-        );
-    }
-
+    let malformed = "{ definitely not json";
+    let record = wire_record(1, "body_chunk", Value::String(malformed.into()));
+    assert_eq!(handle.record(record), TraceWriteOutcome::Queued);
     let manifest = handle.finish().await;
     assert_eq!(manifest.status, "complete");
     assert!(manifest.reasons.is_empty());
     let records = persisted_records(&handle).await;
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        serde_json::from_str::<Value>(records[0].payload.as_str().expect("JSON payload"))
-            .expect("valid reassembled JSON")["text"],
-        "雪"
-    );
-
+    assert_eq!(records[0].payload, malformed);
     manager.shutdown().await;
 }
 
 #[tokio::test]
-async fn structured_body_decodes_base64_utf8_slices_before_redaction() {
+async fn websocket_ping_pong_are_metadata_only() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
-    let wire = b"{\"message\":\"\xe9\x9b\xaa\",\"api_key\":\"never-persist\"}";
-    let utf8 = wire
-        .windows("雪".len())
-        .position(|window| window == "雪".as_bytes())
-        .expect("UTF-8 value");
-
-    for (sequence, fragment) in [&wire[..utf8 + 1], &wire[utf8 + 1..]]
-        .into_iter()
-        .enumerate()
-    {
-        let mut record = encoded_command_code_chunk(sequence as i64 + 1, fragment);
-        record.protocol = Some("open-responses/responses/2026-04-24".to_owned());
-        record.message_type = Some("body_chunk".to_owned());
+    for (sequence, kind) in [(1, "ping"), (2, "pong")] {
+        let mut record = wire_record(sequence, kind, Value::String("control-payload".into()));
+        record.transport = Some("websocket".into());
         assert_eq!(handle.record(record), TraceWriteOutcome::Queued);
     }
-
     let manifest = handle.finish().await;
     assert_eq!(manifest.status, "complete");
-    assert!(manifest.reasons.is_empty());
     let records = persisted_records(&handle).await;
-    assert_eq!(records.len(), 1);
-    let payload: Value = serde_json::from_str(
-        records[0]
-            .payload
-            .as_str()
-            .expect("reassembled structured body"),
-    )
-    .expect("valid reassembled JSON");
-    assert_eq!(payload["message"], "雪");
-    assert_eq!(payload["api_key"], "***");
-
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record.payload["content_capture"], "omitted");
+        assert_eq!(record.payload["reason"], "control_frame_payload_omitted");
+    }
     manager.shutdown().await;
 }
 
 #[tokio::test]
-async fn command_code_ndjson_marks_incomplete_tail_partial_without_losing_prior_records() {
+async fn oversized_wire_record_marks_partial_without_queueing_payload() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
-    let sentinel = "never-persist-this";
-
+    let record = wire_record(
+        1,
+        "body_chunk",
+        Value::String("x".repeat(WIRE_CAPTURE_LIMIT_BYTES + 1)),
+    );
     assert_eq!(
-        handle.record(command_code_chunk(
-            1,
-            Value::String(format!(
-                "{{\"type\":\"start\"}}\n{{\"type\":\"text-delta\",\"access_token\":\"{sentinel}"
-            )),
-        )),
+        handle.record(record),
+        TraceWriteOutcome::Partial(WIRE_CAPTURE_LIMIT)
+    );
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "partial");
+    assert_eq!(manifest.reasons, [WIRE_CAPTURE_LIMIT.to_owned()]);
+    assert!(persisted_records(&handle).await.is_empty());
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_barrier_seals_the_batch_before_later_records() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    assert_eq!(
+        handle.record(wire_record(7, "body_chunk", Value::String("before".into()))),
         TraceWriteOutcome::Queued
     );
 
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "partial");
+    let snapshot = handle.snapshot(7);
+    tokio::pin!(snapshot);
+    tokio::select! {
+        biased;
+        result = &mut snapshot => panic!("snapshot completed before its queued writer work: {result:?}"),
+        _ = std::future::ready(()) => {}
+    }
     assert_eq!(
-        manifest.reasons,
-        ["incomplete_structured_wire_omitted".to_owned()]
+        handle.record(wire_record(7, "body_chunk", Value::String("after".into()))),
+        TraceWriteOutcome::Queued
     );
 
-    let records = persisted_records(&handle).await;
+    let snapshot = snapshot.await.expect("fixed-cut snapshot");
+    let mut records = Vec::new();
+    for segment in snapshot.segments {
+        super::super::trace_storage::visit(&segment.path, segment.bytes, |record| {
+            records.push(serde_json::from_value::<TraceRecord>(record).expect("trace record"));
+            Ok(())
+        })
+        .expect("read fixed-cut snapshot");
+    }
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].payload, "{\"type\":\"start\"}");
-    let persisted = serde_json::to_string(&records).expect("serialize persisted records");
-    assert!(!persisted.contains(sentinel));
-
+    assert_eq!(records[0].payload, "before");
+    assert_eq!(handle.finish().await.status, "complete");
+    assert_eq!(persisted_records(&handle).await.len(), 2);
     manager.shutdown().await;
 }
 
-#[tokio::test]
-async fn command_code_ndjson_omits_malformed_terminated_record_without_leaking_credentials() {
+#[tokio::test(flavor = "current_thread")]
+async fn full_queue_of_oversized_batches_still_reports_partial() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
-    let sentinel = "malformed-secret";
+    let payload = "x".repeat(WRITE_BATCH_BYTES);
 
-    assert_eq!(
-        handle.record(command_code_chunk(
-            1,
-            Value::String(format!(
-                "{{\"type\":\"start\"}}\n{{\"access_token\":\"{sentinel}\"\n"
+    for index in 0..WRITER_QUEUE_CAPACITY - 1 {
+        assert_eq!(
+            handle.record(wire_record(
+                index as i64 + 1,
+                "body_chunk",
+                Value::String(payload.clone()),
             )),
+            TraceWriteOutcome::Queued
+        );
+    }
+    assert_eq!(
+        handle.record(wire_record(
+            WRITER_QUEUE_CAPACITY as i64,
+            "body_chunk",
+            Value::String(payload),
         )),
-        TraceWriteOutcome::Partial("incomplete_structured_wire_omitted")
+        TraceWriteOutcome::Partial(WRITER_OVERFLOW)
     );
-
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "partial");
-    let records = persisted_records(&handle).await;
-    assert_eq!(records.len(), 1);
-    let persisted = serde_json::to_string(&records).expect("serialize persisted records");
-    assert!(!persisted.contains(sentinel));
-
-    manager.shutdown().await;
-}
-
-#[tokio::test]
-async fn non_command_code_chunks_keep_existing_structured_message_capture() {
-    let directory = tempfile::tempdir().expect("trace directory");
-    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
-    let handle = manager.create();
-    let mut chunk = command_code_chunk(
-        1,
-        Value::String("{\"type\":\"one\"}\n{\"type\":\"two\"}\n".to_owned()),
-    );
-    chunk.protocol = Some("open-responses/responses/2026-04-24".to_owned());
-
-    assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "partial");
-    assert!(persisted_records(&handle).await.is_empty());
-
+    assert_eq!(handle.manifest().status, "partial");
+    assert_eq!(handle.manifest().reasons, [WRITER_OVERFLOW.to_owned()]);
     manager.shutdown().await;
 }
 
@@ -322,11 +247,11 @@ async fn flushed_manifest_matches_readable_trace() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
-
     assert_eq!(
-        handle.record(command_code_chunk(
+        handle.record(wire_record(
             1,
-            Value::String("{\"type\":\"start\"}\n".to_owned()),
+            "sse_chunk",
+            Value::String("data: start\n".into()),
         )),
         TraceWriteOutcome::Queued
     );
@@ -342,47 +267,8 @@ async fn flushed_manifest_matches_readable_trace() {
             .sum::<u64>()
     );
     assert_eq!(after_flush.event_count, 1);
-    let records = persisted_records(&handle).await;
-    let payload: Value = serde_json::from_str(records[0].payload.as_str().expect("JSON text"))
-        .expect("valid trace JSON");
-    assert_eq!(payload, serde_json::json!({"type":"start"}));
-
+    assert_eq!(persisted_records(&handle).await.len(), 1);
     handle.finish().await;
-    manager.shutdown().await;
-}
-
-#[tokio::test]
-async fn structured_json_boundary_handles_split_escapes_unicode_and_whitespace() {
-    let directory = tempfile::tempdir().expect("trace directory");
-    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
-    let handle = manager.create();
-    let fragments = [
-        " \t{\"text\":\"雪",
-        "\\\"quoted",
-        "\\\\tail\",\"nested\":[{\"ok\":true}]",
-        "}\r\n",
-    ];
-
-    for (index, fragment) in fragments.into_iter().enumerate() {
-        let mut chunk = command_code_chunk(index as i64 + 1, Value::String(fragment.to_owned()));
-        chunk.protocol = Some("open-responses/responses/2026-04-24".to_owned());
-        assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
-    }
-
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "complete");
-    let records = persisted_records(&handle).await;
-    assert_eq!(records.len(), 1);
-    let payload: Value = serde_json::from_str(
-        records[0]
-            .payload
-            .as_str()
-            .expect("reassembled JSON payload"),
-    )
-    .expect("strict JSON payload");
-    assert_eq!(payload["text"], "雪\"quoted\\tail");
-    assert_eq!(payload["nested"][0]["ok"], true);
-
     manager.shutdown().await;
 }
 
@@ -392,9 +278,10 @@ async fn stopped_capture_preserves_previously_queued_records() {
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
     let handle = manager.create();
     assert_eq!(
-        handle.record(command_code_chunk(
+        handle.record(wire_record(
             1,
-            Value::String("{\"type\":\"start\"}\n".to_owned()),
+            "sse_chunk",
+            Value::String("data: start\n".into())
         )),
         TraceWriteOutcome::Queued
     );
@@ -403,28 +290,6 @@ async fn stopped_capture_preserves_previously_queued_records() {
     assert_eq!(manifest.status, "partial");
     let records = persisted_records(&handle).await;
     assert_eq!(records.len(), 1);
-    let payload: Value = serde_json::from_str(records[0].payload.as_str().expect("JSON text"))
-        .expect("valid trace JSON");
-    assert_eq!(payload, serde_json::json!({"type":"start"}));
-    manager.shutdown().await;
-}
-
-#[tokio::test]
-async fn structured_json_boundary_does_not_accept_trailing_bytes() {
-    let directory = tempfile::tempdir().expect("trace directory");
-    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
-    let handle = manager.create();
-    let mut chunk = command_code_chunk(1, Value::String("{\"ok\":true}trailing".to_owned()));
-    chunk.protocol = Some("open-responses/responses/2026-04-24".to_owned());
-    assert_eq!(handle.record(chunk), TraceWriteOutcome::Queued);
-
-    let manifest = handle.finish().await;
-    assert_eq!(manifest.status, "partial");
-    assert_eq!(
-        manifest.reasons,
-        ["incomplete_structured_wire_omitted".to_owned()]
-    );
-    assert!(persisted_records(&handle).await.is_empty());
-
+    assert_eq!(records[0].payload, "data: start\n");
     manager.shutdown().await;
 }

@@ -138,7 +138,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 delivery: &mut delivery,
                 ledger: &ledger,
                 observer: &observer,
-                model_turn_id: turn.model_turn_id.clone(),
                 observe_delivery,
             });
             let mut output = turn.output;
@@ -267,7 +266,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         },
                     )
                     .await;
-                drop(ops);
                 match advance {
                     LegAdvance::Ready(prepared) => {
                         let PreparedDelivery {
@@ -395,8 +393,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                     LegAdvance::Aborted => aborted = true,
                 }
-            } else {
-                drop(ops);
             }
             drop(leg);
             drop(hook_leg);
@@ -417,7 +413,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         &mut projection,
                         &ledger,
                         &observer,
-                        &turn.model_turn_id,
                         observe_delivery,
                         marker_delivery,
                     )
@@ -441,7 +436,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             &mut projection,
                             &ledger,
                             &observer,
-                            &turn.model_turn_id,
                             observe_delivery,
                             suffix,
                         )
