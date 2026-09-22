@@ -2,6 +2,10 @@ import { defineConfig, devices } from '@playwright/test'
 
 const port = Number(process.env.PLAYWRIGHT_PORT ?? 4173)
 const baseURL = `http://127.0.0.1:${port}`
+const usePrebuiltWebUI = process.env.PLAYWRIGHT_USE_PREBUILT === '1'
+const webServerCommand = usePrebuiltWebUI
+  ? `bun -e "if (!(await Bun.file('dist/index.html').exists())) throw new Error('PLAYWRIGHT_USE_PREBUILT=1 requires dist/index.html from task build:server')" && `
+  : 'bun run build && '
 
 export default defineConfig({
   testDir: './e2e',
@@ -11,7 +15,7 @@ export default defineConfig({
   reporter: process.env.CI ? 'github' : 'list',
   use: { baseURL, colorScheme: 'light', screenshot: 'only-on-failure', trace: 'retain-on-failure' },
   webServer: {
-    command: `bun run build && bun run preview -- --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `${webServerCommand}bun run preview -- --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

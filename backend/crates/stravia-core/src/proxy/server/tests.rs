@@ -11,33 +11,148 @@ use tower::ServiceExt;
 
 use super::*;
 
-async fn proxy_router() -> Router {
+struct ProxyRouterFixture {
+    router: Router,
+    gateway: Gateway,
+    data_dir: tempfile::TempDir,
+}
+
+impl ProxyRouterFixture {
+    async fn close(self) {
+        let Self {
+            router,
+            gateway,
+            data_dir,
+        } = self;
+        drop(router);
+        gateway.shutdown().await;
+        if let Some(pool) = &gateway._sqlite_pool {
+            pool.close().await;
+        }
+        if let Some(pool) = &gateway._postgres_pool {
+            pool.close().await;
+        }
+        drop(gateway);
+        data_dir
+            .close()
+            .expect("remove temporary gateway directory");
+    }
+}
+
+struct ResponsesUpstream {
+    base_url: String,
+    requests: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ResponsesUpstream {
+    async fn close(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            match task.await {
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => panic!("local Responses upstream failed: {error}"),
+                Ok(()) => {}
+            }
+        }
+    }
+}
+
+impl Drop for ResponsesUpstream {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+async fn serve_responses_upstream() -> ResponsesUpstream {
+    let requests = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        axum::routing::post(move |axum::Json(request): axum::Json<serde_json::Value>| {
+            let observed = std::sync::Arc::clone(&observed);
+            async move {
+                observed.lock().push(request);
+                axum::Json(
+                    stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                        "resp-auth",
+                        "auth-model",
+                        "completed",
+                        vec![serde_json::json!({
+                            "type": "message",
+                            "id": "msg-auth",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "authenticated",
+                                "annotations": []
+                            }]
+                        })],
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    ),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local Responses upstream");
+    let address = listener.local_addr().expect("local Responses address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve local Responses upstream");
+    });
+    ResponsesUpstream {
+        base_url: format!("http://{address}/v1"),
+        requests,
+        task: Some(task),
+    }
+}
+
+async fn proxy_router() -> ProxyRouterFixture {
+    let data_dir = tempfile::tempdir().expect("temporary gateway directory");
     let config = GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-proxy-body-limit-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::new(config).await.expect("gateway init");
-    create_router(gateway)
+    let router = create_router(gateway.clone());
+    ProxyRouterFixture {
+        router,
+        gateway,
+        data_dir,
+    }
 }
 
-async fn protected_responses_router() -> (Router, String) {
+async fn protected_responses_router() -> (ProxyRouterFixture, String) {
     protected_responses_router_with_key_state(true).await
 }
 
-async fn protected_responses_router_with_key_state(enabled: bool) -> (Router, String) {
+async fn protected_responses_router_with_key_state(enabled: bool) -> (ProxyRouterFixture, String) {
     protected_responses_router_with_hook(enabled, None).await
 }
 
 async fn protected_responses_router_with_hook(
     enabled: bool,
     hook: Option<std::sync::Arc<dyn stravia_runtime_contract::hook::Hook>>,
-) -> (Router, String) {
-    let data_dir = tempfile::tempdir().expect("temp data dir").keep();
+) -> (ProxyRouterFixture, String) {
+    protected_responses_router_with_base_url(enabled, hook, "http://127.0.0.1:9").await
+}
+
+async fn protected_responses_router_with_base_url(
+    enabled: bool,
+    hook: Option<std::sync::Arc<dyn stravia_runtime_contract::hook::Hook>>,
+    base_url: &str,
+) -> (ProxyRouterFixture, String) {
+    let data_dir = tempfile::tempdir().expect("temporary gateway directory");
     let config = GatewayConfig {
-        data_dir,
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let builder = Gateway::builder(config);
@@ -54,7 +169,7 @@ async fn protected_responses_router_with_hook(
                 vendor: "protocol-open-responses".into(),
                 channel: "default".into(),
                 protocol: Some("open-responses".into()),
-                base_url: "http://127.0.0.1:9".into(),
+                base_url: base_url.into(),
                 models_source: None,
                 static_models: None,
             },
@@ -130,7 +245,15 @@ async fn protected_responses_router_with_hook(
             .await
             .expect("disable API key");
     }
-    (create_router(gateway), api_key.token)
+    let router = create_router(gateway.clone());
+    (
+        ProxyRouterFixture {
+            router,
+            gateway,
+            data_dir,
+        },
+        api_key.token,
+    )
 }
 
 struct BlockingRequestHook {
@@ -182,8 +305,10 @@ impl stravia_runtime_contract::hook::HookSession for BlockingRequestSession {
 #[tokio::test]
 async fn unknown_protocol_paths_and_methods_use_canonical_not_found() {
     for (method, uri) in [("GET", "/v1/unknown"), ("DELETE", "/v1/responses")] {
-        let response = proxy_router()
-            .await
+        let fixture = proxy_router().await;
+        let response = fixture
+            .router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(method)
@@ -200,6 +325,7 @@ async fn unknown_protocol_paths_and_methods_use_canonical_not_found() {
         let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON error");
         assert_eq!(body["error"]["code"], "not_found");
         assert_eq!(body["error"]["type"], "not_found");
+        fixture.close().await;
     }
 }
 
@@ -219,8 +345,10 @@ async fn proxy_accepts_json_bodies_larger_than_axum_default_limit() {
         ],
     });
 
-    let response = proxy_router()
-        .await
+    let fixture = proxy_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -237,12 +365,16 @@ async fn proxy_accepts_json_bodies_larger_than_axum_default_limit() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "proxy must not reject large Gemini JSON bodies with axum's default 2 MiB limit"
     );
+    drop(response);
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_accepts_json_media_type_parameters() {
-    let response = proxy_router()
-        .await
+    let fixture = proxy_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses")
                 .header("content-type", "application/json; charset=utf-8")
@@ -253,12 +385,16 @@ async fn responses_accepts_json_media_type_parameters() {
         .expect("Responses response");
 
     assert_ne!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    drop(response);
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_rejects_form_body_with_canonical_error() {
-    let response = proxy_router()
-        .await
+    let fixture = proxy_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -286,12 +422,17 @@ async fn responses_rejects_form_body_with_canonical_error() {
             }
         })
     );
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_bearer_scheme_is_case_insensitive() {
-    let (router, token) = protected_responses_router().await;
-    let response = router
+    let upstream = serve_responses_upstream().await;
+    let (fixture, token) =
+        protected_responses_router_with_base_url(true, None, &upstream.base_url).await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses")
                 .header("content-type", "application/json")
@@ -302,7 +443,24 @@ async fn responses_bearer_scheme_is_case_insensitive() {
         .await
         .expect("Responses response");
 
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Responses body"),
+    )
+    .expect("Responses JSON");
+    assert_eq!(body["output"][0]["content"][0]["text"], "authenticated");
+    {
+        let requests = upstream.requests.lock();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], "auth-model");
+        assert_eq!(requests[0]["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(requests[0]["input"][0]["role"], "user");
+        assert_eq!(requests[0]["input"][0]["content"][0]["text"], "hello");
+    }
+    fixture.close().await;
+    upstream.close().await;
 }
 
 #[tokio::test]
@@ -322,8 +480,10 @@ async fn responses_rejects_ambiguous_credentials() {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let response = proxy_router()
-            .await
+        let fixture = proxy_router().await;
+        let response = fixture
+            .router
+            .clone()
             .oneshot(
                 request
                     .body(Body::from(r#"{"model":"missing","input":"hello"}"#))
@@ -340,13 +500,16 @@ async fn responses_rejects_ambiguous_credentials() {
         .expect("canonical JSON error");
         assert_eq!(body["error"]["code"], "invalid_authentication");
         assert_eq!(body["error"]["param"], "authorization");
+        fixture.close().await;
     }
 }
 
 #[tokio::test]
 async fn responses_compact_requires_valid_authentication() {
-    let (router, _) = protected_responses_router().await;
-    let response = router
+    let (fixture, _) = protected_responses_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses/compact")
                 .header("content-type", "application/json")
@@ -357,16 +520,19 @@ async fn responses_compact_requires_valid_authentication() {
         .expect("compact response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    drop(response);
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_compact_authenticates_before_parsing_the_body() {
-    let (router, _) = protected_responses_router().await;
+    let (fixture, _) = protected_responses_router().await;
     for (content_type, body) in [
         ("application/json", "{"),
         ("text/plain", r#"{"model":"auth-model","input":"hello"}"#),
     ] {
-        let response = router
+        let response = fixture
+            .router
             .clone()
             .oneshot(
                 Request::post("/v1/responses/compact")
@@ -379,12 +545,15 @@ async fn responses_compact_authenticates_before_parsing_the_body() {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_compact_preserves_authorization_failures_before_parsing_the_body() {
-    let (router, token) = protected_responses_router_with_key_state(false).await;
-    let response = router
+    let (fixture, token) = protected_responses_router_with_key_state(false).await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses/compact")
                 .header("content-type", "application/json")
@@ -403,12 +572,15 @@ async fn responses_compact_preserves_authorization_failures_before_parsing_the_b
     )
     .expect("compact JSON");
     assert_eq!(body["error"]["code"], "permission_denied");
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_compact_rejects_streaming_transport_control() {
-    let (router, token) = protected_responses_router().await;
-    let response = router
+    let (fixture, token) = protected_responses_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses/compact")
                 .header("content-type", "application/json")
@@ -430,12 +602,15 @@ async fn responses_compact_rejects_streaming_transport_control() {
     .expect("compact JSON");
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(body["error"]["param"], "body");
+    fixture.close().await;
 }
 
 #[tokio::test]
 async fn responses_rejects_background_with_canonical_error() {
-    let (router, token) = protected_responses_router().await;
-    let response = router
+    let (fixture, token) = protected_responses_router().await;
+    let response = fixture
+        .router
+        .clone()
         .oneshot(
             Request::post("/v1/responses")
                 .header("content-type", "application/json")
@@ -457,6 +632,7 @@ async fn responses_rejects_background_with_canonical_error() {
     .expect("background error JSON");
     assert_eq!(body["error"]["code"], "unsupported_feature");
     assert_eq!(body["error"]["param"], "background");
+    fixture.close().await;
 }
 #[tokio::test]
 async fn responses_websocket_rejects_unknown_event_types() {
@@ -465,7 +641,7 @@ async fn responses_websocket_rejects_unknown_event_types() {
 
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let (router, token) = protected_responses_router_with_hook(
+    let (fixture, token) = protected_responses_router_with_hook(
         true,
         Some(std::sync::Arc::new(BlockingRequestHook {
             entered: std::sync::Arc::clone(&entered),
@@ -473,6 +649,7 @@ async fn responses_websocket_rejects_unknown_event_types() {
         })),
     )
     .await;
+    let router = fixture.router.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket test listener");
@@ -550,6 +727,12 @@ async fn responses_websocket_rejects_unknown_event_types() {
         .await
         .expect("close WebSocket");
     server.abort();
+    match server.await {
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => panic!("WebSocket test server failed: {error}"),
+        Ok(()) => {}
+    }
+    fixture.close().await;
 }
 #[tokio::test]
 async fn responses_rejects_removed_platform_web_search_extension() {
