@@ -99,6 +99,10 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none' || inputs.cache_warm == 'linux-test' || inputs.cache_warm == 'linux-stable' }}
     name: Unit tests (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
+    env:
+      # rust-toolchain.toml pins the workspace, so make the matrix selection
+      # explicit for every Rust command (including cargo children).
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,22 +111,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.toolchain }}
           cache: false
 
+      - name: Determine unit lane work
+        id: unit-lane
+        shell: bash
+        env:
+          MATRIX_TOOLCHAIN: ${{ matrix.toolchain }}
+          PINNED_RELEASE: ${{ env.RUST_VERSION }}
+          PREWARM_STABLE: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_warm == 'linux-stable' }}
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          release="$(rustc -vV | sed -n 's/^release: //p')"
+          test -n "$release"
+          stable_differs=false
+          if [[ "$release" != "$PINNED_RELEASE" ]]; then
+            stable_differs=true
+          fi
+          # A selected linux-stable cache warm still compiles the lane even
+          # when stable currently resolves to the pinned release.
+          run_expensive=true
+          if [[ "$MATRIX_TOOLCHAIN" != "$PINNED_RELEASE" && "$stable_differs" == false && "$PREWARM_STABLE" != true ]]; then
+            run_expensive=false
+          fi
+          echo "rustc release: $release (pinned: $PINNED_RELEASE)"
+          echo "stable differs from pinned: $stable_differs"
+          echo "run expensive unit lane work: $run_expensive"
+          echo "stable_differs=$stable_differs" >> "$GITHUB_OUTPUT"
+          echo "run_expensive=$run_expensive" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go for BoringSSL
+        if: steps.unit-lane.outputs.run_expensive == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: false
+
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
       - name: Restore Rust dependencies
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # Compiler fingerprints separate stable once it differs from pinned.
@@ -133,39 +167,45 @@ jobs:
           cache-bin: 'false'
 
       - name: Setup Bun
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
 
       - name: Setup Task
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         uses: go-task/setup-task@v2
         with:
           version: ${{ env.TASK_VERSION }}
 
       - name: Install Linux system dependencies
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
       - name: Prepare vendor components and test fixtures
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         run: task build:vendor-fixtures
 
       - name: Compile Rust unit tests
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         run: cargo test --locked --workspace --exclude stravia-desktop --no-run
 
       # The cache action reads this at job teardown, even if later tests fail.
       - name: Preserve successfully compiled dependencies
+        if: steps.unit-lane.outputs.run_expensive == 'true'
         shell: bash
         run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
 
       - name: Run locked unit test suite
-        if: matrix.toolchain == '1.98.1'
+        if: matrix.toolchain == env.RUST_VERSION && steps.unit-lane.outputs.run_expensive == 'true'
         run: task test
 
       - name: Run Rust compatibility tests
-        if: matrix.toolchain == 'stable'
+        if: matrix.toolchain != env.RUST_VERSION && steps.unit-lane.outputs.run_expensive == 'true' && steps.unit-lane.outputs.stable_differs == 'true'
         run: cargo test --locked --workspace --exclude stravia-desktop
 
   web-access-browser:
@@ -440,6 +480,9 @@ jobs:
         run: task build:server
 
       - name: Run WebUI E2E tests
+        env:
+          # task build:server already built this exact dist for the release binary.
+          PLAYWRIGHT_USE_PREBUILT: '1'
         run: bun run test:e2e:web
 
   desktop-smoke:

@@ -194,7 +194,7 @@ tasks:
     desc: Run the SQLite storage E2E tests.
     deps: [build:server:debug, build:vendor-fixtures]
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k sqlite
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k sqlite
 
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.
@@ -202,11 +202,13 @@ tasks:
       vars: [DB_URL]
     deps: [build:server:debug, build:vendor-fixtures]
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k postgres
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
 
   test:e2e:web:
-    desc: Run Chromium WebUI E2E tests.
+    desc: Run Chromium WebUI E2E tests using the production build from build:server.
     deps: [build:server]
+    env:
+      PLAYWRIGHT_USE_PREBUILT: '1'
     cmds:
       - bun run test:e2e:web
 

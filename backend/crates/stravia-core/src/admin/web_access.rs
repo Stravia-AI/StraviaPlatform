@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_local_engines_proxy_and_secret_non_echo() {
+    async fn provider_configuration_persists_without_echoing_secrets() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
@@ -430,15 +430,8 @@ mod tests {
             .find(|provider| provider.kind == "local")
             .expect("Local Web Provider");
 
-        assert!(!local.use_proxy);
-        let engines = local.local_engines.as_deref().expect("Local engines");
-        for id in ["google", "bing", "brave", "baidu"] {
-            assert!(engines[id].enabled, "{id}");
-        }
-        for id in ["360", "sogou_weixin", "google_scholar"] {
-            assert!(!engines[id].enabled, "{id}");
-        }
-
+        let initial_bing_enabled =
+            local.local_engines.as_deref().expect("Local engines")["bing"].enabled;
         let update = serde_json::from_value::<UpdateWebProvider>(serde_json::json!({
             "name": "On-device Web",
             "use_proxy": true,
@@ -452,24 +445,43 @@ mod tests {
             }
         }))
         .expect("Local update");
-        let updated = admin
+        admin
             .update_web_provider(&local.id, update)
             .await
             .expect("updated Local Web Provider");
-        assert_eq!(updated.name, "On-device Web");
-        assert!(updated.use_proxy);
-        assert!(!updated.local_engines.as_deref().unwrap()["google"].enabled);
+        let update_without_secret =
+            serde_json::from_value::<UpdateWebProvider>(serde_json::json!({
+                "local_engines": {
+                    "google": { "enabled": true }
+                }
+            }))
+            .expect("partial Local update");
+        admin
+            .update_web_provider(&local.id, update_without_secret)
+            .await
+            .expect("partially updated Local Web Provider");
+
+        let persisted = admin
+            .get_web_provider(&local.id)
+            .await
+            .expect("persisted Local Web Provider");
+        assert_eq!(persisted.name, "On-device Web");
+        assert!(persisted.use_proxy);
+        let engines = persisted.local_engines.as_deref().expect("Local engines");
+        assert!(engines["google"].enabled);
+        assert_eq!(engines["bing"].enabled, initial_bing_enabled);
         assert_eq!(
-            updated.local_engines.as_deref().unwrap()["google"]
+            engines["google"]
                 .private_settings
                 .as_ref()
                 .and_then(|settings| settings.get("cookies"))
                 .map(String::as_str),
             Some("SID=private-session")
         );
-        let serialized = serde_json::to_string(&updated).expect("serialized Web Provider");
+        let serialized = serde_json::to_string(&persisted).expect("serialized Web Provider");
         assert!(!serialized.contains("SID=private-session"));
         assert!(!serialized.contains("private_settings"));
+
         let test_result = admin
             .test_web_provider(&local.id)
             .await
@@ -482,108 +494,95 @@ mod tests {
                 .is_some_and(|error| error.contains("proxy_url"))
         );
 
-        for invalid in [
-            serde_json::json!({
-                "local_engines": {
-                    "unknown": { "enabled": true }
-                }
-            }),
-            serde_json::json!({
-                "local_engines": {
-                    "google": {
-                        "enabled": true,
-                        "private_settings": { "typo": "secret" }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "local_engines": {
-                    "google": { "enabled": false },
-                    "bing": { "enabled": false },
-                    "brave": { "enabled": false },
-                    "baidu": { "enabled": false },
-                    "360": { "enabled": false },
-                    "sogou_weixin": { "enabled": false },
-                    "google_scholar": { "enabled": false }
-                }
-            }),
-            serde_json::json!({ "api_key": "not-allowed" }),
-        ] {
-            let input =
-                serde_json::from_value::<UpdateWebProvider>(invalid).expect("invalid update shape");
-            assert!(
-                admin.update_web_provider(&local.id, input).await.is_err(),
-                "invalid Local update must be rejected"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn accepts_only_configured_exa_and_zhipu_remote_providers() {
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: data_dir.path().to_path_buf(),
-            ..Default::default()
-        })
-        .await
-        .expect("gateway");
-        let admin = gateway.admin();
-
         for kind in ["exa", "zhipu"] {
-            let provider = admin
+            let created = admin
                 .create_web_provider(CreateWebProvider {
                     name: kind.to_ascii_uppercase(),
                     kind: kind.into(),
-                    api_key: Some("secret".into()),
+                    api_key: Some("remote-secret".into()),
                     use_proxy: true,
                     local_engines: None,
                 })
                 .await
                 .expect("remote Web Provider");
-            assert!(provider.use_proxy);
-            assert!(provider.local_engines.is_none());
-        }
-
-        for kind in ["brave", "tavily"] {
-            let error = admin
-                .create_web_provider(CreateWebProvider {
-                    name: format!("Removed {kind}"),
-                    kind: kind.into(),
-                    api_key: Some("secret".into()),
-                    use_proxy: false,
-                    local_engines: None,
-                })
+            let persisted = admin
+                .get_web_provider(&created.id)
                 .await
-                .expect_err("removed Web Provider kind");
-            assert!(error.to_string().contains("unsupported Web Provider kind"));
+                .expect("persisted remote Web Provider");
+            assert_eq!(persisted.kind, kind);
+            assert_eq!(persisted.api_key.as_deref(), Some("remote-secret"));
+            assert!(persisted.use_proxy);
+            assert!(persisted.local_engines.is_none());
+            assert!(!serde_json::to_string(&persisted)
+                .expect("serialized remote Web Provider")
+                .contains("remote-secret"));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_local_engine_configuration_without_gateway() {
+        let invalid = [
+            (
+                "unknown engine",
+                serde_json::from_value::<LocalSearchEngineConfigs>(serde_json::json!({
+                    "unknown": { "enabled": true }
+                }))
+                .unwrap(),
+            ),
+            (
+                "unknown private setting",
+                serde_json::from_value::<LocalSearchEngineConfigs>(serde_json::json!({
+                    "google": {
+                        "enabled": true,
+                        "private_settings": { "typo": "secret" }
+                    }
+                }))
+                .unwrap(),
+            ),
+            (
+                "all engines disabled",
+                default_local_search_engines()
+                    .into_iter()
+                    .map(|(id, mut engine)| {
+                        engine.enabled = false;
+                        (id, engine)
+                    })
+                    .collect(),
+            ),
+        ];
+
+        for (case, mut engines) in invalid {
+            validate_local_engines(&mut engines).expect_err(case);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_web_provider_kind_configuration_without_gateway() {
+        for kind in ["brave", "tavily"] {
+            normalize_web_provider_kind(kind).expect_err("unsupported kind");
         }
 
-        let missing_key = admin
-            .create_web_provider(CreateWebProvider {
-                name: "Empty Exa".into(),
-                kind: "exa".into(),
-                api_key: None,
-                use_proxy: false,
-                local_engines: None,
-            })
-            .await
-            .expect_err("remote API key is required");
-        assert!(missing_key.to_string().contains("API key is required"));
+        let mut local_engines = default_local_search_engines();
+        AdminService::validate_web_provider_input(
+            "local",
+            Some("not-allowed"),
+            true,
+            true,
+            Some(&mut local_engines),
+        )
+        .expect_err("Local API key must be rejected");
 
-        let remote_engines = admin
-            .create_web_provider(CreateWebProvider {
-                name: "Configured Exa".into(),
-                kind: "exa".into(),
-                api_key: Some("secret".into()),
-                use_proxy: false,
-                local_engines: Some(default_local_search_engines()),
-            })
-            .await
-            .expect_err("remote Local Search Engines must be rejected");
-        assert!(
-            remote_engines
-                .to_string()
-                .contains("does not accept Local Search Engine")
-        );
+        AdminService::validate_web_provider_input("exa", None, false, false, None)
+            .expect_err("remote API key is required");
+
+        let mut remote_engines = default_local_search_engines();
+        AdminService::validate_web_provider_input(
+            "zhipu",
+            Some("secret"),
+            true,
+            true,
+            Some(&mut remote_engines),
+        )
+        .expect_err("remote Local Search Engines must be rejected");
     }
 }

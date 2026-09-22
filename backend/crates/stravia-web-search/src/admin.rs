@@ -336,3 +336,169 @@ fn sources_unavailable() -> WebSearchConfigError {
         "Local Search requires available Search and Fetch sources",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{
+        SearchModel, SearchProvider, SearchRoute, SearchSettingsHost, SearchSources,
+    };
+    use crate::{WebSearchBackendDraft, WebSearchError};
+    use std::collections::HashMap;
+    use tokio::sync::{Mutex, RwLock};
+
+    #[derive(Default)]
+    struct TestSettings {
+        values: RwLock<HashMap<String, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SearchSettingsHost for TestSettings {
+        async fn get(&self, key: &str) -> Result<Option<String>, WebSearchError> {
+            Ok(self.values.read().await.get(key).cloned())
+        }
+
+        async fn set(&self, key: &str, value: &str) -> Result<(), WebSearchError> {
+            self.values
+                .write()
+                .await
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    struct TestAdminHost {
+        settings: Arc<TestSettings>,
+        config_lock: Arc<Mutex<()>>,
+    }
+
+    impl TestAdminHost {
+        fn admin() -> SearchAdmin {
+            SearchAdmin::new(Arc::new(Self {
+                settings: Arc::new(TestSettings::default()),
+                config_lock: Arc::new(Mutex::new(())),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SearchAdminHost for TestAdminHost {
+        fn settings(&self) -> Arc<dyn SearchSettingsHost> {
+            self.settings.clone()
+        }
+
+        fn config_lock(&self) -> Arc<Mutex<()>> {
+            self.config_lock.clone()
+        }
+
+        async fn models(&self) -> Result<Vec<SearchRoute>, ()> {
+            panic!("unexpected models lookup")
+        }
+
+        async fn providers(&self) -> Result<Vec<SearchProvider>, ()> {
+            panic!("unexpected providers lookup")
+        }
+
+        async fn provider(&self, _id: &str) -> Result<Option<SearchProvider>, ()> {
+            panic!("unexpected provider lookup")
+        }
+
+        async fn provider_model(
+            &self,
+            _provider_id: &str,
+            _model: &str,
+        ) -> Result<Option<SearchModel>, ()> {
+            panic!("unexpected provider model lookup")
+        }
+
+        async fn validate_external_route(&self, _route_id: &str) -> Result<(), ()> {
+            panic!("unexpected external route validation")
+        }
+
+        async fn sources(&self) -> Result<Option<SearchSources>, ()> {
+            panic!("unexpected sources lookup")
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_config_accepts_an_incomplete_binding_as_a_full_replacement() {
+        let admin = TestAdminHost::admin();
+        let current = admin.get_web_search_config().await.expect("current config");
+
+        let updated = admin
+            .update_web_search_config(WebSearchConfig {
+                revision: current.revision,
+                enabled: false,
+                backend: Some(WebSearchBackendDraft::Local { model_id: None }),
+                max_turns: 6,
+                total_time_seconds: 120,
+                updated_at: current.updated_at.clone(),
+            })
+            .await
+            .expect("disabled incomplete config");
+
+        assert_eq!(updated.revision, current.revision + 1);
+        assert_eq!(updated.max_turns, 6);
+        assert_eq!(admin.get_web_search_config().await.unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn enabled_config_rejects_incomplete_binding_and_invalid_local_limits() {
+        let admin = TestAdminHost::admin();
+        let current = admin.get_web_search_config().await.expect("current config");
+        let mut input = WebSearchConfig {
+            revision: current.revision,
+            enabled: true,
+            backend: None,
+            max_turns: 12,
+            total_time_seconds: 600,
+            updated_at: current.updated_at.clone(),
+        };
+
+        let error = admin
+            .update_web_search_config(input.clone())
+            .await
+            .expect_err("incomplete binding");
+        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
+
+        input.enabled = false;
+        input.backend = Some(WebSearchBackendDraft::Local { model_id: None });
+        input.max_turns = 1;
+        let error = admin
+            .update_web_search_config(input)
+            .await
+            .expect_err("invalid limits");
+        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
+    }
+
+    #[tokio::test]
+    async fn external_mode_preserves_local_limits_without_validating_them() {
+        let admin = TestAdminHost::admin();
+        let current = admin.get_web_search_config().await.expect("current config");
+
+        let external = admin
+            .update_web_search_config(WebSearchConfig {
+                revision: current.revision,
+                enabled: false,
+                backend: Some(WebSearchBackendDraft::External { route_id: None }),
+                max_turns: 1,
+                total_time_seconds: 1,
+                updated_at: current.updated_at.clone(),
+            })
+            .await
+            .expect("disabled External config");
+
+        assert_eq!(external.max_turns, 1);
+        assert_eq!(external.total_time_seconds, 1);
+        assert_eq!(admin.get_web_search_config().await.unwrap(), external);
+
+        let error = admin
+            .update_web_search_config(WebSearchConfig {
+                backend: Some(WebSearchBackendDraft::Local { model_id: None }),
+                ..external.config
+            })
+            .await
+            .expect_err("Local mode must validate restored limits");
+        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
+    }
+}

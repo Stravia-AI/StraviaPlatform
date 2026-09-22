@@ -55,15 +55,18 @@ test('token activity grid fills the section width at each granularity', async ({
   await page.setViewportSize({ width: 1280, height: 900 })
 
   const ranges = [
-    { value: '6', label: 'Last 6h', rows: 4, currentRows: 1 },
-    { value: '24', label: 'Last 24h', rows: 6, currentRows: 3 },
-    { value: '72', label: 'Last 3d', rows: 4, currentRows: 2 },
-    { value: '168', label: 'Last 7d', rows: 7, currentRows: 4 },
+    { label: 'Last 6h', rows: 4, currentRows: 1 },
+    { label: 'Last 24h', rows: 6, currentRows: 3 },
+    { label: 'Last 3d', rows: 4, currentRows: 2 },
+    { label: 'Last 7d', rows: 7, currentRows: 4 },
   ]
+  await page.goto('/stats')
+
   for (const range of ranges) {
-    await page.goto('/stats')
-    await page.locator('[data-slot="select-trigger"]').click()
+    const selector = page.locator('[data-slot="select-trigger"]')
+    await selector.click()
     await page.getByRole('option', { name: range.label }).click()
+    await expect(selector).toContainText(range.label)
     const grid = page.getByRole('group', { name: 'Token activity' })
     await expect(grid).toBeVisible()
     // 方格尺寸由容器高度推导，等待测量后的重排稳定再断言。
