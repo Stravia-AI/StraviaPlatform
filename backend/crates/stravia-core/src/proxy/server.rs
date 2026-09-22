@@ -130,6 +130,7 @@ async fn observe_inference_ingress(
                     protocol: protocol.to_string(),
                 });
         observer.record_debug(|| RunEvent::Wire {
+            capture_id: None,
             direction: "client_to_platform".into(),
             transport: "http".into(),
             protocol: protocol.to_string(),
@@ -223,6 +224,7 @@ impl CapturedBodyStream {
             }),
         };
         self.capture.record(RunEvent::Wire {
+            capture_id: None,
             direction: "client_to_platform".into(),
             transport: "http".into(),
             protocol: self.protocol.clone(),

@@ -152,9 +152,45 @@ pub(crate) async fn normalize_response(
 ) -> Result<(), ArtifactError> {
     let retention = retention(gateway).await?;
     for item in &mut response.items {
-        if let MessageContent::Blocks(blocks) = &mut item.content {
-            normalize_blocks(gateway, principal, blocks, cancellation, retention).await?;
-        }
+        normalize_item(gateway, principal, item, cancellation, retention).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn normalize_stream_delta(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    delta: &mut stravia_runtime_contract::protocol::ir::AiStreamDelta,
+    cancellation: &CancellationToken,
+) -> Result<(), ArtifactError> {
+    let stravia_runtime_contract::protocol::ir::AiStreamDelta::ItemDone { item, .. } = delta else {
+        return Ok(());
+    };
+    let MessageContent::Blocks(blocks) = &mut item.content else {
+        return Ok(());
+    };
+    if !has_media(blocks) {
+        return Ok(());
+    }
+    normalize_blocks(
+        gateway,
+        principal,
+        blocks,
+        cancellation,
+        retention(gateway).await?,
+    )
+    .await
+}
+
+async fn normalize_item(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    item: &mut stravia_runtime_contract::protocol::ir::AiItem,
+    cancellation: &CancellationToken,
+    retention: Duration,
+) -> Result<(), ArtifactError> {
+    if let MessageContent::Blocks(blocks) = &mut item.content {
+        normalize_blocks(gateway, principal, blocks, cancellation, retention).await?;
     }
     Ok(())
 }
@@ -373,7 +409,7 @@ pub(crate) async fn materialize_request(
     gateway: &crate::Gateway,
     principal: &Principal,
     request: &mut AiRequest,
-    protocol: ProtocolId,
+    protocol: Option<ProtocolId>,
 ) -> Result<Vec<(String, ArtifactId)>, ArtifactError> {
     if !request
         .items
@@ -408,7 +444,7 @@ struct ArtifactAccess<'a> {
 fn materialize_blocks<'a>(
     access: &'a ArtifactAccess<'a>,
     blocks: &'a mut [ContentBlock],
-    protocol: ProtocolId,
+    protocol: Option<ProtocolId>,
     transfers: &'a mut Vec<(String, ArtifactId)>,
 ) -> futures::future::BoxFuture<'a, Result<(), ArtifactError>> {
     Box::pin(async move {
@@ -480,7 +516,7 @@ fn materialize_blocks<'a>(
 async fn materialize_source(
     access: &ArtifactAccess<'_>,
     source: &mut MediaSource,
-    protocol: ProtocolId,
+    protocol: Option<ProtocolId>,
     kind: &str,
     transfers: &mut Vec<(String, ArtifactId)>,
 ) -> Result<(), ArtifactError> {
@@ -488,26 +524,27 @@ async fn materialize_source(
         return Ok(());
     };
     let id = ArtifactId::from_reference(reference)?;
-    let (url, inline) = match protocol.protocol {
-        Protocol::BedrockConverse => (false, kind == "image"),
-        Protocol::AnthropicMessages => (
+    let (url, inline) = match protocol.map(|protocol| protocol.protocol) {
+        None => (true, true),
+        Some(Protocol::BedrockConverse) => (false, kind == "image"),
+        Some(Protocol::AnthropicMessages) => (
             matches!(kind, "image" | "document"),
             matches!(kind, "image" | "document"),
         ),
-        Protocol::OpenAICompatible | Protocol::WatsonxTextChat => {
+        Some(Protocol::OpenAICompatible | Protocol::WatsonxTextChat) => {
             (kind == "image", matches!(kind, "image" | "audio" | "file"))
         }
-        Protocol::OpenResponses => (
+        Some(Protocol::OpenResponses) => (
             matches!(kind, "image" | "file" | "video"),
             matches!(kind, "image" | "file" | "video"),
         ),
-        Protocol::GoogleGemini | Protocol::GatewayLanguageModel => {
+        Some(Protocol::GoogleGemini | Protocol::GatewayLanguageModel) => {
             (kind != "document", kind != "document")
         }
-        Protocol::CohereChat => (kind == "image", kind == "image"),
-        Protocol::CommandCode => (false, kind == "image"),
+        Some(Protocol::CohereChat) => (kind == "image", kind == "image"),
+        Some(Protocol::CommandCode) => (false, kind == "image"),
         // Inline base64 only — the wire ImageData field carries bytes, no URL.
-        Protocol::DevinConnect => (false, kind == "image"),
+        Some(Protocol::DevinConnect) => (false, kind == "image"),
     };
     if access.settings.external_signed_downloads && url {
         let download = access
@@ -532,8 +569,8 @@ async fn materialize_source(
             .await?;
         if kind == "audio"
             && matches!(
-                protocol.protocol,
-                Protocol::OpenAICompatible | Protocol::WatsonxTextChat
+                protocol.map(|protocol| protocol.protocol),
+                Some(Protocol::OpenAICompatible | Protocol::WatsonxTextChat)
             )
             && !matches!(
                 artifact.mime_type.as_str(),

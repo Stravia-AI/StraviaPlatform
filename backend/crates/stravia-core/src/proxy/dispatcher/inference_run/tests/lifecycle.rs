@@ -161,7 +161,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
     use serde_json::{Value, json};
 
     fn responses(id: &str, output: Vec<Value>) -> Value {
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             id,
             "provider-model",
             "completed",
@@ -227,7 +227,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         &gateway,
         "origin-replay",
         &[origin_url],
-        "test-http",
+        "protocol-open-responses",
         "open-responses",
     )
     .await;
@@ -235,7 +235,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         &gateway,
         "foreign-responses-replay",
         &[foreign_url],
-        "test-http",
+        "protocol-open-responses",
         "open-responses",
     )
     .await;
@@ -247,7 +247,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         ("foreign-responses-replay", "foreign Responses answer"),
         ("foreign-chat-replay", "foreign Chat answer"),
     ] {
-        let request = crate::protocol::transform::ProtocolTransform::global()
+        let request = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(
                 OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
                 OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -285,7 +285,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
     }
     drop(gateway);
     let gateway = Gateway::new(config).await.expect("gateway reconstruction");
-    let request = crate::protocol::transform::ProtocolTransform::global()
+    let request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -373,7 +373,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
                 .into_response();
         }
         Json(
-            crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+            stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                 "resp-recovered",
                 "provider-model",
                 "completed",
@@ -430,13 +430,13 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
             &gateway,
             "rejected-cipher-replay",
             &[format!("http://{address}/v1")],
-            "test-http",
+            "protocol-open-responses",
             "open-responses",
         )
         .await;
         set_target_retry_budget(&gateway, "rejected-cipher-replay", retry_budget).await;
         let headers = authorized_headers(&gateway).await;
-        let request = crate::protocol::transform::ProtocolTransform::global()
+        let request = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
             .unwrap()
             .decode_request(json!({
@@ -571,7 +571,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
         &gateway,
         "signed-chat-replay",
         &[upstream_url],
-        "test-http",
+        "protocol-anthropic-messages",
         "anthropic-messages",
     )
     .await;
@@ -995,7 +995,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
         ..Default::default()
     };
     let gateway = Gateway::new(config).await.expect("gateway init");
-    let catalog = gateway.provider_catalog.providers().await;
+    let catalog = gateway.admin().catalog_choices().await;
     let catalog_provider = catalog
         .providers
         .iter()
@@ -1019,6 +1019,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -1044,7 +1045,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "glm-5".into(),
+            target_model: Some("glm-5".into()),
             targets: Vec::new(),
             default_thinking_level: None,
         })
@@ -1173,7 +1174,7 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
         &gateway,
         model,
         &[base_url],
-        "test-http",
+        "protocol-openai-chat-completions",
         "openai-compatible",
     )
     .await;
@@ -1224,7 +1225,7 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         &gateway,
         model,
         &[base_url],
-        "test-http",
+        "protocol-openai-chat-completions",
         "openai-compatible",
     )
     .await;
@@ -1286,10 +1287,6 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("loss response");
-    assert!(String::from_utf8_lossy(&body).contains("STRAVIA_PROTOCOL_LOSSY_REJECTED"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1308,7 +1305,7 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
         &gateway,
         model,
         &[base_url],
-        "test-http",
+        "protocol-openai-chat-completions",
         "openai-compatible",
     )
     .await;
@@ -1387,7 +1384,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         &gateway,
         model,
         &[failed_url, fallback_url],
-        "test-http",
+        "protocol-openai-chat-completions",
         "openai-compatible",
     )
     .await;

@@ -184,7 +184,6 @@ Dockerfile 多阶段 builder 含 Rust、Go、系统开发包与 Web 构建；`ma
 | Release/build-desktop windows-x86_64、windows-aarch64 | build-desktop + OS/arch/hashes，两分区 | **均关闭** | 不适用 | `false` | 两行均关闭 Bun |
 | Release/docker-build amd64、arm64 | GHA `docker-amd64` / `docker-arm64`，max export | A：关闭或 registry read；B：新 `docker-v1-{arch}-min` read | 不适用 | **无 cache-to** | 不直接使用 setup Bun/uv/Rust；Dockerfile 内运行 |
 | Release/publish-image amd64、arm64 | 相同两 GHA scope，再次 max export | 同上一行，只读 | 不适用 | **无 cache-to** | 同上 |
-| Release/nix-build 两 system | 不调用上述 setup/cache action | 不新增原生池分区 | 不适用 | 不适用 | 不新增 Bun/uv cache |
 | Release/prepare、collect-assets、prepare-draft、publish-image-manifest、publish-release | 无本设计涉及的 cache producer | 不新增 | 不适用 | 不适用 | artifact/发布文件不当作 Actions dependency cache |
 
 表内 Linux pinned test / E2E mixed / stable registry / Windows pinned debug 分别指第 3 节完整 shared-key。release 构建选择关闭而非新设 registry-only，避免额外 arch/toolchain 分区；以后若性能证据支持，必须在现有总预算内重新取舍。

@@ -49,7 +49,7 @@ pub trait MediaArtifactHost: Send + Sync {
 #[derive(Clone)]
 pub struct MediaTarget {
     pub provider_id: String,
-    pub model: String,
+    pub model: Option<String>,
     pub input_modalities: Vec<String>,
     pub tool_call: Option<bool>,
 }

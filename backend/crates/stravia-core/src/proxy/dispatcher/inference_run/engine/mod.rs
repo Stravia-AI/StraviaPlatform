@@ -35,7 +35,9 @@ use self::followup::{
 pub(super) use self::ledger::RunLedger;
 use self::leg::*;
 use self::projection::*;
-use self::settlement::{Settlement, report_projected_delivery, settle};
+use self::settlement::{
+    PendingGenerationChainWrite, Settlement, report_projected_delivery, settle,
+};
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
 use std::sync::Arc;
@@ -50,10 +52,10 @@ use crate::agent::ModelTurnExecutor;
 use crate::agent::TurnInput;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::interaction_observation::{AdmissionFacts, IngressObserver, RunEvent, RunStart};
-use crate::model_turn::StreamResponseAccumulator;
-use crate::model_turn::support::ai_response_to_deltas;
+use crate::model_turn::support::ai_response_to_deltas as canonical_ai_response_to_deltas;
 use crate::proxy::context::RequestContext;
 use crate::proxy::security::{ClientCredential, Security};
+use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_runtime_contract::model_turn::CanonicalEvent;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -135,6 +137,64 @@ fn checkpoint_payload<R: ObservationRecorder, T: serde::Serialize + ?Sized>(
     })
 }
 
+fn ai_response_to_deltas(
+    response: &AiResponse,
+) -> Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta> {
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+    let mut deltas = canonical_ai_response_to_deltas(response);
+    let mut response_profile = serde_json::Map::new();
+    for key in [
+        "__open_responses_effective_request",
+        "__open_responses_response_profile",
+    ] {
+        if let Some(profile) = response
+            .vendor
+            .ingress
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+        {
+            response_profile.extend(profile.clone());
+        }
+    }
+    if !response_profile.is_empty() {
+        deltas.insert(
+            0,
+            AiStreamDelta::ResponseMetadata {
+                metadata: serde_json::Value::Object(response_profile),
+            },
+        );
+    }
+    let usage_index = deltas
+        .iter()
+        .position(|delta| matches!(delta, AiStreamDelta::Usage(_)))
+        .unwrap_or_else(|| deltas.len().saturating_sub(1));
+    if let Some(metadata) = response.vendor.ingress.get("__google_response_metadata") {
+        deltas.insert(
+            usage_index,
+            AiStreamDelta::Unknown {
+                raw: serde_json::json!({"__google_response_metadata": metadata}).to_string(),
+            },
+        );
+    }
+    if let Some(terminal) = response.vendor.egress.get("__open_responses_terminal")
+        && let Some(status) = terminal.get("status").and_then(serde_json::Value::as_str)
+    {
+        let done_index = deltas.len().saturating_sub(1);
+        deltas.insert(
+            done_index,
+            AiStreamDelta::ResponseTerminal {
+                status: status.to_owned(),
+                incomplete_details: terminal
+                    .get("incomplete_details")
+                    .filter(|value| !value.is_null())
+                    .cloned(),
+            },
+        );
+    }
+    deltas
+}
+
 fn visible_delta_text(
     delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
 ) -> Option<&str> {
@@ -161,12 +221,19 @@ fn enter_phase(phase: &mut PhaseTracker, next: Phase) -> Result<(), Box<Response
 
 fn thinking_carrier_facts(
     ingress: ProtocolId,
-    egress: ProtocolId,
-) -> crate::protocol::transform::ThinkingCarrierFacts {
-    crate::protocol::transform::ProtocolTransform::global()
-        .bind(ingress, egress)
-        .expect("Inference Run uses a registered protocol pair")
-        .thinking_carrier_facts()
+    egress: Option<ProtocolId>,
+) -> stravia_protocol_codec::transform::ThinkingCarrierFacts {
+    match egress {
+        Some(egress) => stravia_protocol_codec::transform::ProtocolTransform::global()
+            .bind(ingress, egress)
+            .expect("Inference Run uses a registered protocol pair")
+            .thinking_carrier_facts(),
+        None => stravia_protocol_codec::transform::ThinkingCarrierFacts {
+            indexed: true,
+            may_be_protected: true,
+            stream_unprotected_summaries: false,
+        },
+    }
 }
 
 /// Materialized Generation Chain state owned by the Inference Run while the
@@ -178,6 +245,7 @@ pub(super) struct GenerationChainRun {
     client_request: AiRequest,
     previous_response_id: Option<String>,
     compaction_source_generation_id: Option<String>,
+    vendor_publications: Vec<crate::plugin::VendorPublicationFence>,
 }
 
 struct DispatchContext<'a> {
@@ -300,7 +368,7 @@ pub(super) async fn orchestrate(
         crate::generation_chain::set_generation_session_id(&mut request, session_id);
     }
     let mut client_request = request.clone();
-    let ingress_capabilities = crate::protocol::registry::ProtocolRegistry::global()
+    let ingress_capabilities = stravia_protocol_codec::registry::ProtocolRegistry::global()
         .capabilities(&ingress)
         .expect("registered ingress protocol");
     let request_kind = if ingress_capabilities.embeddings {
@@ -384,10 +452,11 @@ pub(super) async fn orchestrate(
             request_kind,
             stravia_runtime_contract::hook::RequestKind::Generation
         ) {
-        let controls = crate::compaction::NativeCompactionControls::classify(&request);
+        let native_compaction_requested =
+            stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
         let begin = tokio::select! {
             begin = async {
-                if controls.requested() {
+                if native_compaction_requested {
                     gw.generation_chains
                         .begin_native_compaction(principal.clone(), request)
                         .await
@@ -771,6 +840,7 @@ pub(super) async fn orchestrate(
         client_request,
         previous_response_id: previous_response_id.clone(),
         compaction_source_generation_id,
+        vendor_publications: Vec::new(),
     };
     let session_context = stravia_runtime_contract::hook::SessionContext {
         tools_fixed: false,
@@ -1091,8 +1161,9 @@ async fn acquire_turn(
         Err(error)
             if error.code == "tools_unsupported"
                 && !stravia_web_search::native_web_search_requested(&effective_request)
-                && !crate::compaction::NativeCompactionControls::classify(&effective_request)
-                    .requested() =>
+                && !stravia_protocol_codec::codec::compaction::native_compaction_requested(
+                    &effective_request,
+                ) =>
         {
             let original_tools = effective_request.tools.clone();
             inference_run.remove_exposed_tools(&mut effective_request);
@@ -1402,5 +1473,3 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     ledger.stage_visible_response(ingress, &prepared_response);
     buffered_completion(delivered.response)
 }
-
-// StreamResponseAccumulator and ensure_tool_index are in accumulator.rs.

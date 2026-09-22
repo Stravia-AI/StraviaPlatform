@@ -109,6 +109,8 @@ struct GenerationChainCompletion {
     source: crate::generation_chain::GenerationSource,
     owns_response_identity: bool,
     response_continuation_available: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    prior_publications: Vec<crate::plugin::VendorPublicationFence>,
+    publication: Option<crate::model_turn::VendorPublication>,
 }
 
 #[derive(Clone)]
@@ -129,7 +131,6 @@ impl CompletionContext {
         generation: super::GenerationChainRun,
         ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
         target: &TargetIdentity,
-        egress: stravia_runtime_contract::protocol::ids::ProtocolId,
         model_turn_id: String,
         observer: crate::interaction_observation::RunObserver,
     ) -> Self {
@@ -138,23 +139,26 @@ impl CompletionContext {
             || generation.client_request.model.clone(),
             |write| write.request().model.clone(),
         );
+        let prior_publications = generation.vendor_publications.clone();
         let generation_chain = generation.write.map(|write| GenerationChainCompletion {
             write,
             source: crate::generation_chain::GenerationSource::Target {
                 namespace: target.namespace.clone(),
-                protocol: egress,
+                protocol: target.protocol_identity(),
                 actual_model: target.actual_model.clone(),
                 selected_target_key: target.target_id.clone(),
             },
             owns_response_identity,
             response_continuation_available: target.response_continuation_available.clone(),
+            prior_publications: prior_publications.clone(),
+            publication: target.publication.clone(),
         });
         Self {
             gateway,
             actual_model: target.actual_model.clone(),
             thinking_source: crate::history_marker::ThinkingSource {
                 namespace: target.namespace.clone(),
-                protocol: egress,
+                protocol: target.protocol_identity(),
                 actual_model: target.actual_model.clone(),
                 target_id: target.target_id.clone(),
             },
@@ -184,6 +188,16 @@ impl CompletionContext {
 
     pub(super) fn gateway(&self) -> &Gateway {
         &self.gateway
+    }
+
+    pub(super) fn current_vendor_publication(
+        &self,
+    ) -> anyhow::Result<Option<crate::plugin::VendorPublicationFence>> {
+        self.generation_chain
+            .as_ref()
+            .and_then(|chain| chain.publication.as_ref())
+            .map(crate::model_turn::VendorPublication::current)
+            .transpose()
     }
 
     pub(super) fn empty_response(&self) -> AiResponse {
@@ -269,10 +283,12 @@ impl PlatformOnlyContinuation {
                 })
                 .map(|publication| publication.state.clone())
                 .collect::<Vec<_>>();
-            if let Some(start) = crate::protocol::codec::open_responses::inline_compaction_boundary(
-                &request.items,
-                &states,
-            ) {
+            if let Some(start) =
+                stravia_protocol_codec::codec::open_responses::inline_compaction_boundary(
+                    &request.items,
+                    &states,
+                )
+            {
                 request.items.drain(..start);
                 crate::router::clear_previous_response_id(request);
             }
@@ -287,7 +303,7 @@ impl PlatformOnlyContinuation {
 pub(super) struct CompletionLease {
     response: Box<AiResponse>,
     staged_delivery: ProjectedDeltaBatch,
-    pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
+    pending_generation_chain: Option<Box<super::PendingGenerationChainWrite>>,
     background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     started_executions: Vec<crate::StartedHistoryMarkerExecution>,
     commit: ClientOutputCommit,
@@ -296,7 +312,7 @@ pub(super) struct CompletionLease {
 pub(super) struct PreparedDelivery {
     pub(super) response: AiResponse,
     pub(super) staged_delivery: ProjectedDeltaBatch,
-    pub(super) pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
+    pub(super) pending_generation_chain: Option<super::PendingGenerationChainWrite>,
     pub(super) background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     pub(super) started_executions: Vec<crate::StartedHistoryMarkerExecution>,
 }
@@ -406,6 +422,18 @@ pub(super) async fn prepare_platform_markers(
 > {
     const PENDING_RETENTION: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+    let vendor_publication = context
+        .current_vendor_publication()
+        .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
+    let _vendor_guard = match vendor_publication.as_ref() {
+        Some(publication) => Some(
+            publication
+                .write_fence()
+                .await
+                .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?,
+        ),
+        None => None,
+    };
     let mut pending =
         Vec::<(PreparedPlatformMarker, String, DetachedPlatformExecution)>::with_capacity(
             executions.len(),
@@ -694,27 +722,39 @@ pub(super) async fn complete_canonical_response(
     let reusable_upstream_id = generation_chain
         .as_ref()
         .is_some_and(|chain| {
-            matches!(
-                chain.source,
-                crate::generation_chain::GenerationSource::Target {
-                    protocol: OPEN_RESPONSES_2026_04_24,
-                    ..
-                }
-            ) && upstream_response_is_available(
+            upstream_response_is_available(
                 chain.write.request(),
                 &chain.response_continuation_available,
             ) && crate::generation_chain::generation_node_is_completed(&response)
-                && response_preserves_upstream(&upstream_response, &response)
+                && response_preserves_upstream(&upstream_response, &canonical_response)
         })
         .then_some(upstream_response_id)
         .flatten();
 
-    let pending_generation_chain = generation_chain.take().and_then(|mut chain| {
+    let pending_generation_chain = if let Some(mut chain) = generation_chain.take() {
+        let mut vendor_publications = chain.prior_publications;
+        if let Some(publication) = chain.publication {
+            let publication = match publication.current() {
+                Ok(publication) => publication,
+                Err(error) => {
+                    return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
+                }
+            };
+            if let Err(error) = publication.ensure_current() {
+                return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
+            }
+            vendor_publications.push(publication);
+        }
         chain
             .write
             .stage(&mut response, &chain.source, reusable_upstream_id)
-            .then_some(chain.write)
-    });
+            .then_some(super::PendingGenerationChainWrite {
+                write: chain.write,
+                vendor_publications,
+            })
+    } else {
+        None
+    };
     CompletionOutcome::Ready(Box::new(CompletionLease {
         response: Box::new(response),
         staged_delivery,
@@ -776,7 +816,7 @@ fn fill_canonical_defaults(context: &CompletionContext, response: &mut AiRespons
             };
             item.set_graph_metadata(
                 Some(
-                    crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                    stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                         prefix,
                         response_id,
                         index,
@@ -838,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_response_reuse_requires_live_transport_affinity() {
+    fn ephemeral_response_reuse_requires_confirmed_reusable_websocket() {
         let mut request = AiRequest::new("model", Vec::new());
         request.ext = Some(
             stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(

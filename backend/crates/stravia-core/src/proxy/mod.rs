@@ -1,6 +1,5 @@
 pub(crate) mod artifacts;
 pub mod auth;
-pub mod client;
 pub mod context;
 pub(crate) mod dispatcher;
 pub mod handler;

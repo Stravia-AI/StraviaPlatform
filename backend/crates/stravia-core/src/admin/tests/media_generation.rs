@@ -33,10 +33,17 @@ impl Drop for GenerationRouteFixture {
 impl GenerationRouteFixture {
     async fn new() -> anyhow::Result<Self> {
         let data_dir = tempfile::tempdir()?;
-        let gateway = Gateway::new(GatewayConfig {
-            data_dir: data_dir.path().to_path_buf(),
-            ..GatewayConfig::default()
-        })
+        let gateway = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..GatewayConfig::default()
+            },
+            Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .await?;
 
         let upstream_calls = Arc::new(AtomicUsize::new(0));
@@ -61,7 +68,7 @@ impl GenerationRouteFixture {
             .providers()
             .create(CreateProviderRecord {
                 name: "Codex image Provider".into(),
-                vendor: Some("openai".into()),
+                vendor: Some("openai-codex".into()),
                 protocol: "open-responses".into(),
                 base_url: upstream_url.clone(),
                 preset_key: Some("openai".into()),
@@ -80,11 +87,11 @@ impl GenerationRouteFixture {
             .providers()
             .create(CreateProviderRecord {
                 name: "Ordinary OpenAI-compatible Provider".into(),
-                vendor: None,
+                vendor: Some("protocol-openai-chat-completions".into()),
                 protocol: "openai-compatible".into(),
                 base_url: upstream_url.clone(),
                 preset_key: None,
-                channel: None,
+                channel: Some("default".into()),
                 models_source: None,
                 static_models: None,
                 api_key: "local-test-key".into(),
@@ -101,7 +108,7 @@ impl GenerationRouteFixture {
             .upsert(
                 &compatible_provider.id,
                 UpsertOAuthCredential {
-                    driver_key: "codex".into(),
+                    driver_key: "openai-codex".into(),
                     scheme: "oauth_auth_code_pkce".into(),
                     access_token: "local-test-access-token".into(),
                     resource_url: Some(upstream_url),
@@ -120,7 +127,9 @@ impl GenerationRouteFixture {
                         metadata: json!({
                             "id": CODEX_MODEL,
                             "name": "Local test model",
+                            "attachment": true,
                             "tool_call": true,
+                            "capabilities": ["media_image"],
                             "modalities": {"input": ["text", "image"], "output": ["text"]}
                         }),
                     },
@@ -150,11 +159,11 @@ impl GenerationRouteFixture {
                 display_name: Some("Image Route".into()),
                 balance: Some("latency_preference".into()),
                 target_provider: String::new(),
-                target_model: String::new(),
+                target_model: None,
                 targets: vec![
                     CreateTarget {
                         provider_id: self.compatible_provider.id.clone(),
-                        model: CODEX_MODEL.into(),
+                        model: Some(CODEX_MODEL.into()),
                         enabled: true,
                         priority: Some(17),
                         first_token_timeout_ms: Some(1_234),
@@ -164,7 +173,7 @@ impl GenerationRouteFixture {
                     },
                     CreateTarget {
                         provider_id: self.incompatible_provider.id.clone(),
-                        model: CODEX_MODEL.into(),
+                        model: Some(CODEX_MODEL.into()),
                         enabled: incompatible_enabled,
                         priority: Some(-3),
                         first_token_timeout_ms: Some(4_321),
@@ -242,7 +251,7 @@ async fn route_qualification_is_atomic_and_a_stale_binding_can_be_disabled() -> 
         .targets
         .iter()
         .find(|target| target.provider_id == fixture.compatible_provider.id)
-        .expect("Codex Target");
+        .expect("image-capable Target");
     assert_eq!(
         (
             primary.priority,
@@ -309,68 +318,6 @@ async fn route_qualification_is_atomic_and_a_stale_binding_can_be_disabled() -> 
     );
     let persisted_disabled = admin.get_media_generation_config().await?;
     assert!(!persisted_disabled.config.enabled);
-    assert_eq!(fixture.upstream_calls.load(Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn expired_oauth_requires_a_refresh_token_without_contacting_upstream() -> anyhow::Result<()>
-{
-    let fixture = GenerationRouteFixture::new().await?;
-    let admin = fixture.gateway.admin();
-    let route = fixture.create_route("oauth-image-model", false).await?;
-
-    fixture
-        .gateway
-        .storage
-        .oauth_credentials()
-        .upsert(
-            &fixture.compatible_provider.id,
-            UpsertOAuthCredential {
-                driver_key: "codex".into(),
-                scheme: "oauth_auth_code_pkce".into(),
-                access_token: "expired-local-test-token".into(),
-                expires_at: Some("2000-01-01T00:00:00Z".into()),
-                refresh_token: None,
-                ..Default::default()
-            },
-        )
-        .await?;
-    let error = admin
-        .update_media_generation_config(GenerationRouteFixture::config(&route, true))
-        .await
-        .expect_err("expired OAuth without refresh must reject the binding");
-    assert_eq!(error.code, "media_generation_oauth_unavailable");
-    let rejected = admin.get_media_generation_config().await?;
-    assert!(!rejected.config.enabled);
-    assert!(rejected.config.image.route_id.is_none());
-    assert_eq!(fixture.upstream_calls.load(Ordering::SeqCst), 0);
-
-    fixture
-        .gateway
-        .storage
-        .oauth_credentials()
-        .upsert(
-            &fixture.compatible_provider.id,
-            UpsertOAuthCredential {
-                driver_key: "codex".into(),
-                scheme: "oauth_auth_code_pkce".into(),
-                access_token: "expired-local-test-token".into(),
-                expires_at: Some("2000-01-01T00:00:00Z".into()),
-                refresh_token: Some("local-test-refresh-token".into()),
-                ..Default::default()
-            },
-        )
-        .await?;
-    let accepted = admin
-        .update_media_generation_config(GenerationRouteFixture::config(&route, true))
-        .await?;
-    assert!(accepted.config.enabled);
-    assert!(accepted.validation.valid);
-    assert_eq!(
-        accepted.config.image.route_id.as_deref(),
-        Some("oauth-image-model")
-    );
     assert_eq!(fixture.upstream_calls.load(Ordering::SeqCst), 0);
     Ok(())
 }

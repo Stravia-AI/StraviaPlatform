@@ -33,21 +33,25 @@ pub enum HistoryMarkerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingSource {
     pub namespace: String,
-    #[serde(with = "thinking_source_protocol")]
-    pub protocol: stravia_runtime_contract::protocol::ids::ProtocolEndpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<stravia_runtime_contract::protocol::ids::ProtocolIdentity>,
     pub actual_model: String,
     pub target_id: String,
 }
 
 impl ThinkingSource {
+    const ITEM_META_KEY: &'static str = "__stravia_thinking_source";
+
     pub(crate) fn from_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> Option<Self> {
-        serde_json::from_value(
-            item.meta
-                .as_ref()?
-                .get("__stravia_thinking_source")?
-                .clone(),
-        )
-        .ok()
+        serde_json::from_value(item.meta.as_ref()?.get(Self::ITEM_META_KEY)?.clone()).ok()
+    }
+
+    pub(crate) fn item_has_source_stamp(
+        item: &stravia_runtime_contract::protocol::ir::AiItem,
+    ) -> bool {
+        item.meta
+            .as_ref()
+            .is_some_and(|meta| meta.get(Self::ITEM_META_KEY).is_some())
     }
 
     pub(crate) fn stamp_response(
@@ -80,30 +84,9 @@ impl ThinkingSource {
         meta.as_object_mut()
             .expect("item metadata is an object")
             .insert(
-                "__stravia_thinking_source".into(),
+                Self::ITEM_META_KEY.into(),
                 serde_json::to_value(self).expect("thinking source is serializable"),
             );
-    }
-}
-
-mod thinking_source_protocol {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
-
-    pub fn serialize<S: Serializer>(
-        value: &ProtocolEndpoint,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(value)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<ProtocolEndpoint, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        crate::protocol::registry::ProtocolRegistry::global()
-            .resolve_alias(&value)
-            .ok_or_else(|| serde::de::Error::custom("unknown thinking source protocol"))
     }
 }
 

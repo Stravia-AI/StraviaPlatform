@@ -307,14 +307,15 @@ CREATE TABLE public.model_backends (
     id text NOT NULL,
     model_id text NOT NULL,
     provider_id text NOT NULL,
-    model text NOT NULL,
+    model text,
     priority integer DEFAULT 0,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     thinking_level_map jsonb DEFAULT '[{"level": "off", "source": "generated", "control": {"type": "hidden"}}, {"level": "minimal", "source": "generated", "control": {"type": "hidden"}}, {"level": "low", "source": "generated", "control": {"type": "hidden"}}, {"level": "medium", "source": "generated", "control": {"type": "hidden"}}, {"level": "high", "source": "generated", "control": {"type": "hidden"}}, {"level": "xhigh", "source": "generated", "control": {"type": "hidden"}}, {"level": "max", "source": "generated", "control": {"type": "hidden"}}]'::jsonb NOT NULL,
     first_token_timeout_ms bigint DEFAULT 60000 NOT NULL,
     target_retry_budget integer DEFAULT 5 NOT NULL,
     target_cooldown_ms bigint DEFAULT 120000 NOT NULL,
-    enabled boolean DEFAULT true NOT NULL
+    enabled boolean DEFAULT true NOT NULL,
+    CONSTRAINT model_backends_model_nonblank CHECK (((model IS NULL) OR (btrim(model) <> ''::text)))
 );
 
 
@@ -730,6 +731,50 @@ CREATE TABLE public.turn_chain_nodes (
 
 
 --
+-- Name: vendor_data_recovery; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_data_recovery (
+    provider_id text NOT NULL,
+    data_kind text NOT NULL,
+    CONSTRAINT vendor_data_recovery_data_kind_check CHECK ((data_kind = ANY (ARRAY['options'::text, 'credentials'::text, 'models'::text])))
+);
+
+
+--
+-- Name: vendor_plugins; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_plugins (
+    vendor_id text NOT NULL,
+    version text NOT NULL,
+    source text NOT NULL,
+    descriptor text NOT NULL,
+    digest text NOT NULL,
+    revision bigint NOT NULL,
+    data_epoch bigint NOT NULL,
+    installed_at bigint NOT NULL,
+    CONSTRAINT vendor_plugins_data_epoch_check CHECK ((data_epoch >= 0)),
+    CONSTRAINT vendor_plugins_revision_check CHECK ((revision > 0)),
+    CONSTRAINT vendor_plugins_source_check CHECK ((source = ANY (ARRAY['builtin'::text, 'local'::text])))
+);
+
+
+--
+-- Name: vendor_private_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_private_state (
+    provider_id text NOT NULL,
+    vendor_id text NOT NULL,
+    format_version text NOT NULL,
+    payload bytea NOT NULL,
+    updated_at bigint NOT NULL,
+    CONSTRAINT vendor_private_state_payload_check CHECK ((octet_length(payload) <= 262144))
+);
+
+
+--
 -- Name: web_providers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1078,6 +1123,30 @@ ALTER TABLE ONLY public.turn_chain_nodes
 
 
 --
+-- Name: vendor_data_recovery vendor_data_recovery_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_data_recovery
+    ADD CONSTRAINT vendor_data_recovery_pkey PRIMARY KEY (provider_id, data_kind);
+
+
+--
+-- Name: vendor_plugins vendor_plugins_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugins
+    ADD CONSTRAINT vendor_plugins_pkey PRIMARY KEY (vendor_id);
+
+
+--
+-- Name: vendor_private_state vendor_private_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_private_state
+    ADD CONSTRAINT vendor_private_state_pkey PRIMARY KEY (provider_id);
+
+
+--
 -- Name: web_providers web_providers_name_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1343,6 +1412,13 @@ CREATE INDEX idx_turn_chain_principal_kind ON public.turn_chain_nodes USING btre
 --
 
 CREATE INDEX idx_turn_chain_reusable_prefix ON public.turn_chain_nodes USING btree (principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC, prefix_completed_at DESC, expires_at, id DESC) WHERE (prefix_namespace IS NOT NULL);
+
+
+--
+-- Name: idx_vendor_private_state_vendor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_vendor_private_state_vendor ON public.vendor_private_state USING btree (vendor_id);
 
 
 --
@@ -1823,6 +1899,22 @@ ALTER TABLE ONLY public.turn_chain_content_refs
 
 ALTER TABLE ONLY public.turn_chain_nodes
     ADD CONSTRAINT turn_chain_nodes_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.turn_chain_nodes(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: vendor_data_recovery vendor_data_recovery_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_data_recovery
+    ADD CONSTRAINT vendor_data_recovery_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: vendor_private_state vendor_private_state_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_private_state
+    ADD CONSTRAINT vendor_private_state_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
 
 
 --

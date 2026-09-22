@@ -21,7 +21,7 @@ use std::collections::HashMap;
 /// When Stravia translates between protocols (e.g. Anthropic → OpenAI), the
 /// source `ProtocolExt` is discarded and the encoder relies solely on the
 /// core `AiRequest` fields.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProtocolExt {
     OpenAiChat(OpenAIChatExt),
     OpenResponses(OpenResponsesExt),

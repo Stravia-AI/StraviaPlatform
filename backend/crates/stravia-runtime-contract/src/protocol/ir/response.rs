@@ -8,11 +8,45 @@ use crate::protocol::ir::request::AiItem;
 use crate::protocol::ir::usage::Usage;
 use crate::protocol::ir::vendor_ext::VendorExtensions;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum EmbeddingVector {
     Floats(Vec<f64>),
     Base64(String),
+}
+
+impl<'de> Deserialize<'de> for EmbeddingVector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct VectorVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for VectorVisitor {
+            type Value = EmbeddingVector;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a numeric embedding array or a base64 string")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                // Untagged buffering loses floating-point numbers when serde_json enables
+                // arbitrary_precision; deserialize the typed sequence without that buffer.
+                Vec::<f64>::deserialize(serde::de::value::SeqAccessDeserializer::new(sequence))
+                    .map(EmbeddingVector::Floats)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(EmbeddingVector::Base64(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(EmbeddingVector::Base64(value))
+            }
+        }
+
+        deserializer.deserialize_any(VectorVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +319,26 @@ where
 mod tests {
     use super::*;
     use crate::protocol::ir::{ContentBlock, MessageContent, ToolCall};
+
+    #[test]
+    fn embedding_vectors_round_trip_through_json_bytes() {
+        for vector in [
+            EmbeddingVector::Floats(vec![0.25, -0.5, 1.0]),
+            EmbeddingVector::Base64("AACAPwAAAMA=".into()),
+        ] {
+            let bytes = serde_json::to_vec(&vector).unwrap();
+            let restored = serde_json::from_slice::<EmbeddingVector>(&bytes).unwrap();
+            match (vector, restored) {
+                (EmbeddingVector::Floats(expected), EmbeddingVector::Floats(actual)) => {
+                    assert_eq!(actual, expected);
+                }
+                (EmbeddingVector::Base64(expected), EmbeddingVector::Base64(actual)) => {
+                    assert_eq!(actual, expected);
+                }
+                _ => panic!("embedding encoding changed across the JSON boundary"),
+            }
+        }
+    }
 
     #[test]
     fn assistant_item_keeps_tool_calls_in_client_visible_block_order() {

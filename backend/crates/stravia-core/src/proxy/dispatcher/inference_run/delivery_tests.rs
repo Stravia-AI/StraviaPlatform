@@ -60,7 +60,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             "type": "compaction", "id": name, "encrypted_content": format!("state-{name}"),
             "provider_metadata": {"revision": 2},
         });
-        let item = crate::protocol::codec::open_responses::decoder::decode_input_item(&wire)
+        let item = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
             .unwrap()
             .unwrap();
         let record = compaction

@@ -17,6 +17,7 @@ from typing import Iterator
 import pytest
 
 from tests.common.helpers import (
+    SERVER_STARTUP_TIMEOUT,
     WebSession,
     find_free_port,
     http_request,
@@ -105,7 +106,7 @@ def test_development_task_accepts_vite_origin_without_bypassing_csrf(
                 "database": {"backend": "sqlite"},
                 "username": "owner", "password": "correct horse battery staple",
             },
-            headers={"origin": origin}, timeout=40.0,
+            headers={"origin": origin}, timeout=SERVER_STARTUP_TIMEOUT,
         )
         assert status == 200, body
         status, body = operator.request(
@@ -177,7 +178,7 @@ def test_sqlite_uses_data_root_across_external_config_and_restart(
                 "database": database,
                 "username": "existing-owner", "password": "correct horse battery staple",
             },
-            timeout=40.0,
+            timeout=SERVER_STARTUP_TIMEOUT,
         )
         assert status == 200, body
     finally:
@@ -226,7 +227,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
             ],
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             token = wait_for_setup_token(logs, proc)
 
             visitor = WebSession(base)
@@ -274,7 +275,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
                     "username": "owner",
                     "password": "correct horse battery staple",
                 },
-                timeout=40.0,
+                timeout=SERVER_STARTUP_TIMEOUT,
             )
             assert status == 200, body
             assert body == {"mode": "server"}
@@ -324,7 +325,7 @@ def _initialized_server(stravia_binary: Path) -> Iterator[dict[str, object]]:
             args=["--host", "127.0.0.1", "--port", str(port), "--data-dir", data_dir],
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             token = wait_for_setup_token(logs, proc)
             session = initialize_server(
                 base,
@@ -418,7 +419,7 @@ def test_setup_token_concurrent_claim_has_one_winner(stravia_binary: Path) -> No
             args=["--host", "127.0.0.1", "--port", str(port), "--data-dir", data_dir],
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             token = wait_for_setup_token(logs, proc)
 
             def claim(_: int) -> int:
@@ -453,7 +454,7 @@ def test_removed_database_and_admin_token_environment_does_not_bypass_setup(
             },
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             status, state = WebSession(base).request("GET", "/api/v1/auth/state")
             assert status == 200
             assert state["mode"] == "setup"
@@ -482,7 +483,7 @@ def test_setup_connection_failure_can_be_corrected_in_same_session(
             args=["--host", "127.0.0.1", "--port", str(port), "--data-dir", data_dir],
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             operator = WebSession(base)
             token = wait_for_setup_token(logs, proc)
             assert operator.request(
@@ -510,7 +511,7 @@ def test_setup_connection_failure_can_be_corrected_in_same_session(
                     "username": "owner",
                     "password": "correct horse battery staple",
                 },
-                timeout=40.0,
+                timeout=SERVER_STARTUP_TIMEOUT,
             )
             assert status == 200, body
             assert _login(base).request("GET", "/api/v1/status")[0] == 200
@@ -531,7 +532,7 @@ def test_concurrent_setup_completion_never_overwrites_the_admin(
             args=["--host", "127.0.0.1", "--port", str(port), "--data-dir", data_dir],
         )
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             operator = WebSession(base)
             assert operator.request(
                 "POST",
@@ -548,7 +549,7 @@ def test_concurrent_setup_completion_never_overwrites_the_admin(
                     f"{base}/api/v1/setup/complete",
                     payload={"client_base_url": base, "database": database, "username": username, "password": password},
                     headers={"cookie": cookie, "origin": base, "x-stravia-csrf": "1"},
-                    timeout=40.0,
+                    timeout=SERVER_STARTUP_TIMEOUT,
                 )
                 return status
 
@@ -590,7 +591,7 @@ def test_failed_setup_preserves_commit_order_and_restart_replaces_setup_credenti
         ]
         proc, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             original_token = wait_for_setup_token(logs, proc)
             operator = WebSession(base)
             assert operator.request(
@@ -617,7 +618,7 @@ def test_failed_setup_preserves_commit_order_and_restart_replaces_setup_credenti
 
         proc, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
         try:
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             visitor = WebSession(base)
             status, state = visitor.request(
                 "GET", "/api/v1/auth/state", headers={"cookie": original_cookie}
@@ -781,7 +782,7 @@ def test_configured_server_restart_uses_saved_database_without_reopening_setup(
             ],
         )
         try:
-            wait_until_ready(f"{restarted_base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{restarted_base}/api/v1/auth/state")
             status, state = WebSession(restarted_base).request("GET", "/api/v1/auth/state")
             assert status == 200
             assert state["mode"] == "server"
@@ -813,10 +814,12 @@ def test_interactive_recovery_preserves_data_and_revokes_all_sessions(
                 "source": {
                     "type": "custom",
                     "vendor": "custom",
+                    "channel": "default",
                     "protocol": "openai",
                     "base_url": "http://127.0.0.1:9/v1",
                 },
                 "credential": {"type": "api_key", "value": "unused"},
+                "vendor_options": {},
             },
         )
         assert status == 200, body
@@ -853,7 +856,7 @@ def test_interactive_recovery_preserves_data_and_revokes_all_sessions(
             ],
         )
         try:
-            wait_until_ready(f"{recovered_base}/api/v1/auth/state", timeout=40.0)
+            wait_until_ready(f"{recovered_base}/api/v1/auth/state")
             for cookie_header in old_cookie_headers:
                 status, _ = http_request(
                     "GET",

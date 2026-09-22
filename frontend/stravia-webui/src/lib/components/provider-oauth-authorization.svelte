@@ -10,14 +10,18 @@ import { admin, isTauri } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { localeState } from '$lib/localization.svelte'
 import { openExternalUrl } from '$lib/open-external'
-import type { OAuthCallbackMode, OAuthSessionInitData } from '$lib/types'
+import type { OAuthCallbackMode, OAuthCandidateConfiguration, OAuthSessionInitData } from '$lib/types'
 import * as Field from '$lib/components/ui/field'
 import { Button } from '$lib/components/ui/button'
 import { Input } from '$lib/components/ui/input'
+import SecretInput from '$lib/components/secret-input.svelte'
 import { Spinner } from '$lib/components/ui/spinner'
 
 interface Props {
-  driver: string
+  vendorId: string
+  channel: string
+  flow: 'authorization_code' | 'device_code' | 'manual'
+  configuration: OAuthCandidateConfiguration
   useProxy: boolean
   mode: 'connect' | 'reconnect'
   providerName?: string
@@ -25,12 +29,24 @@ interface Props {
   class?: string
 }
 
-let { driver, useProxy, mode, providerName = '', onStateChange, class: className = '' }: Props = $props()
+let {
+  vendorId,
+  channel,
+  flow,
+  configuration,
+  useProxy,
+  mode,
+  providerName = '',
+  onStateChange,
+  class: className = '',
+}: Props = $props()
 let oauthSession = $state<OAuthSessionInitData>()
 let callbackUrl = $state('')
+let manualValue = $state('')
 let callbackError = $state('')
 let starting = $state(false)
 let completing = $state(false)
+let sessionGeneration = 0
 let reportedSessionId: string | undefined
 let reportedReady = false
 
@@ -45,17 +61,37 @@ const oauthStatusQuery = createQuery(() => ({
 }))
 const oauthStatus = $derived(oauthStatusQuery.data)
 const oauthInProgress = $derived(
-  Boolean(oauthSession) && oauthStatus?.status !== 'ready' && oauthStatus?.status !== 'error',
+  Boolean(oauthSession) &&
+    !oauthStatusQuery.isError &&
+    oauthStatus?.status !== 'ready' &&
+    oauthStatus?.status !== 'error',
 )
 const userCode = $derived(
   oauthStatus?.status === 'pending' ? (oauthStatus.user_code ?? oauthSession?.user_code) : oauthSession?.user_code,
 )
-const supportsManualCallback = $derived(oauthSession?.scheme === 'oauth_auth_code_pkce')
+const currentAuthUrl = $derived(
+  oauthStatus?.status === 'pending' ? (oauthStatus.auth_url ?? oauthSession?.auth_url) : oauthSession?.auth_url,
+)
+const fallbackReason = $derived(
+  oauthStatus?.status === 'pending'
+    ? (oauthStatus.fallback_reason ?? oauthSession?.fallback_reason)
+    : oauthSession?.fallback_reason,
+)
+const manualInput = $derived(
+  oauthStatus?.status === 'pending'
+    ? (oauthStatus.manual_input ?? oauthSession?.manual_input)
+    : oauthSession?.manual_input,
+)
+const supportsManualCallback = $derived(
+  flow === 'authorization_code' && oauthSession?.callback_mode === 'manual' && !manualInput,
+)
+const supportsManualInput = $derived(Boolean(manualInput) && oauthInProgress)
 const callbackInputId = $derived(mode === 'connect' ? 'oauth-callback-url' : 'provider-oauth-callback-url')
+const manualInputId = $derived(mode === 'connect' ? 'oauth-manual-value' : 'provider-oauth-manual-value')
 
 $effect(() => {
   const sessionId = oauthSession?.session_id
-  const ready = oauthStatus?.status === 'ready'
+  const ready = Boolean(sessionId) && oauthStatus?.status === 'ready'
   if (sessionId === reportedSessionId && ready === reportedReady) return
   reportedSessionId = sessionId
   reportedReady = ready
@@ -73,76 +109,153 @@ function callbackMode(): OAuthCallbackMode {
     : 'manual'
 }
 
-export async function cancel(): Promise<void> {
+function resetLocalSession(): string | undefined {
   const sessionId = oauthSession?.session_id
   oauthSession = undefined
   callbackUrl = ''
+  manualValue = ''
   callbackError = ''
+  completing = false
+  return sessionId
+}
+
+function isCurrentSession(generation: number, sessionId: string): boolean {
+  return sessionGeneration === generation && oauthSession?.session_id === sessionId
+}
+
+export async function cancel(): Promise<void> {
+  sessionGeneration += 1
+  starting = false
+  const sessionId = resetLocalSession()
   if (!sessionId) return
   try {
     await admin.oauth.cancel(sessionId)
-  } catch {
-    // Session cleanup is best-effort; the server also expires abandoned OAuth sessions.
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
   }
 }
 
 async function begin(): Promise<void> {
-  if (!driver) {
+  if (starting) return
+  if (!vendorId || !channel) {
     toast.error(m.provider_oauth_authorization_unavailable())
     return
   }
-  callbackError = ''
-  const popup = typeof window === 'undefined' || isTauri ? null : window.open('about:blank', '_blank')
+  const popup =
+    flow === 'manual' || typeof window === 'undefined' || isTauri ? null : window.open('about:blank', '_blank')
+  const generation = ++sessionGeneration
+  const previousSessionId = resetLocalSession()
   starting = true
-  await cancel()
+  if (previousSessionId) {
+    try {
+      await admin.oauth.cancel(previousSessionId)
+    } catch (error) {
+      if (generation === sessionGeneration) toast.error(localizeBackendErrorMessage(error))
+    }
+  }
+  if (generation !== sessionGeneration) {
+    popup?.close()
+    return
+  }
   try {
-    const session = await admin.oauth.init(driver, useProxy, callbackMode(), localeState.current)
+    const session = await admin.oauth.init(
+      vendorId,
+      channel,
+      configuration,
+      useProxy,
+      callbackMode(),
+      localeState.current,
+    )
+    if (generation !== sessionGeneration) {
+      popup?.close()
+      void admin.oauth.cancel(session.session_id).catch(() => undefined)
+      return
+    }
     oauthSession = session
-    if (popup) popup.location.replace(session.auth_url)
-    else await openExternalUrl(session.auth_url)
+    if (session.auth_url) {
+      if (popup) popup.location.replace(session.auth_url)
+      else await openExternalUrl(session.auth_url)
+    } else {
+      popup?.close()
+    }
   } catch (error) {
     popup?.close()
-    toast.error(localizeBackendErrorMessage(error))
+    if (generation === sessionGeneration) toast.error(localizeBackendErrorMessage(error))
   } finally {
-    starting = false
+    if (generation === sessionGeneration) starting = false
   }
 }
 
 async function reopen(): Promise<void> {
-  if (oauthSession) await openExternalUrl(oauthSession.auth_url)
+  if (currentAuthUrl) await openExternalUrl(currentAuthUrl)
 }
 
 async function completeManual(): Promise<void> {
-  if (!oauthSession || !callbackUrl.trim()) return
+  const sessionId = oauthSession?.session_id
+  const value = callbackUrl.trim()
+  if (!sessionId || !value) return
+  const generation = sessionGeneration
   completing = true
   callbackError = ''
   try {
-    await admin.oauth.complete(oauthSession.session_id, callbackUrl.trim())
+    await admin.oauth.complete(sessionId, 'callback_url', value)
+    if (!isCurrentSession(generation, sessionId)) return
     await oauthStatusQuery.refetch()
   } catch (error) {
-    callbackError = localizeBackendErrorMessage(error)
+    if (isCurrentSession(generation, sessionId)) callbackError = localizeBackendErrorMessage(error)
   } finally {
-    completing = false
+    if (isCurrentSession(generation, sessionId)) completing = false
+  }
+}
+
+async function completeManualInput(): Promise<void> {
+  const sessionId = oauthSession?.session_id
+  const inputType = manualInput?.type
+  const value = manualValue.trim()
+  if (!sessionId || !inputType || !value) return
+  const generation = sessionGeneration
+  completing = true
+  callbackError = ''
+  try {
+    await admin.oauth.complete(sessionId, inputType === 'callback_url' ? 'callback_url' : 'manual', value)
+    if (!isCurrentSession(generation, sessionId)) return
+    manualValue = ''
+    await oauthStatusQuery.refetch()
+  } catch (error) {
+    if (isCurrentSession(generation, sessionId)) callbackError = localizeBackendErrorMessage(error)
+  } finally {
+    if (isCurrentSession(generation, sessionId)) completing = false
   }
 }
 
 export async function updateProxy(nextUseProxy: boolean): Promise<void> {
-  if (!oauthSession || !oauthInProgress) return
+  const sessionId = oauthSession?.session_id
+  if (!sessionId) return
+  if (oauthStatus?.status === 'ready' || oauthStatus?.status === 'error') {
+    await cancel()
+    return
+  }
+  const generation = sessionGeneration
   try {
-    await admin.oauth.updateProxy(oauthSession.session_id, nextUseProxy)
+    await admin.oauth.updateProxy(sessionId, nextUseProxy)
   } catch (error) {
+    if (!isCurrentSession(generation, sessionId)) return
     toast.error(localizeBackendErrorMessage(error))
+    await cancel()
   }
 }
 
 export function consume(): void {
-  oauthSession = undefined
-  callbackUrl = ''
-  callbackError = ''
+  sessionGeneration += 1
+  starting = false
+  resetLocalSession()
 }
 
 onDestroy(() => {
-  void cancel()
+  sessionGeneration += 1
+  starting = false
+  const sessionId = resetLocalSession()
+  if (sessionId) void admin.oauth.cancel(sessionId).catch(() => undefined)
 })
 </script>
 
@@ -156,16 +269,21 @@ onDestroy(() => {
             {mode === 'connect' ? `${providerName} OAuth` : m.common_oauth_account()}
           </p>
           <p class="mt-1 text-sm text-muted-foreground">
-            {mode === 'connect'
-              ? m.provider_oauth_authorization_sign_service_browser()
-              : m.provider_oauth_authorization_reconnect_warning()}
+            {flow === 'manual'
+              ? m.provider_oauth_authorization_manual_help()
+              : mode === 'connect'
+                ? m.provider_oauth_authorization_sign_service_browser()
+                : m.provider_oauth_authorization_reconnect_warning()}
           </p>
         </div>
         <Button type="button" onclick={() => void begin()} disabled={starting}>
-          {#if starting}<Spinner data-icon="inline-start" />{:else}<ExternalLinkIcon data-icon="inline-start" />{/if}
-          {mode === 'connect'
-            ? m.provider_oauth_authorization_sign_oauth()
-            : m.provider_oauth_authorization_sign_again()}
+          {#if starting}<Spinner data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
+              data-icon="inline-start" />{/if}
+          {flow === 'manual'
+            ? m.provider_oauth_authorization_begin_manual()
+            : mode === 'connect'
+              ? m.provider_oauth_authorization_sign_oauth()
+              : m.provider_oauth_authorization_sign_again()}
         </Button>
       </div>
     {:else}
@@ -174,11 +292,15 @@ onDestroy(() => {
           <p class="font-medium">
             {oauthStatus?.status === 'ready'
               ? m.provider_oauth_authorization_authorization_complete()
-              : oauthStatus?.status === 'error'
+              : oauthStatus?.status === 'error' || oauthStatusQuery.isError
                 ? m.provider_oauth_authorization_authorization_failed()
                 : m.provider_oauth_authorization_waiting_authorization()}
           </p>
-          {#if oauthStatus?.status === 'error'}
+          {#if oauthStatusQuery.isError}
+            <p class="mt-1 text-sm text-destructive">
+              {localizeBackendErrorMessage(oauthStatusQuery.error)}
+            </p>
+          {:else if oauthStatus?.status === 'error'}
             <p class="mt-1 text-sm text-destructive">
               {localizeBackendErrorMessage(oauthStatus)}
             </p>
@@ -188,12 +310,19 @@ onDestroy(() => {
             </p>
           {:else if oauthInProgress}
             <p class="mt-1 text-sm text-muted-foreground">
-              {m.provider_oauth_authorization_browser_help()}
+              {flow === 'manual'
+                ? m.provider_oauth_authorization_manual_waiting_help()
+                : m.provider_oauth_authorization_browser_help()}
             </p>
+            {#if fallbackReason}
+              <p class="mt-1 text-sm text-muted-foreground">
+                {m.provider_oauth_authorization_fallback_reason({ reason: fallbackReason })}
+              </p>
+            {/if}
           {/if}
         </div>
         <div class="flex flex-wrap justify-end gap-2">
-          {#if oauthStatus?.status === 'error'}
+          {#if oauthStatus?.status === 'error' || oauthStatusQuery.isError}
             <Button type="button" variant="outline" onclick={() => void begin()}>
               <RefreshCwIcon data-icon="inline-start" />{m.common_try_again()}
             </Button>
@@ -202,11 +331,14 @@ onDestroy(() => {
               {m.provider_oauth_authorization_use_another_account()}
             </Button>
           {:else}
-            <Button type="button" variant="outline" onclick={() => void reopen()}>
-              <ExternalLinkIcon data-icon="inline-start" />{oauthStatus?.status === 'pending' && oauthStatus.last_error
-                ? m.provider_oauth_authorization_try_sign_again()
-                : m.provider_oauth_authorization_reopen_sign_page()}
-            </Button>
+            {#if currentAuthUrl}
+              <Button type="button" variant="outline" onclick={() => void reopen()}>
+                <ExternalLinkIcon data-icon="inline-start" />{oauthStatus?.status === 'pending' &&
+                oauthStatus.last_error
+                  ? m.provider_oauth_authorization_try_sign_again()
+                  : m.provider_oauth_authorization_reopen_sign_page()}
+              </Button>
+            {/if}
             <Button type="button" variant="ghost" onclick={() => void cancel()}>
               {m.provider_oauth_authorization_cancel_sign()}
             </Button>
@@ -224,6 +356,43 @@ onDestroy(() => {
             {m.provider_oauth_authorization_device_code_help()}
           </p>
         </div>
+      {/if}
+
+      {#if supportsManualInput && manualInput}
+        <Field.Field size="fill" class="mt-4">
+          <Field.Label for={manualInputId} hint={manualInput.description ?? undefined}>
+            {manualInput.label}
+          </Field.Label>
+          <div class="flex gap-2">
+            <div class="min-w-0 flex-1">
+              {#if manualInput.secret}
+                <SecretInput
+                  id={manualInputId}
+                  class="font-technical"
+                  bind:value={manualValue}
+                  resetKey={oauthSession.session_id}
+                  autocomplete="off"
+                  oninput={() => (callbackError = '')} />
+              {:else}
+                <Input
+                  id={manualInputId}
+                  class="font-technical"
+                  bind:value={manualValue}
+                  autocomplete="off"
+                  oninput={() => (callbackError = '')} />
+              {/if}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              onclick={() => void completeManualInput()}
+              disabled={completing || !manualValue.trim()}>
+              {#if completing}<Spinner data-icon="inline-start" />{/if}
+              {m.provider_oauth_authorization_complete()}
+            </Button>
+          </div>
+          {#if callbackError}<Field.Error>{callbackError}</Field.Error>{/if}
+        </Field.Field>
       {/if}
 
       {#if supportsManualCallback && oauthInProgress}

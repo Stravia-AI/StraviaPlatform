@@ -152,10 +152,10 @@ pub(super) async fn list_eligible_web_search_models_handler(
     }
 }
 
-pub(super) async fn list_compatible_codex_search_providers_handler(
+pub(super) async fn list_external_search_routes_handler(
     State(gw): State<Gateway>,
 ) -> impl IntoResponse {
-    match gw.admin().list_compatible_codex_search_providers().await {
+    match gw.admin().list_external_search_routes().await {
         Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
         Err(error) => web_search_config_error(error),
     }

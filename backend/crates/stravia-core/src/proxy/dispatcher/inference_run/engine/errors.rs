@@ -24,9 +24,9 @@ pub(super) fn render_hook_control(
         }
         stravia_runtime_contract::hook::HookControl::Respond(response) => {
             let mut delivery = if is_stream {
-                DeliveryAdapter::buffered_stream(ingress, ingress)
+                DeliveryAdapter::buffered_stream(ingress, Some(ingress))
             } else {
-                DeliveryAdapter::non_stream(ingress, ingress)
+                DeliveryAdapter::non_stream(ingress, Some(ingress))
             };
             delivery
                 .deliver_canonical(&response, StatusCode::OK)
@@ -151,19 +151,21 @@ pub(super) fn compaction_stream_error_outcome(
     request: &stravia_runtime_contract::protocol::ir::AiRequest,
     error: &stravia_runtime_contract::protocol::ir::AiError,
 ) -> Option<RoundOutcome> {
-    if !crate::compaction::NativeCompactionControls::classify(request).requested() {
+    if !stravia_protocol_codec::codec::compaction::native_compaction_requested(request) {
         return None;
     }
     let raw = error.raw.as_ref()?;
     let upstream = raw
         .pointer("/response/error")
         .or_else(|| raw.get("error"))?;
+    let mut body = serde_json::json!({ "error": upstream });
+    crate::interaction_observation::redact_value(&mut body);
     let mut failure = stravia_runtime_contract::model_turn::ModelTurnError::new(
         "upstream_stream_error",
         error.message.clone(),
     );
     failure.upstream_status = error.status_code.filter(|status| *status >= 400);
-    failure.upstream_body = Some(Box::new(serde_json::json!({ "error": upstream })));
+    failure.upstream_body = Some(Box::new(body));
     Some(model_turn_error_outcome(failure))
 }
 
@@ -194,6 +196,7 @@ pub(super) fn model_turn_error_status(
         | "compaction_unsupported"
         | "compaction_target_mismatch"
         | "invalid_compaction_state"
+        | "vendor_request_invalid"
         | "compaction_conflict" => StatusCode::BAD_REQUEST,
         "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
             StatusCode::UNPROCESSABLE_ENTITY

@@ -1,22 +1,18 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Gateway;
-use crate::auth;
 use crate::auth::types::{
-    AuthBindingStatus, AuthPollState, AuthScheme, AuthSession, AuthSessionInitData,
-    AuthSessionStatus, AuthSessionStatusData, CredentialBundle, ExchangeAuthContext,
-    OAuthCallbackMode, OAuthSessionStartOptions, RefreshAuthContext, RuntimeBinding,
-    StartAuthContext, StoredCredential, UpdateAuthSession,
+    AuthBindingStatus, AuthCompletionInput, AuthCompletionValue, AuthScheme, AuthSession,
+    AuthSessionCandidate, AuthSessionInitData, AuthSessionStatus, AuthSessionStatusData,
+    CredentialBundle, OAuthCallbackMode, OAuthSessionStartOptions, StoredCredential,
+    UpdateAuthSession,
 };
 use crate::db::models::*;
-use crate::provider::metadata::CapabilitiesSource;
-use crate::provider::{VendorRegistry, google_vertex};
 use crate::storage::traits::ProviderTestResult;
 
 mod api_keys;
@@ -26,7 +22,6 @@ mod extensions;
 pub mod identity;
 mod media;
 mod media_generation;
-mod model_catalog;
 mod model_data;
 mod oauth;
 mod observability;
@@ -47,10 +42,12 @@ pub use crate::interaction_observation::{
     ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
     RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
 };
+pub use provider_connection::{
+    ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderNetworkPermission,
+};
 pub use routes::{BindRouteInput, RouteTargetStatus, UnbindRouteInput};
 
 use auth_data::*;
-use model_catalog::*;
 use model_data::*;
 
 #[cfg(test)]
@@ -84,26 +81,10 @@ pub struct AdminService {
     gw: Gateway,
 }
 
-#[derive(Clone)]
-pub(crate) struct ResolvedProviderRuntime {
-    pub access_token: String,
-    pub binding: RuntimeBinding,
-}
-
 impl AdminService {
     pub fn new(gw: Gateway) -> Self {
         Self { gw }
     }
-}
-
-pub(super) fn format_connectivity_error(error: &reqwest::Error) -> String {
-    if error.is_timeout() {
-        return "Connection timeout (10s), please check Base URL or network settings".to_string();
-    }
-    if error.is_connect() {
-        return "Unable to connect to the host, please check DNS/network settings".to_string();
-    }
-    error.to_string()
 }
 
 pub(super) fn coded_error(code: &str, message: &str, params: Value) -> anyhow::Error {
@@ -122,11 +103,4 @@ pub(super) fn normalize_name(name: &str, field: &str) -> anyhow::Result<String> 
         anyhow::bail!("{field} cannot be empty");
     }
     Ok(trimmed.to_string())
-}
-
-pub(super) fn normalize_vendor(vendor: Option<&str>) -> Option<String> {
-    vendor
-        .map(str::trim)
-        .filter(|v| !v.is_empty() && *v != "custom")
-        .map(|v| v.to_lowercase())
 }

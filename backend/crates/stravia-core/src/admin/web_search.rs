@@ -3,7 +3,7 @@ use std::sync::Arc;
 use stravia_web_search::{
     WebSearchConfig,
     admin::{
-        CompatibleCodexProvider, EligibleSearchModel, SearchAdmin, WebSearchConfigError,
+        EligibleSearchModel, ExternalSearchRoute, SearchAdmin, WebSearchConfigError,
         WebSearchConfigView,
     },
 };
@@ -21,12 +21,10 @@ impl AdminService {
     ) -> Result<Vec<EligibleSearchModel>, WebSearchConfigError> {
         self.search_admin().list_eligible_web_search_models().await
     }
-    pub async fn list_compatible_codex_search_providers(
+    pub async fn list_external_search_routes(
         &self,
-    ) -> Result<Vec<CompatibleCodexProvider>, WebSearchConfigError> {
-        self.search_admin()
-            .list_compatible_codex_search_providers()
-            .await
+    ) -> Result<Vec<ExternalSearchRoute>, WebSearchConfigError> {
+        self.search_admin().list_external_search_routes().await
     }
     pub async fn update_web_search_config(
         &self,
@@ -43,10 +41,17 @@ mod tests {
 
     async fn admin() -> (tempfile::TempDir, AdminService) {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
+        let gateway = crate::Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
         .await
         .expect("Gateway");
         (directory, gateway.admin())
@@ -116,32 +121,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_mode_preserves_local_limits_without_validating_them() {
+    async fn external_mode_preserves_local_limits_without_validating_them() {
         let (_directory, admin) = admin().await;
         let current = admin.get_web_search_config().await.expect("current config");
 
-        let codex = admin
+        let external = admin
             .update_web_search_config(WebSearchConfig {
                 revision: current.revision,
                 enabled: false,
-                backend: Some(WebSearchBackendDraft::Codex {
-                    provider_id: None,
-                    upstream_model: None,
-                }),
+                backend: Some(WebSearchBackendDraft::External { route_id: None }),
                 max_turns: 1,
                 total_time_seconds: 1,
                 updated_at: current.updated_at.clone(),
             })
             .await
-            .expect("disabled Codex config");
+            .expect("disabled External config");
 
-        assert_eq!(codex.max_turns, 1);
-        assert_eq!(codex.total_time_seconds, 1);
+        assert_eq!(external.max_turns, 1);
+        assert_eq!(external.total_time_seconds, 1);
 
         let error = admin
             .update_web_search_config(WebSearchConfig {
                 backend: Some(WebSearchBackendDraft::Local { model_id: None }),
-                ..codex.config
+                ..external.config
             })
             .await
             .expect_err("Local mode must validate restored limits");
@@ -150,18 +152,25 @@ mod tests {
 
     #[tokio::test]
     async fn local_search_requires_sources_but_ignores_the_legacy_disabled_switch() {
-        let (_directory, admin) = admin().await;
+        let _directory = tempfile::tempdir().expect("temporary directory");
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: _directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .expect("Gateway");
+        let admin = gateway.admin();
         let provider = admin
             .gw
             .storage
             .providers()
             .create(crate::db::models::CreateProviderRecord {
                 name: "Tool-capable Provider".into(),
-                vendor: None,
+                vendor: Some("protocol-openai-chat-completions".into()),
                 protocol: "openai-compatible".into(),
                 base_url: "https://example.com/v1".into(),
                 preset_key: None,
-                channel: None,
+                channel: Some("default".into()),
                 models_source: None,
                 static_models: None,
                 api_key: "sk-test".into(),
@@ -191,7 +200,7 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: provider.id.clone(),
-                target_model: "tool-model".into(),
+                target_model: Some("tool-model".into()),
                 targets: vec![],
                 default_thinking_level: None,
             })
@@ -261,7 +270,14 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_local_sources_satisfy_search_requirements() {
-        let (_directory, admin) = admin().await;
+        let _directory = tempfile::tempdir().expect("temporary directory");
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: _directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .expect("Gateway");
+        let admin = gateway.admin();
         let store = admin.gw.storage.web_providers().unwrap();
         let local = store
             .list()
@@ -295,56 +311,5 @@ mod tests {
                 .code,
             "WEB_SEARCH_SOURCES_UNAVAILABLE"
         );
-    }
-
-    #[tokio::test]
-    async fn codex_binding_requires_an_effective_oauth_credential() {
-        let (_directory, admin) = admin().await;
-        let provider = admin
-            .gw
-            .storage
-            .providers()
-            .create(crate::db::models::CreateProviderRecord {
-                name: "Codex without OAuth".into(),
-                vendor: Some("openai".into()),
-                protocol: "open-responses".into(),
-                base_url: "https://chatgpt.com/backend-api/codex/responses".into(),
-                preset_key: Some("openai".into()),
-                channel: Some("codex".into()),
-                models_source: None,
-                static_models: None,
-                api_key: String::new(),
-                adapter_credentials: "{}".into(),
-                vendor_options: "{}".into(),
-                auth_mode: "oauth".into(),
-                use_proxy: false,
-            })
-            .await
-            .expect("Codex Provider");
-
-        assert!(
-            admin
-                .list_compatible_codex_search_providers()
-                .await
-                .expect("compatible Providers")
-                .is_empty()
-        );
-
-        let current = admin.get_web_search_config().await.expect("current config");
-        let error = admin
-            .update_web_search_config(WebSearchConfig {
-                revision: current.revision,
-                enabled: true,
-                backend: Some(WebSearchBackendDraft::Codex {
-                    provider_id: Some(provider.id),
-                    upstream_model: Some("gpt-5".into()),
-                }),
-                max_turns: 12,
-                total_time_seconds: 600,
-                updated_at: current.updated_at.clone(),
-            })
-            .await
-            .expect_err("missing OAuth credential");
-        assert_eq!(error.code, "WEB_SEARCH_CODEX_PROVIDER_INVALID");
     }
 }

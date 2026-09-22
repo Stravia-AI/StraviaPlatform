@@ -12,13 +12,9 @@ mod model_discovery;
 mod model_records;
 mod provider_model_records;
 mod thinking_map;
-use model_discovery::{
-    HttpProviderModelDiscovery, ProviderModelDiscovery, RouteModelDiscoveryError,
-};
+use model_discovery::RouteModelDiscoveryError;
 pub use model_records::RouteTargetStatus;
 use provider_model_records::PreparedProviderModel;
-
-static HTTP_PROVIDER_MODEL_DISCOVERY: HttpProviderModelDiscovery = HttpProviderModelDiscovery;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,22 +61,11 @@ pub(crate) struct RouteUnbind {
 
 pub(crate) struct RouteModule<'a> {
     admin: &'a AdminService,
-    model_discovery: &'a dyn ProviderModelDiscovery,
 }
 
 impl<'a> RouteModule<'a> {
     pub(crate) fn new(admin: &'a AdminService) -> Self {
-        Self::with_model_discovery(admin, &HTTP_PROVIDER_MODEL_DISCOVERY)
-    }
-
-    fn with_model_discovery(
-        admin: &'a AdminService,
-        model_discovery: &'a dyn ProviderModelDiscovery,
-    ) -> Self {
-        Self {
-            admin,
-            model_discovery,
-        }
+        Self { admin }
     }
 
     pub(crate) async fn add_provider_model(
@@ -113,7 +98,18 @@ impl<'a> RouteModule<'a> {
         &self,
         provider_id: &str,
     ) -> Result<Vec<String>, RouteModelDiscoveryError> {
-        self.model_discovery.discover(self.admin, provider_id).await
+        let discovered = model_discovery::discover_provider_models(self.admin, provider_id).await?;
+        let _publication_guard = discovered.write_fence().await.map_err(|error| {
+            RouteModelDiscoveryError::DiscoverySetup {
+                provider_id: provider_id.to_owned(),
+                source: error,
+            }
+        })?;
+        Ok(discovered
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect())
     }
 
     pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<Route> {
@@ -165,13 +161,22 @@ impl<'a> RouteModule<'a> {
     ) -> anyhow::Result<()> {
         for target in proposed {
             let provider_id = target.provider_id.trim();
-            let provider_model_id = normalize_model_id(&target.model)?;
+            let provider_model_id = target
+                .model
+                .as_deref()
+                .map(normalize_model_id)
+                .transpose()?;
             if existing.iter().any(|current| {
                 current.provider_id == provider_id
-                    && model_id_match_key(&current.model) == model_id_match_key(&provider_model_id)
+                    && same_target_model(current.model.as_deref(), provider_model_id.as_deref())
             }) {
                 continue;
             }
+            if provider_model_id.is_none() {
+                self.ensure_provider_only_search_target(provider_id).await?;
+                continue;
+            }
+            let provider_model_id = provider_model_id.expect("checked model Target");
             let Some(provider_model) = self
                 .admin
                 .gw
@@ -203,6 +208,66 @@ impl<'a> RouteModule<'a> {
         Ok(())
     }
 
+    async fn ensure_provider_only_search_target(&self, provider_id: &str) -> anyhow::Result<()> {
+        let provider = self.admin.get_provider(provider_id).await?;
+        let vendor_id = provider
+            .vendor
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                coded_error(
+                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
+                    "Provider-only Targets require an installed search Vendor",
+                    serde_json::json!({ "provider_id": provider_id }),
+                )
+            })?;
+        let descriptor = self
+            .admin
+            .gw
+            .vendor_plugins
+            .descriptor(vendor_id)
+            .map_err(|_| {
+                coded_error(
+                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
+                    "Provider-only Targets require an installed search Vendor",
+                    serde_json::json!({ "provider_id": provider_id, "vendor_id": vendor_id }),
+                )
+            })?;
+        let channel_id = provider.channel.as_deref().unwrap_or("default");
+        let channel = descriptor
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .ok_or_else(|| {
+                coded_error(
+                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
+                    "Provider channel is not available in the installed Vendor",
+                    serde_json::json!({
+                        "provider_id": provider_id,
+                        "vendor_id": vendor_id,
+                        "channel": channel_id,
+                    }),
+                )
+            })?;
+        if !channel
+            .capabilities
+            .contains(&stravia_vendor_sdk::Capability::Search)
+            || channel.search_model_required
+        {
+            return Err(coded_error(
+                "PROVIDER_ONLY_TARGET_UNAVAILABLE",
+                "Provider channel does not support model-free search",
+                serde_json::json!({
+                    "provider_id": provider_id,
+                    "vendor_id": vendor_id,
+                    "channel": channel_id,
+                }),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn copy_provider_targets(
         &self,
         original_provider_id: &str,
@@ -223,8 +288,10 @@ impl<'a> RouteModule<'a> {
                 .collect::<Vec<_>>();
 
             for target in &copied_targets {
-                self.copy_provider_model(original_provider_id, copied_provider_id, &target.model)
-                    .await?;
+                if let Some(model) = target.model.as_deref() {
+                    self.copy_provider_model(original_provider_id, copied_provider_id, model)
+                        .await?;
+                }
             }
 
             let mut targets = route
@@ -353,7 +420,7 @@ impl<'a> RouteModule<'a> {
             } => {
                 let target = CreateTarget {
                     provider_id: provider_id.clone(),
-                    model: provider_model_id.clone(),
+                    model: Some(provider_model_id.clone()),
                     enabled: true,
                     priority: Some(priority),
                     first_token_timeout_ms: Some(first_token_timeout_ms),
@@ -383,7 +450,9 @@ impl<'a> RouteModule<'a> {
         if let Some(existing) = existing.as_ref()
             && existing.targets.iter().any(|target| {
                 target.provider_id == provider_id
-                    && model_id_match_key(&target.model) == model_id_match_key(&provider_model_id)
+                    && target.model.as_deref().is_some_and(|model| {
+                        model_id_match_key(model) == model_id_match_key(&provider_model_id)
+                    })
             })
         {
             return Ok(existing.clone());
@@ -425,11 +494,11 @@ impl<'a> RouteModule<'a> {
                     display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),
                     target_provider: provider_id.clone(),
-                    target_model: provider_model_id.clone(),
+                    target_model: Some(provider_model_id.clone()),
                     default_thinking_level: None,
                     targets: vec![CreateTarget {
                         provider_id,
-                        model: provider_model_id,
+                        model: Some(provider_model_id),
                         enabled: true,
                         priority: Some(priority),
                         first_token_timeout_ms: Some(first_token_timeout_ms),
@@ -440,11 +509,10 @@ impl<'a> RouteModule<'a> {
                 })
                 .await;
         };
-        if existing
-            .targets
-            .iter()
-            .any(|target| target.provider_id == provider_id && target.model == provider_model_id)
-        {
+        if existing.targets.iter().any(|target| {
+            target.provider_id == provider_id
+                && target.model.as_deref() == Some(provider_model_id.as_str())
+        }) {
             return Ok(existing);
         }
 
@@ -466,7 +534,7 @@ impl<'a> RouteModule<'a> {
         targets.push(UpsertTarget {
             id: None,
             provider_id,
-            model: provider_model_id,
+            model: Some(provider_model_id),
             enabled: true,
             priority: Some(priority),
             first_token_timeout_ms: Some(first_token_timeout_ms),
@@ -499,7 +567,8 @@ impl<'a> RouteModule<'a> {
             .targets
             .iter()
             .filter(|target| {
-                target.provider_id != input.provider_id || target.model != provider_model_id
+                target.provider_id != input.provider_id
+                    || target.model.as_deref() != Some(provider_model_id.as_str())
             })
             .map(|target| UpsertTarget {
                 id: Some(target.id.clone()),
@@ -587,6 +656,14 @@ impl AdminService {
         RouteModule::new(self)
             .regenerate_thinking_map(route_id, target_id)
             .await
+    }
+}
+
+fn same_target_model(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => model_id_match_key(left) == model_id_match_key(right),
+        (None, None) => true,
+        _ => false,
     }
 }
 

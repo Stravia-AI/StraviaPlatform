@@ -56,6 +56,7 @@ fn ws_wire(
     payload: Value,
 ) -> crate::interaction_observation::RunEvent {
     crate::interaction_observation::RunEvent::Wire {
+        capture_id: None,
         direction: direction.into(),
         transport: "websocket".into(),
         protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -83,6 +84,7 @@ fn handshake_ingress(
                 protocol: OPEN_RESPONSES_2026_04_24.to_string(),
             });
     observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        capture_id: None,
         direction: "client_to_platform".into(),
         transport: "http".into(),
         protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -122,6 +124,7 @@ fn websocket_ingress(
                 protocol: OPEN_RESPONSES_2026_04_24.to_string(),
             });
     observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        capture_id: None,
         direction: "client_to_platform".into(),
         transport: "http".into(),
         protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -144,6 +147,7 @@ fn websocket_ingress(
         payload: Value::Null,
     });
     observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        capture_id: None,
         direction: "platform_to_client".into(),
         transport: "http".into(),
         protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -1126,7 +1130,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let progress = Arc::new(Mutex::new(StreamForwardProgress {
             response: Some(
-                crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
                     "resp-timeout",
                     "logical-model",
                     "in_progress",

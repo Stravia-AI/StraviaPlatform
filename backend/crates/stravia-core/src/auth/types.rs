@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use anyhow::bail;
-use async_trait::async_trait;
+use stravia_runtime_contract::CancellationToken;
+
+use crate::plugin::VendorSessionScope;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::db::models::Provider;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -92,33 +94,6 @@ impl AuthBindingStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OAuthCallbackPort {
-    Fixed { primary: u16, fallback: u16 },
-    Dynamic,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct OAuthCallbackPolicy {
-    pub bind_host: &'static str,
-    pub redirect_host: &'static str,
-    pub path: &'static str,
-    pub port: OAuthCallbackPort,
-    pub manual_redirect_uri: &'static str,
-    pub cancel_path: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthDriverMetadata {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub scheme: AuthScheme,
-    pub supports_new_provider: bool,
-    pub supports_existing_provider: bool,
-    pub callback: Option<OAuthCallbackPolicy>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthCallbackMode {
@@ -143,76 +118,31 @@ pub struct OAuthSessionStartOptions {
     pub fallback_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct StartAuthContext {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSessionCandidate {
+    pub vendor_id: String,
+    pub channel: String,
     pub provider_id: Option<String>,
-    pub provider: Option<Provider>,
+    pub base_url: String,
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, Value>,
+    #[serde(default)]
     pub use_proxy: bool,
-    pub redirect_uri: Option<String>,
-    pub requested_scopes: Vec<String>,
-    pub metadata: Value,
-    pub http_client: Option<reqwest::Client>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RefreshAuthContext {
-    pub use_proxy: bool,
-    pub metadata: Value,
-    pub http_client: Option<reqwest::Client>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ExchangeAuthContext {
-    pub use_proxy: bool,
-    pub metadata: Value,
-    pub http_client: Option<reqwest::Client>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthExchangeInput {
-    pub callback_url: String,
+pub struct AuthCompletionInput {
+    pub input: AuthCompletionValue,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum OAuthExchangeError {
-    #[error("callback URL is invalid")]
-    InvalidCallbackUrl,
-    #[error("callback URL is missing authorization code")]
-    MissingAuthorizationCode,
-    #[error("OAuth state is missing")]
-    MissingState,
-    #[error("OAuth state mismatch")]
-    StateMismatch,
-    #[error("OAuth authorization was denied: {0}")]
-    AccessDenied(String),
-    #[error("OAuth authorization code is invalid or expired: {0}")]
-    InvalidGrant(String),
-    #[error("OAuth client or redirect configuration is invalid: {0}")]
-    Configuration(String),
-    #[error("OAuth authorization failed temporarily: {0}")]
-    Retryable(String),
-}
-
-impl OAuthExchangeError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::InvalidCallbackUrl => "AUTH_CALLBACK_URL_INVALID",
-            Self::MissingAuthorizationCode => "AUTH_CALLBACK_CODE_MISSING",
-            Self::MissingState => "AUTH_CALLBACK_STATE_MISSING",
-            Self::StateMismatch => "AUTH_CALLBACK_STATE_MISMATCH",
-            Self::AccessDenied(_) => "AUTH_ACCESS_DENIED",
-            Self::InvalidGrant(_) => "AUTH_INVALID_GRANT",
-            Self::Configuration(_) => "AUTH_CONFIGURATION_ERROR",
-            Self::Retryable(_) => "AUTH_EXCHANGE_RETRYABLE",
-        }
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::AccessDenied(_) | Self::InvalidGrant(_) | Self::Configuration(_)
-        )
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuthCompletionValue {
+    CallbackUrl { value: String },
+    Manual { value: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -259,21 +189,14 @@ pub struct StoredCredential {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthProgress {
-    pub user_code: Option<String>,
-    pub verification_uri: Option<String>,
-    pub verification_uri_complete: Option<String>,
-    pub expires_at: Option<String>,
-    pub poll_interval_seconds: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSessionInitData {
     pub session_id: String,
-    pub vendor: String,
-    pub scheme: String,
-    pub auth_url: String,
+    pub vendor_id: String,
+    pub channel: String,
+    pub flow: stravia_vendor_sdk::AuthFlow,
+    pub auth_url: Option<String>,
     pub user_code: Option<String>,
+    pub manual_input: Option<stravia_vendor_sdk::AuthManualInput>,
     pub callback_mode: OAuthCallbackMode,
     pub listener_state: String,
     pub listener_port: Option<u16>,
@@ -287,9 +210,12 @@ pub struct AuthSessionInitData {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AuthSessionStatusData {
     Pending {
-        scheme: String,
-        auth_url: String,
+        vendor_id: String,
+        channel: String,
+        flow: stravia_vendor_sdk::AuthFlow,
+        auth_url: Option<String>,
         user_code: Option<String>,
+        manual_input: Option<Box<stravia_vendor_sdk::AuthManualInput>>,
         callback_mode: OAuthCallbackMode,
         listener_state: String,
         listener_port: Option<u16>,
@@ -313,12 +239,21 @@ pub enum AuthSessionStatusData {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum AuthPollState {
-    Pending(AuthProgress),
-    Ready(CredentialBundle),
-    Error { code: String, message: String },
+#[derive(Clone)]
+pub(crate) struct VendorAuthSessionRuntime {
+    pub(crate) scope: Arc<VendorSessionScope>,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) publication: Arc<tokio::sync::Mutex<Option<crate::plugin::VendorPublicationFence>>>,
+}
+
+impl std::fmt::Debug for VendorAuthSessionRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VendorAuthSessionRuntime")
+            .field("vendor_id", &self.scope.vendor_id)
+            .field("data_epoch", &self.scope.data_epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +261,8 @@ pub struct AuthSession {
     pub id: String,
     pub provider_id: Option<String>,
     pub driver_key: String,
+    pub channel: String,
+    pub auth_descriptor: stravia_vendor_sdk::AuthDescriptor,
     pub scheme: String,
     pub status: String,
     pub use_proxy: bool,
@@ -346,24 +283,8 @@ pub struct AuthSession {
     pub error_code: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateAuthSession {
-    pub provider_id: Option<String>,
-    pub driver_key: String,
-    pub scheme: String,
-    pub status: String,
-    pub use_proxy: bool,
-    pub user_code: Option<String>,
-    pub verification_uri: Option<String>,
-    pub verification_uri_complete: Option<String>,
-    pub state_json: Option<String>,
-    pub context_json: Option<String>,
-    pub result_json: Option<String>,
-    pub expires_at: Option<String>,
-    pub poll_interval_seconds: Option<i32>,
-    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub(crate) vendor_runtime: Option<Arc<VendorAuthSessionRuntime>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -380,52 +301,4 @@ pub struct UpdateAuthSession {
     pub poll_interval_seconds: Option<i32>,
     pub error_code: Option<String>,
     pub last_error: Option<String>,
-}
-
-#[async_trait]
-pub trait AuthDriver: Send + Sync {
-    fn metadata(&self) -> AuthDriverMetadata;
-
-    async fn start(&self, _ctx: StartAuthContext) -> anyhow::Result<CreateAuthSession> {
-        bail!("{} start flow is not implemented yet", self.metadata().key)
-    }
-
-    async fn poll(
-        &self,
-        _session: &AuthSession,
-        _ctx: RefreshAuthContext,
-    ) -> anyhow::Result<AuthPollState> {
-        bail!("{} poll flow is not implemented yet", self.metadata().key)
-    }
-
-    async fn exchange(
-        &self,
-        _session: &AuthSession,
-        _input: AuthExchangeInput,
-        _ctx: ExchangeAuthContext,
-    ) -> anyhow::Result<CredentialBundle> {
-        bail!(
-            "{} exchange flow is not implemented yet",
-            self.metadata().key
-        )
-    }
-
-    async fn refresh(
-        &self,
-        _credential: &StoredCredential,
-        _ctx: RefreshAuthContext,
-    ) -> anyhow::Result<CredentialBundle> {
-        bail!(
-            "{} refresh flow is not implemented yet",
-            self.metadata().key
-        )
-    }
-
-    fn bind_runtime(
-        &self,
-        _provider: &Provider,
-        _credential: &StoredCredential,
-    ) -> anyhow::Result<RuntimeBinding> {
-        Ok(RuntimeBinding::default())
-    }
 }

@@ -111,7 +111,7 @@ impl ModelTurnExecutor for SchemaRepairModel {
                 model_id: input.request.model.clone(),
                 provider_id: "in-memory".into(),
                 target_id: "in-memory".into(),
-                egress: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+                egress: Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24),
             },
             input.request,
             [Ok(CanonicalEvent::Completed(Box::new(response)))],
@@ -219,6 +219,7 @@ async fn local_backend_repairs_schema_without_native_structured_outputs() {
                 total_time: Duration::from_secs(60),
             }),
             cancellation: stravia_runtime_contract::CancellationToken::new(),
+            deadline: std::time::Instant::now() + Duration::from_secs(60),
         })
         .await
         .expect("schema-aware Local Search");

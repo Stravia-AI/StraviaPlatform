@@ -354,6 +354,7 @@ pub trait StorageBootstrap: Send + Sync {
 }
 
 pub trait Storage: Send + Sync {
+    fn vendor_plugins(&self) -> &crate::plugin::PluginStore;
     fn providers(&self) -> &dyn ProviderStore;
     fn web_providers(&self) -> Option<&dyn WebProviderStore> {
         None

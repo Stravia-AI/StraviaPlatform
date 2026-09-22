@@ -543,8 +543,8 @@ _避免使用_：Egress Wire Value、Native Reasoning Option、Mapped Effort
 
 ## Provider
 
-Provider 是管理员保存的一条上游连接，包含 Catalog 身份、Vendor、Protocol、base URL 与 Adapter Credentials；base URL 是保存时由 Vendor 从 Adapter Credentials 派生的快照，管理员显式覆盖时保存覆盖值，推理期间不重新派生。它不是 Provider Catalog Entry，也不是客户端 Route。
-_避免使用_：Vendor（当指这条保存记录）
+Provider 是管理员保存的一条上游连接，引用一个 Vendor、供应商身份及其 channel，并保存 Protocol、已确认的服务地址、普通选项和连接范围的上游凭据。供应商身份表示这条连接属于哪类上游接入；保存连接的 UUID 区分具体连接记录，同一供应商身份可以有多条连接，两者不得互换。Provider 是调用与凭据信任的连接边界，不是 Vendor Plugin、Provider Catalog Entry 或客户端 Route。
+_避免使用_：Vendor（当指这条保存记录）、把供应商身份当作连接 UUID
 
 ## Provider Allowance
 
@@ -553,7 +553,7 @@ _避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
 
 ## Provider Allowance Monitor
 
-Provider Allowance Monitor 是 Stravia Core 按 Provider 的 Catalog 身份选择、读取并规范化上游额度的受信实现；只有启用且命中本地 Monitor registry 的 Provider 才具有 Provider Allowance。Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
+Provider Allowance Monitor 是 Provider 所引用的 Vendor Plugin 为该类供应商读取并规范化上游额度的受信能力。Stravia 负责按 Provider 调度读取、保存样本与呈现结果；Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
 _避免使用_：Catalog Allowance Capability、Quota Endpoint、远端解析规则
 
 ## Allowance Item
@@ -578,12 +578,12 @@ _避免使用_：7 日均用量、Usage Forecast
 
 ## Vendor
 
-Vendor 是具有稳定身份的上游供应商接入定义，其身份不由 npm package、Provider Catalog 条目或所用协议决定。同一 Vendor 可以包含多个 channel，并被多条已保存的 Provider 连接引用。
-_避免使用_：SDK、npm package、Provider（当指接入定义）
+Vendor 是具有稳定身份的供应商接入实现，可以包含多个 channel。基础回退 Vendor 以一个身份覆盖多个供应商身份；专属 Vendor 完整接管其供应商身份下的全部连接，不与基础 Vendor 按 channel、能力或操作混用，在专属实现缺失、不可用或失败时也不回退。供应商身份与已保存 Provider 连接的 UUID 不同。
+_避免使用_：SDK、npm package、Provider（当指接入定义）、把基础 Vendor 的供应商身份当作多个 Vendor
 
 ## Vendor Plugin
 
-Vendor Plugin 是实现一个 Vendor 的可安装、版本化软件包，一个包对应一个 Vendor，可包含多个 channel，并提供模型推理、完整联网搜索、媒体生成中的一种或多种能力，不以模型推理为必备能力。它不是已保存的 Provider 连接，也不是供多个插件复用的 Protocol Codec。
+Vendor Plugin 是实现一个 Vendor 的可安装、版本化软件包，可包含多个 channel，并提供模型推理、完整联网搜索、媒体生成中的一种或多种能力，不以模型推理为必备能力。一个基础插件实现一个覆盖多个供应商品牌标识的回退 Vendor，而不是导出多个 Vendor 身份；专属插件对匹配品牌标识具有整体优先权。它不是已保存的 Provider 连接，也不是供多个插件复用的 Protocol Codec。
 _避免使用_：Provider 连接、Protocol Codec
 
 ## Vendor Credential Authorization

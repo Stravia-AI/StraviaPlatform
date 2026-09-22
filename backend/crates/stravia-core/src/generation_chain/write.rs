@@ -193,7 +193,7 @@ impl GenerationChainWrite {
     ) -> bool {
         if !generation_node_is_legal(response)
             || !client_projection_is_valid(
-                crate::protocol::transform::ProtocolTransform::inferred_ingress(
+                stravia_protocol_codec::transform::ProtocolTransform::inferred_ingress(
                     &self.request_delta,
                 ),
                 response,
@@ -216,13 +216,18 @@ impl GenerationChainWrite {
                 actual_model,
                 selected_target_key,
             } => (
-                GenerationChainState::from_request(&self.request, namespace, *protocol)
-                    .with_provider_model(actual_model)
-                    .with_selected_target_key(selected_target_key),
+                GenerationChainState::from_request(
+                    &self.request,
+                    namespace,
+                    Option::<ProtocolId>::None,
+                )
+                .with_protocol_identity(protocol.as_ref())
+                .with_provider_model(actual_model)
+                .with_selected_target_key(selected_target_key),
                 upstream_response_id,
             ),
             GenerationSource::Hook { protocol } => (
-                GenerationChainState::from_request(&self.request, "hook", *protocol),
+                GenerationChainState::from_request(&self.request, "hook", Some(*protocol)),
                 None,
             ),
         };

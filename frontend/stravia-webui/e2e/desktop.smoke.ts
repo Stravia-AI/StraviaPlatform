@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import type { AddressInfo } from 'node:net'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { $, browser, expect } from '@wdio/globals'
 
@@ -98,6 +99,64 @@ async function unusedPort(): Promise<number> {
 }
 
 describe('Stravia desktop smoke', () => {
+  before(async () => {
+    await browser.tauri.switchWindow('main')
+    await $('a[href="/vendor-plugins"]').waitForExist({ timeout: 180_000 })
+  })
+
+  it('imports a local Wasm component through native-authenticated desktop management', async () => {
+    await browser.execute(() => {
+      localStorage.setItem('stravia-locale', 'en-US')
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    })
+    await browser.refresh()
+    await browser.tauri.switchWindow('main')
+    await $('a[href="/vendor-plugins"]').click()
+    const component = fileURLToPath(new URL('../../../target/vendor-test-fixtures/lifecycle-v1.wasm', import.meta.url))
+    await $('#vendor-plugin-file').waitForExist()
+    const contents = await readFile(component)
+    // 嵌入式驱动不支持文件路径发送；分块传递真实文件，避免超过其 JSON 请求体上限。
+    for (let offset = 0; offset < contents.length; offset += 256 * 1024) {
+      await browser.execute(
+        (encoded, name) => {
+          const input = document.querySelector<HTMLInputElement>('#vendor-plugin-file')
+          if (!input) throw new Error('Plugin file input is missing')
+          const previous = input.files?.item(0)
+          const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0))
+          const files = new DataTransfer()
+          files.items.add(new File(previous ? [previous, bytes] : [bytes], name, { type: 'application/wasm' }))
+          input.files = files.files
+        },
+        contents.subarray(offset, offset + 256 * 1024).toString('base64'),
+        basename(component),
+      )
+    }
+    await browser.execute(() => {
+      const input = document.querySelector<HTMLInputElement>('#vendor-plugin-file')
+      if (!input) throw new Error('Plugin file input is missing')
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await $('button=Review import').click()
+    const preview = await $('[role="dialog"]')
+    await expect(preview).toHaveText(expect.stringContaining('fixture.lifecycle'))
+    await preview.$('button=Apply plugin change').click()
+    await preview.waitForExist({ reverse: true })
+
+    const card = await $('//*[@data-slot="card"][.//*[normalize-space()="fixture.lifecycle"]]')
+    await expect(card).toHaveText(expect.stringContaining('1.0.0'))
+    await expect(card).toHaveText(expect.stringContaining('Local'))
+    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const installed = (await adminRequest(port, '/vendor-plugins')) as Array<{
+      vendor_id: string
+      version: string
+      source: string
+    }>
+    expect(installed.find((plugin) => plugin.vendor_id === 'fixture.lifecycle')).toMatchObject({
+      version: '1.0.0',
+      source: 'local',
+    })
+  })
+
   it('persists the complete client address through native authenticated settings without weakening access checks', async () => {
     await browser.execute(() => {
       localStorage.setItem('stravia-locale', 'en-US')
@@ -322,7 +381,13 @@ describe('Stravia desktop smoke', () => {
           method: 'POST',
           body: JSON.stringify({
             name: `Desktop smoke provider ${fixtureSuffix}`,
-            source: { type: 'custom', protocol: 'open-responses', base_url: 'https://desktop-smoke.invalid' },
+            source: {
+              type: 'custom',
+              vendor: 'protocol-open-responses',
+              channel: 'default',
+              protocol: 'open-responses',
+              base_url: 'https://desktop-smoke.invalid',
+            },
             credential: { type: 'none' },
             use_proxy: false,
           }),

@@ -22,7 +22,7 @@ bunx tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 1. 确保 `Cargo.toml`、`package.json` 和 `backend/apps/stravia-desktop/tauri.conf.json` 版本一致，并在 `CHANGELOG.md` 中存在该版本的非空章节。
 2. 从 `main` 中的目标 commit 创建 `vMAJOR.MINOR.PATCH` 或合法 SemVer prerelease tag。
-3. 推送 tag。`release.yml` 会运行完整 CI，签署四个平台产物，执行 `.github/scripts/generate-updater-manifest.py`，创建 draft Release，发布容器与 Nix 产物，最后公开 Release。
+3. 推送 tag。`release.yml` 会运行完整 CI，签署四个平台产物，执行 `.github/scripts/generate-updater-manifest.py`，创建 draft Release，发布容器镜像，最后公开 Release。
 4. 任一签名 secret、`.sig`、平台产物或清单字段缺失时 workflow 必须失败。不要通过移除校验、手工上传无签名安装包或发布部分清单来绕过失败。
 
 `stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。

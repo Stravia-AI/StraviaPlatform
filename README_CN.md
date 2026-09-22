@@ -72,7 +72,7 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-也可使用 `nix run github:Stravia-AI/StraviaPlatform`，或从 Releases 下载对应平台压缩包（请先对照 `SHA256SUMS` 校验）。
+也可从 Releases 下载对应平台压缩包（请先对照 `SHA256SUMS` 校验）。
 
 **首次启动（两种形态相同）：**
 
@@ -124,14 +124,14 @@ Responses 流在收到 indexed reasoning 项的权威完成事件后立即关闭
 ### 平台工具与内置 Agent 运行时
 
 - `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
-- **联网搜索** —— Agent 循环替模型搜索、读网页，可用内嵌 Moli 引擎、Exa 或智谱，也可绑定 Codex 搜索。
+- **联网搜索** —— 可使用 Local Agent 循环配合内嵌 Moli、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
 - **媒体生成** —— 通过已有 Codex OAuth Route 生成或编辑一张图片，再用 Artifact Reference 在后续工具中复用。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
 
 #### 图片生成
 
-在 **高级功能 → 媒体生成** 中绑定已保存的图片 Route，再开启能力。所有已启用 Target 必须使用已启用的 OpenAI Codex OAuth Provider、GPT-5 或更高代模型，以及已连接的凭据；已禁用 Target 不参与校验。保存配置不会触发生图。执行前再次校验绑定，并沿用凭据刷新、Route 优先级、重试与切换策略。具体账号和模型是否可用仍取决于上游支持。
+在 **高级功能 → 媒体生成** 中绑定已保存的图片 Route，再开启能力。所有已启用 Target 必须使用已启用的 Provider，其已安装 Vendor 的 channel 与所选 Provider Model 均支持图片生成，并具备所需凭据；已禁用 Target 不参与校验。内置 Codex OAuth 与纯图片插件使用相同的 Route 机制。保存配置不会触发生图。执行前再次校验绑定，并沿用凭据刷新、Route 优先级、重试与切换策略。具体账号和模型是否可用仍取决于上游支持。
 
 MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自动暴露还要求 API Key 同时开启透明注入总开关并选择 **媒体生成**。新旧 Key 的该选项均默认关闭；它不是独立权限。
 
@@ -144,6 +144,20 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 编辑时添加有序的 `reference_images`：当前 Principal 拥有且**不附带读取选项**的纯 `sa:…` 引用，或公网 HTTP(S) 图片 URL。本地文件先走现有 `/v1/artifacts/uploads` 上传流程。公网来源在生图前安全抓取并收存，不透传源 URL。平台最多接受五张 JPEG/PNG/WebP 参考图，每张不超过 32 MiB、单边 8192 像素、总计 2500 万像素。非法、缺失、过期或其他 Principal 的文件在生图前即被拒绝。
 
 成功结果只包含 `artifact_reference`、`mime_type`、`size` 和从实际解码文件读取的 `media: {width,height}`。引用可用于下一次编辑；显式下载调用 `StraviaRead`，参数为 `{"path":"sa:…?download=1"}`。无图片、损坏图片或收存失败均返回错误，不产生空图成功结果。执行状态不明时，Route 重试可能重复生成并额外消耗额度；取消、输入错误、收存失败不会触发重新生图。用量仅记录上游实际报告的值。
+
+### 供应商插件
+
+所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 恰好随附五个 Vendor 包：一个 `stravia-vendor-base` 基础回退 Vendor 覆盖 Codex、Grok、Command Code、Devin 之外的全部现有供应商接入，另有 `stravia-vendor-codex`、`stravia-vendor-grok`、`stravia-vendor-command-code`、`stravia-vendor-devin` 四个包分别专用于这四种身份。普通 OpenAI 与 xAI API 连接仍由基础包承接；其他保留的接入继续具备原有认证、云协议、模型发现、额度查询与推理行为。专属包完整接管其供应商身份下的全部 channel 和操作；即使它不可用、缺少某项 channel 或能力，或执行失败，也不会回退到基础包。供应商身份与已保存 Provider 连接的 UUID 是两种不同身份。
+
+内置插件首次使用即可用。**供应商插件** 页面展示已安装的身份、实际版本、来源与加载状态；浏览器和 Desktop 使用同一界面导入本机 `.wasm` 文件。安装不会访问插件市场或下载 codec 依赖。包名称与作者为自报信息，不代表已验证身份。共享 codec 库覆盖 OpenAI-compatible（含 embeddings）、Anthropic、Gemini 和 Open Responses；专有协议留在其所属 Vendor 包内。
+
+基础包在构建时从随附注册表生成目录接入。兼容品牌复用其实现族，但不继承其他供应商的 OAuth channel。模型同步保留供应商自身的清单策略：原生账户接入发现账户可用模型，Claude Code 与 Vertex 保留各 channel 的精选清单，目录型接入使用其模型目录。自定义连接保留插件自身的发现方式。显式静态模型优先；已保存的目录来源标记不会将原生账户或精选清单扩张为整个目录。
+
+连接表单使用插件声明的字段与 channel。填写凭据即授权该插件处理当前连接的上游秘密，不授予其他连接或平台管理凭据的访问权。保存前复核 Base URL 与授权 origin。origin 精确匹配协议、主机与端口；HTTP 权限不会隐式授予 WebSocket 权限。管理员可以明确配置本机或局域网服务。已声明的地址字段可根据保存的配置授予附属 origin，但 OAuth 响应和插件私有状态不能扩大授权。
+
+本地替换后退出内置自动更新。只有程序随附版本严格更高时才自动更新内置插件，同版本或较旧版本不覆盖现有产物。**恢复程序随附版本** 需要明确确认，并提示可能的降级。兼容更新允许在途调用使用旧版本完成。不兼容更新必须确认受影响数据及该 Vendor 活跃任务的中断；Provider 身份、Route/Target 绑定、历史与已确认用量保持保留。因重置而缺少数据的连接暂不可用，重新配置或认证后恢复。
+
+同一连接可以提供推理、完整搜索与图片生成，也可以仅提供其中部分能力。插件不要求可选模型时，外部搜索 Route 可使用 Provider-only Target。外部搜索返回完整引用报告，不支持续接；Local 搜索保持既有续接规则。结果交付前的可重试错误遵循 Route 策略，可能重复上游执行并消耗额度。SDK、隔离与生命周期契约见[插件设计](docs/design/vendor-plugins.md)。
 
 ### 密钥、用量与请求记录
 
@@ -169,7 +183,8 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 ### 存储与部署
 
 - 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。
-- 部署所拥有的全部数据收归单一实例锁保护的数据目录；旧布局有显式迁移工具。
+- 实例保留在本地的内容统一置于实例锁保护的数据目录。不可变插件 Component 位于 `plugins/artifacts/<sha256>.wasm`；SQL 只保存插件元数据以及连接与私有状态，不保存 Component 字节。
+- 实例文件必须与数据库配套备份。仅备份远程 PostgreSQL 并不完整，因为其中没有已安装的插件 Component。现有迁移工具会随旧数据根的其余内容一并复制插件产物。
 - 一个端口同时提供模型 API、MCP、Admin API、健康探针与内嵌 WebUI；反向代理下可用显式管理入口与受信代理。
 
 ## 部署形态
@@ -179,7 +194,7 @@ MCP 与兼容模型请求的显式调用使用同一个 `generate` 工具。自�
 | 形态     | Tauri 桌面应用，集成管理界面           | 单一无头二进制或容器镜像              |
 | 适用     | 个人开发者；可直接写入本机客户端配置   | 自托管与团队共享部署                  |
 | 存储     | 本地 SQLite                            | SQLite 或 PostgreSQL                  |
-| 获取     | Releases 上的 Windows NSIS / Linux AppImage | 压缩包 · `ghcr.io` 镜像 · Nix flake |
+| 获取     | Releases 上的 Windows NSIS / Linux AppImage | 压缩包 · `ghcr.io` 镜像 |
 
 同一套 Rust 核心驱动两种形态，管理面是同一个 WebUI。
 

@@ -14,9 +14,7 @@ import type {
   ProviderModelList,
   ProviderModelSelectionPolicy,
   ProviderModelSyncSummary,
-  CatalogProviderList,
   CanonicalModelList,
-  CatalogRefreshSummary,
   ApiKeyStats,
   CreateApiKey,
   BindRouteInput,
@@ -43,6 +41,7 @@ import type {
   ModelCapabilities,
   ModelStats,
   OAuthCallbackMode,
+  OAuthCandidateConfiguration,
   OAuthSessionInitData,
   OAuthSessionStatusData,
   Provider,
@@ -57,13 +56,15 @@ import type {
   UpdateRoute,
   UpdateProvider,
   UpdateWebProvider,
-  VendorMetadata,
+  ProviderDescriptor,
+  ProviderConfigurationPreview,
+  ProviderConfigurationPreviewInput,
   WebAccessSettings,
   WebProvider,
   WebSearchConfigView,
   UpdateWebSearchConfig,
   EligibleSearchModel,
-  CompatibleCodexProvider,
+  ExternalSearchRoute,
   MediaUnderstandingConfigView,
   UpdateMediaUnderstandingConfig,
   MediaGenerationConfig,
@@ -72,6 +73,9 @@ import type {
   ThinkingLevel,
   ProviderAllowanceSnapshot,
   ProviderAllowanceTarget,
+  ConfirmPluginUpdate,
+  PluginPreview,
+  PluginSummary,
 } from '$lib/types'
 
 export { isTauri }
@@ -120,7 +124,23 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
   return decodeAdmin<T>(response)
 }
 
+async function uploadWasm<T>(path: string, file: File): Promise<T> {
+  const response = await authenticatedFetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/wasm', 'X-Stravia-CSRF': '1' },
+    body: file,
+  })
+  return decodeAdmin<T>(response)
+}
+
 export const admin = {
+  vendorPlugins: {
+    list: () => request<PluginSummary[]>('GET', '/vendor-plugins'),
+    import: (file: File) => uploadWasm<PluginPreview>('/vendor-plugins/import', file),
+    confirm: (input: ConfirmPluginUpdate) => request<PluginSummary>('POST', '/vendor-plugins/confirm', input),
+    restoreBuiltin: (vendorId: string) =>
+      request<PluginPreview>('POST', `/vendor-plugins/${encodeURIComponent(vendorId)}/restore`),
+  },
   credentialProtection: {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
@@ -132,15 +152,11 @@ export const admin = {
       request<ConnectClientApplyPlan>('POST', '/connect-clients/preview', input),
   },
   providers: {
-    vendors: () => request<VendorMetadata[]>('GET', '/vendors'),
+    descriptors: () => request<ProviderDescriptor[]>('GET', '/vendors'),
     list: () => request<Provider[]>('GET', '/providers'),
     create: (input: CreateProvider) => request<Provider>('POST', '/providers', input),
-    previewBaseUrl: (vendorId: string, adapterCredentials: Record<string, string>, baseUrl?: string) =>
-      request<{ base_url: string }>('POST', '/providers/base-url/preview', {
-        vendor_id: vendorId,
-        adapter_credentials: adapterCredentials,
-        base_url: baseUrl,
-      }),
+    previewConfiguration: (input: ProviderConfigurationPreviewInput) =>
+      request<ProviderConfigurationPreview>('POST', '/providers/configuration-preview', input),
     copy: (id: string, options: Record<string, unknown> = {}) =>
       request<Provider>('POST', `/providers/${id}/copy`, options),
     update: (id: string, input: UpdateProvider) => request<Provider>('PUT', `/providers/${id}`, input),
@@ -188,11 +204,7 @@ export const admin = {
     createOAuth: (sessionId: string, input: CreateProvider) =>
       request<Provider>('POST', '/providers/oauth', { session_id: sessionId, input }),
   },
-  catalog: {
-    providers: async () => (await request<CatalogProviderList>('GET', '/catalog/providers')).providers,
-    canonicalModels: () => request<CanonicalModelList>('GET', '/catalog/models'),
-    refresh: () => request<CatalogRefreshSummary>('POST', '/catalog/refresh'),
-  },
+  catalog: { canonicalModels: () => request<CanonicalModelList>('GET', '/catalog/models') },
   webAccess: {
     providers: {
       list: () => request<WebProvider[]>('GET', '/web-providers'),
@@ -212,7 +224,7 @@ export const admin = {
       update: (input: UpdateWebSearchConfig) => request<WebSearchConfigView>('PUT', '/web-search/config', input),
     },
     eligibleModels: () => request<EligibleSearchModel[]>('GET', '/web-search/eligible-models'),
-    compatibleCodexProviders: () => request<CompatibleCodexProvider[]>('GET', '/web-search/codex-providers'),
+    externalRoutes: () => request<ExternalSearchRoute[]>('GET', '/web-search/external-routes'),
   },
   mediaUnderstanding: {
     get: () => request<MediaUnderstandingConfigView>('GET', '/media-understanding'),
@@ -228,22 +240,28 @@ export const admin = {
     eligibleRoutes: () => request<EligibleMediaGenerationRoute[]>('GET', '/media-generation/eligible-routes'),
   },
   oauth: {
-    init: (vendor: string, useProxy: boolean, callbackMode: OAuthCallbackMode, locale: Locale) =>
+    init: (
+      vendorId: string,
+      channel: string,
+      configuration: OAuthCandidateConfiguration,
+      useProxy: boolean,
+      callbackMode: OAuthCallbackMode,
+      locale: Locale,
+    ) =>
       request<OAuthSessionInitData>('POST', '/oauth/sessions/init', {
-        vendor,
+        vendor_id: vendorId,
+        channel,
         use_proxy: useProxy,
         callback_mode: callbackMode,
         locale,
+        ...configuration,
       }),
     status: (sessionId: string) => request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
     cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${sessionId}/cancel`),
     updateProxy: (sessionId: string, useProxy: boolean) =>
       request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${sessionId}/proxy`, { use_proxy: useProxy }),
-    complete: (sessionId: string, callbackUrl: string, metadata?: Record<string, unknown>) =>
-      request<void>('POST', `/oauth/sessions/${sessionId}/complete`, {
-        callback_url: callbackUrl,
-        metadata: metadata ?? {},
-      }),
+    complete: (sessionId: string, type: 'callback_url' | 'manual', value: string) =>
+      request<void>('POST', `/oauth/sessions/${sessionId}/complete`, { input: { type, value } }),
   },
   models: {
     list: () => request<Route[]>('GET', '/models'),

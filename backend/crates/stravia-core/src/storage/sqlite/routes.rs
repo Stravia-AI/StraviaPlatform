@@ -18,7 +18,7 @@ impl SqliteRouteStore {
         let sql = format!(
             "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -45,7 +45,7 @@ impl SqliteRouteStore {
         let route = sqlx::query_as::<_, Route>(
             "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
@@ -140,7 +140,8 @@ impl RouteStore for SqliteRouteStore {
             let id = existing
                 .iter()
                 .find(|row| {
-                    row.provider_id == target.provider_id.trim() && row.model == target.model.trim()
+                    row.provider_id == target.provider_id.trim()
+                        && row.model.as_deref() == target.model.as_deref().map(str::trim)
                 })
                 .map(|row| row.id.clone())
                 .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
@@ -150,7 +151,7 @@ impl RouteStore for SqliteRouteStore {
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
-            .bind(target.model.trim())
+            .bind(target.model.as_deref().map(str::trim))
             .bind(target.enabled)
             .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
             .bind(
@@ -201,7 +202,7 @@ mod tests {
         crate::db::models::CreateTarget {
             enabled: true,
             provider_id: provider_id.into(),
-            model: model.into(),
+            model: Some(model.into()),
             priority: Some(0),
             first_token_timeout_ms: None,
             target_retry_budget: None,
@@ -267,7 +268,58 @@ mod tests {
         assert_eq!(persisted.balance, "traffic_equalization");
         assert_eq!(persisted.targets.len(), 1);
         assert_eq!(persisted.targets[0].provider_id, "provider-1");
-        assert_eq!(persisted.targets[0].model, "working-model");
+        assert_eq!(persisted.targets[0].model.as_deref(), Some("working-model"));
+    }
+
+    #[tokio::test]
+    async fn provider_only_target_round_trips_without_a_model_row() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("migrations");
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, protocol, base_url, api_key, auth_mode
+             ) VALUES ('research-provider', 'Research', 'open-responses', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("Provider");
+        let store = SqliteRouteStore { pool };
+
+        let route = store
+            .put(PutRoute {
+                id: None,
+                model_id: "research-route".into(),
+                display_name: None,
+                selection_strategy: "traffic_equalization".into(),
+                is_enabled: true,
+                targets: vec![crate::db::models::CreateTarget {
+                    provider_id: "research-provider".into(),
+                    model: None,
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
+                default_thinking_level: None,
+            })
+            .await
+            .expect("Provider-only Route");
+
+        assert!(route.target_model.is_none());
+        assert!(route.targets[0].model.is_none());
+        assert_eq!(route.targets[0].provider_id, "research-provider");
     }
 
     #[tokio::test]

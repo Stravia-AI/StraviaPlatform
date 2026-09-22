@@ -1,10 +1,27 @@
 export type OAuthCallbackMode = 'auto' | 'manual'
 
+export interface OAuthCandidateConfiguration {
+  provider_id?: string
+  base_url: string
+  protocol?: string | null
+  options: Record<string, unknown>
+  credentials: Record<string, unknown>
+}
+
+export interface OAuthManualInput {
+  type: 'text' | 'callback_url'
+  label: string
+  description?: string | null
+  secret: boolean
+}
+
 export interface OAuthSessionInitData {
   session_id: string
-  vendor: string
-  scheme: string
-  auth_url: string
+  /** Supplier profile type ID; the wire field name remains `vendor_id`. */
+  vendor_id: string
+  channel: string
+  flow: 'authorization_code' | 'device_code' | 'manual'
+  auth_url?: string | null
   user_code?: string | null
   callback_mode: OAuthCallbackMode
   listener_state: string
@@ -13,13 +30,13 @@ export interface OAuthSessionInitData {
   fallback_reason?: string | null
   expires_in: number
   interval: number
+  manual_input?: OAuthManualInput | null
 }
 
 export type OAuthSessionStatusData =
   | {
       status: 'pending'
-      scheme: string
-      auth_url: string
+      auth_url?: string | null
       user_code?: string | null
       callback_mode: OAuthCallbackMode
       listener_state: string
@@ -30,6 +47,7 @@ export type OAuthSessionStatusData =
       last_error?: string | null
       expires_in: number
       interval: number
+      manual_input?: OAuthManualInput | null
     }
   | { status: 'exchanging'; expires_in: number }
   | { status: 'ready'; expires_in: number; resource_url?: string | null }

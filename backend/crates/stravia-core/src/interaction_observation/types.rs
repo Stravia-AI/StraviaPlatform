@@ -405,6 +405,8 @@ pub(crate) enum RunEvent {
         payload: Value,
     },
     Wire {
+        #[serde(skip)]
+        capture_id: Option<u64>,
         direction: String,
         transport: String,
         protocol: String,

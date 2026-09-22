@@ -3,14 +3,13 @@
 //! Callers submit a Principal, Effective Model Request, authorization,
 //! optional forwarded upstream hints, and cancel / deadline. The live adapter
 //! drives the `router::selection` attempt policy, first-output failover, and
-//! Provider Transport.
+//! Wasm Vendor execution through the host-owned transport boundary.
 
-mod accumulator;
+mod capability;
 mod live;
 mod provider;
 pub(crate) mod support;
 
-pub(crate) use accumulator::StreamResponseAccumulator;
 pub(crate) use live::LiveModelTurnExecutor;
 
 use std::sync::{Arc, atomic::AtomicBool};
@@ -108,16 +107,6 @@ impl TurnInput {
         self
     }
 
-    pub(crate) fn without_responses_websocket(mut self) -> Self {
-        self.allow_responses_websocket = false;
-        self
-    }
-
-    pub(crate) fn with_normalized_attachments(mut self) -> Self {
-        self.attachments_normalized = true;
-        self
-    }
-
     pub(crate) fn with_observer(mut self, observer: RunObserver) -> Self {
         self.observer = Some(observer);
         self
@@ -129,13 +118,79 @@ use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream,
 #[derive(Clone)]
 pub(crate) struct UpstreamErrorResponse;
 
+#[derive(Clone, Default)]
+pub(crate) struct VendorPublication {
+    current: Arc<parking_lot::Mutex<Option<crate::plugin::VendorPublicationFence>>>,
+}
+
+impl std::fmt::Debug for VendorPublication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VendorPublication")
+            .field("available", &self.current.lock().is_some())
+            .finish()
+    }
+}
+
+impl VendorPublication {
+    pub(crate) fn publish(&self, publication: crate::plugin::VendorPublicationFence) {
+        *self.current.lock() = Some(publication);
+    }
+
+    pub(crate) fn current(&self) -> anyhow::Result<crate::plugin::VendorPublicationFence> {
+        self.current
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Vendor result has no publication fence"))
+    }
+
+    pub(crate) async fn write_fence(
+        &self,
+    ) -> anyhow::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        self.current()?.write_fence().await
+    }
+}
+
+/// 一次最终写入可包含多轮、甚至多个 Vendor 的结果。先逐结果校验，再按
+/// 活动锁的进程内稳定顺序去重取读锁，避免两个反向跨 Vendor 提交与更新写锁互锁；
+/// 全部锁到手后再次逐结果校验，保证去重没有跳过各自的 caller/deadline/epoch。
+pub(crate) async fn vendor_write_fences(
+    publications: &[crate::plugin::VendorPublicationFence],
+) -> anyhow::Result<Vec<tokio::sync::OwnedRwLockReadGuard<()>>> {
+    for publication in publications {
+        publication.ensure_current()?;
+    }
+    let mut activities = publications.to_vec();
+    activities.sort_by_key(crate::plugin::VendorPublicationFence::activity_order_key);
+    activities.dedup_by(|right, left| left.same_activity(right));
+
+    let mut guards = Vec::with_capacity(activities.len());
+    for activity in &activities {
+        guards.push(activity.write_fence().await?);
+    }
+    for publication in publications {
+        publication.ensure_current()?;
+    }
+    Ok(guards)
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetIdentity {
     pub actual_model: String,
     pub provider_id: String,
     pub target_id: String,
     pub(crate) namespace: String,
+    pub(crate) protocol_hint: String,
     pub(crate) response_continuation_available: Arc<AtomicBool>,
+    pub(crate) publication: Option<VendorPublication>,
+}
+
+impl TargetIdentity {
+    pub(crate) fn protocol_identity(
+        &self,
+    ) -> Option<stravia_runtime_contract::protocol::ids::ProtocolIdentity> {
+        (!self.protocol_hint.is_empty()).then(|| self.protocol_hint.clone().into())
+    }
 }
 
 pub struct ModelTurn {
@@ -161,7 +216,9 @@ impl ModelTurn {
                 provider_id: route.provider_id.clone(),
                 target_id: route.target_id.clone(),
                 namespace: String::new(),
+                protocol_hint: String::new(),
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
+                publication: None,
             },
             route,
             output: Box::pin(futures::stream::iter(events)),
@@ -190,9 +247,6 @@ impl ModelTurnExecutor for UnreachableModelTurnExecutor {
 pub(crate) fn unreachable_executor() -> Arc<dyn ModelTurnExecutor> {
     Arc::new(UnreachableModelTurnExecutor)
 }
-
-#[cfg(test)]
-use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -233,7 +287,7 @@ impl ModelTurnExecutor for InMemoryModelTurnExecutor {
             model_id: request.model.clone(),
             provider_id: "in-memory".into(),
             target_id: "in-memory".into(),
-            egress: OPEN_RESPONSES_2026_04_24,
+            egress: None,
         };
         Ok(ModelTurn::in_memory(
             route,

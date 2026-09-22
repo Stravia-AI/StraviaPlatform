@@ -28,6 +28,9 @@ const INCOMPLETE_STRUCTURED_WIRE_OMITTED: &str = "incomplete_structured_wire_omi
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TraceRecord {
+    // 仅用于内存中的响应重组；进程内资源身份不进入诊断文件。
+    #[serde(skip)]
+    pub capture_id: Option<u64>,
     pub schema_version: u32,
     pub sequence: i64,
     pub recorded_at: i64,
@@ -229,8 +232,9 @@ pub(crate) struct TraceHandle {
 struct TraceState {
     // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
     queued_sequence: parking_lot::Mutex<i64>,
-    wire_pending: parking_lot::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
+    wire_pending: parking_lot::Mutex<std::collections::HashMap<String, (Vec<u8>, TraceRecord)>>,
     ndjson_pending: parking_lot::Mutex<std::collections::HashMap<String, (Vec<u8>, TraceRecord)>>,
+    json_http_captures: parking_lot::Mutex<HashSet<u64>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     event_count: AtomicU64,
@@ -307,6 +311,7 @@ impl TraceManager {
             queued_sequence: parking_lot::Mutex::new(0),
             wire_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ndjson_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            json_http_captures: parking_lot::Mutex::new(HashSet::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
@@ -448,16 +453,36 @@ fn is_command_code_ndjson(record: &TraceRecord) -> bool {
         )
 }
 
-fn captured_payload_bytes(payload: &Value) -> Result<Cow<'_, [u8]>, &'static str> {
-    if let Some(text) = payload.as_str() {
+fn declares_json_body(headers: &Value) -> bool {
+    headers
+        .get("content-type")
+        .and_then(Value::as_str)
+        .is_some_and(|content_type| {
+            let media_type = content_type.split(';').next().unwrap_or_default().trim();
+            let Some((_, subtype)) = media_type.split_once('/') else {
+                return false;
+            };
+            subtype.eq_ignore_ascii_case("json")
+                || subtype
+                    .rsplit_once('+')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
+        })
+}
+
+fn captured_payload_bytes(
+    payload: &Value,
+    base64_encoded: bool,
+) -> Result<Cow<'_, [u8]>, &'static str> {
+    if !base64_encoded && let Some(text) = payload.as_str() {
         return Ok(Cow::Borrowed(text.as_bytes()));
     }
-    let Some(encoded) = payload
-        .as_object()
-        .filter(|object| object.get("encoding").and_then(Value::as_str) == Some("base64"))
-        .and_then(|object| object.get("data"))
-        .and_then(Value::as_str)
-    else {
+    let Some(encoded) = payload.as_str().or_else(|| {
+        payload
+            .as_object()
+            .filter(|object| object.get("encoding").and_then(Value::as_str) == Some("base64"))
+            .and_then(|object| object.get("data"))
+            .and_then(Value::as_str)
+    }) else {
         return Err(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
     };
     base64::engine::general_purpose::STANDARD
@@ -475,9 +500,26 @@ impl TraceHandle {
         {
             return TraceWriteOutcome::Partial(STORAGE_ERROR);
         }
-        if is_command_code_ndjson(&record) {
+        if record.protocol.as_deref() == Some(COMMAND_CODE_PROTOCOL)
+            && record.direction.as_deref() == Some("upstream_response")
+            && record.message_type.as_deref() == Some("response_headers")
+            && let Some(capture_id) = record.capture_id
+        {
+            // 重定向共用响应资源；只有最终响应的格式决定其响应体如何重组。
+            let mut json_captures = self.state.json_http_captures.lock();
+            if declares_json_body(&record.headers) {
+                json_captures.insert(capture_id);
+            } else {
+                json_captures.remove(&capture_id);
+            }
+        }
+        if is_command_code_ndjson(&record)
+            && !record.capture_id.is_some_and(|capture_id| {
+                self.state.json_http_captures.lock().contains(&capture_id)
+            })
+        {
             let payload = std::mem::take(&mut record.payload);
-            return match captured_payload_bytes(&payload) {
+            return match captured_payload_bytes(&payload, record.payload_encoding == "base64") {
                 Ok(bytes) => self.record_command_code_ndjson(&record, &bytes),
                 Err(reason) => {
                     self.mark_partial(reason, false);
@@ -488,35 +530,53 @@ impl TraceHandle {
         if matches!(
             record.message_type.as_deref(),
             Some("body_chunk" | "sse_chunk")
-        ) && let Some(text) = record.payload.as_str()
-        {
+        ) {
+            let payload = std::mem::take(&mut record.payload);
+            let bytes = match captured_payload_bytes(&payload, record.payload_encoding == "base64")
+            {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    self.mark_partial(reason, false);
+                    return TraceWriteOutcome::Partial(reason);
+                }
+            };
             let key = format!(
-                "{}:{}:{}",
+                "{}:{}:{}:{}",
+                record.capture_id.unwrap_or(0),
                 record.direction.as_deref().unwrap_or_default(),
                 record.attempt_id.as_deref().unwrap_or_default(),
                 record.message_type.as_deref().unwrap_or_default()
             );
             let mut pending = self.state.wire_pending.lock();
-            let (buffer, _) = pending.entry(key.clone()).or_insert_with(|| {
-                let mut template = record.clone();
-                template.payload = Value::Null;
-                (String::new(), template)
-            });
-            buffer.push_str(text);
-            if buffer.len() as u64 > WIRE_MESSAGE_LIMIT_BYTES {
+            let (buffer, _) = pending
+                .entry(key.clone())
+                .or_insert_with(|| (Vec::new(), record.clone()));
+            if buffer.len().saturating_add(bytes.len()) as u64 > WIRE_MESSAGE_LIMIT_BYTES {
                 pending.remove(&key);
                 self.mark_partial("structured_wire_capture_limit", false);
                 return TraceWriteOutcome::Partial("structured_wire_capture_limit");
             }
-            let complete = serde_json::from_str::<Value>(buffer).is_ok()
-                || ((buffer.starts_with("data:")
-                    || buffer.starts_with("event:")
-                    || buffer.starts_with(':'))
-                    && (buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n")));
+            if buffer.is_empty() {
+                *buffer = bytes.into_owned();
+            } else {
+                buffer.extend_from_slice(&bytes);
+            }
+            let complete = serde_json::from_slice::<serde::de::IgnoredAny>(buffer).is_ok()
+                || ((buffer.starts_with(b"data:")
+                    || buffer.starts_with(b"event:")
+                    || buffer.starts_with(b":"))
+                    && (buffer.ends_with(b"\n\n") || buffer.ends_with(b"\r\n\r\n")));
             if !complete {
                 return TraceWriteOutcome::Queued;
             }
-            record.payload = Value::String(pending.remove(&key).expect("complete wire message").0);
+            let bytes = pending.remove(&key).expect("complete wire message").0;
+            let Ok(text) = String::from_utf8(bytes) else {
+                self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
+                return TraceWriteOutcome::Partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED);
+            };
+            record.payload = Value::String(text);
+            record.payload_encoding.clear();
+            record.payload_encoding.push_str("json");
             record.representation = "reassembled_application_message".into();
         }
         self.queue_record(record)
@@ -524,14 +584,16 @@ impl TraceHandle {
 
     fn record_command_code_ndjson(&self, record: &TraceRecord, chunk: &[u8]) -> TraceWriteOutcome {
         let key = format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}",
+            record.capture_id.unwrap_or(0),
             record.protocol.as_deref().unwrap_or_default(),
             record.direction.as_deref().unwrap_or_default(),
             record.attempt_id.as_deref().unwrap_or_default(),
             record.message_type.as_deref().unwrap_or_default()
         );
         let mut chunk_template = record.clone();
-        chunk_template.payload = Value::Null;
+        chunk_template.payload_encoding.clear();
+        chunk_template.payload_encoding.push_str("json");
         let mut outcome = TraceWriteOutcome::Queued;
         let mut limit_exceeded = false;
         let mut pending = self.state.ndjson_pending.lock();
@@ -650,20 +712,33 @@ impl TraceHandle {
                 }
             }
             let pending = std::mem::take(&mut *self.state.wire_pending.lock());
-            for (_, (text, mut record)) in pending {
-                let trimmed = text.trim_start();
-                if trimmed.starts_with(['{', '[', '"', ':'])
-                    || trimmed.starts_with("data:")
-                    || trimmed.starts_with("event:")
-                {
-                    self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
-                } else {
-                    // Plain-text HTTP errors are complete at EOF, not at a JSON/SSE boundary.
-                    // Delay their redaction until now so split upload grants remain secret.
-                    record.payload = Value::String(text);
-                    record.representation = "reassembled_application_message".into();
-                    let _ = self.queue_record(record);
+            for (_, (bytes, mut record)) in pending {
+                match String::from_utf8(bytes) {
+                    Ok(text) => {
+                        let trimmed = text.trim_start();
+                        if trimmed.starts_with(['{', '[', '"', ':'])
+                            || trimmed.starts_with("data:")
+                            || trimmed.starts_with("event:")
+                        {
+                            self.mark_partial(INCOMPLETE_STRUCTURED_WIRE_OMITTED, false);
+                            continue;
+                        }
+                        // Plain-text HTTP errors are complete at EOF, not at a JSON/SSE boundary.
+                        // Delay their redaction until now so split upload grants remain secret.
+                        record.payload = Value::String(text);
+                        record.payload_encoding.clear();
+                        record.payload_encoding.push_str("json");
+                    }
+                    Err(error) => {
+                        record.payload = Value::String(
+                            base64::engine::general_purpose::STANDARD.encode(error.into_bytes()),
+                        );
+                        record.payload_encoding.clear();
+                        record.payload_encoding.push_str("base64");
+                    }
                 }
+                record.representation = "reassembled_application_message".into();
+                let _ = self.queue_record(record);
             }
             let (response, receive) = oneshot::channel();
             let sent = self
@@ -1214,6 +1289,7 @@ mod tests {
 
     fn binary_record(payload: String) -> TraceRecord {
         TraceRecord {
+            capture_id: None,
             schema_version: 0,
             sequence: 1,
             recorded_at: 0,

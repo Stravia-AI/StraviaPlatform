@@ -61,7 +61,7 @@ async fn responses(
 }
 
 fn completed(id: &str, output: Value) -> Value {
-    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+    stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
         id,
         "upstream-model",
         "completed",
@@ -139,11 +139,13 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let provider = admin.create_provider(CreateProvider {
             name: Some("local publication fault Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("custom".into()), protocol: "open-responses".into(),
+                vendor: "protocol-open-responses".into(), channel: "default".into(),
+                protocol: Some("open-responses".into()),
                 base_url: format!("http://{provider_address}/v1"),
                 models_source: None, static_models: None,
             },
             credential: ProviderCredentialInput::ApiKey { value: "local-provider-key".into() },
+            vendor_options: Default::default(),
             use_proxy: false,
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
@@ -151,7 +153,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         }).await.unwrap();
         let route = admin.create_model(CreateRoute {
             model_id: "native-publication".into(), display_name: None, balance: None,
-            target_provider: provider.id, target_model: "upstream-model".into(), targets: vec![],
+            target_provider: provider.id, target_model: Some("upstream-model".into()), targets: vec![],
             default_thinking_level: None,
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
@@ -273,7 +275,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert!(response.status().is_success());
         let delivered: Value = response.json().await.unwrap();
         assert_eq!(delivered["output"], json!([native]));
-        let pair = crate::protocol::transform::ProtocolTransform::global()
+        let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24).unwrap();
         let decoded = pair.decode_request(json!({"model":"native-publication","input":delivered["output"]})).unwrap();
         assert!(gateway.compaction.resolve(&Principal::new(key.id), &decoded.items).await.unwrap().is_some());
@@ -308,13 +310,15 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         let provider = admin.create_provider(CreateProvider {
             name: Some("local HTTP Responses provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("custom".into()),
-                protocol: "open-responses".into(),
+                vendor: "protocol-open-responses".into(),
+                channel: "default".into(),
+                protocol: Some("open-responses".into()),
                 base_url: format!("http://{provider_address}/v1"),
                 models_source: None,
                 static_models: None,
             },
             credential: ProviderCredentialInput::ApiKey { value: "local-provider-key".into() },
+            vendor_options: Default::default(),
             use_proxy: false,
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
@@ -325,7 +329,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "upstream-model".into(),
+            target_model: Some("upstream-model".into()),
             targets: vec![],
             default_thinking_level: None,
         }).await.unwrap();
@@ -367,7 +371,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             "rolling_identity":{"version":7,"cursor":"preserve-me","nested":[1,{"flag":true}]}
         });
         first.respond.send(completed("first-native", json!([native.clone()]))).unwrap();
-        let pair = crate::protocol::transform::ProtocolTransform::global()
+        let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24).unwrap();
         let mut exposed = false;
         let terminal = loop {

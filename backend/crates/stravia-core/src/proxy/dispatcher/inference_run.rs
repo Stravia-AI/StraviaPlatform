@@ -254,6 +254,7 @@ impl WebSocketRunDelivery {
 
     fn record_wire_text(&self, text: &str) {
         self.observer.record_debug(|| RunEvent::Wire {
+            capture_id: None,
             direction: "platform_to_client".into(),
             transport: "websocket".into(),
             protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
@@ -796,6 +797,7 @@ impl Stream for ObservedDeliveryStream {
                     }
                 }
                 self.observer.record_debug(|| RunEvent::Wire {
+                    capture_id: None,
                     direction: "platform_to_client".into(),
                     transport: self.transport.into(),
                     protocol: self.protocol.clone(),
@@ -871,6 +873,7 @@ fn wrap_observed_delivery(
                 .collect(),
         );
         RunEvent::Wire {
+            capture_id: None,
             direction: "platform_to_client".into(),
             transport: "http".into(),
             protocol: protocol.clone(),

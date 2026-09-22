@@ -72,7 +72,7 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-or `nix run github:Stravia-AI/StraviaPlatform`, or a platform archive from Releases (verify against `SHA256SUMS`).
+Alternatively, download a platform archive from Releases (verify against `SHA256SUMS`).
 
 **First run (both):**
 
@@ -124,14 +124,14 @@ Each upstream target keeps one consecutive-failure count shared by internal retr
 ### Platform tools and built-in agent runtime
 
 - `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
-- **Web Search** — an agent loop searches and reads pages for the model, using the embedded Moli engine, Exa, or Zhipu — or a Codex search binding.
+- **Web Search** — use the Local agent loop with Moli, Exa, or Zhipu sources, or bind an External Route whose Vendor plugin returns a complete cited report.
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
 - **Media Generation** — generate or edit one image through an existing Codex OAuth Route, then reuse its Artifact Reference in later tools.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
 
 #### Image generation
 
-In **Advanced Features → Media Generation**, bind a saved image Route and enable the capability. Every enabled Target must use an enabled OpenAI Codex OAuth Provider with a GPT-5-or-later model and connected credentials; disabled Targets do not participate. Saving validates configuration without generating an image. Execution validates the binding again and uses the existing credential refresh, Route priority, retry, and failover policies. Actual account/model availability remains subject to upstream support.
+In **Advanced Features → Media Generation**, bind a saved image Route and enable the capability. Every enabled Target must use an enabled Provider whose installed Vendor channel and selected Provider Model support image generation, with the required credentials; disabled Targets do not participate. Bundled Codex OAuth and image-only plugins use the same Route mechanism. Saving validates configuration without generating an image. Execution validates the binding again and uses the existing credential refresh, Route priority, retry, and failover policies. Actual account/model availability remains subject to upstream support.
 
 The same `generate` tool is available through MCP and explicit compatible model requests. Automatic exposure additionally requires the API key's transparent-injection switch and **Media Generation** selection. That selection defaults to off for new and existing keys; it is not a separate permission.
 
@@ -144,6 +144,20 @@ Only `prompt` is required inside `input`. Optional `aspect_ratio` accepts `1:1`,
 For editing, add ordered `reference_images`: plain owned `sa:…` references **without read options**, or public HTTP(S) image URLs. Upload local files through the existing `/v1/artifacts/uploads` flow first. Public URLs are safely fetched and stored before generation; source URLs are not forwarded. The platform accepts at most five JPEG/PNG/WebP references, each at most 32 MiB, 8192 pixels per edge, and 25 megapixels. Invalid, missing, expired, or another Principal's files fail before generation.
 
 Success returns only `artifact_reference`, `mime_type`, `size`, and `media: {width,height}` measured from the decoded file. Reuse the reference for the next edit, or call `StraviaRead` with `{"path":"sa:…?download=1"}` for an authorized download. No image, invalid image, or failed storage is an error, not a successful empty result. Route retries can repeat generation and consume additional quota when execution is uncertain; cancellation, invalid input, and storage failures do not trigger regeneration. Usage is recorded only when reported upstream.
+
+### Vendor plugins
+
+All model Vendors run as self-contained Wasm Components. Stravia bundles exactly five Vendor packages: one `stravia-vendor-base` fallback Vendor for every existing supplier integration except Codex, Grok, Command Code, and Devin, plus `stravia-vendor-codex`, `stravia-vendor-grok`, `stravia-vendor-command-code`, and `stravia-vendor-devin` for those four identities. Plain OpenAI and xAI API connections remain in the base package; the other retained integrations keep their existing authentication, cloud protocols, model discovery, allowance, and inference behavior. The dedicated packages completely own all channels and operations for their supplier identity. If one is unavailable, lacks a channel or capability, or fails, Stravia does not fall back to the base package. A supplier identity is distinct from the UUID of a saved Provider connection.
+
+Bundled plugins are available on first use. **Vendor Plugins** shows each installed identity, actual version, source, and loading status; import a local `.wasm` file through the same interface in the browser or Desktop. Installation does not contact a marketplace or download codec dependencies. Package names and authors are self-reported, not verified identities. The shared codec library covers OpenAI-compatible protocols (including embeddings), Anthropic, Gemini, and Open Responses; proprietary protocols remain inside their owning Vendor package.
+
+The base package generates its catalog profiles from the bundled registry at build time. Compatible brands reuse their adapter family without inheriting another supplier's OAuth channels. Model sync preserves each supplier's inventory policy: native account-backed profiles discover available account models, Claude Code and Vertex retain their channel-specific curated lists, and directory-backed profiles use their catalog. Custom connections retain their plugin's discovery behavior. Static model overrides take precedence; a saved catalog-origin marker never expands a native account or curated inventory to the entire directory.
+
+Connection forms use the plugin's declared fields and channels. Providing credentials authorizes that plugin to handle the selected connection's upstream secrets, not other connections or platform administration credentials. Review the Base URL and authorized origins before saving. Origins match the exact scheme, host, and port; HTTP access does not implicitly authorize WebSocket access. Administrators may explicitly configure local or private-network services. Declared URL fields can grant additional origins from saved configuration, but OAuth responses and plugin private state cannot expand those grants.
+
+Local replacements leave automatic builtin updates. Builtin updates apply only a strictly newer bundled version; equal or older versions do not overwrite the installed artifact. **Restore bundled version** explicitly rejoins builtin management and warns about downgrades. Compatible updates let in-flight calls finish on the old version. Incompatible updates require confirmation of the affected data and interruption of that Vendor's active work; Provider identities, Route/Target bindings, history, and confirmed usage remain intact. Connections missing reset data stay unavailable until reconfigured or authenticated again.
+
+A connection may provide inference, complete search, and image generation, or only a subset. External search Routes may use Provider-only Targets when the plugin does not require a selectable model. External search returns a complete cited report and does not support continuation; Local search retains its existing continuation rules. Retryable failures before result delivery follow Route policy and may repeat upstream work and consume quota. See the [plugin design](docs/design/vendor-plugins.md) for the SDK, isolation, and lifecycle contracts.
 
 ### Keys, usage, and request history
 
@@ -169,7 +183,8 @@ Good to know: it catches what its rules know — not every secret, and not perso
 ### Storage and deployment
 
 - SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3.
-- Everything a deployment owns sits under one data directory, protected by an instance lock; a migration tool upgrades older layouts.
+- Everything the instance keeps locally sits under one data directory, protected by an instance lock. Immutable plugin Components live at `plugins/artifacts/<sha256>.wasm`; SQL stores plugin metadata and connection/private state, never the Component bytes.
+- Back up the instance files and its database together. A remote PostgreSQL backup alone is incomplete because it does not contain the installed plugin Components. The existing migration tool copies plugin artifacts with the rest of an older data root.
 - One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
 
 ## Deployment modes
@@ -179,7 +194,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 | Form          | Tauri app with integrated management UI             | Single headless binary or container image   |
 | Best for      | Individual developers; writes client config locally | Self-hosted and shared team deployments     |
 | Storage       | Local SQLite                                        | SQLite or PostgreSQL                        |
-| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image · Nix flake       |
+| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image                  |
 
 The same Rust core powers both; the management surface is the same WebUI.
 

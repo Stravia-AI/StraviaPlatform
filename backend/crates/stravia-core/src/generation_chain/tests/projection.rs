@@ -2,9 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn responses_thinking_tool_replay_discovers_immediate_parent() {
-    use crate::protocol::codec::open_responses::decoder::ResponsesDecoder;
-    use crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter;
-    use crate::protocol::codec::open_responses::stream::ResponsesStreamFormatter;
+    use stravia_protocol_codec::codec::open_responses::decoder::ResponsesDecoder;
+    use stravia_protocol_codec::codec::open_responses::formatter::ResponsesResponseFormatter;
+    use stravia_protocol_codec::codec::open_responses::stream::ResponsesStreamFormatter;
     use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
     for streaming in [true, false] {
@@ -192,9 +192,8 @@ async fn hook_completion_does_not_reuse_an_earlier_target_or_upstream_response()
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "provider:model",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut continued,
@@ -271,9 +270,8 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "provider:model",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut continued,
@@ -292,9 +290,8 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "different-account",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut materialized,
@@ -306,7 +303,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
         item.reasoning_ref()
             .is_some_and(|(_, _, encrypted)| encrypted == Some("encrypted"))
     }));
-    let encoded = crate::protocol::transform::ProtocolTransform::global()
+    let encoded = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             OPEN_RESPONSES_2026_04_24,
@@ -477,9 +474,8 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "provider:model",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut provider_request,
@@ -555,9 +551,8 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "different-account",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut replay,
@@ -566,7 +561,7 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
         None
     );
 
-    let encoded = crate::protocol::transform::ProtocolTransform::global()
+    let encoded = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("registered protocol pair")
         .encode_request(&replay)
@@ -903,7 +898,9 @@ fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
         project_client_history(OPEN_RESPONSES_2026_04_24, &response, &mut []).expect("project");
     let id = output[0].id_ref().expect("stamped id").to_owned();
     assert_eq!(
-        crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id(&id),
+        stravia_protocol_codec::codec::open_responses::formatter::response_id_from_gateway_item_id(
+            &id
+        ),
         Some(response.id.clone())
     );
 

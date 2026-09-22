@@ -128,13 +128,13 @@ pub(super) async fn configure_gateway_extensions(
             Arc::new(web_search::host::LocalAgentHost(runner)),
             local_search_evidence,
         )),
-        Arc::new(stravia_web_search::CodexAgenticSearchBackend::new(
-            Arc::new(web_search::host::SearchHost(gateway.clone())),
-        )),
+        Arc::new(stravia_web_search::ExternalSearchBackend::new(Arc::new(
+            web_search::host::SearchHost(gateway.clone()),
+        ))),
         report_validator,
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(GatewayWebSearchAuthorizer {
-            storage: Arc::clone(&gateway.storage),
+            gateway: gateway.clone(),
         }),
     );
     *gateway.web_search_runner_state.write().await = Some(search_runner);
@@ -149,7 +149,7 @@ pub(super) async fn configure_gateway_extensions(
     Ok(())
 }
 struct GatewayWebSearchAuthorizer {
-    storage: storage::DynStorage,
+    gateway: Gateway,
 }
 
 fn web_search_authorization_error() -> stravia_web_search::WebSearchError {
@@ -166,60 +166,28 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
         principal: &stravia_runtime_contract::Principal,
         binding: &stravia_web_search::ResolvedWebSearchBackend,
     ) -> Result<(), stravia_web_search::WebSearchError> {
-        proxy::security::Security::new(self.storage.auth())
+        proxy::security::Security::new(self.gateway.storage.auth())
             .authorize_principal_web_search(principal)
             .await
             .map_err(|_| web_search_authorization_error())?;
-        match binding {
-            stravia_web_search::ResolvedWebSearchBackend::Local { model_id } => {
-                self.storage
-                    .routes()
-                    .list_active()
-                    .await
-                    .map_err(|_| web_search_authorization_error())?
-                    .into_iter()
-                    .find(|route| route.id == *model_id)
-                    .ok_or_else(web_search_authorization_error)?;
-                proxy::security::Security::new(self.storage.auth())
-                    .authorize_principal_capability(principal)
-                    .await
-                    .map_err(|_| web_search_authorization_error())?;
-            }
-            stravia_web_search::ResolvedWebSearchBackend::Codex {
-                provider_id,
-                upstream_model,
-            } => {
-                let provider = self
-                    .storage
-                    .providers()
-                    .get(provider_id)
-                    .await
-                    .map_err(|_| web_search_authorization_error())?
-                    .filter(|provider| {
-                        stravia_web_search::codex_provider_contract(
-                            &web_search::host::provider_snapshot(provider),
-                        )
-                    })
-                    .ok_or_else(web_search_authorization_error)?;
-                let model_available = self
-                    .storage
-                    .provider_models()
-                    .find(provider_id, upstream_model)
-                    .await
-                    .map_err(|_| web_search_authorization_error())?
-                    .is_some_and(|model| model.effective_available());
-                let credential_available = self
-                    .storage
-                    .oauth_credentials()
-                    .get(&provider.id)
-                    .await
-                    .map_err(|_| web_search_authorization_error())?
-                    .is_some();
-                if !model_available || !credential_available {
-                    return Err(web_search_authorization_error());
-                }
-            }
-        }
+        let route_id = match binding {
+            stravia_web_search::ResolvedWebSearchBackend::Local { model_id } => model_id,
+            stravia_web_search::ResolvedWebSearchBackend::External { route_id } => route_id,
+        };
+        // 能力准入由固定版本的 Vendor 操作负责；兼容更新后的能力变化不能撤销旧调用。
+        // Principal 权限与 Route 启用状态仍在执行期间持续重验。
+        self.gateway
+            .storage
+            .routes()
+            .get(route_id)
+            .await
+            .map_err(|_| web_search_authorization_error())?
+            .filter(|route| route.is_enabled)
+            .ok_or_else(web_search_authorization_error)?;
+        proxy::security::Security::new(self.gateway.storage.auth())
+            .authorize_principal_capability(principal)
+            .await
+            .map_err(|_| web_search_authorization_error())?;
         Ok(())
     }
 }

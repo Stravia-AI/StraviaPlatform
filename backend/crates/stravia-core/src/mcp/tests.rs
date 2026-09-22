@@ -217,15 +217,22 @@ type SdkClient = RunningService<RoleClient, ClientInfo>;
 #[tokio::test]
 async fn read_tool_responses_schema_supports_strict_optional_arguments() {
     use crate::hook::tool::PlatformToolRegistry;
-    use crate::protocol::codec::open_responses::encoder::ResponsesEncoder;
+    use stravia_protocol_codec::codec::open_responses::encoder::ResponsesEncoder;
     use stravia_runtime_contract::hook::ToolId;
     use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, Role};
 
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let gateway = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
+    let gateway = Gateway::from_storage(
+        crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .expect("gateway");
     let tool = read::ReadTool::new(&gateway, &mut Vec::new()).expect("read tool");
@@ -451,8 +458,9 @@ async fn media_test_app_with_answer(
         .create_provider(crate::db::models::CreateProvider {
             name: Some("MCP Vision".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url: provider_url,
                 models_source: None,
                 static_models: None,
@@ -460,6 +468,7 @@ async fn media_test_app_with_answer(
             credential: crate::db::models::ProviderCredentialInput::ApiKey {
                 value: "test-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -472,6 +481,7 @@ async fn media_test_app_with_answer(
             crate::provider_models::CreateManualProviderModel {
                 metadata: json!({
                     "id": "vision",
+                    "attachment": true,
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
             },
@@ -485,7 +495,7 @@ async fn media_test_app_with_answer(
             display_name: None,
             balance: None,
             target_provider: provider.id,
-            target_model: "vision".into(),
+            target_model: Some("vision".into()),
             targets: vec![],
             default_thinking_level: None,
         })

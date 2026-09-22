@@ -390,7 +390,7 @@ pub fn history_request_controls_hash(request: &AiRequest) -> [u8; 32] {
             "frequency_penalty": request.generation.frequency_penalty,
         },
         "embedding": &request.embedding,
-        "tools": request.tools.as_ref().map(|tools| {
+        "tools": request.tools.as_ref().filter(|tools| !tools.is_empty()).map(|tools| {
             tools.iter().map(history_tool_value).collect::<Vec<_>>()
         }),
         "tool_choice": &request.tool_choice,

@@ -1,5 +1,10 @@
 //! Protocol layer.
 //!
+//! Wire codecs, the adapter registry, and canonical transforms live in the
+//! shared `stravia-protocol-codec` crate (consumed by the host and Wasm vendor
+//! plugins). This module keeps only the host-side provider negotiation built
+//! on the DB `Provider` row.
+//!
 //! # Three-layer identity
 //!
 //! Canonical form: `{protocol}/{name}/{version}`.
@@ -8,65 +13,12 @@
 //! - `name`: wire-format endpoint name (`chat-completions`, `responses`, `messages`, `generate-content`).
 //! - `version`: dated or vendor schema version (`v1`, `2026-04-24`, `2023-06-01`, `v1beta`).
 //!
-//! See [`ids`], [`registry`], and the crate-private Protocol Conversion module
-//! for the model.
-//!
-//! ## Codec layout
-//!
-//! Each `codec/<vendor>/<protocol>/` directory co-locates one wire adapter.
-//!
-//! - `codec/openai/compatible/chat_completions.rs` — `OpenAICompatibleChatCompletionsV1`
-//! - `codec/openai/compatible/embeddings.rs` — `OpenAICompatibleEmbeddingsV1`
-//! - `codec/open_responses/adapter.rs` — `OpenResponses20260424`
-//! - `codec/anthropic/messages/adapter.rs` — `AnthropicMessages2023`
-//! - `codec/google/gemini/generate_content.rs` — `GoogleGeminiGenerateContentV1Beta`
-//!
-//! Shared semantic utilities live in `codec/reasoning.rs` and
-//! `codec/tool_correlation.rs`.
-//!
-//! ## Alias table
-//!
-//! See [`registry::ProtocolRegistry`] for three-tier resolution of endpoint aliases
-//! and [`registry::ProtocolRegistry::parse_protocol`] for Protocol-level resolution.
-
-pub(crate) mod codec;
-
-#[cfg(test)]
-mod conversion;
-pub mod registry;
-#[cfg(test)]
-mod registry_tests;
-pub(crate) mod transform;
+//! See `stravia_runtime_contract::protocol::ids` and
+//! `stravia_protocol_codec::registry` for the model.
 
 use crate::db::models::Provider;
-use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
-
-// ── SSE helper ──
-
-#[derive(Debug, Clone)]
-pub(crate) struct SseEvent {
-    pub(crate) event: Option<String>,
-    pub(crate) data: String,
-}
-
-impl SseEvent {
-    pub(crate) fn new(event: Option<&str>, data: impl Into<String>) -> Self {
-        Self {
-            event: event.map(|e| e.to_string()),
-            data: data.into(),
-        }
-    }
-
-    pub(crate) fn to_sse_string(&self) -> String {
-        let mut s = String::new();
-        if let Some(ref event) = self.event {
-            s.push_str(&format!("event: {event}\n"));
-        }
-        s.push_str(&format!("data: {}\n\n", self.data));
-        s
-    }
-}
 
 // ── Provider protocol negotiation ──
 
@@ -85,24 +37,18 @@ pub struct ResolvedEgress {
 }
 
 impl ProviderProtocols {
-    /// Best-effort string → [`ProtocolEndpoint`] resolver.
-    pub fn parse_protocol_key(s: &str) -> Option<ProtocolEndpoint> {
-        let reg = registry::ProtocolRegistry::global();
-        reg.resolve_alias(s).or_else(|| {
-            let protocol = reg.parse_protocol(s)?;
-            reg.endpoints_for_protocol(protocol).first().copied()
-        })
-    }
+    /// Build host codec declarations from a provider DB row.
+    ///
+    /// Guest-owned or third-party protocol identities deliberately return
+    /// `None`: they remain opaque to the host instead of being presented as
+    /// OpenAI-compatible.
+    pub fn from_provider(provider: &Provider) -> Option<Self> {
+        let default = ProtocolRegistry::global().resolve_alias(provider.protocol.trim())?;
 
-    /// Build from a provider DB row.
-    pub fn from_provider(provider: &Provider) -> Self {
-        let default = Self::parse_protocol_key(provider.protocol.trim())
-            .unwrap_or(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
-
-        Self {
+        Some(Self {
             default,
             base_url: provider.base_url.trim().to_string(),
-        }
+        })
     }
 
     /// Returns `true` if the provider declares support for `protocol`.

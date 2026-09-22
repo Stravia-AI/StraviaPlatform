@@ -68,7 +68,7 @@
 - 已有 Server 首次升级通过新的设置令牌创建管理员，完成前只提供初始化服务。已有 PostgreSQL 安装必须先将原连接配置迁入文件，不能因缺少配置默认切换到 SQLite。
 - Server 提供 `stravia-server --data-dir <root> --config <path> recover-admin` 本地交互式凭据恢复命令；操作者先停止占用该根的实例，再针对同一数据根及配置运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
 - 恢复要求配置文件、目标数据库与既有管理员均可读；它不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
-- 管理入口默认支持 HTTP 与 HTTPS，非回环监听不要求 HTTPS，默认监听仍为 `127.0.0.1:23471`。Docker 与 Nix 的数据库连接同样只来自持久化的 `server.toml`。
+- 管理入口默认支持 HTTP 与 HTTPS，非回环监听不要求 HTTPS，默认监听仍为 `127.0.0.1:23471`。Docker 的数据库连接同样只来自持久化的 `server.toml`。
 
 ## 管理入口与代理信任
 
@@ -79,7 +79,7 @@
 - `Origin` 请求头只是独立校验对象，不能用于恢复预期外部源。允许入口 A 与 B 不代表 A 可以跨源写 B；不开放管理跨源 CORS。既有 CSRF、JSON、HttpOnly、SameSite 与会话撤销要求保留。
 - 设置、访问、刷新 Cookie 的设置和清除均根据每个请求恢复的外部协议采用 Secure；HTTPS 代理的 HTTP 回源不造成降级。不同主机不承诺登录态互通；同一主机 Cookie 不按协议／端口隔离，已有 Secure Cookie 可能阻止 HTTP 覆写。不能为兼容混用而取消 Secure 或扩大 Domain。
 - 旧 `--public-origin`、`STRAVIA_PUBLIC_ORIGIN` 与 Server `--admin-cors-origin` 已移除，不保留兼容入口。残留的 `STRAVIA_PUBLIC_ORIGIN` 会使 Server 启动失败并要求迁移，不会静默丢弃旧入口限制。入口列表误配置可通过本地修改启动配置并重启恢复，无需登录。
-- HTTP 暴露密码、会话与请求完整性；默认不限入口失去固定主机列表的部分 DNS rebinding 防护。启动警告按允许 HTTP／不限入口的配置事实提示，不把 HTTP 回源当成浏览器明文。可信代理 CIDR 应尽量窄，不得默认信任全部网络；入口列表、同源与 CSRF 均不能替代 TLS／防火墙。完整 Nginx、Docker、Nix 与 Vite 配置见两种语言的 README，决策见 [ADR-0052](../adr/0052-allow-explicit-http-admin-origin.md)。
+- HTTP 暴露密码、会话与请求完整性；默认不限入口失去固定主机列表的部分 DNS rebinding 防护。启动警告按允许 HTTP／不限入口的配置事实提示，不把 HTTP 回源当成浏览器明文。可信代理 CIDR 应尽量窄，不得默认信任全部网络；入口列表、同源与 CSRF 均不能替代 TLS／防火墙。完整 Nginx、Docker 与 Vite 配置见两种语言的 README，决策见 [ADR-0052](../adr/0052-allow-explicit-http-admin-origin.md)。
 
 ## 实施验收
 

@@ -1,27 +1,70 @@
 use super::*;
 
+fn validate_auth_browser_url(value: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("vendor authorization URL is invalid"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none(),
+        "vendor authorization URL must be an absolute HTTP(S) URL without credentials"
+    );
+    Ok(())
+}
+
 impl AdminService {
     pub(super) async fn create_auth_session_record(
         &self,
-        input: auth::CreateAuthSession,
+        candidate: AuthSessionCandidate,
+        auth_descriptor: stravia_vendor_sdk::AuthDescriptor,
+        state: String,
+        response: Option<stravia_vendor_sdk::AuthResponse>,
+        scope: crate::plugin::VendorSessionScope,
         options: OAuthSessionStartOptions,
     ) -> anyhow::Result<AuthSession> {
-        // OAuth sessions are process-local. Callback requests must reach this
-        // Gateway instance until a shared session store is introduced.
+        // Authentication sessions are process-local. The captured component,
+        // private state, and cancellation token remain isolated to this session.
         if !self.gw.config.config_poll_interval.is_zero() {
             tracing::debug!(
                 "creating oauth session in multi-replica mode \
                  — ensure the callback reaches this replica (session affinity required)"
             );
         }
-        let now = now_rfc3339();
-        let listener_state = if input.scheme == AuthScheme::OAuthDeviceCode.as_str() {
-            "not_required".to_string()
-        } else if options.callback_mode == OAuthCallbackMode::Auto {
-            "listening".to_string()
-        } else {
-            "not_started".to_string()
+        let (auth_url, user_code, verification_uri, interval_seconds) = match response {
+            Some(stravia_vendor_sdk::AuthResponse::Authorization {
+                url,
+                user_code,
+                verification_uri,
+                interval_seconds,
+            }) => (Some(url), user_code, verification_uri, interval_seconds),
+            None if auth_descriptor.flow == stravia_vendor_sdk::AuthFlow::Manual => {
+                (None, None, None, None)
+            }
+            _ => anyhow::bail!("vendor auth start did not return an authorization response"),
         };
+        if let Some(value) = auth_url.as_deref() {
+            validate_auth_browser_url(value)?;
+        }
+        if let Some(value) = verification_uri.as_deref() {
+            validate_auth_browser_url(value)?;
+        }
+
+        let now = Utc::now();
+        let scheme = match auth_descriptor.flow {
+            stravia_vendor_sdk::AuthFlow::AuthorizationCode => AuthScheme::OAuthAuthCodePkce,
+            stravia_vendor_sdk::AuthFlow::DeviceCode => AuthScheme::OAuthDeviceCode,
+            stravia_vendor_sdk::AuthFlow::Manual => AuthScheme::SetupToken,
+        };
+        let listener_state =
+            if auth_descriptor.flow != stravia_vendor_sdk::AuthFlow::AuthorizationCode {
+                "not_required".to_string()
+            } else if options.callback_mode == OAuthCallbackMode::Auto {
+                "listening".to_string()
+            } else {
+                "not_started".to_string()
+            };
+        let verification_uri = verification_uri.or_else(|| auth_url.clone());
         let session = AuthSession {
             callback_mode: options.callback_mode,
             listener_state,
@@ -29,23 +72,33 @@ impl AdminService {
             redirect_uri: options.redirect_uri,
             fallback_reason: options.fallback_reason,
             id: stravia_runtime_contract::identifier::new_id(),
-            provider_id: input.provider_id,
-            driver_key: input.driver_key,
-            scheme: input.scheme,
-            status: input.status,
-            use_proxy: input.use_proxy,
-            user_code: input.user_code,
-            verification_uri: input.verification_uri,
-            verification_uri_complete: input.verification_uri_complete,
-            state_json: input.state_json,
-            context_json: input.context_json,
-            result_json: input.result_json,
-            expires_at: input.expires_at,
-            poll_interval_seconds: input.poll_interval_seconds,
-            last_error: input.last_error,
+            provider_id: candidate.provider_id.clone(),
+            driver_key: candidate.vendor_id,
+            channel: candidate.channel,
+            auth_descriptor,
+            scheme: scheme.as_str().to_string(),
+            status: AuthSessionStatus::Pending.as_str().to_string(),
+            use_proxy: candidate.use_proxy,
+            user_code,
+            verification_uri,
+            verification_uri_complete: auth_url,
+            state_json: Some(serde_json::json!({ "state": state }).to_string()),
+            context_json: None,
+            result_json: None,
+            expires_at: Some((now + chrono::Duration::minutes(10)).to_rfc3339()),
+            poll_interval_seconds: interval_seconds
+                .map(|seconds| i32::try_from(seconds).unwrap_or(i32::MAX)),
+            last_error: None,
             error_code: None,
-            created_at: now.clone(),
-            updated_at: now,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+            vendor_runtime: Some(std::sync::Arc::new(
+                crate::auth::types::VendorAuthSessionRuntime {
+                    scope: std::sync::Arc::new(scope),
+                    cancellation: stravia_runtime_contract::CancellationToken::new(),
+                    publication: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                },
+            )),
         };
         self.gw
             .auth_sessions
@@ -71,7 +124,11 @@ impl AdminService {
             .get(id)
             .is_some_and(|session| is_expired_at(session.expires_at.as_deref()));
         if expired {
-            sessions.remove(id);
+            let removed = sessions.remove(id);
+            drop(sessions);
+            if let Some(runtime) = removed.and_then(|session| session.vendor_runtime) {
+                runtime.cancellation.cancel();
+            }
             return Err(coded_error(
                 "AUTH_SESSION_EXPIRED",
                 "auth session expired",
@@ -129,7 +186,6 @@ impl AdminService {
         }
         session.status = AuthSessionStatus::Ready.as_str().to_string();
         session.result_json = Some(serde_json::to_string(bundle)?);
-        session.expires_at = bundle.expires_at.clone();
         session.last_error = None;
         session.error_code = None;
         session.listener_state = "stopped".to_string();
@@ -162,10 +218,15 @@ impl AdminService {
         };
         session.error_code = Some(code.to_string());
         session.last_error = Some(message.to_string());
+        let runtime = terminal.then(|| session.vendor_runtime.clone()).flatten();
         if terminal {
             session.listener_state = "stopped".to_string();
         }
         session.updated_at = now_rfc3339();
+        drop(sessions);
+        if let Some(runtime) = runtime {
+            runtime.cancellation.cancel();
+        }
         Ok(())
     }
 
@@ -196,6 +257,13 @@ impl AdminService {
         let current = sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("auth session not found: {id}"))?;
+        if let Some(value) = input.verification_uri.as_deref() {
+            validate_auth_browser_url(value)?;
+        }
+        if let Some(value) = input.verification_uri_complete.as_deref() {
+            validate_auth_browser_url(value)?;
+        }
+
         if let Some(value) = input.status {
             current.status = value;
         }
@@ -237,7 +305,11 @@ impl AdminService {
     }
 
     pub(super) async fn delete_auth_session_record(&self, id: &str) -> anyhow::Result<()> {
-        self.gw.auth_sessions.write().await.remove(id);
+        if let Some(session) = self.gw.auth_sessions.write().await.remove(id)
+            && let Some(runtime) = session.vendor_runtime
+        {
+            runtime.cancellation.cancel();
+        }
         Ok(())
     }
 
@@ -255,8 +327,81 @@ impl AdminService {
     }
     pub(crate) async fn cleanup_auth_sessions(&self) -> anyhow::Result<usize> {
         let mut sessions = self.gw.auth_sessions.write().await;
-        let before = sessions.len();
-        sessions.retain(|_, session| !is_expired_at(session.expires_at.as_deref()));
-        Ok(before.saturating_sub(sessions.len()))
+        let expired: Vec<_> = sessions
+            .iter()
+            .filter(|(_, session)| is_expired_at(session.expires_at.as_deref()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            if let Some(session) = sessions.remove(id)
+                && let Some(runtime) = session.vendor_runtime
+            {
+                runtime.cancellation.cancel();
+            }
+        }
+        Ok(expired.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Gateway;
+    use crate::auth::{AuthSessionCandidate, OAuthCallbackMode, OAuthSessionStartOptions};
+    use crate::config::GatewayConfig;
+
+    #[tokio::test]
+    async fn guest_script_authorization_url_is_not_stored() -> anyhow::Result<()> {
+        let data_dir = tempfile::tempdir()?;
+        let gw = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
+        .await?;
+        let admin = gw.admin();
+        let candidate = AuthSessionCandidate {
+            vendor_id: "openai-codex".into(),
+            channel: "codex".into(),
+            provider_id: None,
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            protocol: None,
+            options: Default::default(),
+            credentials: Default::default(),
+            use_proxy: false,
+        };
+        let (provider, auth_descriptor) =
+            admin.provider_auth_candidate_snapshot(&candidate).await?;
+        let scope = gw.create_vendor_session_scope(&candidate.vendor_id, provider)?;
+        let error = admin
+            .create_auth_session_record(
+                candidate,
+                auth_descriptor,
+                "test-state".into(),
+                Some(stravia_vendor_sdk::AuthResponse::Authorization {
+                    url: "javascript:alert('session-secret')".into(),
+                    user_code: None,
+                    verification_uri: Some("https://auth.openai.com".into()),
+                    interval_seconds: None,
+                }),
+                scope,
+                OAuthSessionStartOptions {
+                    callback_mode: OAuthCallbackMode::Manual,
+                    redirect_uri: "http://localhost:1457/auth/callback".into(),
+                    listener_port: None,
+                    fallback_reason: None,
+                },
+            )
+            .await
+            .expect_err("guest script URL should be rejected");
+
+        assert!(!error.to_string().contains("session-secret"));
+        assert!(gw.auth_sessions.read().await.is_empty());
+        Ok(())
     }
 }

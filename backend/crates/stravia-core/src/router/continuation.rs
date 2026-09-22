@@ -7,9 +7,8 @@ use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 pub struct ContinuationTarget<'a> {
     pub namespace: &'a str,
-    pub protocol: ProtocolId,
+    pub protocol: Option<ProtocolId>,
     pub actual_model: &'a str,
-    pub logical_model: &'a str,
     pub allow_ephemeral_response: bool,
 }
 

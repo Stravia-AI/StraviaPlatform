@@ -10,6 +10,7 @@ pub(crate) use continuation::{
 };
 pub use matcher::RouteCache;
 pub(crate) use selection::{RouteSelector, SelectionError};
+pub(crate) use selector::target_key;
 pub use selector::{
     AttemptFailureDisposition, ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy,
     RouteAttemptReservation, RoutePolicyState, RouteSchedulingSnapshot, SelectedTarget,

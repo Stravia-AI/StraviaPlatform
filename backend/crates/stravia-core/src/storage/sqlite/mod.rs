@@ -12,6 +12,7 @@ use crate::db::models::{
     Route, StatsOverview, StatsSeries, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
     is_valid_provider_auth_mode,
 };
+use crate::plugin::PluginStore;
 use crate::storage::traits::{
     AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, OAuthCredentialStore,
     ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
@@ -26,6 +27,7 @@ use web_providers::SqliteWebProviderStore;
 #[derive(Clone)]
 pub struct SqliteStorage {
     pool: SqlitePool,
+    plugin_store: PluginStore,
     provider_store: Arc<SqliteProviderStore>,
     web_provider_store: Arc<SqliteWebProviderStore>,
     model_store: Arc<SqliteRouteStore>,
@@ -40,6 +42,7 @@ pub struct SqliteStorage {
 
 impl SqliteStorage {
     pub fn from_pool(pool: SqlitePool) -> Self {
+        let plugin_store = PluginStore::sqlite(pool.clone());
         let provider_store = Arc::new(SqliteProviderStore { pool: pool.clone() });
         let web_provider_store = Arc::new(SqliteWebProviderStore { pool: pool.clone() });
         let model_store = Arc::new(SqliteRouteStore { pool: pool.clone() });
@@ -55,6 +58,7 @@ impl SqliteStorage {
         let bootstrap = Arc::new(SqliteBootstrap { pool: pool.clone() });
         Self {
             pool,
+            plugin_store,
             provider_store,
             web_provider_store,
             model_store,
@@ -74,6 +78,10 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
+    fn vendor_plugins(&self) -> &PluginStore {
+        &self.plugin_store
+    }
+
     fn providers(&self) -> &dyn ProviderStore {
         self.provider_store.as_ref()
     }

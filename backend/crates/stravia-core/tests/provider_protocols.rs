@@ -9,7 +9,7 @@
 
 use stravia_core::db::models::Provider;
 use stravia_core::protocol::ProviderProtocols;
-use stravia_core::protocol::registry::ProtocolRegistry;
+use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -42,7 +42,7 @@ fn provider_with_protocol(protocol: &str, base_url: &str) -> Provider {
 #[test]
 fn parses_legacy_protocol_keys() {
     let provider = provider_with_protocol("openai", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
 
     assert!(pp.supports(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
     assert!(!pp.supports(ANTHROPIC_MESSAGES_2023_06_01));
@@ -55,7 +55,7 @@ fn parses_legacy_protocol_keys() {
 #[test]
 fn parses_canonical_protocol_id() {
     let provider = provider_with_protocol("openai/chat/v1", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
 
     assert!(pp.supports(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
     assert_eq!(pp.default, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
@@ -64,7 +64,7 @@ fn parses_canonical_protocol_id() {
 #[test]
 fn parses_short_name_aliases() {
     let provider = provider_with_protocol("openai-chat", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
 
     assert!(pp.supports(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
     assert_eq!(pp.default, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
@@ -73,7 +73,7 @@ fn parses_short_name_aliases() {
 #[test]
 fn resolve_egress_exact_match_skips_conversion() {
     let provider = provider_with_protocol("openai", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
     let r = pp.resolve_egress(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
     assert_eq!(r.protocol, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
@@ -87,7 +87,7 @@ fn resolve_egress_responses_falls_back_to_provider_default() {
     // separate protocols; there is no same-protocol Tier-2 fallback between them.
     // An Open Responses client falls through to Tier 3 (provider default).
     let provider = provider_with_protocol("openai", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
     let r = pp.resolve_egress(OPEN_RESPONSES_2026_04_24);
 
     // No exact match, no same-protocol match (OpenResponses ≠ OpenAICompatible).
@@ -100,12 +100,18 @@ fn resolve_egress_responses_falls_back_to_provider_default() {
 #[test]
 fn resolve_egress_falls_back_to_global_default_when_family_missing() {
     let provider = provider_with_protocol("openai", "https://a.example/v1");
-    let pp = ProviderProtocols::from_provider(&provider);
+    let pp = ProviderProtocols::from_provider(&provider).expect("registered host protocol");
     // Anthropic ingress, no Anthropic endpoint → fall back to default.
     let r = pp.resolve_egress(ANTHROPIC_MESSAGES_2023_06_01);
 
     assert_eq!(r.protocol, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
     assert!(r.needs_conversion);
+}
+
+#[test]
+fn guest_owned_protocol_is_not_disguised_as_openai() {
+    let provider = provider_with_protocol("acme/private-inference-v7", "https://private.example");
+    assert!(ProviderProtocols::from_provider(&provider).is_none());
 }
 
 #[test]

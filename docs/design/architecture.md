@@ -52,13 +52,9 @@ stravia/
 │           │   └── extensions.rs · history_marker_executions.rs
 │           ├── model_turn/       # Model Turn Executor deep module（crate-private）
 │           │   ├── mod.rs            # execute(TurnInput) interface / Live + InMemory adapters
-│           │   ├── live.rs           # 授权、router::selection 驱动的 Target 尝试循环、transport
-│           │   ├── provider/         # Provider Turn transport deep module
-│           │   │   ├── mod.rs            # 选择 transport 与公共执行流程
-│           │   │   ├── reasoning.rs      # reasoning normalizer
-│           │   │   ├── transport_http.rs
-│           │   │   └── transport_responses_websocket.rs
-│           │   ├── accumulator.rs
+│           │   ├── live.rs           # 授权、router::selection 与 Wasm Vendor 尝试循环
+│           │   ├── capability.rs     # Vendor capability 执行与 canonical event bridge
+│           │   ├── provider/mod.rs   # 通用尝试观测；无 native Provider transport
 │           │   ├── support.rs
 │           │   └── tests.rs
 │           ├── reversible_redaction/ # 凭据保护的设置/观测 Host Adapter 与 SQL 集成回归
@@ -72,9 +68,6 @@ stravia/
 │           ├── proxy/            # 代理面
 │           │   ├── mod.rs
 │           │   ├── auth.rs
-│           │   ├── client/       # ProxyClient HTTP + Responses WebSocket transport
-│           │   │   ├── mod.rs
-│           │   │   └── websocket.rs
 │           │   ├── context.rs    # RequestContext / ContextBag
 │           │   ├── handler.rs    # models_list 只读端点（≤110 行）
 │           │   ├── artifacts.rs  # multipart upload / signed download adapters
@@ -136,27 +129,15 @@ stravia/
 │           │       │   └── messages/
 │           │       └── google/
 │           │           └── gemini/
-│           ├── provider/         # 厂商扩展层
-│           │   ├── mod.rs
-│           │   ├── vendor.rs     # inference Vendor trait / ProviderCtx
-│           │   ├── vendor_ext.rs # VendorExtension trait / VendorCtx
-│           │   ├── registry.rs   # VendorRegistry；inference、extension 与 metadata-only 注册
-│           │   ├── metadata.rs   # VendorMetadata / Label / AuthMode
-│           │   ├── outbound.rs   # OutboundRequest
-│           │   ├── inbound.rs    # InboundResponse
-│           │   ├── common/
-│           │   │   ├── openai_compat.rs # OpenAI 兼容共用逻辑（唯一名称）
-│           │   │   └── pipeline.rs   # 7 步 build_request / parse_response 自由函数
-│           │   ├── openai/           # OpenAiVendor + OpenAIFamilyExt
-│           │   │   └── codex/        # OpenAiCodexChannel（OAuth channel）
-│           │   ├── anthropic/        # AnthropicVendor + AnthropicFamilyExt
-│           │   │   └── claude_code/  # AnthropicClaudeCodeChannel
-│           │   ├── google/ · google_vertex/ · amazon_bedrock/ · azure/
-│           │   ├── sap_ai_core/ · cloudflare_ai_gateway/ · merge_gateway/ · gateway/
-│           │   ├── openai_compatible/ · openrouter/ · ollama/ · custom/
-│           │   └── aihubmix/ · cerebras/ · cohere/ · deepinfra/ · gitlab/ · groq/ · mistral/
-│           │       · perplexity/ · qvac/ · salad_cloud/ · togetherai/ · venice/
-│           │       · vercel/ · watsonx/ · xai/        # xAI API Key + Grok OAuth channel
+│           ├── plugin/           # Wasm Vendor host：安装、权限、网络、状态与调度
+│           │   ├── mod.rs        # 对外类型与执行接口导出；无编译期 Vendor inventory
+│           │   ├── builtin.rs    # 随产品发布的 Wasm 组件装载与 descriptor 身份核对
+│           │   ├── execution.rs  # execute_vendor / typed OperationInput / publication fence
+│           │   ├── manager.rs    # 安装版本、更新切换与运行中 operation 管理
+│           │   ├── lifecycle.rs  # 更新写栅栏与结果发布读栅栏
+│           │   ├── network.rs    # descriptor 授权下的 HTTP/WebSocket host transport
+│           │   ├── permissions.rs# descriptor origin 与配置字段权限解析
+│           │   └── store.rs      # 组件、私有状态与 data epoch 持久化
 │           ├── admin/            # AdminService 管理面（按职责拆分）
 │           │   ├── mod.rs
 │           │   ├── extensions.rs # list_loaded_extensions（provider/protocol 只读清单）
@@ -661,117 +642,62 @@ Request/response encode 和 stream delta encode 在跨协议时执行 per-value 
 
 ---
 
-## 6. 厂商扩展层（provider/）
+## 6. Wasm Vendor 组件层（plugin/）
 
-三层职责分离：
+Vendor 的身份、channel、认证、发现、allowance、请求构造与响应语义全部由可安装 Wasm 组件实现。Core 不再包含原生 `Vendor` / `VendorExtension` trait、`VendorRegistry`、编译期 inventory，或由宿主按品牌、协议猜测的 native fallback；基础回退与专属接管都由已安装组件的 descriptor 声明，descriptor 是唯一运行时事实来源。
 
-```
-protocol/codec/   ← 序列化层：AiRequest/AiResponse ↔ wire-format JSON
-provider/         ← 编排层：Vendor trait（build_request / parse_response）+ VendorExtension hooks
-```
+随产品交付的 Vendor 恰好拆为五个 Component 包：
 
-`VendorExtension` 的 hook 仅是 adapter 内部的 provider-specific 编解码/流式适配，不属于 HookRuntime 的推理事件面；它们不能绕过 canonical IR，也不能取得 HookRuntime 未授权的凭据或状态。
-
-
-### 6.1 Vendor trait（原 ProviderAdapter）
-
-`dispatcher` 的唯一接触点（`provider/vendor.rs`）：
-
-```rust
-#[async_trait]
-pub trait Vendor: Send + Sync + 'static {
-    // 标识 / 元数据
-    fn scope(&self) -> VendorScope;              // Vendor | Channel
-    fn vendor_id(&self) -> &'static str;
-    fn supported_protocols(&self) -> &'static [ProtocolId];
-    fn metadata(&self) -> &'static VendorMetadata;
-
-    // 推理与 Models 的共同认证 / URL 构造契约
-    fn construct_request(&self, ctx: &RequestContext, purpose: RequestPurpose)
-        -> anyhow::Result<ConstructedRequest>;
-
-    // 编解码 hook（可选，默认 no-op）
-    async fn pre_request(&self, ctx, req: &mut AiRequest, gw: &Gateway);
-    async fn pre_encode(&self, ctx, req: &mut AiRequest);
-    async fn post_encode(&self, ctx, body: &mut Value, headers: &mut HeaderMap);
-    async fn pre_parse(&self, ctx, body: &mut Value);
-    async fn post_parse(&self, ctx, resp: &mut AiResponse);
-
-    // 流式 hook
-    async fn on_stream_raw_chunk(&self, ctx, chunk: &str);
-    async fn on_stream_delta(&self, ctx, delta: &mut AiStreamDelta);
-
-    // 编排（required）
-    async fn build_request(&self, req: &mut AiRequest, ctx: &ProviderCtx)
-        -> Result<OutboundRequest, GatewayError>;
-    async fn parse_response(&self, resp: InboundResponse, ctx: &ProviderCtx)
-        -> Result<AiResponse, GatewayError>;
-    fn map_error(&self, status: u16, body: Value) -> GatewayError;
-    fn validate_environment(&self, provider: &Provider) -> Result<(), GatewayError>;
-
-    // Vendor-specific pre/post encode/parse and stream adaptation stay here.
-    // Inference traffic always traverses canonical IR; no raw bypass is exposed.
-}
+```text
+stravia-vendor-base/         ← vendor_id=base 的单一 fallback Vendor；承接四个专属身份之外的全部既有接入
+stravia-vendor-codex/        ← vendor_id=openai-codex；完整拥有 Codex
+stravia-vendor-grok/         ← vendor_id=xai-grok；完整拥有 Grok
+stravia-vendor-command-code/ ← vendor_id=command-code；完整拥有 Command Code
+stravia-vendor-devin/        ← vendor_id=devin；完整拥有 Devin
+stravia-vendor-common/       ← 多个 guest 共用的 Rust rlib，不是 Vendor
+stravia-protocol-codec/      ← OpenAI-compatible（含 embeddings）、Anthropic、Gemini、Open Responses 四个标准 family
+stravia-core/plugin/         ← 安装、版本、权限、网络、状态、调度与发布栅栏
+model_turn/                  ← 路由与尝试策略；只调用 Gateway::execute_vendor
 ```
 
-**build_request pipeline**（`provider/common/pipeline.rs`）：
-`pre_request` → `normalize_tool_results` → `pre_encode` → `codec_encode` → `post_encode` → `construct_request`。codec / post-encode headers 覆盖构造默认值，明确 runtime binding headers 保持最终覆盖优先级。
+基础包只有一个 Vendor 身份；其中各供应商 profile 是配置与行为声明，不是多个 Vendor。普通 OpenAI 与 xAI API channel 留在基础包，Anthropic OAuth、Google/Vertex、Bedrock、DeepSeek 及其他非专属接入的既有认证、云协议、发现、allowance 与推理能力也完整保留。Codex、Grok、Command Code、Devin 的专属包按供应商身份整体接管所有 channel 和操作；专属包未安装、不可用、缺少某项 channel/能力或执行失败时都不回退基础包。
 
-`RequestPurpose::Inference` 携带实际 egress 协议、base URL、codec 相对路径与实际模型；`Models` 只携带调用方选定的完整端点，不执行推理模型或 deployment 路径改写。`RequestContext` 携带解析后的凭据与默认认证抑制，构造返回最终 URL 和 headers。认证抑制同时覆盖默认 header 和 query 凭据；协议别名经 ProtocolRegistry，凭据 query 使用结构化编码。已知 Models 约定优先，自定义端点继承所解析 Vendor 的 Models 约定，不猜任意 URL。
+这是对 ADR-0063、ADR-0064 中“四个通用协议 Vendor/插件”表述的后续取代性澄清：保留全量 Wasm 与自包含锁定 codec 的决策，但四个标准协议 family 现在是共享 codec，而不是四个 Vendor 包。它与 ADR-0061 的独立 Vendor 身份一致；基础包仍是一个 Vendor，而不是一个包导出多个 Vendor。Command Code 与 Devin 的专有 codec 分别归其 guest，Bedrock、Cohere、Gateway、Watsonx 的专有实现归基础 guest，host 不链接这些专有 codec。
 
-Provider 查询与 Route 同步分别拥有来源优先级、发送、解析、原有超时及错误；查询保留原有静态回退，同步失败明确报错。两者都用 `http_client_for_provider(use_proxy)` 遵循既有全局出站策略，不另选代理或在配置失败后绕过。Provider write 与 Route bind 仍为独立 module。
+`task build:vendors` 一次构建五个 Component，并在 `target/vendor-plugins/manifest.json` 输出完整 manifest；不得单独构建一部分后把不完整集合当作内置 inventory。
 
-**ProviderCtx**（`provider/vendor.rs`）：
+这条边界禁止长期 native bypass：未知 vendor/channel 不回落到协议家族适配器，未知 wire protocol 也不按品牌猜测。Provider 保存的 channel 必须命中已安装 descriptor；descriptor 未声明协议时保持 `None`，调用方不能擅自补成 Open Responses 或其他协议。
 
-```rust
-pub struct ProviderCtx<'a> {
-    pub provider:             &'a Provider,
-    pub protocol:             ProtocolId,        // 即 ProtocolEndpoint
-    pub egress_base_url:      &'a str,
-    pub api_key:              &'a str,
-    pub actual_model:         &'a str,
-    pub credential:           Option<&'a StoredCredential>,
-    pub gw:                   &'a Gateway,
-    pub disable_default_auth: bool,
-}
-```
+### 6.1 Descriptor 与操作入口
 
-### 6.2 VendorExtension（channel / family ext）
+WIT 契约为 `stravia:vendor@0.2.0`。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
 
-`VendorExtension`（`provider/vendor_ext.rs`）保留用途化 `construct_request`、编解码与流式 hook，以及 Target capability / Responses WebSocket 契约；不再暴露分离认证与 URL 钩子。
+这里的 `provider_id` 是供应商 profile 身份，不是已保存 Provider 连接的数据库 UUID。SDK 与 WIT 的 `ProviderSnapshot.provider_id` 为必填；准入、channel 校验、网络 origin 与 guest 分派都只使用当前 profile，不能合并其他 profile 的声明。基础 guest 按该身份分派，专属 guest 拒绝其他身份。
 
-**关系：**
-- `Vendor` 通过 blanket `impl<T: Vendor> VendorExtension for T` 自动实现 `VendorExtension`
-- Channel-only 类型（`OpenAiCodexChannel`、`AnthropicClaudeCodeChannel`）仅 impl `VendorExtension`
+Core 的通用执行入口是 `Gateway::execute_vendor`。它按 Provider 绑定取得已安装组件，校验 descriptor 身份和 channel，构造 `ProviderSnapshot`，再将 typed `OperationInput` 交给 guest：
 
-**两套注册（均通过 `inventory::submit!`）：**
+- `Infer`：canonical `AiRequest` 进入 guest；guest 使用共享 codec 构造 wire 请求并发出 canonical runtime event。
+- `Discover` / `Allowance` / `Auth` / `ConfigValidation`：由声明对应 capability 的 guest 处理；host 不保留同厂商原生实现。
+- 运行中的 session 固定已加载组件与 data epoch；组件更新不兼容时，旧 session 不能继续发布结果。
 
-```rust
-// 完整 vendor
-inventory::submit! { VendorRegistration { make: || Box::new(XxxVendor) } }
-// Channel / family ext
-inventory::submit! { ExtensionRegistration { make: || Box::new(XxxChannel) } }
-```
+操作结束返回 `VendorExecution { output, publication }`，流事件携带同一 `VendorPublicationFence`。普通完成后 fence 仍可用于最终历史/compaction 写入；caller 取消、deadline 或不兼容插件更新后 fence 失效。最终异步写入在真实写入期间持有读栅栏，插件更新通过写栅栏等待这些发布完成；不得为了方便长期持有 `VendorOperation` lease。
 
-`VendorRegistry::resolve(provider, protocol_id)` 返回 `Arc<dyn VendorExtension>`，内部通过 `VendorAsExt` 包装统一两类注册。
+### 6.2 受控宿主能力
 
-### 6.3 共用 helpers（provider/common/openai_compat.rs）
+Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提供通用能力：
 
-OpenAI 兼容厂商复用 `construct_openai_request`、`openai_map_error`、`openai_build_request`、`openai_parse_response` 和 `GenericOpenAICompatibleAdapter`；用途化构造内部统一处理 Bearer 与路径规则。
+- 根据 descriptor 的固定 origin、base URL 字段与显式配置解析最小网络授权；guest 输出不能扩大 origin。
+- HTTP / WebSocket 统一经过 host transport，遵循代理设置、取消、deadline、响应大小与消息大小限制。
+- Provider credentials 以 typed snapshot 交给当前操作；私有状态按供应商 profile 身份、已保存 Provider 连接 UUID 和 data epoch 隔离。
+- protocol codec 保持跨厂商通用，只负责 canonical IR 与 wire 表示能力；厂商 URL、headers、认证刷新、模型发现和错误解释留在 guest。
 
-### 6.4 厂商列表
+内置 Vendor 与第三方 Vendor 走同一 `LoadedPlugin` / Wasm runtime 路径。`plugin/builtin.rs` 只负责装载随产品发布的组件并核对 descriptor 身份，不是另一套原生实现。
 
-| 厂商 | vendor_id | 特殊处理 |
-|---|---|---|
-| OpenAI | `openai` | 含 `codex` channel（OAuth） |
-| Anthropic | `anthropic` | `x-api-key` + `anthropic-version`；含 `claude-code` channel |
-| Google | `google` | URL 追加 `?key=<api_key>`；`override_model_in_body=true` |
-| Vertex AI | `vertexai` | Service account auth + 区域 endpoint |
-| DeepSeek / Moonshot / Zhipu / MiniMax / ZAI / OpenRouter / Nvidia / Ollama | 各自 vendor_id | 委托 `GenericOpenAICompatibleAdapter` / openai_compat_* |
-| xAI | `xai` | API Key 默认 channel；`grok` channel 使用 device-code OAuth、Grok Build identity headers 与 Responses upstream |
-| custom | `custom` | 用户自定义 vendor preset |
+### 6.3 维护约束
 
----
+新增或修改 Vendor 行为时必须修改对应 guest，并在真实 Wasm 测试面验证；不得在 Core 按 vendor id、model 名称或 protocol family 增加特殊分支。Core 可保留的只有平台通用 codec、权限、网络、调度、观测和持久化职责。若 guest 需要新的宿主能力，应先扩展通用 typed SDK/WIT 契约，并证明它不依赖单一厂商品牌；不能以临时 native fallback 绕过组件边界。
+
+内置组件当前覆盖 OpenAI/Codex、Anthropic/Claude Code、Google、Vertex AI、Amazon Bedrock、Devin、Command Code、xAI、GitLab、SAP AI Core、Watsonx 及通用 OpenAI-compatible 系列。实际可用列表始终以运行时已安装 descriptor 为准，而不是本文静态清单。
 
 ## 7. 错误处理
 
@@ -786,7 +712,7 @@ OpenAI 兼容厂商复用 `construct_openai_request`、`openai_map_error`、`ope
 | `RouteNotFound` | 404 | 无匹配模型/路由 |
 | `ProtocolUnsupported` | 400 | 协议不支持 |
 | `ProtocolLossyRejected` | 422 | lossy 转换被拒绝 |
-| `ProviderUnavailable` | 503 | 无可用 vendor extension |
+| `ProviderUnavailable` | 503 | 无可用的已安装 Vendor 组件 |
 | `UpstreamStatus` | 上游 status | 上游返回错误 |
 | `UpstreamTimeout` | 504 | 上游超时 |
 | `StreamParseError` | 502 | SSE chunk 解析失败 |
@@ -915,11 +841,11 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。插件 Component 是不可变、按内容寻址的实例文件；SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。校验后的文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
+旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的 Component 均随源数据根复制；插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含插件 Component，不能单独作为完整实例备份。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
 
 > 首个 SQLx migration 直接创建基础表；后续版本在 SQLite 与 PostgreSQL 中等价演进，不通过删除数据库处理不兼容版本。
 
@@ -928,7 +854,7 @@ Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日
 CREATE TABLE providers (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    vendor          TEXT,             -- canonical vendor_id
+    vendor          TEXT,             -- supplier profile identity, not saved connection UUID
     protocol        TEXT NOT NULL,
     base_url        TEXT NOT NULL,
     api_key         TEXT NOT NULL,    -- static api key

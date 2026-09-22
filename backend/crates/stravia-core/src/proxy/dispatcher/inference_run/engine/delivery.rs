@@ -10,8 +10,8 @@ use axum::response::{IntoResponse, Response};
 use futures::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::protocol::SseEvent;
-use crate::protocol::transform::{ProtocolTransform, StreamEncodeStage, TransformError};
+use stravia_protocol_codec::SseEvent;
+use stravia_protocol_codec::transform::{ProtocolTransform, StreamEncodeStage, TransformError};
 use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::protocol::ids::Protocol;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
@@ -60,7 +60,7 @@ pub(super) enum DeliveryAdapter {
 
 pub(super) struct LiveStreamRequest {
     pub(super) ingress: ProtocolId,
-    pub(super) egress: ProtocolId,
+    pub(super) egress: Option<ProtocolId>,
     pub(super) tx: tokio::sync::mpsc::Sender<Result<String, Infallible>>,
     pub(super) cancellation: CancellationToken,
     pub(super) preflight: tokio::sync::oneshot::Sender<Result<(), RoundOutcome>>,
@@ -78,15 +78,28 @@ pub(super) struct LiveStreamSink {
 }
 
 impl DeliveryAdapter {
-    pub(super) fn non_stream(ingress: ProtocolId, egress: ProtocolId) -> Self {
-        Self::NonStream { ingress, egress }
+    pub(super) fn non_stream(ingress: ProtocolId, egress: Option<ProtocolId>) -> Self {
+        // With no compatibility hint the plugin output is canonical IR, so encode
+        // directly for the real client ingress without claiming an upstream wire.
+        let response_profile = match egress {
+            Some(protocol) => protocol,
+            None => ingress,
+        };
+        Self::NonStream {
+            ingress,
+            egress: response_profile,
+        }
     }
 
-    pub(super) fn buffered_stream(ingress: ProtocolId, egress: ProtocolId) -> Self {
+    pub(super) fn buffered_stream(ingress: ProtocolId, egress: Option<ProtocolId>) -> Self {
+        let response_profile = match egress {
+            Some(protocol) => protocol,
+            None => ingress,
+        };
         Self::Stream {
             ingress,
-            egress,
-            encoder: Box::new(stream_encoder(ingress, egress)),
+            egress: response_profile,
+            encoder: Box::new(stream_encoder(ingress, response_profile)),
             failed: false,
             live: None,
         }
@@ -102,10 +115,14 @@ impl DeliveryAdapter {
             terminal_delivery,
             commit,
         } = request;
+        let response_profile = match egress {
+            Some(protocol) => protocol,
+            None => ingress,
+        };
         Self::Stream {
             ingress,
-            egress,
-            encoder: Box::new(stream_encoder(ingress, egress)),
+            egress: response_profile,
+            encoder: Box::new(stream_encoder(ingress, response_profile)),
             failed: false,
             live: Some(LiveStreamSink {
                 tx,
@@ -566,7 +583,7 @@ mod tests {
         (
             DeliveryAdapter::live_stream(LiveStreamRequest {
                 ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-                egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
                 tx,
                 cancellation,
                 preflight: preflight_tx,
@@ -589,7 +606,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
             ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
             tx: tx.clone(),
             cancellation: cancellation.clone(),
             preflight: preflight_tx,
@@ -625,7 +642,7 @@ mod tests {
         );
         let mut delivery = DeliveryAdapter::non_stream(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            ANTHROPIC_MESSAGES_2023_06_01,
+            Some(ANTHROPIC_MESSAGES_2023_06_01),
         );
 
         let delivered = delivery.deliver_canonical(&response, StatusCode::OK);
@@ -651,7 +668,7 @@ mod tests {
         commit_tx.send(()).expect("commit receiver");
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
             ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            egress: ANTHROPIC_MESSAGES_2023_06_01,
+            egress: Some(ANTHROPIC_MESSAGES_2023_06_01),
             tx,
             cancellation: CancellationToken::new(),
             preflight: preflight_tx,
@@ -729,7 +746,7 @@ mod tests {
         commit_tx.send(()).expect("commit receiver");
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
             ingress: OPEN_RESPONSES_2026_04_24,
-            egress: ANTHROPIC_MESSAGES_2023_06_01,
+            egress: Some(ANTHROPIC_MESSAGES_2023_06_01),
             tx,
             cancellation: CancellationToken::new(),
             preflight: preflight_tx,

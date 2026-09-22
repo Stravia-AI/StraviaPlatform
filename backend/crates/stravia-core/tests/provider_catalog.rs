@@ -135,6 +135,59 @@ fn version(revision: &str) -> CatalogVersion {
     }
 }
 
+fn descriptor(provider_id: &str) -> stravia_vendor_sdk::ProviderDescriptor {
+    descriptor_with_catalog(
+        provider_id,
+        Some(provider_id),
+        "default",
+        "openai-compatible",
+        None,
+    )
+}
+
+fn descriptor_with_catalog(
+    provider_id: &str,
+    catalog_id: Option<&str>,
+    channel_id: &str,
+    protocol: &str,
+    default_base_url: Option<&str>,
+) -> stravia_vendor_sdk::ProviderDescriptor {
+    serde_json::from_value(json!({
+        "provider_id": provider_id,
+        "catalog_id": catalog_id,
+        "display_name": provider_id,
+        "description": null,
+        "channels": [{
+            "id": channel_id,
+            "name": channel_id,
+            "description": null,
+            "auth": null,
+            "protocol": protocol,
+            "default_base_url": default_base_url,
+            "capabilities": ["infer"],
+            "search_model_required": false
+        }],
+        "capabilities": ["infer"],
+        "config_fields": [],
+        "network": {
+            "base_url_field": null,
+            "extra_origins": [],
+            "field_origins": []
+        },
+        "data_compat": {
+            "config_fields_format": 1,
+            "private_state_format": 1,
+            "credentials_format": 1,
+            "model_metadata_format": 1
+        }
+    }))
+    .expect("test descriptor")
+}
+
+fn test_descriptors() -> Vec<stravia_vendor_sdk::ProviderDescriptor> {
+    vec![descriptor("demo")]
+}
+
 fn source() -> ScriptedSource {
     ScriptedSource {
         state: Arc::new(Mutex::new(SourceState {
@@ -180,141 +233,77 @@ fn source() -> ScriptedSource {
 }
 
 #[tokio::test]
-async fn catalog_npm_maps_to_vendor_id() -> anyhow::Result<()> {
+async fn catalog_profiles_bind_to_explicit_catalog_ids() -> anyhow::Result<()> {
     let mappings = [
-        ("openai", "@ai-sdk/openai", "openai", "open-responses"),
+        ("openai", "@ai-sdk/openai", "open-responses"),
         (
             "openai-compatible",
             "@ai-sdk/openai-compatible",
             "openai-compatible",
-            "openai-compatible",
         ),
-        (
-            "anthropic",
-            "@ai-sdk/anthropic",
-            "anthropic",
-            "anthropic-messages",
-        ),
-        ("google", "@ai-sdk/google", "google", "google-gemini"),
-        ("xai", "@ai-sdk/xai", "xai", "openai-compatible"),
+        ("anthropic", "@ai-sdk/anthropic", "anthropic-messages"),
+        ("google", "@ai-sdk/google", "google-gemini"),
+        ("xai", "@ai-sdk/xai", "openai-compatible"),
         (
             "azure-cognitive-services",
             "@ai-sdk/azure",
-            "azure",
             "openai-compatible",
         ),
-        ("groq", "@ai-sdk/groq", "groq", "openai-compatible"),
-        (
-            "cerebras",
-            "@ai-sdk/cerebras",
-            "cerebras",
-            "openai-compatible",
-        ),
-        (
-            "togetherai",
-            "@ai-sdk/togetherai",
-            "togetherai",
-            "openai-compatible",
-        ),
-        ("mistral", "@ai-sdk/mistral", "mistral", "openai-compatible"),
-        (
-            "deepinfra",
-            "@ai-sdk/deepinfra",
-            "deepinfra",
-            "openai-compatible",
-        ),
-        (
-            "perplexity",
-            "@ai-sdk/perplexity",
-            "perplexity",
-            "openai-compatible",
-        ),
-        (
-            "gateway",
-            "@ai-sdk/gateway",
-            "gateway",
-            "gateway-language-model",
-        ),
-        ("vercel", "@ai-sdk/vercel", "vercel", "openai-compatible"),
-        (
-            "vertexai",
-            "@ai-sdk/google-vertex",
-            "google-vertex",
-            "google-gemini",
-        ),
+        ("groq", "@ai-sdk/groq", "openai-compatible"),
+        ("cerebras", "@ai-sdk/cerebras", "openai-compatible"),
+        ("togetherai", "@ai-sdk/togetherai", "openai-compatible"),
+        ("mistral", "@ai-sdk/mistral", "openai-compatible"),
+        ("deepinfra", "@ai-sdk/deepinfra", "openai-compatible"),
+        ("perplexity", "@ai-sdk/perplexity", "openai-compatible"),
+        ("gateway", "@ai-sdk/gateway", "gateway-language-model"),
+        ("vercel", "@ai-sdk/vercel", "openai-compatible"),
+        ("vertexai", "@ai-sdk/google-vertex", "google-gemini"),
         (
             "vertex-anthropic",
             "@ai-sdk/google-vertex/anthropic",
-            "google-vertex-anthropic",
             "anthropic-messages",
         ),
         (
             "amazon-bedrock",
             "@ai-sdk/amazon-bedrock",
-            "amazon-bedrock",
             "bedrock-converse",
         ),
-        ("cohere", "@ai-sdk/cohere", "cohere", "cohere-chat"),
+        ("cohere", "@ai-sdk/cohere", "cohere-chat"),
         (
             "openrouter",
             "@openrouter/ai-sdk-provider",
-            "openrouter",
             "openai-compatible",
         ),
-        (
-            "watsonx",
-            "watsonx-ai-provider",
-            "watsonx",
-            "watsonx-text-chat",
-        ),
-        (
-            "venice",
-            "venice-ai-sdk-provider",
-            "venice",
-            "openai-compatible",
-        ),
-        (
-            "aihubmix",
-            "@aihubmix/ai-sdk-provider",
-            "aihubmix",
-            "openai-compatible",
-        ),
+        ("watsonx", "watsonx-ai-provider", "watsonx-text-chat"),
+        ("venice", "venice-ai-sdk-provider", "openai-compatible"),
+        ("aihubmix", "@aihubmix/ai-sdk-provider", "openai-compatible"),
         (
             "sap-ai-core",
             "@jerome-benoit/sap-ai-provider-v2",
-            "sap-ai-core",
             "openai-compatible",
         ),
-        ("qvac", "@qvac/ai-sdk-provider", "qvac", "openai-compatible"),
+        ("qvac", "@qvac/ai-sdk-provider", "openai-compatible"),
         (
             "salad-cloud",
             "@saladtechnologies-oss/ai-sdk-provider",
-            "salad-cloud",
             "openai-compatible",
         ),
         (
             "cloudflare-ai-gateway",
             "ai-gateway-provider",
-            "cloudflare-ai-gateway",
             "openai-compatible",
         ),
-        (
-            "gitlab",
-            "gitlab-ai-provider",
-            "gitlab",
-            "openai-compatible",
-        ),
+        ("gitlab", "gitlab-ai-provider", "openai-compatible"),
         (
             "merge-gateway",
             "merge-gateway-ai-sdk-provider",
-            "merge-gateway",
             "openai-compatible",
         ),
     ];
     let source = source();
     let providers = mappings
         .iter()
-        .map(|(id, npm, _, _)| {
+        .map(|(id, npm, _)| {
             (
                 (*id).to_string(),
                 json!({ "id": id, "name": id, "npm": npm, "api": "" }),
@@ -326,18 +315,116 @@ async fn catalog_npm_maps_to_vendor_id() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
     catalog.refresh().await?;
-    let providers = catalog.providers().await;
+    let descriptors = mappings
+        .iter()
+        .map(|(catalog_id, _, protocol)| {
+            descriptor_with_catalog(catalog_id, Some(catalog_id), "default", protocol, None)
+        })
+        .collect::<Vec<_>>();
+    let providers = catalog.providers(&descriptors).await;
 
-    for (id, npm, vendor_id, protocol) in mappings {
+    for (id, npm, protocol) in mappings {
         let provider = providers
             .providers
             .iter()
             .find(|provider| provider.id == id)
             .unwrap_or_else(|| panic!("catalog Provider {id}"));
+        assert_eq!(provider.catalog_id.as_deref(), Some(id));
         assert_eq!(provider.npm, npm);
-        assert_eq!(provider.vendor_id, vendor_id);
         assert_eq!(provider.protocol, protocol);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dedicated_profiles_reuse_catalog_brands_without_merging_channels() -> anyhow::Result<()> {
+    let source = source();
+    {
+        let mut state = source.state.lock().await;
+        state.providers = serde_json::to_vec(&json!({
+            "openai": {
+                "id": "openai",
+                "name": "OpenAI",
+                "npm": "@ai-sdk/openai",
+                "api": "https://api.openai.com/v1",
+                "doc": "https://platform.openai.com/docs"
+            },
+            "xai": {
+                "id": "xai",
+                "name": "xAI",
+                "npm": "@ai-sdk/xai",
+                "api": "https://api.x.ai/v1"
+            }
+        }))?;
+        state.scopes.insert(
+            "openai".to_string(),
+            br#"{
+              "gpt-5": {
+                "id": "gpt-5",
+                "name": "GPT-5",
+                "modalities": { "input": ["text"], "output": ["text"] }
+              }
+            }"#
+            .to_vec(),
+        );
+    }
+    let data_dir = tempfile::tempdir()?;
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
+    catalog.refresh().await?;
+
+    let providers = catalog
+        .providers(&[
+            descriptor_with_catalog("openai", Some("openai"), "default", "open-responses", None),
+            descriptor_with_catalog(
+                "openai-codex",
+                Some("openai"),
+                "codex",
+                "open-responses",
+                Some("https://chatgpt.com/backend-api/codex"),
+            ),
+            descriptor_with_catalog("xai", Some("xai"), "default", "openai-compatible", None),
+            descriptor_with_catalog(
+                "xai-grok",
+                Some("xai"),
+                "grok",
+                "open-responses",
+                Some("https://cli-chat-proxy.grok.com/v1"),
+            ),
+        ])
+        .await;
+
+    assert_eq!(providers.providers.len(), 4);
+    for (provider_id, catalog_id, channel_id) in [
+        ("openai", "openai", "default"),
+        ("openai-codex", "openai", "codex"),
+        ("xai", "xai", "default"),
+        ("xai-grok", "xai", "grok"),
+    ] {
+        let matches = providers
+            .providers
+            .iter()
+            .filter(|provider| provider.id == provider_id)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "profile {provider_id} must not duplicate");
+        assert_eq!(matches[0].catalog_id.as_deref(), Some(catalog_id));
+        assert_eq!(matches[0].channels.len(), 1);
+        assert_eq!(matches[0].channels[0].id, channel_id);
+    }
+    let codex = providers
+        .providers
+        .iter()
+        .find(|provider| provider.id == "openai-codex")
+        .expect("Codex profile");
+    assert_eq!(codex.npm, "@ai-sdk/openai");
+    assert_eq!(
+        codex.documentation_url.as_deref(),
+        Some("https://platform.openai.com/docs")
+    );
+
+    let sources = catalog.model_sources("openai", "codex").await?;
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].provider_id, "openai");
+    assert_eq!(sources[0].metadata["id"], "gpt-5");
     Ok(())
 }
 
@@ -348,30 +435,18 @@ async fn catalog_commits_global_indexes_for_one_revision() -> anyhow::Result<()>
     let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source.clone()))?;
 
     let refreshed = catalog.refresh().await?;
-    let providers = catalog.providers().await;
+    let providers = catalog.providers(&test_descriptors()).await;
     let models = catalog.canonical_models().await;
 
     assert!(refreshed.changed);
     assert_eq!(refreshed.revision, "revision-1");
     assert_eq!(refreshed.generated_at, "2026-08-20T14:01:40Z");
-    // 索引里的 demo 加上并入的内置服务 command-code 与 devin。
-    assert_eq!(refreshed.provider_count, 3);
+    assert_eq!(refreshed.provider_count, 1);
     assert_eq!(refreshed.model_count, 1);
     assert_eq!(providers.revision, models.revision);
     assert_eq!(providers.generated_at, models.generated_at);
-    assert_eq!(providers.providers[0].id, "command-code");
-    assert_eq!(providers.providers[1].id, "demo");
-    let devin = &providers.providers[2];
-    assert_eq!(devin.id, "devin");
-    assert_eq!(devin.vendor_id, "devin");
-    assert_eq!(devin.protocol, "devin-connect");
-    assert_eq!(devin.channels.len(), 1);
-    assert_eq!(devin.channels[0].id, "devin");
-    assert_eq!(devin.channels[0].base_url, "https://server.codeium.com");
-    assert_eq!(
-        devin.channels[0].auth_mode,
-        stravia_core::provider_catalog::CatalogAuthMode::OAuth
-    );
+    assert_eq!(providers.providers[0].id, "demo");
+    assert_eq!(providers.providers[0].catalog_id.as_deref(), Some("demo"));
     assert_eq!(models.models[0].id, "demo/chat");
     assert_eq!(
         catalog
@@ -485,7 +560,10 @@ async fn failed_global_update_keeps_the_last_known_good_generation() -> anyhow::
     source.set_canonical_models(b"[]".to_vec()).await;
 
     assert!(catalog.refresh().await.is_err());
-    assert_eq!(catalog.providers().await.revision, "revision-1");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "revision-1"
+    );
     assert_eq!(catalog.canonical_models().await.models[0].id, "demo/chat");
     Ok(())
 }
@@ -502,7 +580,10 @@ async fn new_global_revision_replaces_the_active_generation() -> anyhow::Result<
     let restarted = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
 
     assert!(refreshed.changed);
-    assert_eq!(catalog.providers().await.revision, "revision-2");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "revision-2"
+    );
     assert_eq!(restarted.canonical_models().await.revision, "revision-2");
     Ok(())
 }
@@ -519,7 +600,10 @@ async fn revision_change_during_download_does_not_publish_a_mixed_generation() -
         .await;
 
     assert!(catalog.refresh().await.is_err());
-    assert_eq!(catalog.providers().await.revision, "bootstrap");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "bootstrap"
+    );
     assert!(!data_dir.path().join("catalog/active.json").exists());
     Ok(())
 }
@@ -533,7 +617,10 @@ async fn unsafe_remote_revision_is_rejected_before_persisting_cache_paths() -> a
     source.set_version(version("../../outside-cache")).await;
 
     assert!(catalog.refresh().await.is_err());
-    assert_eq!(catalog.providers().await.revision, "bootstrap");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "bootstrap"
+    );
     assert!(!data_dir.path().join("catalog/active.json").exists());
     Ok(())
 }
@@ -547,7 +634,10 @@ async fn restart_loads_the_complete_last_known_good_generation() -> anyhow::Resu
 
     let restarted = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
 
-    assert_eq!(restarted.providers().await.revision, "revision-1");
+    assert_eq!(
+        restarted.providers(&test_descriptors()).await.revision,
+        "revision-1"
+    );
     assert_eq!(restarted.canonical_models().await.models[0].id, "demo/chat");
     Ok(())
 }
@@ -593,7 +683,10 @@ async fn uncached_provider_scope_refreshes_stale_global_indexes() -> anyhow::Res
 
     assert_eq!(scope.revision, "revision-2");
     assert_eq!(scope.models[0].metadata["id"], "chat");
-    assert_eq!(catalog.providers().await.revision, "revision-2");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "revision-2"
+    );
     Ok(())
 }
 
@@ -613,13 +706,19 @@ async fn uncached_provider_scope_preserves_indexes_when_global_refresh_fails() -
         error.downcast_ref::<CatalogError>(),
         Some(CatalogError::ScopeRefresh { .. })
     ));
-    assert_eq!(catalog.providers().await.revision, "revision-1");
+    assert_eq!(
+        catalog.providers(&test_descriptors()).await.revision,
+        "revision-1"
+    );
     assert_eq!(
         catalog.canonical_model("demo/chat").await?["name"],
         "Demo Chat"
     );
     let restarted = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
-    assert_eq!(restarted.providers().await.revision, "revision-1");
+    assert_eq!(
+        restarted.providers(&test_descriptors()).await.revision,
+        "revision-1"
+    );
     Ok(())
 }
 
@@ -695,61 +794,14 @@ async fn resolve_channel_reports_typed_errors_for_stale_selections() -> anyhow::
     catalog.refresh().await?;
 
     let missing_provider = catalog
-        .resolve_channel("gone-vendor", "default", "fingerprint")
+        .resolve_channel("gone-vendor", "default", "fingerprint", &test_descriptors())
         .await
         .unwrap_err();
     assert!(missing_provider.downcast_ref::<CatalogError>().is_some_and(
         |error| matches!(error, CatalogError::ProviderNotFound { provider_id } if provider_id == "gone-vendor")
     ));
 
-    // 内置服务(command-code)随索引规范化并入快照,必须能按 catalog 流程解析。
-    let builtin_fingerprint = {
-        let providers = catalog.providers().await;
-        providers
-            .providers
-            .iter()
-            .find(|provider| provider.id == "command-code")
-            .expect("command-code must be merged into the snapshot")
-            .channels
-            .iter()
-            .find(|channel| channel.id == "default")
-            .expect("command-code default channel must exist")
-            .fingerprint
-            .clone()
-    };
-    let builtin = catalog
-        .resolve_channel("command-code", "default", &builtin_fingerprint)
-        .await?;
-    assert_eq!(builtin.0.vendor_id, "command-code");
-    assert_eq!(builtin.1.protocol, "command-code");
-
-    // devin 同为编译期并入服务,其唯一 OAuth 渠道必须能解析出 devin-connect
-    // 端点,供「连接模型服务」完成 catalog 契约校验。
-    let devin_fingerprint = {
-        let providers = catalog.providers().await;
-        providers
-            .providers
-            .iter()
-            .find(|provider| provider.id == "devin")
-            .expect("devin must be merged into the snapshot")
-            .channels
-            .iter()
-            .find(|channel| channel.id == "devin")
-            .expect("devin channel must exist")
-            .fingerprint
-            .clone()
-    };
-    let devin = catalog
-        .resolve_channel("devin", "devin", &devin_fingerprint)
-        .await?;
-    assert_eq!(devin.0.vendor_id, "devin");
-    assert_eq!(devin.1.protocol, "devin-connect");
-    assert_eq!(
-        devin.1.auth_mode,
-        stravia_core::provider_catalog::CatalogAuthMode::OAuth
-    );
-
-    let providers = catalog.providers().await;
+    let providers = catalog.providers(&test_descriptors()).await;
     let demo = providers
         .providers
         .iter()
@@ -762,7 +814,12 @@ async fn resolve_channel_reports_typed_errors_for_stale_selections() -> anyhow::
         .expect("demo default channel must exist");
 
     let missing_channel = catalog
-        .resolve_channel("demo", "oauth", &demo_channel.fingerprint)
+        .resolve_channel(
+            "demo",
+            "oauth",
+            &demo_channel.fingerprint,
+            &test_descriptors(),
+        )
         .await
         .unwrap_err();
     assert!(missing_channel.downcast_ref::<CatalogError>().is_some_and(
@@ -771,7 +828,7 @@ async fn resolve_channel_reports_typed_errors_for_stale_selections() -> anyhow::
     ));
 
     let changed = catalog
-        .resolve_channel("demo", "default", "stale-fingerprint")
+        .resolve_channel("demo", "default", "stale-fingerprint", &test_descriptors())
         .await
         .unwrap_err();
     assert!(changed.downcast_ref::<CatalogError>().is_some_and(|error| {

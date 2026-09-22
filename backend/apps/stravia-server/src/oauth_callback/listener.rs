@@ -6,41 +6,45 @@ pub(super) enum CallbackBinding {
 }
 
 pub(super) async fn bind_callback_listener(
-    policy: OAuthCallbackPolicy,
+    policy: AuthCallback,
 ) -> anyhow::Result<CallbackBinding> {
     match policy.port {
-        OAuthCallbackPort::Dynamic => {
-            let listener = TcpListener::bind((policy.bind_host, 0))
+        AuthCallbackPort::Dynamic => {
+            let listener = TcpListener::bind((policy.bind_host.as_str(), 0))
                 .await
                 .with_context(|| format!("bind OAuth callback listener on {}", policy.bind_host))?;
             let port = listener.local_addr()?.port();
             Ok(CallbackBinding::Listening { listener, port })
         }
-        OAuthCallbackPort::Fixed { primary, fallback } => {
-            for (index, port) in [primary, fallback].into_iter().enumerate() {
-                let mut cancel_attempted = false;
-                for attempt in 0..CODEX_BIND_ATTEMPTS {
-                    match TcpListener::bind((policy.bind_host, port)).await {
-                        Ok(listener) => {
-                            return Ok(CallbackBinding::Listening { listener, port });
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                            if index == 0 && !cancel_attempted {
-                                cancel_attempted = true;
-                                let _ = send_cancel_request(policy.bind_host, port).await;
-                            }
-                            if attempt + 1 < CODEX_BIND_ATTEMPTS {
-                                tokio::time::sleep(CODEX_BIND_RETRY_DELAY).await;
-                            }
+        AuthCallbackPort::Fixed { primary, fallback } => {
+            for (index, port) in std::iter::once(primary).chain(fallback).enumerate() {
+                let mut bound = TcpListener::bind((policy.bind_host.as_str(), port)).await;
+                if index == 0
+                    && bound
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::AddrInUse)
+                    && let Some(path) = policy.cancel_path.as_deref()
+                {
+                    match send_cancel_request(&policy.bind_host, port, path).await {
+                        Ok(()) => {
+                            // 等待旧监听器完成取消响应并关闭连接后，再尝试一次；不轮询抢占端口。
+                            bound = TcpListener::bind((policy.bind_host.as_str(), port)).await;
                         }
                         Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!(
-                                    "bind OAuth callback listener on {}:{port}",
-                                    policy.bind_host
-                                )
-                            });
+                            tracing::debug!(%error, "failed to cancel the occupied OAuth callback listener")
                         }
+                    }
+                }
+                match bound {
+                    Ok(listener) => return Ok(CallbackBinding::Listening { listener, port }),
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "bind OAuth callback listener on {}:{port}",
+                                policy.bind_host
+                            )
+                        });
                     }
                 }
             }
@@ -51,18 +55,37 @@ pub(super) async fn bind_callback_listener(
     }
 }
 
-pub(super) async fn send_cancel_request(host: &str, port: u16) -> io::Result<()> {
-    let address = format!("{host}:{port}");
-    let mut stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&address))
+pub(super) async fn send_cancel_request(host: &str, port: u16, path: &str) -> io::Result<()> {
+    let mut stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect((host, port)))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "cancel connection timed out"))??;
-    let request =
-        format!("GET /cancel HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
     tokio::time::timeout(Duration::from_secs(2), stream.write_all(request.as_bytes()))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "cancel write timed out"))??;
-    let mut response = [0_u8; 64];
-    let _ = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response)).await;
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        stream.take(4097).read_to_end(&mut response),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "cancel response timed out"))??;
+    let status = std::str::from_utf8(&response)
+        .ok()
+        .and_then(|text| text.lines().next())
+        .and_then(|line| line.split_ascii_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok());
+    if response.len() > 4096 || !status.is_some_and(|status| (200..300).contains(&status)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid cancel response",
+        ));
+    }
     Ok(())
 }
 
@@ -77,14 +100,14 @@ pub(super) struct CallbackState {
 
 pub(super) fn serve_callback_listener(
     listener: TcpListener,
-    policy: OAuthCallbackPolicy,
+    policy: AuthCallback,
     state: CallbackState,
     mut receiver: watch::Receiver<bool>,
 ) {
     let gateway = state.gateway.clone();
     let session_id = state.session_id.clone();
-    let mut app = Router::new().route(policy.path, get(oauth_callback_handler));
-    if let Some(cancel_path) = policy.cancel_path {
+    let mut app = Router::new().route(&policy.path, get(oauth_callback_handler));
+    if let Some(cancel_path) = policy.cancel_path.as_deref() {
         app = app.route(
             cancel_path,
             get(oauth_cancel_handler).post(oauth_cancel_handler),
@@ -96,15 +119,30 @@ pub(super) fn serve_callback_listener(
         let timeout_gateway = gateway.clone();
         let timeout_session_id = session_id.clone();
         let shutdown_signal = async move {
-            tokio::select! {
-                _ = receiver.changed() => {}
-                _ = tokio::time::sleep(CALLBACK_TTL) => {
-                    if let Err(error) = timeout_gateway.admin().mark_oauth_session_error(
-                        &timeout_session_id,
-                        "AUTH_TIMEOUT",
-                        "auth session expired",
-                    ).await {
-                        tracing::debug!(%error, "failed to mark timed-out OAuth session");
+            let timeout = tokio::time::sleep(CALLBACK_TTL);
+            tokio::pin!(timeout);
+            let mut lifecycle = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    _ = receiver.changed() => break,
+                    _ = &mut timeout => {
+                        if let Err(error) = timeout_gateway.admin().mark_oauth_session_error(
+                            &timeout_session_id,
+                            "AUTH_TIMEOUT",
+                            "auth session expired",
+                        ).await {
+                            tracing::debug!(%error, "failed to mark timed-out OAuth session");
+                        }
+                        break;
+                    }
+                    _ = lifecycle.tick() => {
+                        if !matches!(
+                            timeout_gateway.admin().get_oauth_session_status(&timeout_session_id).await,
+                            Ok(stravia_core::auth::AuthSessionStatusData::Pending { .. }
+                                | stravia_core::auth::AuthSessionStatusData::Exchanging { .. })
+                        ) {
+                            break;
+                        }
                     }
                 }
             }
@@ -148,7 +186,14 @@ pub(super) async fn oauth_callback_handler(
     let result = state
         .gateway
         .admin()
-        .complete_oauth_session(&state.session_id, AuthExchangeInput { callback_url })
+        .complete_oauth_session(
+            &state.session_id,
+            stravia_core::auth::AuthCompletionInput {
+                input: stravia_core::auth::AuthCompletionValue::CallbackUrl {
+                    value: callback_url,
+                },
+            },
+        )
         .await;
 
     let copy = state.locale.copy();

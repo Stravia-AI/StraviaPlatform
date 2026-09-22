@@ -7,12 +7,13 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     let chain =
         GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
     let owner = principal("inline-owner");
-    let state =
-        crate::protocol::codec::open_responses::decoder::decode_input_item(&serde_json::json!({
+    let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({
             "type": "compaction", "id": "native-inline-state", "encrypted_content": "opaque-inline"
-        }))
-        .unwrap()
-        .unwrap();
+        }),
+    )
+    .unwrap()
+    .unwrap();
     let mut source = chain
         .begin(
             owner.clone(),
@@ -29,7 +30,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     source_response.items = vec![AiItem::output_text("source answer")];
     source_response.items[0].set_graph_metadata(
         Some(
-            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+            stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                 "msg",
                 source.id(),
                 0,
@@ -79,7 +80,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
         history_context_fingerprint(&continued.request().items),
         history_context_fingerprint(&expected)
     );
-    let trigger = crate::protocol::codec::open_responses::decoder::decode_input_item(
+    let trigger = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({"type": "compaction_trigger"}),
     )
     .unwrap()
@@ -115,7 +116,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     response.items = vec![state.clone(), AiItem::output_text("inline answer")];
     response.items[1].set_graph_metadata(
         Some(
-            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+            stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                 "msg",
                 write.id(),
                 1,
@@ -162,7 +163,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
         answer.items = vec![AiItem::output_text("next answer")];
         answer.items[0].set_graph_metadata(
             Some(
-                crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                     "msg",
                     next.id(),
                     0,
@@ -223,8 +224,11 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
         .begin(owner.clone(), responses_request(vec![original.clone()]))
         .await
         .unwrap();
-    let item_id =
-        crate::protocol::codec::open_responses::formatter::gateway_item_id("msg", source.id(), 0);
+    let item_id = stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
+        "msg",
+        source.id(),
+        0,
+    );
     let mut answer = AiResponse::new("source-answer", "model");
     answer.items = vec![AiItem::output_text("saved answer")];
     answer.items[0].set_graph_metadata(
@@ -235,7 +239,7 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
     );
     assert!(source.stage(&mut answer, &generation_source(), None));
     source.persist().await.unwrap();
-    let decode = crate::protocol::codec::open_responses::decoder::decode_input_item;
+    let decode = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item;
     let reference = decode(&serde_json::json!({"type":"item_reference","id":item_id}))
         .unwrap()
         .unwrap();
@@ -291,7 +295,7 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
     answer.items = vec![AiItem::output_text("already delivered answer")];
     answer.items[0].set_graph_metadata(
         Some(
-            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+            stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                 "msg",
                 source.id(),
                 0,
@@ -303,7 +307,7 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
     );
     assert!(source.stage(&mut answer, &generation_source(), None));
     source.persist().await.unwrap();
-    let state = crate::protocol::codec::open_responses::decoder::decode_input_item(
+    let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({"type":"compaction","id":"same-source-state","encrypted_content":"opaque"}),
     ).unwrap().unwrap();
     compaction
@@ -325,7 +329,7 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         )
         .await
         .unwrap();
-    let trigger = crate::protocol::codec::open_responses::decoder::decode_input_item(
+    let trigger = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({"type":"compaction_trigger"}),
     )
     .unwrap()
@@ -363,12 +367,13 @@ async fn native_window_excludes_only_verified_items_from_new_input() {
     crate::migrations::migrate_sqlite(&pool).await.unwrap();
     let compaction = crate::compaction::Compaction::sqlite(pool);
     let owner = principal("leading-user");
-    let state =
-        crate::protocol::codec::open_responses::decoder::decode_input_item(&serde_json::json!({
+    let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({
             "type": "compaction", "encrypted_content": "leading-boundary"
-        }))
-        .unwrap()
-        .unwrap();
+        }),
+    )
+    .unwrap()
+    .unwrap();
     let window = vec![user_message("retained old user"), state];
     compaction
         .register(

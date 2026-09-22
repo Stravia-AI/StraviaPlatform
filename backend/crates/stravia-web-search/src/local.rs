@@ -405,9 +405,13 @@ impl SearchBackend for LocalSearchBackend {
                             .then_some(super::SearchPartialCause::WorkingBudgetExhausted),
                         report,
                         evidence,
-                        usage: result.usage,
+                        usage: Some(result.usage),
                         model_turns,
                         tool_calls,
+                        publication: None,
+                        provider_id: None,
+                        upstream_model: None,
+                        target_id: None,
                     });
                 }
                 stravia_runtime_contract::agent::AgentEvent::Failed { error } => {
@@ -810,6 +814,7 @@ mod tests {
                     total_time: Duration::from_secs(60),
                 }),
                 cancellation: stravia_runtime_contract::CancellationToken::new(),
+                deadline: std::time::Instant::now() + Duration::from_secs(60),
             })
             .await
             .expect_err("superseded Local definition revisions must fail");

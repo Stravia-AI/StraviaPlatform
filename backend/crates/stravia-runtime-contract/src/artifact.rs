@@ -93,7 +93,7 @@ impl ArtifactSettings {
 
     pub fn validate(&self) -> Result<(), ArtifactError> {
         fn base(value: &str) -> Result<(), ArtifactError> {
-            let url = reqwest::Url::parse(value)
+            let url = url::Url::parse(value)
                 .map_err(|_| ArtifactError::Invalid("invalid file access base URL".into()))?;
             if !matches!(url.scheme(), "http" | "https")
                 || url.host_str().is_none()

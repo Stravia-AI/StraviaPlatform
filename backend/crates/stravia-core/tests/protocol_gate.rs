@@ -45,7 +45,7 @@ fn provider(protocol: &str) -> Provider {
 #[test]
 fn openai_compat_protocol_suite_includes_embeddings() {
     let p = provider("openai-compatible");
-    let pp = ProviderProtocols::from_provider(&p);
+    let pp = ProviderProtocols::from_provider(&p).expect("registered host protocol");
 
     assert!(
         pp.supports(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
@@ -63,7 +63,7 @@ fn openai_compat_protocol_suite_includes_embeddings() {
 #[test]
 fn endpoint_keyed_format_expands_to_full_protocol_suite() {
     let p = provider("openai/chat/v1");
-    let pp = ProviderProtocols::from_provider(&p);
+    let pp = ProviderProtocols::from_provider(&p).expect("registered host protocol");
 
     // parse_protocol("openai/chat/v1") → Protocol::OpenAICompatible → suite expansion
     assert!(pp.supports(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
@@ -83,7 +83,7 @@ fn endpoint_keyed_format_expands_to_full_protocol_suite() {
 #[test]
 fn embeddings_endpoint_key_also_expands_to_full_openai_compat_suite() {
     let p = provider("openai/embeddings/v1");
-    let pp = ProviderProtocols::from_provider(&p);
+    let pp = ProviderProtocols::from_provider(&p).expect("registered host protocol");
 
     // Both chat and embeddings present after suite expansion.
     assert!(pp.supports(OPENAI_COMPATIBLE_EMBEDDINGS_V1));

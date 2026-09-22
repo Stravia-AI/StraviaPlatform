@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 stravia-runtime-contract = { workspace = true }
+stravia-vendor-sdk = { workspace = true }
 stravia-web-access-contract = { workspace = true }
 stravia-web-access = { workspace = true }
 async-trait = { workspace = true }

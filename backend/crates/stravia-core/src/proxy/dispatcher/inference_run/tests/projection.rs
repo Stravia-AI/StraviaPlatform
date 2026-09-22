@@ -9,7 +9,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
     use serde_json::{Value, json};
 
     fn snapshot(status: &str, output: Vec<Value>) -> Value {
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-paragraphs",
             "provider-model",
             status,
@@ -156,7 +156,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
             &gateway,
             model,
             &[format!("http://{address}/v1")],
-            "test-http",
+            "protocol-open-responses",
             "open-responses",
         )
         .await;
@@ -226,7 +226,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
         );
         displays.push(displayed);
 
-        let request = crate::protocol::transform::ProtocolTransform::global()
+        let request = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(
                 OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
                 OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -480,7 +480,7 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
             .contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
     );
 
-    let replay_request = crate::protocol::registry::ProtocolRegistry::global()
+    let replay_request = stravia_protocol_codec::registry::ProtocolRegistry::global()
         .adapter(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
         .expect("OpenAI Chat adapter")
         .decode_request(serde_json::json!({

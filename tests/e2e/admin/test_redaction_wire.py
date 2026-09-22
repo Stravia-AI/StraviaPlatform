@@ -70,8 +70,9 @@ def wire_route(env: dict[str, Any], url: str, protocol: str, model: str) -> str:
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/providers", headers=env["auth"],
         payload={"name": model, "source": {"type": "custom", "vendor": "custom",
-                 "protocol": protocol, "base_url": url},
-                 "credential": {"type": "api_key", "value": "upstream-wire-auth"}},
+                 "channel": "default", "protocol": protocol, "base_url": url},
+                 "credential": {"type": "api_key", "value": "upstream-wire-auth"},
+                 "vendor_options": {}},
     )
     assert status == 200, body
     provider_id = body["data"]["id"]
@@ -202,6 +203,7 @@ def test_raw_encoder_carriers_are_protected_without_losing_fidelity(
             )
             assert status == 200, response
             actual = received[-1]["body"]
+            assert "upstream-wire-auth" not in json.dumps(actual)
             headers = {name.lower(): value for name, value in received[-1]["headers"].items()}
             assert "upstream-wire-auth" in {
                 headers.get("x-api-key"), headers.get("x-goog-api-key"),

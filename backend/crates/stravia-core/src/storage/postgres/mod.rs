@@ -12,6 +12,7 @@ use crate::db::models::{
     Route, StatsOverview, StatsSeries, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
     is_valid_provider_auth_mode,
 };
+use crate::plugin::PluginStore;
 use crate::storage::sql::config::SqlBackendConfig;
 use crate::storage::traits::{
     AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, OAuthCredentialStore,
@@ -76,6 +77,7 @@ impl PostgresAdapter {
 #[derive(Clone)]
 pub struct PostgresStorage {
     pool: Pool<Postgres>,
+    plugin_store: PluginStore,
     provider_store: Arc<PostgresProviderStore>,
     web_provider_store: Arc<PostgresWebProviderStore>,
     model_store: Arc<PostgresRouteStore>,
@@ -92,6 +94,7 @@ impl PostgresStorage {
     pub async fn connect(config: SqlBackendConfig) -> anyhow::Result<Self> {
         let adapter = PostgresAdapter::connect(config).await?;
         let pool = adapter.pool().clone();
+        let plugin_store = PluginStore::postgres(pool.clone());
         let provider_store = Arc::new(PostgresProviderStore { pool: pool.clone() });
         let web_provider_store = Arc::new(PostgresWebProviderStore { pool: pool.clone() });
         let model_store = Arc::new(PostgresRouteStore { pool: pool.clone() });
@@ -107,6 +110,7 @@ impl PostgresStorage {
         let bootstrap = Arc::new(PostgresBootstrap { adapter });
         Ok(Self {
             pool,
+            plugin_store,
             provider_store,
             web_provider_store,
             model_store,
@@ -126,6 +130,10 @@ impl PostgresStorage {
 }
 
 impl Storage for PostgresStorage {
+    fn vendor_plugins(&self) -> &PluginStore {
+        &self.plugin_store
+    }
+
     fn providers(&self) -> &dyn ProviderStore {
         self.provider_store.as_ref()
     }

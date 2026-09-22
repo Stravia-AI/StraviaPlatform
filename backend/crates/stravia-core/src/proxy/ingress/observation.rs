@@ -54,6 +54,7 @@ pub(crate) fn reject(
         return response;
     }
     observer.record_debug(|| RunEvent::Wire {
+        capture_id: None,
         direction: "platform_to_client".into(),
         transport: "http".into(),
         protocol: "error".into(),
@@ -70,6 +71,7 @@ pub(crate) fn reject(
     let stream = body.into_data_stream().map(move |result| {
         match &result {
             Ok(bytes) => observer.record_debug(|| RunEvent::Wire {
+                capture_id: None,
                 direction: "platform_to_client".into(),
                 transport: "http".into(),
                 protocol: "error".into(),

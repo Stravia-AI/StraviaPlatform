@@ -1,109 +1,24 @@
-//! Read-only inventory of built-in protocol and provider extensions.
+//! Wasm Vendor 组件的安装、生命周期与受控宿主能力。
+//!
+//! Vendor 清单以已安装组件为准；协议 codec 注册表属于通用协议层，不能再与
+//! 编译期 Vendor inventory 拼成一套伪插件清单。
 
-use std::sync::OnceLock;
+mod artifacts;
+mod builtin;
+pub(crate) mod execution;
+mod lifecycle;
+pub(crate) mod manager;
+pub(crate) mod network;
+pub(crate) mod permissions;
+mod store;
+mod types;
 
-use crate::protocol::registry::ProtocolRegistry;
-use crate::provider::VendorRegistry;
-
-/// The kind of built-in extension represented by a manifest entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilityKind {
-    /// A provider vendor preset/adapter.
-    ProviderVendor,
-    /// A protocol endpoint handler.
-    ProtocolEndpoint,
-}
-
-impl CapabilityKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CapabilityKind::ProviderVendor => "provider_vendor",
-            CapabilityKind::ProtocolEndpoint => "protocol_endpoint",
-        }
-    }
-}
-
-/// A read-only description of one loaded extension.
-#[derive(Debug, Clone)]
-pub struct PluginManifest {
-    /// Stable identifier of the extension (hook name / vendor id / protocol id).
-    pub id: String,
-    /// Which capability slot this extension occupies.
-    pub capability: CapabilityKind,
-}
-
-/// Aggregated, read-only view over Stravia's compile-time provider and protocol
-/// registries.
-pub struct PluginKernel {
-    vendors: &'static VendorRegistry,
-    protocols: &'static ProtocolRegistry,
-}
-
-impl PluginKernel {
-    /// Process-wide kernel singleton.
-    pub fn global() -> &'static PluginKernel {
-        static KERNEL: OnceLock<PluginKernel> = OnceLock::new();
-        KERNEL.get_or_init(|| PluginKernel {
-            vendors: VendorRegistry::global(),
-            protocols: ProtocolRegistry::global(),
-        })
-    }
-
-    /// Enumerate every loaded extension across all registries.
-    pub fn manifests(&self) -> Vec<PluginManifest> {
-        let mut out = Vec::new();
-
-        for vendor in self.vendors.list_metadata() {
-            out.push(PluginManifest {
-                id: vendor.id.to_string(),
-                capability: CapabilityKind::ProviderVendor,
-            });
-        }
-        for endpoint in self.protocols.endpoints() {
-            out.push(PluginManifest {
-                id: endpoint.to_string(),
-                capability: CapabilityKind::ProtocolEndpoint,
-            });
-        }
-
-        out
-    }
-
-    /// Manifests filtered to a single capability kind.
-    pub fn manifests_of(&self, kind: CapabilityKind) -> Vec<PluginManifest> {
-        self.manifests()
-            .into_iter()
-            .filter(|m| m.capability == kind)
-            .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kernel_aggregates_builtin_extensions() {
-        let kernel = PluginKernel::global();
-        let manifests = kernel.manifests();
-
-        // Built-in protocol endpoints and vendor presets are always registered,
-        // so the aggregated view must never be empty.
-        assert!(
-            !manifests.is_empty(),
-            "expected built-in extensions to be registered"
-        );
-        assert!(
-            !kernel
-                .manifests_of(CapabilityKind::ProtocolEndpoint)
-                .is_empty(),
-            "expected at least one protocol endpoint"
-        );
-        assert!(
-            !kernel
-                .manifests_of(CapabilityKind::ProviderVendor)
-                .is_empty(),
-            "expected at least one provider vendor"
-        );
-    }
-}
+pub(crate) use execution::{
+    VendorCallContext, VendorEvent, VendorExecution, VendorRequest, VendorSessionScope,
+};
+pub(crate) use lifecycle::VendorPublicationFence;
+pub use store::PluginStore;
+pub use types::{
+    ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginNetworkPermission,
+    PluginPreview, PluginProvider, PluginSource, PluginSummary,
+};

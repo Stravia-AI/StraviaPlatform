@@ -7,11 +7,13 @@
 //! - `version`: pinned wire-schema version (`v1`, `2026-04-24`, `2023-06-01`, `v1beta`).
 //!
 //! `ProtocolEndpoint` is `Copy` and stores `&'static str` slices — values must be const.
-//! Runtime parsing of arbitrary strings into a `ProtocolEndpoint` is the responsibility of
-//! `ProtocolRegistry::resolve_alias`, which returns one of the registered const ids.
+//! Host codec lookup still belongs to `ProtocolRegistry`; guest-selected identities use
+//! [`ProtocolIdentity`] so an unregistered private protocol remains opaque and exact.
 
 use std::fmt;
 use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 /// Top-level protocol suite (wire-format family).
 ///
@@ -80,6 +82,52 @@ impl fmt::Display for Protocol {
     }
 }
 
+impl Protocol {
+    /// Resolve a known suite, endpoint, or legacy identifier without consulting
+    /// a host codec registry. Unknown guest-selected identities remain opaque.
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        value
+            .trim()
+            .parse()
+            .ok()
+            .or_else(|| ProtocolEndpoint::from_identifier(value).map(|endpoint| endpoint.protocol))
+    }
+
+    /// Whether the shared protocol semantics can carry a resolved Thinking
+    /// control. Private wire encoding remains in the owning guest.
+    pub fn represents_target_thinking_control(
+        self,
+        control: &crate::thinking::TargetThinkingControl,
+    ) -> bool {
+        use crate::thinking::TargetThinkingControl;
+
+        if matches!(control, TargetThinkingControl::Hidden) {
+            return true;
+        }
+        match self {
+            Self::OpenResponses => matches!(
+                control,
+                TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
+            ),
+            Self::AnthropicMessages | Self::GoogleGemini => true,
+            Self::OpenAICompatible => {
+                matches!(control, TargetThinkingControl::Effort { .. })
+            }
+            Self::DevinConnect => matches!(
+                control,
+                TargetThinkingControl::Effort { .. }
+                    | TargetThinkingControl::Enabled
+                    | TargetThinkingControl::Disabled
+            ),
+            Self::BedrockConverse
+            | Self::CohereChat
+            | Self::WatsonxTextChat
+            | Self::GatewayLanguageModel
+            | Self::CommandCode => false,
+        }
+    }
+}
+
 impl FromStr for Protocol {
     type Err = anyhow::Error;
 
@@ -132,6 +180,60 @@ impl fmt::Display for ProtocolEndpoint {
     }
 }
 
+/// The protocol identity selected by a vendor guest.
+///
+/// Unlike [`ProtocolEndpoint`], this value is intentionally open: third-party
+/// guests may return identities unknown to the host. The original string is
+/// retained for private-state affinity and protected-thinking replay.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProtocolIdentity(String);
+
+impl ProtocolIdentity {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Known suite semantics, when the identity is part of the shared contract.
+    /// Unknown plugin identities deliberately return `None` without changing
+    /// their stored identity.
+    pub fn protocol(&self) -> Option<Protocol> {
+        Protocol::from_identifier(&self.0)
+    }
+
+    pub fn matches_endpoint(&self, endpoint: ProtocolEndpoint) -> bool {
+        self.protocol() == Some(endpoint.protocol)
+    }
+}
+
+impl fmt::Display for ProtocolIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl From<String> for ProtocolIdentity {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for ProtocolIdentity {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<ProtocolEndpoint> for ProtocolIdentity {
+    fn from(value: ProtocolEndpoint) -> Self {
+        Self::new(value.to_string())
+    }
+}
+
 // ── Canonical const `ProtocolEndpoint` values ────────────────────────────────
 
 pub const OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1: ProtocolEndpoint =
@@ -166,6 +268,63 @@ pub const COMMAND_CODE_GENERATE_V1: ProtocolEndpoint =
 
 pub const DEVIN_CONNECT_GET_CHAT_MESSAGE_V1: ProtocolEndpoint =
     ProtocolEndpoint::new(Protocol::DevinConnect, "get-chat-message", "v1");
+
+impl ProtocolEndpoint {
+    /// Resolve endpoint identities that are part of the shared runtime contract.
+    /// This is identity parsing only; owning guest codecs remain responsible for
+    /// all private wire encoding and decoding.
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        Some(match value.trim() {
+            "openai-compatible/chat-completions/v1"
+            | "openai/chat/v1"
+            | "openai-chat"
+            | "openai-chat-completions" => OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            "openai-compatible/embeddings/v1"
+            | "openai/embeddings/v1"
+            | "openai-embeddings"
+            | "embeddings" => OPENAI_COMPATIBLE_EMBEDDINGS_V1,
+            "open-responses/responses/2026-04-24" | "open-responses" => OPEN_RESPONSES_2026_04_24,
+            "anthropic-messages/messages/2023-06-01" | "anthropic-messages" => {
+                ANTHROPIC_MESSAGES_2023_06_01
+            }
+            "google-gemini/generate-content/v1beta"
+            | "google-generate"
+            | "google-generate-content" => GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            "bedrock-converse/converse/v1" => BEDROCK_CONVERSE_V1,
+            "cohere-chat/chat/v2" => COHERE_CHAT_V2,
+            "watsonx-text-chat/chat/v1" => WATSONX_TEXT_CHAT_V1,
+            "gateway-language-model/language-model/v4" => GATEWAY_LANGUAGE_MODEL_V4,
+            "command-code/generate/v1" => COMMAND_CODE_GENERATE_V1,
+            "devin-connect/get-chat-message/v1" => DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            _ => return None,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProtocolEndpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "openai-compatible/chat-completions/v1" => Ok(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
+            "openai-compatible/embeddings/v1" => Ok(OPENAI_COMPATIBLE_EMBEDDINGS_V1),
+            "open-responses/responses/2026-04-24" => Ok(OPEN_RESPONSES_2026_04_24),
+            "anthropic-messages/messages/2023-06-01" => Ok(ANTHROPIC_MESSAGES_2023_06_01),
+            "google-gemini/generate-content/v1beta" => Ok(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA),
+            "bedrock-converse/converse/v1" => Ok(BEDROCK_CONVERSE_V1),
+            "cohere-chat/chat/v2" => Ok(COHERE_CHAT_V2),
+            "watsonx-text-chat/chat/v1" => Ok(WATSONX_TEXT_CHAT_V1),
+            "gateway-language-model/language-model/v4" => Ok(GATEWAY_LANGUAGE_MODEL_V4),
+            "command-code/generate/v1" => Ok(COMMAND_CODE_GENERATE_V1),
+            "devin-connect/get-chat-message/v1" => Ok(DEVIN_CONNECT_GET_CHAT_MESSAGE_V1),
+            _ => Err(serde::de::Error::custom(format_args!(
+                "unknown canonical protocol endpoint `{value}`"
+            ))),
+        }
+    }
+}
 
 // ── Backward-compat type alias ────────────────────────────────────────────────
 
@@ -344,5 +503,31 @@ mod tests {
         set.insert(id);
         set.insert(copied);
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn selected_protocol_identity_preserves_unknown_plugins() {
+        let identity = ProtocolIdentity::new("acme/private-inference-v7");
+        assert_eq!(identity.as_str(), "acme/private-inference-v7");
+        assert_eq!(identity.protocol(), None);
+        assert!(!identity.matches_endpoint(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
+        assert_eq!(
+            serde_json::to_string(&identity).unwrap(),
+            r#""acme/private-inference-v7""#
+        );
+    }
+
+    #[test]
+    fn selected_protocol_identity_exposes_known_semantics_without_a_codec() {
+        let private = ProtocolIdentity::new("devin-connect");
+        assert_eq!(private.protocol(), Some(Protocol::DevinConnect));
+        assert!(Protocol::DevinConnect.represents_target_thinking_control(
+            &crate::thinking::TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        let standard = ProtocolIdentity::new("openai/chat/v1");
+        assert!(standard.matches_endpoint(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
+        assert!(standard.matches_endpoint(OPENAI_COMPATIBLE_EMBEDDINGS_V1));
     }
 }

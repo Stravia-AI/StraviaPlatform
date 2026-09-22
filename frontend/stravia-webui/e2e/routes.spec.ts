@@ -13,7 +13,20 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
   await page.route('**/api/v1/providers', (route) =>
     route.fulfill({
       json: {
-        data: [{ id: 'prefill-provider', name: 'Prefill service', protocol: 'openai-compatible', is_enabled: true }],
+        data: [
+          {
+            id: 'prefill-provider',
+            name: 'Prefill service',
+            vendor: 'openai-compatible',
+            channel: 'default',
+            protocol: 'openai-compatible',
+            base_url: 'https://prefill.example/v1',
+            use_proxy: false,
+            is_enabled: true,
+            created_at: '2026-08-17T00:00:00Z',
+            updated_at: '2026-08-17T00:00:00Z',
+          },
+        ],
       },
     }),
   )
@@ -103,9 +116,14 @@ test('Models table fits the desktop content width without horizontal scrolling',
           {
             id: 'codex',
             name: 'Codex',
+            vendor: 'openai-codex',
+            channel: 'codex',
             protocol: 'open-responses',
             base_url: 'https://codex.example/v1',
+            use_proxy: false,
             is_enabled: true,
+            created_at: '2026-08-17T00:00:00Z',
+            updated_at: '2026-08-17T00:00:00Z',
           },
         ],
       },
@@ -174,7 +192,20 @@ test('Mobile model links preserve new-tab navigation and keep row actions indepe
   await page.route('**/api/v1/providers', (route) =>
     route.fulfill({
       json: {
-        data: [{ id: 'mobile-provider', name: 'Mobile provider', protocol: 'open-responses', is_enabled: true }],
+        data: [
+          {
+            id: 'mobile-provider',
+            name: 'Mobile provider',
+            vendor: 'openai-codex',
+            channel: 'codex',
+            protocol: 'open-responses',
+            base_url: 'https://mobile.example/v1',
+            use_proxy: false,
+            is_enabled: true,
+            created_at: '2026-08-17T00:00:00Z',
+            updated_at: '2026-08-17T00:00:00Z',
+          },
+        ],
       },
     }),
   )
@@ -292,6 +323,8 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
           {
             id: 'provider',
             name: 'Provider',
+            vendor: 'openai-compatible',
+            channel: 'default',
             protocol: 'openai-compatible',
             base_url: 'https://provider.example/v1',
             use_proxy: false,
@@ -419,6 +452,8 @@ test('Model Route editor derives thinking levels and identifies blocking destina
           {
             id: 'provider',
             name: 'Provider',
+            vendor: 'openai-compatible',
+            channel: 'default',
             protocol: 'openai-compatible',
             base_url: 'https://provider.example/v1',
             use_proxy: false,
@@ -530,6 +565,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     {
       id: 'provider-a',
       name: 'Provider A',
+      vendor: 'openai-compatible',
+      channel: 'default',
       protocol: 'openai-compatible',
       base_url: 'https://a.example/v1',
       use_proxy: false,
@@ -540,6 +577,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     {
       id: 'provider-b',
       name: 'Provider B',
+      vendor: 'openai-compatible',
+      channel: 'default',
       protocol: 'openai-compatible',
       base_url: 'https://b.example/v1',
       use_proxy: false,
@@ -807,6 +846,227 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
 })
 
+test('Provider-managed search saves a Provider-only Target with null model identity', async ({ page }) => {
+  const provider = {
+    id: 'search-provider',
+    name: 'Search Provider',
+    vendor: 'fixture.capability-search',
+    channel: 'default',
+    protocol: 'fixture-search',
+    base_url: 'https://search.example',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
+  }
+  let createBody: Record<string, unknown> | undefined
+
+  await page.route('**/api/v1/vendors', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            provider_id: 'fixture.capability-search',
+            catalog_id: null,
+            display_name: 'Capability Contract (pure-search)',
+            description: 'Exercises model-free full search.',
+            channels: [
+              {
+                id: 'default',
+                name: 'Default',
+                description: null,
+                auth: null,
+                protocol: null,
+                default_base_url: null,
+                capabilities: ['search'],
+                model_capabilities: [],
+                search_model_required: false,
+              },
+            ],
+            capabilities: ['search'],
+            config_fields: [],
+            network: { base_url_field: null, extra_origins: [], field_origins: [] },
+            data_compat: {
+              config_fields_format: 1,
+              private_state_format: 1,
+              credentials_format: 1,
+              model_metadata_format: 1,
+            },
+          },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/providers**', async (route) => {
+    const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
+    if (path === '/providers') {
+      await route.fulfill({ json: { data: [provider] } })
+      return
+    }
+    if (path.endsWith('/models')) {
+      await route.fulfill({ json: { data: { models: [] } } })
+      return
+    }
+    await route.fallback()
+  })
+  await page.route('**/api/v1/models', async (route) => {
+    if (route.request().method() === 'POST') {
+      createBody = route.request().postDataJSON()
+      await route.fulfill({ json: { data: { id: 'search-route', model_id: 'search-route' } } })
+      return
+    }
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  // 描述符先完成，之后才打开按需挂载的菜单，覆盖成功快照未被早期错误标志订阅的边界。
+  const descriptorsLoaded = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/vendors')
+  await page.goto('/models/new')
+  await (await descriptorsLoaded).finished()
+  const modelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
+  await modelId.fill('search-route')
+  await modelId.press('Enter')
+  await page.getByRole('button', { name: 'Add destination' }).click()
+  await page.getByLabel('Destination 1 model service', { exact: true }).click()
+  await page.getByRole('option', { name: provider.name, exact: true }).click()
+  await page.getByLabel('Destination type', { exact: true }).click()
+  await page.getByRole('option', { name: 'Provider-managed search', exact: true }).click()
+  await expect(page.getByText('This service chooses its own upstream search model.')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+  const destination = page.getByRole('button', { name: 'Edit destination 1' })
+  await expect(destination).toContainText('Provider-managed search')
+  await expect(page.getByRole('complementary', { name: 'Disabled' })).toContainText('Provider-managed search')
+  await destination.dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
+  await expect(page.getByLabel('Layer 1')).toContainText('Provider-managed search')
+  await page.getByRole('button', { name: 'Save model' }).click()
+
+  await expect
+    .poll(() => createBody)
+    .toMatchObject({
+      model_id: 'search-route',
+      target_provider: provider.id,
+      target_model: null,
+      targets: [{ provider_id: provider.id, model: null, enabled: true, priority: 0 }],
+    })
+})
+
+test('Provider-managed search waits for descriptors, recovers errors, and applies real capability support', async ({
+  page,
+}) => {
+  const provider = {
+    id: 'saved-search-provider',
+    name: 'Saved Search Provider',
+    vendor: 'fixture.saved-search',
+    channel: 'default',
+    protocol: 'fixture-search',
+    base_url: 'https://saved-search.example',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
+  }
+  const model = {
+    id: 'saved-search-route',
+    model_id: 'saved-search-route',
+    display_name: null,
+    balance: 'traffic_equalization',
+    target_provider: provider.id,
+    target_model: null,
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    supported_thinking_levels: [],
+    targets: [
+      {
+        id: 'saved-search-target',
+        model_id: 'saved-search-route',
+        provider_id: provider.id,
+        model: null,
+        enabled: true,
+        priority: 1,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
+        created_at: '2026-08-17T00:00:00Z',
+        thinking_level_map: [],
+      },
+    ],
+  }
+  let descriptorsAvailable = false
+
+  await page.route('**/api/v1/vendors', (route) =>
+    route.fulfill(
+      descriptorsAvailable
+        ? {
+            json: {
+              data: [
+                {
+                  provider_id: provider.vendor,
+                  catalog_id: null,
+                  display_name: provider.name,
+                  description: 'Saved provider without model-free search.',
+                  channels: [
+                    {
+                      id: 'default',
+                      name: 'Default',
+                      description: null,
+                      auth: null,
+                      protocol: 'fixture-search',
+                      default_base_url: null,
+                      capabilities: ['infer'],
+                      model_capabilities: [],
+                      search_model_required: false,
+                    },
+                  ],
+                  capabilities: ['infer'],
+                  config_fields: [],
+                  network: { base_url_field: null, extra_origins: [], field_origins: [] },
+                  data_compat: {
+                    config_fields_format: 1,
+                    private_state_format: 1,
+                    credentials_format: 1,
+                    model_metadata_format: 1,
+                  },
+                },
+              ],
+            },
+          }
+        : { status: 503, json: { error: 'Descriptor registry unavailable' } },
+    ),
+  )
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  await page.route('**/api/v1/providers/saved-search-provider/models', (route) =>
+    route.fulfill({ json: { data: { models: [] } } }),
+  )
+  await page.route('**/api/v1/models/saved-search-route', (route) => route.fulfill({ json: { data: model } }))
+  await page.route('**/api/v1/models/saved-search-route/target-statuses', (route) =>
+    route.fulfill({ json: { data: [] } }),
+  )
+
+  await page.goto('/models/saved-search-route')
+  const destination = page.getByRole('button', { name: 'Edit destination 1' })
+  await expect(destination).toContainText('Provider-managed search')
+  await expect(page.getByText('Provider-managed search unavailable', { exact: true })).toHaveCount(0)
+
+  const descriptorFailure = page.getByRole('alert').filter({ hasText: 'Descriptor registry unavailable' })
+  await expect(descriptorFailure).toBeVisible()
+  descriptorsAvailable = true
+  await descriptorFailure.getByRole('button', { name: 'Retry', exact: true }).click()
+
+  await expect(descriptorFailure).toHaveCount(0)
+  await expect(destination.getByText('Provider-managed search unavailable', { exact: true })).toBeVisible()
+
+  await destination.click()
+  await page.getByLabel('Destination type', { exact: true }).click()
+  await expect(page.getByRole('option', { name: 'Provider-managed search', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+
+  await page.getByRole('button', { name: 'Add destination' }).click()
+  await page.getByLabel('Destination 2 model service', { exact: true }).click()
+  await page.getByRole('option', { name: provider.name, exact: true }).click()
+  await page.getByLabel('Destination type', { exact: true }).click()
+  await expect(page.getByRole('option', { name: 'Provider-managed search', exact: true })).toHaveCount(0)
+})
+
 test('Model ID remains editable while the Canonical Model catalog fails to load', async ({ page }) => {
   let releaseCatalog!: () => void
   const catalogGate = new Promise<void>((resolve) => {
@@ -876,6 +1136,8 @@ test('Destination status reflects runtime state without overwriting the editor d
           {
             id: 'provider',
             name: 'Provider',
+            vendor: 'openai-compatible',
+            channel: 'default',
             protocol: 'openai-compatible',
             base_url: 'https://provider.example/v1',
             use_proxy: false,

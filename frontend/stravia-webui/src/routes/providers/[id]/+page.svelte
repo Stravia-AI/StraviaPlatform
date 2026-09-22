@@ -30,6 +30,10 @@ type ProviderDetailView = 'connection' | 'models' | 'routes'
 const view = $derived(parseProviderDetailView(page.url.searchParams.get('view')))
 const queryClient = useQueryClient()
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
+const providerDescriptorsQuery = createQuery(() => ({
+  queryKey: ['provider-descriptors'],
+  queryFn: admin.providers.descriptors,
+}))
 const routesQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 let syncStatus = $state<'idle' | 'syncing' | 'success' | 'error'>('idle')
 let syncSummary = $state<ProviderModelSyncSummary>()
@@ -39,6 +43,21 @@ let autoSyncStarted = $state(false)
 let savedProvider = $state<Provider>()
 
 const provider = $derived(savedProvider ?? providersQuery.data?.find((item) => item.id === providerId))
+const descriptor = $derived(providerDescriptorsQuery.data?.find((item) => item.provider_id === provider?.vendor))
+const channel = $derived(descriptor?.channels.find((item) => item.id === provider?.channel))
+const canDiscoverModels = $derived(channel?.capabilities.includes('model_discovery') ?? false)
+const usesProviderModels = $derived(
+  Boolean(
+    channel?.capabilities.includes('infer') ||
+    channel?.capabilities.includes('media_image') ||
+    channel?.search_model_required,
+  ),
+)
+const detailTabs = $derived([
+  { id: 'connection', label: m.provider_detail_tab_connection },
+  ...(usesProviderModels ? [{ id: 'models', label: m.provider_detail_tab_models }] : []),
+  { id: 'routes', label: m.provider_detail_tab_routes },
+])
 const routeReferences = $derived(
   (routesQuery.data ?? []).flatMap((route) =>
     route.targets.filter((target) => target.provider_id === providerId).map((target) => ({ route, target })),
@@ -46,7 +65,7 @@ const routeReferences = $derived(
 )
 
 $effect(() => {
-  if (page.url.searchParams.get('sync') === 'created' && provider && !autoSyncStarted) {
+  if (page.url.searchParams.get('sync') === 'created' && provider && canDiscoverModels && !autoSyncStarted) {
     autoSyncStarted = true
     void syncModels()
   }
@@ -57,6 +76,7 @@ function parseProviderDetailView(value: string | null): ProviderDetailView {
 }
 
 async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
+  if (!canDiscoverModels) return undefined
   syncStatus = 'syncing'
   syncError = ''
   try {
@@ -121,11 +141,14 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
       {#snippet meta()}
         <div class="flex flex-wrap items-center gap-2">
           <ProviderMark
-            icon={provider.preset_key ?? 'custom'}
+            icon={descriptor?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'}
             name={provider.name}
-            catalog={Boolean(provider.preset_key)}
+            catalog={Boolean(descriptor?.catalog_id ?? provider.preset_key)}
             endpoint={provider.base_url} />
-          <Badge variant="outline">{provider.protocol}</Badge>
+          {#if provider.protocol}<Badge variant="outline">{provider.protocol}</Badge>{/if}
+          {#each channel?.capabilities ?? [] as capability (capability)}
+            <Badge variant="secondary" class="font-technical">{capability}</Badge>
+          {/each}
           <StatusIndicator
             compact
             label={provider.is_enabled ? m.common_enabled_status() : m.common_inactive_status()}
@@ -133,13 +156,15 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
         </div>
       {/snippet}
       {#snippet actions()}
-        <Button href={`/models/new?provider=${encodeURIComponent(provider.id)}`}
-          ><PlusIcon data-icon="inline-start" />{m.providers_use_model()}</Button>
+        {#if usesProviderModels}
+          <Button href={`/models/new?provider=${encodeURIComponent(provider.id)}`}
+            ><PlusIcon data-icon="inline-start" />{m.providers_use_model()}</Button>
+        {/if}
       {/snippet}
     </PageHeader>
 
     <nav class={tabsListVariants()} data-variant="default" aria-label={m.common_model_service_details()}>
-      {#each [{ id: 'connection', label: m.provider_detail_tab_connection }, { id: 'models', label: m.provider_detail_tab_models }, { id: 'routes', label: m.provider_detail_tab_routes }] as item (item.id)}
+      {#each detailTabs as item (item.id)}
         <a
           class={tabsTriggerVariants()}
           data-state={view === item.id ? 'active' : 'inactive'}
@@ -149,7 +174,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
       {/each}
     </nav>
 
-    {#if view === 'connection'}
+    {#if view === 'connection' || (view === 'models' && !usesProviderModels)}
       <ProviderConnectionView {provider} onSaved={(saved: Provider) => (savedProvider = saved)} />
     {:else if view === 'models'}
       {#if syncStatus === 'syncing' || syncStatus === 'error'}
@@ -185,7 +210,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
         routeReferencesReady={!routesQuery.isPending && !routesQuery.isError}
         syncedAt={syncCompletedAt}
         syncedSummary={syncSummary}
-        onSync={syncModels} />
+        onSync={canDiscoverModels ? syncModels : undefined} />
     {:else if view === 'routes'}
       <section class="route-section" aria-labelledby="provider-route-references-title">
         <div class="route-section-header">
@@ -225,7 +250,13 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
                   {#if logicalModelSecondaryId(reference.route)}
                     · {reference.route.model_id}{/if}
                 </a>
-                <TechnicalValue value={reference.target.model} copyable />
+                {#if reference.target.model}
+                  <TechnicalValue value={reference.target.model} copyable />
+                {:else}
+                  <span class="text-sm text-muted-foreground">
+                    {m.model_editor_provider_only_search_destination()}
+                  </span>
+                {/if}
                 <Badge variant="outline">{m.providers_order()} {reference.target.priority}</Badge>
               </div>
             {/each}

@@ -83,6 +83,6 @@ pub(super) fn api_key_with_bindings(row: ApiKey, model_ids: Vec<String>) -> ApiK
 pub(super) fn normalize_provider_vendor(vendor: Option<&str>) -> Option<String> {
     vendor
         .map(str::trim)
-        .filter(|v| !v.is_empty() && *v != "custom")
+        .filter(|v| !v.is_empty())
         .map(|v| v.to_lowercase())
 }

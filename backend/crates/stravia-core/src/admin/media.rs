@@ -83,6 +83,11 @@ mod tests {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         })
+        .storage(std::sync::Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )))
         .build()
         .await
         .expect("Gateway");
@@ -147,11 +152,11 @@ mod tests {
             .providers()
             .create(crate::db::models::CreateProviderRecord {
                 name: "Vision Provider".into(),
-                vendor: None,
+                vendor: Some("protocol-openai-chat-completions".into()),
                 protocol: "openai-compatible".into(),
                 base_url: "https://example.com/v1".into(),
                 preset_key: None,
-                channel: None,
+                channel: Some("default".into()),
                 models_source: None,
                 static_models: None,
                 api_key: "sk-test".into(),
@@ -169,6 +174,7 @@ mod tests {
                 crate::provider_models::CreateManualProviderModel {
                     metadata: serde_json::json!({
                         "id": "vision",
+                        "attachment": true,
                         "modalities": { "input": ["text", "image"], "output": ["text"] }
                     }),
                 },
@@ -194,7 +200,7 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: provider.id.clone(),
-                target_model: "vision".into(),
+                target_model: Some("vision".into()),
                 targets: vec![],
                 default_thinking_level: None,
             })
@@ -206,11 +212,11 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: String::new(),
-                target_model: String::new(),
+                target_model: None,
                 targets: vec![
                     crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
-                        model: "vision".into(),
+                        model: Some("vision".into()),
                         enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
@@ -220,7 +226,7 @@ mod tests {
                     },
                     crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
-                        model: "text".into(),
+                        model: Some("text".into()),
                         enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,

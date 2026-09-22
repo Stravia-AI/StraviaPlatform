@@ -15,7 +15,7 @@ mod types;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
-pub(crate) use redaction::{redact_text, redact_url, redact_value};
+pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;
 
@@ -26,7 +26,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -897,8 +897,11 @@ impl IngressObserver {
             debug_enabled,
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
+            event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
+            finalization_sent: AtomicBool::new(false),
+            publications: AtomicUsize::new(0),
             pending_finish: Mutex::new(None),
             failure: Mutex::new(None),
             generation_commit_fences: Mutex::new(Vec::new()),
@@ -987,6 +990,14 @@ impl Drop for IngressObserver {
 pub(crate) struct RunObserver {
     inner: Arc<RunObserverInner>,
 }
+
+/// A committed asynchronous publication may outlive the request future that
+/// started it. The guard keeps Finalize behind that publication while allowing
+/// Finish to remain the prompt client-visible terminal boundary.
+pub(crate) struct RunPublicationGuard {
+    inner: Arc<RunObserverInner>,
+}
+
 struct RunObserverInner {
     observation: InteractionObservation,
     run_id: String,
@@ -994,8 +1005,11 @@ struct RunObserverInner {
     debug_enabled: bool,
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
+    event_boundary: Mutex<()>,
     gap: AtomicBool,
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
+    finalization_sent: AtomicBool,
+    publications: AtomicUsize,
     pending_finish: Mutex<Option<(RunOutcome, i64)>>,
     failure: Mutex<Option<FailureDiagnostic>>,
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
@@ -1123,6 +1137,21 @@ impl RunObserver {
     }
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
         self.inner.protected.register(secrets);
+    }
+    pub(crate) fn protected_secrets(&self) -> ProtectedSecrets {
+        self.inner.protected.clone()
+    }
+    pub(crate) fn publication_guard(&self) -> Option<RunPublicationGuard> {
+        let _boundary = self.inner.event_boundary.lock();
+        if self.inner.terminal.load(Ordering::Acquire)
+            || self.inner.finalization_sent.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        self.inner.publications.fetch_add(1, Ordering::AcqRel);
+        Some(RunPublicationGuard {
+            inner: self.inner.clone(),
+        })
     }
     pub(crate) fn debug_enabled(&self) -> bool {
         self.inner.debug_enabled
@@ -1276,6 +1305,12 @@ impl RunObserver {
         }
     }
     fn send_event(&self, mut event: RunEvent) {
+        // Serialize the terminal check with Finish/Finalize enqueueing. Holders
+        // retained by transport or Vendor cleanup must not append behind it.
+        let _boundary = self.inner.event_boundary.lock();
+        if self.inner.terminal.load(Ordering::Acquire) {
+            return;
+        }
         if matches!(event, RunEvent::ClientToolResult { .. }) {
             self.send_tool_results(vec![event]);
             return;
@@ -1355,6 +1390,7 @@ impl RunObserver {
             self.inner.protected.text(reason);
         }
         redaction::redact_run_outcome(&mut outcome);
+        let _boundary = self.inner.event_boundary.lock();
         let mut generation_commit_fences = self.inner.generation_commit_fences.lock();
         if !self.inner.terminal.swap(true, Ordering::AcqRel) {
             if let Err(error) =
@@ -1389,11 +1425,99 @@ impl RunObserver {
             for fence in generation_commit_fences.drain(..) {
                 fence.resolve();
             }
+            // RunOutcome is the semantic end of ordinary capture. Vendor/network
+            // observer clones do not delay the Trace; only an explicit committed
+            // publication guard may enqueue evidence before Finalize.
+            if self.inner.publications.load(Ordering::Acquire) == 0 {
+                self.inner.send_finalization();
+            }
         }
     }
 }
+
+impl RunPublicationGuard {
+    pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
+        self.inner.protected.register(secrets);
+    }
+
+    pub(crate) fn credential_mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
+        let _boundary = self.inner.event_boundary.lock();
+        if self.inner.finalization_sent.load(Ordering::Acquire) {
+            return;
+        }
+        let mut event = RunEvent::CredentialMappingsCreated { discoveries };
+        self.inner.protected.event(&mut event);
+        redaction::redact_run_event(&mut event);
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::Event {
+                run_id: self.inner.run_id.clone(),
+                event,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .record(&self.inner.run_id, writer::now());
+        }
+    }
+}
+
+impl Drop for RunPublicationGuard {
+    fn drop(&mut self) {
+        let _boundary = self.inner.event_boundary.lock();
+        let previous = self.inner.publications.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "publication guard count underflow");
+        if previous == 1 && self.inner.terminal.load(Ordering::Acquire) {
+            self.inner.send_finalization();
+        }
+    }
+}
+
+impl RunObserverInner {
+    /// The caller holds `event_boundary`, so no publication can enqueue behind
+    /// this terminal trace boundary.
+    fn send_finalization(&self) {
+        if self.finalization_sent.load(Ordering::Acquire) {
+            return;
+        }
+        let command = WriterCommand::Finalize {
+            run_id: Some(self.run_id.clone()),
+            rejection_id: None,
+            trace: self.trace.clone(),
+            pending_finish: self.pending_finish.lock().take(),
+            gap: self.gap.load(Ordering::Acquire),
+        };
+        let sent = if let Some(permit) = self.finalization.lock().take() {
+            permit.send(command);
+            true
+        } else {
+            match self.observation.inner.writer.try_send(command) {
+                Ok(()) => true,
+                Err(error) => {
+                    if let WriterCommand::Finalize { pending_finish, .. } = error.into_inner() {
+                        *self.pending_finish.lock() = pending_finish;
+                    }
+                    false
+                }
+            }
+        };
+        self.finalization_sent.store(sent, Ordering::Release);
+    }
+}
+
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
+        if *self.finalization_sent.get_mut() {
+            return;
+        }
         for ((model_turn_id, attempt_id), mut state) in
             std::mem::take(self.thinking_redaction.get_mut())
         {
@@ -1697,6 +1821,10 @@ pub(super) fn record_trace_at(
     sequence: i64,
 ) {
     let diagnostic = matches!(&event, RunEvent::TargetSelected { .. });
+    let capture_id = match &event {
+        RunEvent::Wire { capture_id, .. } => *capture_id,
+        _ => None,
+    };
     let (
         stage,
         direction,
@@ -1755,6 +1883,7 @@ pub(super) fn record_trace_at(
             payload,
             model_turn_id,
             attempt_id,
+            ..
         } => (
             None,
             Some(direction),
@@ -1782,6 +1911,7 @@ pub(super) fn record_trace_at(
         other => ("json".to_owned(), other),
     };
     let _ = trace.record(TraceRecord {
+        capture_id,
         schema_version: TRACE_SCHEMA_VERSION,
         sequence,
         recorded_at: chrono::Utc::now().timestamp_millis(),

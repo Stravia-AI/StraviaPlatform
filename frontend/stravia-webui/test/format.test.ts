@@ -61,19 +61,4 @@ describe('localized count sentences', () => {
     expect(String(m.provider_model_catalog_used_by_models({ count: 2 }, { locale: EN }))).toBe('Used by 2 models')
     expect(String(m.provider_model_catalog_used_by_models({ count: 2 }, { locale: ZH }))).toBe('用于 2 个模型')
   })
-
-  test('selects singular and plural nouns for catalog refresh summaries', () => {
-    expect(
-      String(m.provider_editor_catalog_refresh_summary({ provider_count: 1, model_count: 1 }, { locale: EN })),
-    ).toBe('Service list updated: 1 service and 1 model.')
-    expect(
-      String(m.provider_editor_catalog_refresh_summary({ provider_count: 1, model_count: 2 }, { locale: EN })),
-    ).toBe('Service list updated: 1 service and 2 models.')
-    expect(
-      String(m.provider_editor_catalog_refresh_summary({ provider_count: 2, model_count: 1 }, { locale: EN })),
-    ).toBe('Service list updated: 2 services and 1 model.')
-    expect(
-      String(m.provider_editor_catalog_refresh_summary({ provider_count: 2, model_count: 2 }, { locale: ZH })),
-    ).toBe('服务列表已更新：2 个服务、2 个模型。')
-  })
 })

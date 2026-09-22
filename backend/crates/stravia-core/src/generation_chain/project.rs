@@ -25,7 +25,7 @@ pub(super) fn project_client_commit(
     response: &AiResponse,
 ) -> Result<ProjectedClientCommit, TurnCommitError> {
     let fresh_states = &parent.fresh_inline_states;
-    let inline_boundary = crate::protocol::codec::open_responses::inline_compaction_boundary;
+    let inline_boundary = stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
     let mut client_request_delta = canonical_client_history_request(request_delta);
     let mut client_items = parent
         .replacement_client_items
@@ -80,7 +80,9 @@ pub(crate) fn project_client_history(
     if ingress == OPEN_RESPONSES_2026_04_24 {
         let _ = prefix;
         let mut output =
-            crate::protocol::codec::open_responses::formatter::stamp_output_graph_ids(response);
+            stravia_protocol_codec::codec::open_responses::formatter::stamp_output_graph_ids(
+                response,
+            );
         // Thinking 经 Responses 交付的是正文，不是摘要；历史身份必须与客户端回放一致。
         // 只改写 ingress 投影，保留 effective Thinking 与原生 Reasoning 的语义。
         for item in &mut output {
@@ -167,7 +169,9 @@ fn project_chat_history(response: &AiResponse) -> Result<Vec<AiItem>, String> {
         );
     }
     Ok(vec![
-        crate::protocol::codec::openai::compatible::stream::client_history_output_item(response),
+        stravia_protocol_codec::codec::openai::compatible::stream::client_history_output_item(
+            response,
+        ),
     ])
 }
 
@@ -178,7 +182,7 @@ fn project_anthropic_history(response: &AiResponse) -> Vec<AiItem> {
         .any(|item| item.role == Role::Assistant)
     {
         let mut item = response.to_assistant_item();
-        crate::protocol::codec::anthropic::messages::stream::normalize_client_history_item(
+        stravia_protocol_codec::codec::anthropic::messages::stream::normalize_client_history_item(
             &mut item,
         );
         vec![item]
@@ -294,7 +298,7 @@ pub(super) fn item_reference_node_ids(ingress: ProtocolId, items: &[AiItem]) -> 
         .iter()
         .filter_map(item_reference_id)
         .filter_map(
-            crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id,
+            stravia_protocol_codec::codec::open_responses::formatter::response_id_from_gateway_item_id,
         )
         .collect()
 }
@@ -352,10 +356,13 @@ pub(crate) fn generation_node_is_completed(response: &AiResponse) -> bool {
         .map_or_else(|| response.error.is_none(), |status| status == "completed")
 }
 
-fn provider_effective_profile(
-    response: &AiResponse,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    response
+/// 应用上游确认的有效控制，并借用原画像供持久化投影使用。
+/// 无画像时返回 None；画像无法解码时保留原请求。
+pub(crate) fn apply_provider_effective_response<'a>(
+    request: &mut AiRequest,
+    response: &'a AiResponse,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let profile = response
         .vendor
         .egress
         .get("__open_responses_provider_effective")
@@ -365,8 +372,9 @@ fn provider_effective_profile(
                 .ingress
                 .get("__open_responses_response_profile")
         })
-        .and_then(serde_json::Value::as_object)
-        .cloned()
+        .and_then(serde_json::Value::as_object)?;
+    apply_provider_effective_request(request, profile);
+    Some(profile)
 }
 
 fn apply_provider_effective_request(
@@ -374,7 +382,7 @@ fn apply_provider_effective_request(
     profile: &serde_json::Map<String, serde_json::Value>,
 ) {
     let Ok(effective) =
-        crate::protocol::codec::open_responses::decoder::decode_effective_response_profile(
+        stravia_protocol_codec::codec::open_responses::decoder::decode_effective_response_profile(
             &request.model,
             profile,
         )
@@ -410,12 +418,12 @@ pub(super) fn attach_persisted_profile(
     previous_response_id: Option<&str>,
 ) {
     let mut profile =
-        crate::protocol::codec::open_responses::encoder::response_profile_from_request(request);
-    let provider_effective = provider_effective_profile(response);
+        stravia_protocol_codec::codec::open_responses::encoder::response_profile_from_request(
+            request,
+        );
     if let Some(profile) = profile.as_object_mut() {
-        if let Some(provider_effective) = provider_effective {
-            apply_provider_effective_request(request, &provider_effective);
-            profile.extend(provider_effective);
+        if let Some(provider_effective) = apply_provider_effective_response(request, response) {
+            profile.extend(provider_effective.clone());
         }
         profile.insert(
             "model".into(),

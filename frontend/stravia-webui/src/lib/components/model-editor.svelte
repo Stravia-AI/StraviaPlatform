@@ -33,6 +33,7 @@ import type {
   TargetThinkingControl,
   ThinkingLevel,
   ThinkingLevelMapping,
+  ProviderDescriptor,
 } from '$lib/types'
 import {
   addRouteTarget,
@@ -54,6 +55,7 @@ import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
 import ModelSpecification from '$lib/components/model-specification.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
@@ -150,6 +152,27 @@ const canonicalModelsQuery = createQuery(() => ({
   queryFn: () => admin.catalog.canonicalModels(),
 }))
 const canonicalModels = $derived(canonicalModelsQuery.data?.models ?? [])
+const providerDescriptorsQuery = createQuery(() => ({
+  queryKey: ['provider-descriptors'],
+  queryFn: admin.providers.descriptors,
+  // 能力在按需打开的下拉菜单中读取，不能让初始错误标志的属性跟踪漏掉成功快照。
+  notifyOnChangeProps: 'all',
+}))
+const providerDescriptors = $derived<ProviderDescriptor[]>(providerDescriptorsQuery.data ?? [])
+
+function providerOnlySearchSupported(providerId: string): boolean {
+  if (!providerDescriptorsQuery.isSuccess) return false
+  const provider = providers.find((candidate) => candidate.id === providerId)
+  if (!provider?.vendor) return false
+  const descriptor = providerDescriptors.find((candidate) => candidate.provider_id === provider.vendor)
+  const channelId = provider.channel ?? 'default'
+  const channel = descriptor?.channels.find((candidate) => candidate.id === channelId)
+  return Boolean(channel && channel.capabilities.includes('search') && !channel.search_model_required)
+}
+
+function providerOnlySearchUnavailable(target: RouteTargetForm): boolean {
+  return target.model === null && providerDescriptorsQuery.isSuccess && !providerOnlySearchSupported(target.providerId)
+}
 
 // Destination runtime status is a read-only projection of the saved route's circuit state;
 // it refreshes on its own cadence and never writes back into the form draft.
@@ -176,7 +199,8 @@ const targetStatusMap = $derived.by(() => {
 function targetRuntimeStatus(target: RouteTargetForm): TargetRuntimeStatus | undefined {
   if (!target.persisted || !target.id) return undefined
   const status = targetStatusMap[target.id]
-  if (!status || status.provider_id !== target.providerId || status.model !== target.model.trim()) return undefined
+  const model = target.model === null ? null : target.model.trim()
+  if (!status || status.provider_id !== target.providerId || status.model !== model) return undefined
   return status
 }
 
@@ -219,7 +243,7 @@ $effect(() => {
   if (!initialized && providers.length > 0) {
     initialized = true
     for (const target of targets) {
-      if (target.providerId) void loadInventory(target, true)
+      if (target.providerId && target.model !== null) void loadInventory(target, true)
     }
   }
 })
@@ -236,7 +260,7 @@ function selectedSummary(target: RouteTargetForm): ProviderModelSummary | undefi
 }
 
 async function loadInventory(target: RouteTargetForm, initializeDraft = false): Promise<void> {
-  if (!target.providerId) return
+  if (!target.providerId || target.model === null) return
   target.loading = true
   target.validationError = ''
   try {
@@ -268,6 +292,21 @@ async function changeProvider(target: RouteTargetForm, providerId: string): Prom
   target.validationError = ''
   target.thinkingLevelMap = []
   await loadInventory(target)
+}
+
+async function changeDestinationType(target: RouteTargetForm, type: string): Promise<void> {
+  if (type === 'provider_only') {
+    target.model = null
+    target.custom = false
+    target.validationError = ''
+    target.thinkingLevelMap = []
+    return
+  }
+  if (target.model === null) {
+    target.model = ''
+    target.validationError = ''
+    await loadInventory(target)
+  }
 }
 
 async function selectModel(target: RouteTargetForm, modelId: string): Promise<void> {
@@ -391,7 +430,7 @@ function targetIndex(target: RouteTargetForm): number {
 }
 
 function targetConfigured(target: RouteTargetForm): boolean {
-  return Boolean(target.providerId && target.model.trim())
+  return Boolean(target.providerId && (target.model === null || target.model.trim()))
 }
 
 function startTargetDrag(event: DragEvent, target: RouteTargetForm): void {
@@ -491,7 +530,8 @@ function defaultThinkingLevelLabel(): string {
 function targetLabel(target: RouteTargetForm, index: number): string {
   const destination = m.model_editor_destination_value({ index: index + 1 })
   const provider = providers.find((candidate) => candidate.id === target.providerId)
-  return [destination, provider?.name ?? target.providerId, target.model.trim()].filter(Boolean).join(' · ')
+  const model = target.model === null ? m.model_editor_provider_only_search_destination() : target.model.trim()
+  return [destination, provider?.name ?? target.providerId, model].filter(Boolean).join(' · ')
 }
 
 function thinkingLevelBlockers(level: ThinkingLevel): string[] {
@@ -530,7 +570,7 @@ function thinkingControlLabel(type: TargetThinkingControl['type']): string {
 function targetThinkingContext(target: RouteTargetForm) {
   return thinkingControlContext(
     providers.find((provider) => provider.id === target.providerId),
-    target.model,
+    target.model ?? '',
   )
 }
 
@@ -555,7 +595,7 @@ function thinkingRowHint(target: RouteTargetForm, row: ThinkingLevelMapping): st
 }
 
 async function blockEnableForUnwritableThinking(target: RouteTargetForm): Promise<boolean> {
-  if (target.thinkingLevelMap.length === 0 && target.providerId && target.model.trim()) {
+  if (target.thinkingLevelMap.length === 0 && target.providerId && target.model?.trim()) {
     await loadThinkingMap(target)
   }
   const levels = unwritableThinkingLevels(target)
@@ -632,6 +672,7 @@ async function saveModel(): Promise<void> {
   saving = true
   try {
     for (const target of targets) {
+      if (target.model === null) continue
       const modelId = target.model.trim()
       const needsSnapshot =
         target.custom && !target.persisted && !target.inventory.some((providerModel) => providerModel.id === modelId)
@@ -814,6 +855,15 @@ async function saveModel(): Promise<void> {
           ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
       </div>
 
+      {#if providerDescriptorsQuery.isError}
+        <RequestFailure
+          class="mb-4"
+          title={m.provider_config_plugins_load_failed()}
+          message={localizeBackendErrorMessage(providerDescriptorsQuery.error)}
+          retry={() => providerDescriptorsQuery.refetch()}
+          retrying={providerDescriptorsQuery.isFetching} />
+      {/if}
+
       {#if savedRouteId}
         <p class="mb-2 mt-3 text-xs text-muted-foreground">
           {m.model_editor_target_status_refresh_note()}
@@ -943,7 +993,7 @@ async function saveModel(): Promise<void> {
                             {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
                           </span>
                           <span class="min-w-0 flex-1 truncate font-technical text-sm text-muted-foreground">
-                            {target.model}
+                            {target.model ?? m.model_editor_provider_only_search_destination()}
                           </span>
                           {#if status}
                             <StatusIndicator
@@ -956,6 +1006,9 @@ async function saveModel(): Promise<void> {
                         <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                           {#if target.persisted && summary && !summary.available}
                             <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                          {/if}
+                          {#if providerOnlySearchUnavailable(target)}
+                            <Badge variant="destructive">{m.model_editor_provider_only_search_unavailable()}</Badge>
                           {/if}
                           {#if unwritableThinkingLevels(target).length > 0}
                             <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
@@ -1038,12 +1091,17 @@ async function saveModel(): Promise<void> {
                       </span>
                     </span>
                     <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
-                      {target.model || m.model_editor_choose_model()}
+                      {target.model === null
+                        ? m.model_editor_provider_only_search_destination()
+                        : target.model || m.model_editor_choose_model()}
                     </span>
                   </div>
                   <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                     {#if target.persisted && summary && !summary.available}
                       <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                    {/if}
+                    {#if providerOnlySearchUnavailable(target)}
+                      <Badge variant="destructive">{m.model_editor_provider_only_search_unavailable()}</Badge>
                     {/if}
                     {#if unwritableThinkingLevels(target).length > 0}
                       <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
@@ -1100,6 +1158,9 @@ async function saveModel(): Promise<void> {
                   {#if target.persisted && summary && !summary.available}<Badge variant="destructive"
                       >{m.model_editor_model_no_longer_available()}</Badge
                     >{/if}
+                  {#if providerOnlySearchUnavailable(target)}
+                    <Badge variant="destructive">{m.model_editor_provider_only_search_unavailable()}</Badge>
+                  {/if}
                 </div>
                 <div class="flex items-center gap-1">
                   {#if !target.enabled}
@@ -1114,7 +1175,7 @@ async function saveModel(): Promise<void> {
                 </div>
               </div>
 
-              <Field.Group class="grid gap-4 lg:grid-cols-2">
+              <Field.Group class="grid gap-4 lg:grid-cols-3">
                 <Field.Field size="select">
                   <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
                   <Select.Root
@@ -1139,9 +1200,45 @@ async function saveModel(): Promise<void> {
                   </Select.Root>
                 </Field.Field>
 
-                <Field.Field size="fill">
+                <Field.Field size="select">
+                  <Field.Label for={`target-type-${target.key}`}>{m.model_editor_destination_type()}</Field.Label>
+                  <Select.Root
+                    type="single"
+                    value={target.model === null ? 'provider_only' : 'model'}
+                    onValueChange={(value: string) => value && void changeDestinationType(target, value)}>
+                    <Select.Trigger id={`target-type-${target.key}`} class="w-full">
+                      {target.model === null
+                        ? m.model_editor_provider_only_search_destination()
+                        : m.model_editor_model_destination()}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        <Select.Item value="model">{m.model_editor_model_destination()}</Select.Item>
+                        {#if target.model === null || providerOnlySearchSupported(target.providerId)}
+                          <Select.Item value="provider_only">
+                            {m.model_editor_provider_only_search_destination()}
+                          </Select.Item>
+                        {/if}
+                      </Select.Group>
+                    </Select.Content>
+                  </Select.Root>
+                </Field.Field>
+
+                <Field.Field size="fill" data-invalid={providerOnlySearchUnavailable(target)}>
                   <Field.Label for={`target-model-${target.key}`}>{m.common_model()}</Field.Label>
-                  {#if target.custom}
+                  {#if target.model === null}
+                    <p
+                      id={`target-model-${target.key}`}
+                      class="min-h-10 rounded-lg border bg-muted/30 px-3 py-2 text-sm">
+                      {m.model_editor_provider_only_search_destination()}
+                    </p>
+                    <Field.Description>{m.model_editor_provider_only_search_help()}</Field.Description>
+                    {#if providerOnlySearchUnavailable(target)}
+                      <p class="text-sm text-destructive" role="status">
+                        {m.model_editor_provider_only_search_unavailable_help()}
+                      </p>
+                    {/if}
+                  {:else if target.custom}
                     <Input
                       id={`target-model-${target.key}`}
                       class="font-technical"
@@ -1212,11 +1309,11 @@ async function saveModel(): Promise<void> {
                   <ModelSpecification specification={summary.specification} />
                   <ModelDetailsDialog
                     providerId={target.providerId}
-                    modelId={target.model}
+                    modelId={target.model ?? ''}
                     triggerLabel={m.model_editor_view_model_details()} />
                 </div>
               {/if}
-              {#if target.providerId && target.model.trim() && target.thinkingLevelMap.length > 0}
+              {#if target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
                 <div class="mt-4 border-t pt-4">
                   <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
                     <div>

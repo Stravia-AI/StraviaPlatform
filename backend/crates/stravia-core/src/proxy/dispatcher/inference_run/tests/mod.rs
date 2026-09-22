@@ -21,14 +21,10 @@ use crate::db::models::{
     CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
 };
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
-use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
-use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
-use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
-use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 
 async fn wait_for_observed_run_finish(
@@ -52,8 +48,6 @@ async fn wait_for_observed_run_finish(
     .await
     .expect("first request completes before continuation");
 }
-
-struct NormalizingTestVendor;
 
 struct CommitBarrierStore {
     inner: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore>,
@@ -234,80 +228,6 @@ impl stravia_runtime_contract::turn_chain::TurnChainStore for FailingParentDisco
         &self,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
         self.inner.sweep_expired().await
-    }
-}
-
-#[async_trait]
-impl crate::provider::vendor::Vendor for NormalizingTestVendor {
-    fn scope(&self) -> crate::provider::registry::VendorScope {
-        crate::provider::registry::VendorScope::Vendor {
-            vendor_id: "normalizing-test",
-        }
-    }
-    fn target_capabilities(
-        &self,
-        protocol: stravia_runtime_contract::protocol::ids::ProtocolId,
-    ) -> crate::provider::vendor_ext::ResolvedTargetCapabilities {
-        crate::provider::vendor_ext::ResolvedTargetCapabilities {
-            stream_only: protocol == OPEN_RESPONSES_2026_04_24,
-            ..Default::default()
-        }
-    }
-
-    async fn post_parse(
-        &self,
-        _context: &crate::provider::vendor_ext::VendorCtx<'_>,
-        response: &mut AiResponse,
-    ) -> anyhow::Result<()> {
-        response.replace_output_text(format!("normalized:{}", response.output_text()));
-        Ok(())
-    }
-
-    async fn on_stream_delta(
-        &self,
-        _context: &crate::provider::vendor_ext::VendorCtx<'_>,
-        delta: &mut stravia_runtime_contract::protocol::ir::AiStreamDelta,
-    ) -> anyhow::Result<()> {
-        if let stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(content) = delta {
-            content.insert_str(0, "normalized:");
-        }
-        Ok(())
-    }
-
-    fn vendor_id(&self) -> &'static str {
-        "normalizing-test"
-    }
-
-    fn supported_protocols(
-        &self,
-    ) -> &'static [stravia_runtime_contract::protocol::ids::ProtocolId] {
-        &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
-    }
-
-    async fn build_request(
-        &self,
-        request: &mut AiRequest,
-        context: &crate::provider::vendor::ProviderCtx<'_>,
-    ) -> Result<crate::provider::outbound::OutboundRequest, crate::error::GatewayError> {
-        crate::provider::common::pipeline::build_request(self, request, context).await
-    }
-
-    async fn parse_response(
-        &self,
-        response: crate::provider::inbound::InboundResponse,
-        context: &crate::provider::vendor::ProviderCtx<'_>,
-    ) -> Result<AiResponse, crate::error::GatewayError> {
-        crate::provider::common::pipeline::parse_response(self, response, context).await
-    }
-
-    fn map_error(&self, status: u16, _body: serde_json::Value) -> crate::error::GatewayError {
-        crate::error::GatewayError::upstream_status("normalizing-test", status, None)
-    }
-}
-
-inventory::submit! {
-    crate::provider::registry::VendorRegistration {
-        make: || Box::new(NormalizingTestVendor),
     }
 }
 
@@ -576,7 +496,7 @@ async fn hidden_round_request_hook_response_is_delivered_impl() {
             .count(),
         1
     );
-    let request = crate::protocol::transform::ProtocolTransform::global()
+    let request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             OPEN_RESPONSES_2026_04_24,
@@ -976,8 +896,9 @@ async fn create_test_provider_with_model(
         .create_provider(CreateProvider {
             name: Some(name.into()),
             source: ProviderSourceInput::Custom {
-                vendor: None,
-                protocol: "openai-compatible".into(),
+                vendor: "protocol-openai-chat-completions".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -985,6 +906,7 @@ async fn create_test_provider_with_model(
             credential: ProviderCredentialInput::ApiKey {
                 value: "test-key".into(),
             },
+            vendor_options: Default::default(),
             use_proxy: false,
         })
         .await
@@ -1316,7 +1238,13 @@ async fn serve_media_model(
 async fn configure_route(gateway: &Gateway, model: &str, base_urls: &[String]) {
     // Generic fixtures speak Chat Completions over HTTP. Keep them off the
     // OpenAI-direct Responses WebSocket path; dedicated transport tests opt in.
-    configure_route_with_vendor(gateway, model, base_urls, "test-http").await;
+    configure_route_with_vendor(
+        gateway,
+        model,
+        base_urls,
+        "protocol-openai-chat-completions",
+    )
+    .await;
 }
 
 async fn configure_route_with_vendor(
@@ -1345,13 +1273,32 @@ async fn configure_route_with_protocol(
         _ => None,
     };
     for (priority, base_url) in base_urls.iter().enumerate() {
+        let mut vendor_options = serde_json::Map::new();
+        if vendor == "openai" {
+            // 本地 WebSocket 授权必须显式保存；HTTP base URL 不隐式授权另一协议。
+            let mut websocket_url = url::Url::parse(base_url).expect("fixture base URL");
+            let scheme = if websocket_url.scheme() == "https" {
+                "wss"
+            } else {
+                "ws"
+            };
+            websocket_url
+                .set_scheme(scheme)
+                .expect("fixture WebSocket scheme");
+            websocket_url.set_path(&format!(
+                "{}/responses",
+                websocket_url.path().trim_end_matches('/'),
+            ));
+            vendor_options.insert("websocket_url".into(), websocket_url.to_string().into());
+        }
         let provider = gateway
             .admin()
             .create_provider(CreateProvider {
                 name: Some(format!("{model}-provider-{priority}")),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some(vendor.into()),
-                    protocol: protocol.into(),
+                    vendor: vendor.into(),
+                    channel: "default".into(),
+                    protocol: Some(protocol.into()),
                     base_url: base_url.clone(),
                     models_source: None,
                     static_models: None,
@@ -1359,6 +1306,7 @@ async fn configure_route_with_protocol(
                 credential: ProviderCredentialInput::ApiKey {
                     value: "test-key".into(),
                 },
+                vendor_options,
                 use_proxy: false,
             })
             .await
@@ -1381,7 +1329,7 @@ async fn configure_route_with_protocol(
         targets.push(CreateTarget {
             enabled: true,
             provider_id: provider.id,
-            model: "provider-model".into(),
+            model: Some("provider-model".into()),
             priority: Some(100_000 - priority as i32),
             first_token_timeout_ms: None,
             target_retry_budget: Some(0),
@@ -1396,7 +1344,7 @@ async fn configure_route_with_protocol(
             display_name: None,
             balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
-            target_model: String::new(),
+            target_model: None,
             targets,
             default_thinking_level: None,
         })
@@ -1471,7 +1419,7 @@ fn open_responses_response(content: &str) -> serde_json::Value {
     let mut response = AiResponse::new("resp_provider", "provider-model");
     response.push_output_text(content);
     response.stop_reason = Some("stop".into());
-    crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter
+    stravia_protocol_codec::codec::open_responses::formatter::ResponsesResponseFormatter
         .format_response(&response)
 }
 
@@ -2456,6 +2404,8 @@ async fn platform_markers_are_ingress_neutral_impl() {
             "total_tokens": 2
         }
     });
+    // Host ingress owns only the four standard generation protocols. Guest-owned
+    // private protocol round trips live in the real-Wasm vendor contract suite.
     let protocols = [
         (
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -2467,10 +2417,6 @@ async fn platform_markers_are_ingress_neutral_impl() {
             GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
             "/v1beta/models/ingress-neutral:generateContent",
         ),
-        (BEDROCK_CONVERSE_V1, "/model/ingress-neutral/converse"),
-        (COHERE_CHAT_V2, "/v2/chat"),
-        (WATSONX_TEXT_CHAT_V1, "/ml/v1/text/chat"),
-        (GATEWAY_LANGUAGE_MODEL_V4, "/language-model"),
     ];
     let mut provider_responses = Vec::new();
     for _ in &protocols {
@@ -2513,9 +2459,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
         assert!(!body.contains("stravia__ordered_tool"), "{ingress}: {body}");
         let body_json: serde_json::Value =
             serde_json::from_str(&body).expect("protocol response JSON");
-        let marker_is_reasoning = if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-            || ingress == WATSONX_TEXT_CHAT_V1
-        {
+        let marker_is_reasoning = if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
             body_json["choices"][0]["message"]["reasoning_content"]
                 .as_str()
                 .is_some_and(|text| text.contains(crate::history_marker::HISTORY_MARKER_PREFIX))
@@ -2555,48 +2499,13 @@ async fn platform_markers_are_ingress_neutral_impl() {
                             text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
                         })
                 })
-        } else if ingress == BEDROCK_CONVERSE_V1 {
-            body_json["output"]["message"]["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|block| {
-                    block
-                        .pointer("/reasoningContent/reasoningText/text")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|text| {
-                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
-                        })
-                })
-        } else if ingress == COHERE_CHAT_V2 {
-            body_json["message"]["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|block| {
-                    block["type"] == "thinking"
-                        && block["thinking"].as_str().is_some_and(|text| {
-                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
-                        })
-                })
-        } else if ingress == GATEWAY_LANGUAGE_MODEL_V4 {
-            body_json["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|block| {
-                    block["type"] == "reasoning"
-                        && block["text"].as_str().is_some_and(|text| {
-                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
-                        })
-                })
         } else {
             false
         };
         assert!(marker_is_reasoning, "{ingress}: {body}");
     }
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 16);
-    assert_eq!(tool_calls.lock().len(), 8);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
+    assert_eq!(tool_calls.lock().len(), 4);
 }
 
 fn openai_sse_platform_tool_call() -> String {
@@ -2943,7 +2852,7 @@ fn openai_responses_sse(content: &str) -> String {
         }]
     });
     let in_progress_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-provider",
             "provider-model",
             "in_progress",
@@ -2953,7 +2862,7 @@ fn openai_responses_sse(content: &str) -> String {
             serde_json::Value::Null,
         );
     let completed_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-provider",
             "provider-model",
             "completed",
@@ -3068,7 +2977,7 @@ fn openai_responses_live_summary_sse_parts(
             serde_json::Value::String(encrypted_content.to_owned());
     }
     let in_progress_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-live-protected",
             "provider-model",
             "in_progress",
@@ -3078,7 +2987,7 @@ fn openai_responses_live_summary_sse_parts(
             serde_json::Value::Null,
         );
     let completed_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-live-protected",
             "provider-model",
             "completed",
@@ -3215,7 +3124,7 @@ fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {
         "name": "client_tool"
     });
     let in_progress_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-provider",
             "provider-model",
             "in_progress",
@@ -3225,7 +3134,7 @@ fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {
             serde_json::Value::Null,
         );
     let completed_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             "resp-provider",
             "provider-model",
             "completed",
@@ -3307,7 +3216,7 @@ fn openai_responses_protected_parallel_tools_sse(
         "encrypted_content": "opaque-reasoning"
     });
     let in_progress_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             response_id,
             "provider-model",
             "in_progress",
@@ -3368,7 +3277,7 @@ fn openai_responses_protected_parallel_tools_sse(
         output.push(completed);
     }
     let completed_response =
-        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
             response_id,
             "provider-model",
             "completed",

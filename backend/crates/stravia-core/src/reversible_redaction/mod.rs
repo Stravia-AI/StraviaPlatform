@@ -1,7 +1,7 @@
 //! Core settings and observation adapters for the credential protection capability.
 use std::sync::Arc;
 
-use crate::interaction_observation::{RunEvent, RunObserver};
+use crate::interaction_observation::{RunObserver, RunPublicationGuard};
 use crate::storage::DynStorage;
 use stravia_credential_protection::store::{Mapping, MappingStore};
 use stravia_credential_protection::{CredentialDiscovery, RedactionHost, RedactionObserver};
@@ -29,7 +29,7 @@ impl RedactionHost for SettingsHost {
     }
 }
 
-struct ObservationHost(RunObserver);
+struct ObservationHost(RunPublicationGuard);
 
 impl RedactionObserver for ObservationHost {
     fn protect_secrets(&self, mappings: &[Mapping]) {
@@ -38,8 +38,8 @@ impl RedactionObserver for ObservationHost {
     }
 
     fn mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
-        self.0.record(RunEvent::CredentialMappingsCreated {
-            discoveries: discoveries
+        self.0.credential_mappings_created(
+            discoveries
                 .into_iter()
                 .map(
                     |discovery| crate::interaction_observation::CredentialDiscovery {
@@ -48,7 +48,7 @@ impl RedactionObserver for ObservationHost {
                     },
                 )
                 .collect(),
-        });
+        );
     }
 }
 
@@ -75,9 +75,11 @@ impl ReversibleRedaction {
         request: &mut AiRequest,
         observer: Option<&RunObserver>,
     ) -> Result<Vec<Mapping>, RedactionError> {
-        let observer = observer.map(|observer| {
-            Arc::new(ObservationHost(observer.clone())) as Arc<dyn RedactionObserver>
-        });
+        let observer = observer
+            .and_then(RunObserver::publication_guard)
+            .map(|publication| {
+                Arc::new(ObservationHost(publication)) as Arc<dyn RedactionObserver>
+            });
         self.capability.protect(principal, request, observer).await
     }
 

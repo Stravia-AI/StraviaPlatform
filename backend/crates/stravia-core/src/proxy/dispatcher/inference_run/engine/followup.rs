@@ -11,7 +11,7 @@ pub(super) enum FollowupModelTurn {
 pub(super) struct HookResponsePlan {
     pub response: AiResponse,
     pub staged_delivery: ProjectedDeltaBatch,
-    pub pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
+    pub pending_generation_chain: Option<Box<super::PendingGenerationChainWrite>>,
 }
 
 /// Why Hook response preparation stopped. Each caller renders it on its own
@@ -57,7 +57,7 @@ pub(super) async fn prepare_hook_response(
         model_id: request.model.clone(),
         provider_id: "hook".into(),
         target_id: "hook".into(),
-        egress: ingress,
+        egress: Some(ingress),
     });
     match inference_run.on_client_output(&mut response).await {
         Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
@@ -73,7 +73,7 @@ pub(super) async fn prepare_hook_response(
         response.id = write.id().to_owned();
     }
     projection.begin_model_leg(
-        thinking_carrier_facts(ingress, ingress),
+        thinking_carrier_facts(ingress, Some(ingress)),
         inference_run.exposed_tool_names(),
         None,
     );
@@ -108,7 +108,12 @@ pub(super) async fn prepare_hook_response(
             None,
         );
         response.vendor = staged_response.vendor;
-        staged.then_some(write).map(Box::new)
+        staged
+            .then_some(super::PendingGenerationChainWrite {
+                write,
+                vendor_publications: std::mem::take(&mut generation.vendor_publications),
+            })
+            .map(Box::new)
     });
     for next in [Phase::SemanticComplete, Phase::AwaitingDelivery] {
         phase.transition(next).map_err(HookRespondError::Failure)?;

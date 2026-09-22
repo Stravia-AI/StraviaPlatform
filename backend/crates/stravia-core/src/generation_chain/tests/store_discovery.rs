@@ -101,7 +101,7 @@ async fn delivered_prefix_waits_for_commit_without_serializing_real_branches() {
             let mut reference = user_message("");
             reference.meta = Some(serde_json::json!({
                 "__open_responses_item_reference":
-                    crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                    stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
                         "msg",
                         &pending_id,
                         0,
@@ -1106,9 +1106,8 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "provider:model",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: false,
                 },
                 &mut without_affinity,
@@ -1124,9 +1123,8 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
                 &owner,
                 crate::router::ContinuationTarget {
                     namespace: "provider:model",
-                    protocol: OPEN_RESPONSES_2026_04_24,
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
                     actual_model: "model",
-                    logical_model: "model",
                     allow_ephemeral_response: true,
                 },
                 &mut with_affinity,
@@ -1500,10 +1498,17 @@ async fn response_history_survives_adapter_reconstruction() {
 #[tokio::test]
 async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
     let data_dir = tempfile::tempdir().unwrap();
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
+    let gateway = crate::Gateway::from_storage(
+        crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .unwrap();
     let owner = principal("legacy-tool-owner");
@@ -1609,10 +1614,17 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
 #[tokio::test]
 async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let data_dir = tempfile::tempdir().unwrap();
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
+    let gateway = crate::Gateway::from_storage(
+        crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
+    )
     .await
     .unwrap();
     let owner = principal("fresh-tool-owner");
@@ -1989,7 +2001,7 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
             .collect::<Vec<_>>(),
         vec!["call_existing", "call_a", "call_b", "call_c", "call_d"]
     );
-    crate::protocol::codec::tool_correlation::normalize_request_tool_results(&mut next);
+    stravia_protocol_codec::codec::tool_correlation::normalize_request_tool_results(&mut next);
 
     assert_eq!(
         next.items

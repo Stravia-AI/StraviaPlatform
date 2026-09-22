@@ -17,7 +17,7 @@ fn principal(id: &str) -> Principal {
 fn generation_source() -> GenerationSource {
     GenerationSource::Target {
         namespace: "provider:model".into(),
-        protocol: OPEN_RESPONSES_2026_04_24,
+        protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
         actual_model: "model".into(),
         selected_target_key: "provider:model".into(),
     }
@@ -72,7 +72,7 @@ fn responses_request(messages: Vec<AiItem>) -> AiRequest {
 }
 
 fn chat_request(messages: serde_json::Value) -> AiRequest {
-    crate::protocol::transform::ProtocolTransform::global()
+    stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             OPEN_RESPONSES_2026_04_24,

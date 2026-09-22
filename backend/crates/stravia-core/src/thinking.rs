@@ -141,6 +141,80 @@ fn default_map() -> Vec<ThinkingLevelMapping> {
         .collect()
 }
 
+/// Host-side authorization for a resolved Target Thinking Control. Standard
+/// protocol semantics and explicit model/plugin metadata are both valid
+/// evidence; the host does not require a proprietary guest codec to be present.
+/// An explicit non-reasoning model always stays closed.
+pub(crate) fn control_is_writable(
+    protocol: &str,
+    metadata: &ProviderModelMetadata,
+    toggle_declared: bool,
+    control: &TargetThinkingControl,
+) -> bool {
+    if control.is_hidden() {
+        return true;
+    }
+    if metadata.reasoning == Some(false) {
+        return false;
+    }
+    stravia_runtime_contract::protocol::ids::Protocol::from_identifier(protocol)
+        .is_some_and(|protocol| protocol.represents_target_thinking_control(control))
+        || model_declares_control(metadata, toggle_declared, control)
+}
+
+fn model_declares_control(
+    metadata: &ProviderModelMetadata,
+    toggle_declared: bool,
+    control: &TargetThinkingControl,
+) -> bool {
+    match control {
+        TargetThinkingControl::Hidden => true,
+        TargetThinkingControl::Enabled | TargetThinkingControl::Disabled => {
+            toggle_declared
+                || metadata
+                    .extensions
+                    .get("thinking_toggle")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        }
+        TargetThinkingControl::Effort { value } => {
+            metadata
+                .reasoning_options
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|option| match option {
+                    ReasoningOption::Effort { values } => values
+                        .iter()
+                        .flatten()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(value)),
+                    _ => false,
+                })
+                || metadata
+                    .extensions
+                    .get("reasoning_levels")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|candidate| candidate.eq_ignore_ascii_case(value))
+        }
+        TargetThinkingControl::Budget { value } => metadata
+            .reasoning_options
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|option| match option {
+                ReasoningOption::BudgetTokens { min, max } => {
+                    let minimum = min.filter(|minimum| *minimum >= 0).unwrap_or(0) as u64;
+                    let value = u64::from(*value);
+                    value >= minimum && max.is_none_or(|maximum| value <= maximum)
+                }
+                _ => false,
+            }),
+    }
+}
+
 pub fn mapping_control(
     mappings: &[ThinkingLevelMapping],
     level: ThinkingLevel,
@@ -260,5 +334,55 @@ mod tests {
                 ThinkingLevel::High
             ]
         );
+    }
+
+    #[test]
+    fn private_guest_controls_use_model_metadata_without_a_host_codec() {
+        let metadata = serde_json::from_value::<ProviderModelMetadata>(serde_json::json!({
+            "id": "private-model",
+            "reasoning": true,
+            "reasoning_levels": ["low", "high"],
+            "thinking_toggle": true
+        }))
+        .unwrap();
+
+        assert!(control_is_writable(
+            "acme/private-inference-v7",
+            &metadata,
+            false,
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        assert!(control_is_writable(
+            "acme/private-inference-v7",
+            &metadata,
+            false,
+            &TargetThinkingControl::Enabled
+        ));
+        assert!(!control_is_writable(
+            "acme/private-inference-v7",
+            &metadata,
+            false,
+            &TargetThinkingControl::Budget { value: 4096 }
+        ));
+    }
+
+    #[test]
+    fn explicit_non_reasoning_metadata_closes_private_controls() {
+        let metadata = serde_json::from_value::<ProviderModelMetadata>(serde_json::json!({
+            "id": "private-model",
+            "reasoning": false,
+            "reasoning_levels": ["high"]
+        }))
+        .unwrap();
+        assert!(!control_is_writable(
+            "acme/private-inference-v7",
+            &metadata,
+            false,
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
     }
 }

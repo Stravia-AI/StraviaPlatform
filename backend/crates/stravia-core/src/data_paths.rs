@@ -52,6 +52,10 @@ impl<'a> DataPaths<'a> {
         self.root.join("artifacts")
     }
 
+    pub fn plugins(&self) -> PathBuf {
+        self.root.join("plugins")
+    }
+
     /// Observation 在此目录内管理 `observation-debug`。
     pub fn diagnostics(&self) -> PathBuf {
         self.root.join("diagnostics")

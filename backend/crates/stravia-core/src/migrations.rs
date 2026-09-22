@@ -1406,4 +1406,218 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
         .expect("Media Generation injection preference");
         assert!(!inject_media_generation);
     }
+
+    fn legacy_provider_configuration_cases() -> Vec<(
+        &'static str,
+        &'static str,
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+    )> {
+        use serde_json::json;
+        vec![
+            (
+                "azure-provider",
+                "azure",
+                json!({"apiKey":"secret","resourceName":"legacy-resource","apiVersion":"2025-04-01"}),
+                json!({"resourceName":"preferred-resource"}),
+                json!({"apiKey":"secret"}),
+                json!({"resourceName":"preferred-resource","apiVersion":"2025-04-01"}),
+            ),
+            (
+                "bedrock-provider",
+                "amazon-bedrock",
+                json!({"accessKeyId":"secret","secretAccessKey":"secret","sessionToken":"secret","region":"us-east-1"}),
+                json!({}),
+                json!({"accessKeyId":"secret","secretAccessKey":"secret","sessionToken":"secret"}),
+                json!({"region":"us-east-1"}),
+            ),
+            (
+                "vertex-provider",
+                "google-vertex",
+                json!({"credentials":"secret","project":"project-one","location":"europe-west1"}),
+                json!({}),
+                json!({"credentials":"secret"}),
+                json!({"project":"project-one","location":"europe-west1"}),
+            ),
+            (
+                "vertex-anthropic-provider",
+                "google-vertex-anthropic",
+                json!({"apiKey":"secret","project":"project-two","location":"global"}),
+                json!({}),
+                json!({"apiKey":"secret"}),
+                json!({"project":"project-two","location":"global"}),
+            ),
+            (
+                "sap-provider",
+                "sap-ai-core",
+                json!({"clientId":"secret","clientSecret":"secret","deploymentUrl":"https://deployment.example.test","tokenUrl":"https://auth.example.test/token","resourceGroup":"production"}),
+                json!({}),
+                json!({"clientId":"secret","clientSecret":"secret"}),
+                json!({"deploymentUrl":"https://deployment.example.test","tokenUrl":"https://auth.example.test/token","resourceGroup":"production"}),
+            ),
+            (
+                "gitlab-provider",
+                "gitlab",
+                json!({"apiKey":"secret","instanceUrl":"https://gitlab.example.test","aiGatewayUrl":"https://gateway.example.test"}),
+                json!({}),
+                json!({"apiKey":"secret"}),
+                json!({"instanceUrl":"https://gitlab.example.test","aiGatewayUrl":"https://gateway.example.test"}),
+            ),
+            (
+                "watsonx-provider",
+                "watsonx",
+                json!({"apiKey":"secret","projectId":"project-id","baseUrl":"https://eu-de.ml.cloud.ibm.com","apiVersion":"2026-04-20"}),
+                json!({}),
+                json!({"apiKey":"secret"}),
+                json!({"projectId":"project-id","baseUrl":"https://eu-de.ml.cloud.ibm.com","apiVersion":"2026-04-20"}),
+            ),
+            (
+                "cloudflare-provider",
+                "cloudflare-ai-gateway",
+                json!({"apiToken":"secret","accountId":"account-id","gatewayId":"gateway-id"}),
+                json!({}),
+                json!({"apiToken":"secret"}),
+                json!({"accountId":"account-id","gatewayId":"gateway-id"}),
+            ),
+            (
+                "openrouter-provider",
+                "openrouter",
+                json!({"apiKey":"secret","httpReferer":"https://app.example.test","xTitle":"App"}),
+                json!({}),
+                json!({"apiKey":"secret"}),
+                json!({"httpReferer":"https://app.example.test","xTitle":"App"}),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn provider_configuration_separation_migrates_sqlite_legacy_connections() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite");
+        migrate_sqlite_range(&pool, 1, 57).await;
+        for (id, vendor, credentials, options, _, _) in legacy_provider_configuration_cases() {
+            sqlx::query(
+                "INSERT INTO providers (
+                    id, name, vendor, protocol, base_url, api_key,
+                    adapter_credentials, vendor_options, auth_mode
+                 ) VALUES (?, ?, ?, 'openai-compatible', 'https://example.test', '', ?, ?, 'apikey')",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(vendor)
+            .bind(credentials.to_string())
+            .bind(options.to_string())
+            .execute(&pool)
+            .await
+            .expect("legacy provider");
+        }
+
+        migrate_sqlite_range(&pool, 58, 58).await;
+
+        for (id, _, _, _, expected_credentials, expected_options) in
+            legacy_provider_configuration_cases()
+        {
+            let (credentials, options) = sqlx::query_as::<_, (String, String)>(
+                "SELECT adapter_credentials, vendor_options FROM providers WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("migrated provider");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&credentials).expect("credentials JSON"),
+                expected_credentials,
+                "{id} credentials"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&options).expect("options JSON"),
+                expected_options,
+                "{id} options"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_configuration_separation_migrates_postgres_legacy_connections_when_configured()
+     {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+        let schema = format!(
+            "stravia_provider_configuration_migration_test_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated PostgreSQL schema");
+        let options: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("PostgreSQL connection options");
+        let options = options.options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("isolated PostgreSQL pool");
+        migrate_postgres_range(&pool, 1, 57).await;
+        for (id, vendor, credentials, options, _, _) in legacy_provider_configuration_cases() {
+            sqlx::query(
+                "INSERT INTO providers (
+                    id, name, vendor, protocol, base_url, api_key,
+                    adapter_credentials, vendor_options, auth_mode
+                 ) VALUES ($1, $2, $3, 'openai-compatible', 'https://example.test', '', $4, $5, 'apikey')",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(vendor)
+            .bind(credentials.to_string())
+            .bind(options.to_string())
+            .execute(&pool)
+            .await
+            .expect("legacy provider");
+        }
+
+        migrate_postgres_range(&pool, 58, 58).await;
+
+        for (id, _, _, _, expected_credentials, expected_options) in
+            legacy_provider_configuration_cases()
+        {
+            let (credentials, options) = sqlx::query_as::<_, (String, String)>(
+                "SELECT adapter_credentials, vendor_options FROM providers WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("migrated provider");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&credentials).expect("credentials JSON"),
+                expected_credentials,
+                "{id} credentials"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&options).expect("options JSON"),
+                expected_options,
+                "{id} options"
+            );
+        }
+
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .expect("drop isolated PostgreSQL schema");
+    }
 }

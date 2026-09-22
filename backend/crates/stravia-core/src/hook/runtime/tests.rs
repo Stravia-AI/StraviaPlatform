@@ -212,7 +212,9 @@ fn route_context() -> RouteContext {
         model_id: "model-id".into(),
         provider_id: "provider-id".into(),
         target_id: "target-id".into(),
-        egress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        egress: Some(
+            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ),
     }
 }
 
