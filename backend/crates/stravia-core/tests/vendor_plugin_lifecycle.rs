@@ -6,8 +6,10 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request as AxumRequest, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode, Uri};
 use axum::response::Response;
+use sqlx::Connection as _;
 use stravia_core::Gateway;
 use stravia_core::config::GatewayConfig;
+use stravia_core::data_paths::DataPaths;
 use stravia_core::db::models::{
     CreateApiKey, CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput,
     ProviderSourceInput, UpdateRoute, UpsertTarget,
@@ -1271,6 +1273,220 @@ async fn incompatible_update_cancels_only_its_vendor_rejects_late_results_and_re
         .find(|plugin| plugin.vendor_id == OTHER_VENDOR)
         .expect("other vendor remains installed");
     assert_eq!(other_summary.version, "1.0.0");
+    Ok(())
+}
+
+#[tokio::test]
+async fn uninstall_cancels_only_its_vendor_preserves_data_and_invalidates_old_previews()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = new_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "lifecycle-v2.wasm", false).await?;
+    install(&gateway, "lifecycle-other-v1.wasm", false).await?;
+    let mut lifecycle_upstream = TestUpstream::start().await;
+    let mut other_upstream = TestUpstream::start().await;
+    let lifecycle = connection(
+        &gateway,
+        LIFECYCLE_VENDOR,
+        "uninstall account",
+        "lifecycle-uninstall",
+        &lifecycle_upstream.base_url,
+        "retained-secret",
+        options(&[]),
+    )
+    .await?;
+    let other = connection(
+        &gateway,
+        OTHER_VENDOR,
+        "unrelated uninstall account",
+        "lifecycle-uninstall-unrelated",
+        &other_upstream.base_url,
+        "other-secret",
+        options(&[]),
+    )
+    .await?;
+    let token = api_key(&gateway, &[&lifecycle.route_id, &other.route_id]).await?;
+    let router = create_router(gateway.clone());
+
+    let seeded = tokio::spawn(invoke(
+        router.clone(),
+        token.clone(),
+        lifecycle.route_id.clone(),
+    ));
+    let seed_request = lifecycle_upstream.next().await;
+    assert_eq!(seed_request.header("x-state-before"), Some("0"));
+    seed_request.reply(UpstreamReply::model("state-before-uninstall"));
+    assert_success_with(&seeded.await?, "state-before-uninstall");
+
+    let stale_preview = gateway
+        .admin()
+        .preview_vendor_plugin(fixture("lifecycle-v1.wasm"))
+        .await?;
+    let unrelated_preview = gateway
+        .admin()
+        .preview_vendor_plugin(fixture("lifecycle-other-v1.wasm"))
+        .await?;
+    let cancelled_call = tokio::spawn(invoke(
+        router.clone(),
+        token.clone(),
+        lifecycle.route_id.clone(),
+    ));
+    let late_request = lifecycle_upstream.next().await;
+    let unrelated_call = tokio::spawn(invoke(
+        router.clone(),
+        token.clone(),
+        other.route_id.clone(),
+    ));
+    let unrelated_request = other_upstream.next().await;
+
+    gateway
+        .admin()
+        .uninstall_vendor_plugin(LIFECYCLE_VENDOR)
+        .await?;
+    assert_ne!(cancelled_call.await?.0, StatusCode::OK);
+    unrelated_request.reply(UpstreamReply::model("other-vendor-completed"));
+    assert_success_with(&unrelated_call.await?, "other-vendor-completed");
+    late_request.reply(UpstreamReply::model("must-not-be-published"));
+    gateway
+        .admin()
+        .confirm_vendor_plugin(ConfirmPluginUpdate {
+            preview_id: unrelated_preview.id,
+            allow_data_discard: false,
+        })
+        .await?;
+
+    let installed = gateway.admin().list_vendor_plugins().await?;
+    assert!(
+        installed
+            .iter()
+            .all(|plugin| plugin.vendor_id != LIFECYCLE_VENDOR)
+    );
+    assert!(
+        installed
+            .iter()
+            .any(|plugin| plugin.vendor_id == OTHER_VENDOR)
+    );
+    assert_eq!(
+        gateway
+            .admin()
+            .get_provider(&lifecycle.provider_id)
+            .await?
+            .id,
+        lifecycle.provider_id
+    );
+    let retained_route = gateway.admin().get_model("lifecycle-uninstall").await?;
+    assert_eq!(retained_route.targets.len(), 1);
+    assert_eq!(retained_route.targets[0].id, lifecycle.target_id);
+
+    let unavailable = invoke(router, token, lifecycle.route_id.clone()).await;
+    assert_ne!(unavailable.0, StatusCode::OK);
+    lifecycle_upstream.assert_no_request();
+    assert!(
+        gateway
+            .admin()
+            .confirm_vendor_plugin(ConfirmPluginUpdate {
+                preview_id: stale_preview.id,
+                allow_data_discard: true,
+            })
+            .await
+            .is_err(),
+        "a preview from the removed installation must never become current again"
+    );
+
+    let reinstall = gateway
+        .admin()
+        .preview_vendor_plugin(fixture("lifecycle-v2.wasm"))
+        .await?;
+    assert_eq!(reinstall.previous_version, None);
+    assert!(reinstall.inherits_credentials);
+    assert!(reinstall.cancels_active_operations);
+    let retained_data = reinstall
+        .discarded_data
+        .iter()
+        .find(|discard| discard.provider.id == lifecycle.provider_id)
+        .expect("retained connection data requires a conservative compatibility decision");
+    assert!(retained_data.kinds.iter().any(|kind| kind == "credentials"));
+    assert!(
+        retained_data
+            .kinds
+            .iter()
+            .any(|kind| kind == "private_state")
+    );
+    assert!(
+        gateway
+            .admin()
+            .confirm_vendor_plugin(ConfirmPluginUpdate {
+                preview_id: reinstall.id,
+                allow_data_discard: false,
+            })
+            .await
+            .is_err(),
+        "reinstall must not silently reuse data after its compatibility baseline was removed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_legacy_builtin_plugin_can_be_uninstalled_and_stays_removed_after_restart()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..GatewayConfig::default()
+    };
+    let gateway = Gateway::new(config.clone()).await?;
+    install(&gateway, "lifecycle-v1.wasm", false).await?;
+    drop(gateway);
+
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(DataPaths::new(directory.path()).database()),
+    )
+    .await?;
+    sqlx::query("UPDATE vendor_plugins SET source='builtin' WHERE vendor_id=$1")
+        .bind(LIFECYCLE_VENDOR)
+        .execute(&mut connection)
+        .await?;
+    drop(connection);
+    for artifact in std::fs::read_dir(directory.path().join("plugins/artifacts"))? {
+        std::fs::remove_file(artifact?.path())?;
+    }
+
+    let gateway = Gateway::new(config.clone()).await?;
+    let unavailable = gateway
+        .admin()
+        .list_vendor_plugins()
+        .await?
+        .into_iter()
+        .find(|plugin| plugin.vendor_id == LIFECYCLE_VENDOR)
+        .expect("legacy builtin installation record");
+    assert_eq!(unavailable.source, PluginSource::Builtin);
+    assert_eq!(unavailable.status, "unavailable");
+    let base_error = gateway.admin().uninstall_vendor_plugin("base").await;
+    assert!(base_error.is_err());
+
+    gateway
+        .admin()
+        .uninstall_vendor_plugin(LIFECYCLE_VENDOR)
+        .await?;
+    drop(gateway);
+    let restarted = Gateway::new(config).await?;
+    assert!(
+        restarted
+            .admin()
+            .list_vendor_plugins()
+            .await?
+            .iter()
+            .all(|plugin| plugin.vendor_id != LIFECYCLE_VENDOR)
+    );
+    assert!(
+        restarted
+            .admin()
+            .list_vendor_plugins()
+            .await?
+            .iter()
+            .any(|plugin| plugin.vendor_id == "base")
+    );
     Ok(())
 }
 

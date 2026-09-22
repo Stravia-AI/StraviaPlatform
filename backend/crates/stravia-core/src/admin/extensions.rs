@@ -34,6 +34,15 @@ impl AdminService {
         self.gw.vendor_plugins.restore(&self.gw, vendor_id).await
     }
 
+    /// 卸载指定 Vendor 的专属插件，即使当前组件无法加载也可执行。
+    ///
+    /// 取消并排空该 Vendor 的活动调用与认证会话，移除安装记录，但保留连接、
+    /// 凭据、路由、历史、插件私有数据和产物文件。空 ID、`base`、未安装的插件，
+    /// 以及任务排空或存储失败均返回错误；取消不能保证上游停止执行或计费。
+    pub async fn uninstall_vendor_plugin(&self, vendor_id: &str) -> anyhow::Result<()> {
+        self.gw.vendor_plugins.uninstall(&self.gw, vendor_id).await
+    }
+
     /// 返回当前已安装且可加载的 Provider profile；未知或不可用的 supplier 返回错误。
     pub fn vendor_metadata(
         &self,

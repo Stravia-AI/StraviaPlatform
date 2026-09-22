@@ -1818,5 +1818,16 @@
   "vendor_plugins_preview_confirm": "Apply plugin change",
   "vendor_plugins_preview_confirming": "Applying…",
   "vendor_plugins_update_applied": "Vendor plugin change applied.",
-  "vendor_plugins_preview_failed": "The plugin change could not be applied. Review the error and try again; your selected file and preview are retained."
+  "vendor_plugins_preview_failed": "The plugin change could not be applied. Review the error and try again; your selected file and preview are retained.",
+  "vendor_plugins_uninstall_action": "Uninstall",
+  "vendor_plugins_uninstall_title": "Uninstall {name}?",
+  "vendor_plugins_uninstall_description": "This plugin will be uninstalled. Its model services and capabilities will be unavailable until a compatible plugin is installed again.",
+  "vendor_plugins_uninstall_retained_title": "Saved data will be retained",
+  "vendor_plugins_uninstall_retained_description": "Model-service configurations, credentials, models, routes, history, and plugin data will remain. Reinstalling may require confirmation to reset incompatible plugin data.",
+  "vendor_plugins_uninstall_interruptions_title": "Active work and sign-ins will stop",
+  "vendor_plugins_uninstall_interruptions_description": "Active calls and authorization sessions for this vendor will be cancelled; incomplete sign-ins must restart. Cancellation does not guarantee that an upstream service stops work, and charges may still be incurred.",
+  "vendor_plugins_uninstall_confirm": "Uninstall plugin",
+  "vendor_plugins_uninstalling": "Uninstalling…",
+  "vendor_plugins_uninstalled": "Vendor plugin uninstalled.",
+  "vendor_plugins_uninstall_failed": "The plugin could not be uninstalled. Review the error and try again."
 }

@@ -727,6 +727,66 @@ async fn compatible_update_pins_paginated_model_sync_to_one_plugin_version() -> 
 }
 
 #[tokio::test]
+async fn uninstall_cancels_auth_exchange_without_deleting_saved_connection_credentials()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = new_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "management-v2.wasm", false).await?;
+    let mut upstream = TestUpstream::start().await;
+    let provider = create_oauth_provider(
+        &gateway,
+        &mut upstream,
+        MANAGEMENT_VENDOR,
+        "Retained uninstall provider",
+        "retained-access-token",
+    )
+    .await?;
+    let credential = gateway
+        .storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("saved OAuth credential");
+
+    let unsaved = begin_oauth(&gateway, MANAGEMENT_VENDOR, None, &upstream.base_url).await?;
+    let gw = gateway.clone();
+    let session_id = unsaved.session_id.clone();
+    let input = completion(&unsaved);
+    let exchange =
+        tokio::spawn(async move { gw.admin().complete_oauth_session(&session_id, input).await });
+    let late_request = upstream.next().await;
+    assert_eq!(late_request.operation(), "oauth_exchange");
+
+    gateway
+        .admin()
+        .uninstall_vendor_plugin(MANAGEMENT_VENDOR)
+        .await?;
+    assert!(exchange.await?.is_err());
+    late_request.reply(UpstreamReply::token("late-token", "late-refresh"));
+    assert!(
+        gateway
+            .admin()
+            .get_oauth_session_status(&unsaved.session_id)
+            .await
+            .is_err(),
+        "uninstall must remove the cancelled authentication session"
+    );
+    assert_eq!(
+        gateway
+            .storage
+            .oauth_credentials()
+            .get(&provider.id)
+            .await?,
+        Some(credential),
+        "uninstall must retain the saved connection credential"
+    );
+    let retained = gateway.admin().get_provider(&provider.id).await?;
+    assert_eq!(retained.id, provider.id);
+    assert_eq!(retained.vendor_options, provider.vendor_options);
+    Ok(())
+}
+
+#[tokio::test]
 async fn incompatible_update_cancels_management_work_and_requires_selective_recovery()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

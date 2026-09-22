@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -678,6 +679,66 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
             usage_after_restart["total_output_tokens"],
         ) == (15, 15)
         assert usage_after_restart["api_key_name"] == usage_before_update["api_key_name"]
+
+        # 缺失产物的异常插件仍须可卸载；管理操作不能依赖组件成功加载。
+        stop_stravia_server(process, logs)
+        process = None
+        digest = hashlib.sha256((fixtures / "lifecycle-v3.wasm").read_bytes()).hexdigest()
+        (artifact_dir / f"{digest}.wasm").unlink()
+        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        assert _plugins(session)[LIFECYCLE_VENDOR]["status"] == "unavailable"
+        # configured_credential_fields 依赖已加载描述符；组件不可用时它为空，不代表凭据被删除。
+        unavailable_provider_facts = {
+            provider_id: _provider_fact(session, provider_id)
+            for provider_id in provider_facts
+        }
+
+        status, body = session.request("DELETE", "/api/v1/vendor-plugins/base")
+        assert status == 400, body
+        assert _plugins(session)["base"]["status"] == "ready"
+        status, body = session.request(
+            "DELETE", f"/api/v1/vendor-plugins/{LIFECYCLE_VENDOR}"
+        )
+        assert status == 200, body
+        assert LIFECYCLE_VENDOR not in _plugins(session)
+        assert {
+            provider_id: _provider_fact(session, provider_id)
+            for provider_id in provider_facts
+        } == unavailable_provider_facts
+        assert {
+            model_id: _route_fact(session, model_id) for model_id in route_facts
+        } == route_facts
+        status, body = http_request(
+            "POST",
+            f"{base_url}/v1/responses",
+            payload={"model": first["model_id"], "input": "uninstalled plugin"},
+            headers={"authorization": f"Bearer {api_key['key']}"},
+        )
+        assert status >= 400, body
+        _invoke(
+            base_url,
+            lifecycle_upstream,
+            api_key["key"],
+            other["model_id"],
+            version="1.0.0",
+            vendor=OTHER_VENDOR,
+            state_before=4,
+            secret=other_secret,
+        )
+        stop_stravia_server(process, logs)
+        process = None
+        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        assert LIFECYCLE_VENDOR not in _plugins(session)
+        assert _provider_fact(session, first["provider_id"]) == unavailable_provider_facts[first["provider_id"]]
+        assert _route_fact(session, first["model_id"]) == route_facts[first["model_id"]]
+        reinstall = _preview_plugin(session, fixtures, "lifecycle-v3.wasm")
+        retained_data = {
+            item["provider"]["id"]: item["kinds"]
+            for item in reinstall["discarded_data"]
+        }
+        for connection in (first, second):
+            assert "credentials" in retained_data[connection["provider_id"]]
+            assert "private_state" in retained_data[connection["provider_id"]]
     finally:
         if process is not None:
             stop_stravia_server(process, logs)

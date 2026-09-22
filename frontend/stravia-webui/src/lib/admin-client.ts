@@ -140,6 +140,7 @@ export const admin = {
     confirm: (input: ConfirmPluginUpdate) => request<PluginSummary>('POST', '/vendor-plugins/confirm', input),
     restoreBuiltin: (vendorId: string) =>
       request<PluginPreview>('POST', `/vendor-plugins/${encodeURIComponent(vendorId)}/restore`),
+    uninstall: (vendorId: string) => request<void>('DELETE', `/vendor-plugins/${encodeURIComponent(vendorId)}`),
   },
   credentialProtection: {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),

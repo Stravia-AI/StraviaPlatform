@@ -1815,5 +1815,16 @@
   "vendor_plugins_preview_confirm": "应用插件变更",
   "vendor_plugins_preview_confirming": "正在应用…",
   "vendor_plugins_update_applied": "供应商插件变更已应用。",
-  "vendor_plugins_preview_failed": "无法应用插件变更。请检查错误后重试；已选文件和预览会保留。"
+  "vendor_plugins_preview_failed": "无法应用插件变更。请检查错误后重试；已选文件和预览会保留。",
+  "vendor_plugins_uninstall_action": "卸载",
+  "vendor_plugins_uninstall_title": "卸载 {name}？",
+  "vendor_plugins_uninstall_description": "将卸载此插件。在重新安装兼容插件前，依赖它的模型服务和能力将不可用。",
+  "vendor_plugins_uninstall_retained_title": "已保存数据会保留",
+  "vendor_plugins_uninstall_retained_description": "模型服务配置、凭据、模型、路由、历史记录和插件数据都会保留。重新安装时，可能需要确认重置不兼容的插件数据。",
+  "vendor_plugins_uninstall_interruptions_title": "活动任务和登录将中断",
+  "vendor_plugins_uninstall_interruptions_description": "该供应商的活动调用和授权会话将被取消，未完成的登录需要重新开始。取消不保证上游服务停止执行，仍可能产生费用。",
+  "vendor_plugins_uninstall_confirm": "卸载插件",
+  "vendor_plugins_uninstalling": "正在卸载…",
+  "vendor_plugins_uninstalled": "供应商插件已卸载。",
+  "vendor_plugins_uninstall_failed": "无法卸载插件。请检查错误后重试。"
 }

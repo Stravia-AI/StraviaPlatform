@@ -272,6 +272,56 @@ impl PluginStore {
         }
     }
 
+    /// 仅删除安装元数据；连接、凭据、模型、恢复标记与插件私有状态均留待重装兼容性检查。
+    pub(crate) async fn uninstall(
+        &self,
+        vendor_id: &str,
+        expected_revision: i64,
+    ) -> Result<(), PluginStorageError> {
+        match &self.backend {
+            PluginStoreBackend::Memory(store) => {
+                let mut data = store.data.write().await;
+                if !data
+                    .installed
+                    .get(vendor_id)
+                    .is_some_and(|installed| installed.revision == expected_revision)
+                {
+                    return Err(PluginStorageError::Changed);
+                }
+                data.installed.remove(vendor_id);
+                Ok(())
+            }
+            PluginStoreBackend::Sqlite(pool) => {
+                let changed =
+                    sqlx::query("DELETE FROM vendor_plugins WHERE vendor_id=$1 AND revision=$2")
+                        .bind(vendor_id)
+                        .bind(expected_revision)
+                        .execute(pool)
+                        .await
+                        .map_err(storage_error)?
+                        .rows_affected();
+                if changed != 1 {
+                    return Err(PluginStorageError::Changed);
+                }
+                Ok(())
+            }
+            PluginStoreBackend::Postgres(pool) => {
+                let changed =
+                    sqlx::query("DELETE FROM vendor_plugins WHERE vendor_id=$1 AND revision=$2")
+                        .bind(vendor_id)
+                        .bind(expected_revision)
+                        .execute(pool)
+                        .await
+                        .map_err(storage_error)?
+                        .rows_affected();
+                if changed != 1 {
+                    return Err(PluginStorageError::Changed);
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// 包替换与经确认的数据重置原子提交；调用者先持有供应商静默凭证。
     pub(crate) async fn install(
         &self,

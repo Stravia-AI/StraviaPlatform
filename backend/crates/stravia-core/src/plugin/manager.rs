@@ -662,6 +662,36 @@ impl VendorPlugins {
         self.summary(gw, &pending.preview.vendor_id).await
     }
 
+    pub(crate) async fn uninstall(&self, gw: &Gateway, vendor_id: &str) -> anyhow::Result<()> {
+        let vendor_id = vendor_id.trim();
+        anyhow::ensure!(!vendor_id.is_empty(), "vendor plugin id is required");
+        anyhow::ensure!(
+            vendor_id != "base",
+            "the embedded base plugin cannot be uninstalled"
+        );
+
+        let _update = self.updates.lock().await;
+        let revision = self
+            .entries
+            .read()
+            .get(vendor_id)
+            .map(|entry| entry.record.revision)
+            .ok_or_else(|| anyhow::anyhow!("vendor plugin is not installed"))?;
+        // 非 base 包只拥有与 Vendor ID 同名的操作域；卸载异常插件不应依赖描述符解析或加载。
+        let quiescent = self.operations.cancel_and_drain(vendor_id).await?;
+        gw.admin().cancel_vendor_sessions(vendor_id).await;
+        let configuration = self.operations.configuration_guard(vendor_id).await;
+        self.store.uninstall(vendor_id, revision).await?;
+        self.entries.write().remove(vendor_id);
+        // 清除依赖旧归属的预览，防止重装后 revision 重用使旧确认再次生效；其他插件的预览保留。
+        self.pending.lock().await.retain(|_, pending| {
+            pending.preview.vendor_id != vendor_id && !pending.scope_ids.contains(vendor_id)
+        });
+        quiescent.resume();
+        drop(configuration);
+        Ok(())
+    }
+
     pub(crate) async fn restore(
         &self,
         gw: &Gateway,

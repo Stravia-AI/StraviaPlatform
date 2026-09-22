@@ -9,11 +9,18 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import type { PluginBindingImpact, PluginNetworkPermission, PluginPreview, PluginSource } from '$lib/types'
+import type {
+  PluginBindingImpact,
+  PluginNetworkPermission,
+  PluginPreview,
+  PluginSource,
+  PluginSummary,
+} from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import * as Alert from '$lib/components/ui/alert'
+import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Card from '$lib/components/ui/card'
@@ -42,6 +49,10 @@ let previewOpen = $state(false)
 let confirmError = $state<string>()
 let confirming = $state(false)
 let allowDataDiscard = $state(false)
+let uninstallTarget = $state<PluginSummary>()
+let uninstallOpen = $state(false)
+let uninstalling = $state(false)
+let uninstallError = $state<string>()
 
 const plugins = $derived(pluginsQuery.data ?? [])
 const selectedFile = $derived(selectedFiles?.item(0) ?? undefined)
@@ -130,6 +141,64 @@ async function restoreBuiltin(vendorId: string): Promise<void> {
     restoreError = { vendorId, message: localizeBackendErrorMessage(error) }
   } finally {
     restoringVendorId = undefined
+  }
+}
+
+function openUninstall(plugin: PluginSummary): void {
+  if (plugin.vendor_id === 'base') return
+  uninstallTarget = plugin
+  uninstallError = undefined
+  uninstallOpen = true
+}
+
+function setUninstallOpen(open: boolean): void {
+  if (uninstalling) return
+  uninstallOpen = open
+  if (!open) {
+    uninstallTarget = undefined
+    uninstallError = undefined
+  }
+}
+
+async function refreshPluginRuntimeQueries(): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['vendor-plugins'] }),
+    queryClient.invalidateQueries({ queryKey: ['gateway-status'] }),
+    queryClient.invalidateQueries({ queryKey: ['provider-descriptors'] }),
+    queryClient.invalidateQueries({ queryKey: ['providers'] }),
+    queryClient.invalidateQueries({ queryKey: ['provider-models'] }),
+    queryClient.invalidateQueries({ queryKey: ['provider-allowances'] }),
+    queryClient.invalidateQueries({ queryKey: ['provider-allowance'] }),
+    queryClient.invalidateQueries({ queryKey: ['model-target-statuses'] }),
+    queryClient.invalidateQueries({ queryKey: ['models'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-providers'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-access-settings'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-search-config'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-search-eligible-models'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-search-external-routes'] }),
+    queryClient.invalidateQueries({ queryKey: ['media-understanding-config'] }),
+    queryClient.invalidateQueries({ queryKey: ['media-generation-config'] }),
+    queryClient.invalidateQueries({ queryKey: ['media-generation-eligible-routes'] }),
+    queryClient.invalidateQueries({ queryKey: ['oauth-session'] }),
+  ])
+}
+
+async function uninstallPlugin(): Promise<void> {
+  const target = uninstallTarget
+  if (!target || uninstalling || target.vendor_id === 'base') return
+
+  uninstalling = true
+  uninstallError = undefined
+  try {
+    await admin.vendorPlugins.uninstall(target.vendor_id)
+    await refreshPluginRuntimeQueries()
+    uninstallOpen = false
+    uninstallTarget = undefined
+    toast.success(m.vendor_plugins_uninstalled())
+  } catch (error) {
+    uninstallError = localizeBackendErrorMessage(error)
+  } finally {
+    uninstalling = false
   }
 }
 
@@ -265,6 +334,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
             plugin.builtin_version &&
             !plugin.pending_update &&
             (plugin.source === 'local' || plugin.status !== 'ready' || plugin.version !== plugin.builtin_version)}
+          {@const canUninstall = plugin.vendor_id !== 'base'}
           <Card.Root>
             <Card.Header>
               <Card.Title class="min-w-0 truncate">{plugin.name}</Card.Title>
@@ -347,7 +417,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                 <RequestFailure message={restoreError.message} />
               {/if}
             </Card.Content>
-            {#if plugin.pending_update || canRestoreBuiltin}
+            {#if plugin.pending_update || canRestoreBuiltin || canUninstall}
               <Card.Footer class="flex flex-wrap justify-end gap-2 border-t">
                 {#if canRestoreBuiltin}
                   <Button
@@ -367,6 +437,11 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                     {m.vendor_plugins_review_update()}
                   </Button>
                 {/if}
+                {#if canUninstall}
+                  <Button variant="outline" onclick={() => openUninstall(plugin)}>
+                    {m.vendor_plugins_uninstall_action()}
+                  </Button>
+                {/if}
               </Card.Footer>
             {/if}
           </Card.Root>
@@ -375,6 +450,49 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     {/if}
   </section>
 </div>
+
+<AlertDialog.Root bind:open={() => uninstallOpen, setUninstallOpen}>
+  {#if uninstallTarget}
+    <AlertDialog.Content class="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-lg">
+      <AlertDialog.Header>
+        <AlertDialog.Title>
+          {m.vendor_plugins_uninstall_title({ name: uninstallTarget.name })}
+        </AlertDialog.Title>
+        <AlertDialog.Description>{m.vendor_plugins_uninstall_description()}</AlertDialog.Description>
+      </AlertDialog.Header>
+
+      <div class="flex flex-col gap-3">
+        <Alert.Root>
+          <Alert.Title>{m.vendor_plugins_uninstall_retained_title()}</Alert.Title>
+          <Alert.Description>{m.vendor_plugins_uninstall_retained_description()}</Alert.Description>
+        </Alert.Root>
+        <Alert.Root variant="warning">
+          <CircleAlertIcon />
+          <Alert.Title>{m.vendor_plugins_uninstall_interruptions_title()}</Alert.Title>
+          <Alert.Description>{m.vendor_plugins_uninstall_interruptions_description()}</Alert.Description>
+        </Alert.Root>
+        {#if uninstallError}
+          <RequestFailure title={m.vendor_plugins_uninstall_failed()} message={uninstallError} />
+        {/if}
+      </div>
+
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel disabled={uninstalling}>{m.common_cancel()}</AlertDialog.Cancel>
+        <AlertDialog.Action
+          variant="destructive"
+          disabled={uninstalling}
+          aria-busy={uninstalling}
+          onclick={(event: MouseEvent) => {
+            event.preventDefault()
+            void uninstallPlugin()
+          }}>
+          {#if uninstalling}<Spinner data-icon="inline-start" />{/if}
+          {uninstalling ? m.vendor_plugins_uninstalling() : m.vendor_plugins_uninstall_confirm()}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  {/if}
+</AlertDialog.Root>
 
 <Dialog.Root bind:open={previewOpen}>
   {#if preview}

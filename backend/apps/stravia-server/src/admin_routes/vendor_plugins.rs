@@ -6,7 +6,7 @@ use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use stravia_core::Gateway;
 use stravia_core::plugin::ConfirmPluginUpdate;
 
@@ -20,6 +20,10 @@ pub(super) fn routes() -> Router<Gateway> {
             post(import_vendor_plugin).layer(DefaultBodyLimit::max(MAX_COMPONENT_BYTES)),
         )
         .route("/vendor-plugins/confirm", post(confirm_vendor_plugin))
+        .route(
+            "/vendor-plugins/{vendor_id}",
+            delete(uninstall_vendor_plugin),
+        )
         .route(
             "/vendor-plugins/{vendor_id}/restore",
             post(restore_vendor_plugin),
@@ -73,6 +77,16 @@ async fn confirm_vendor_plugin(
 ) -> Response {
     match gateway.admin().confirm_vendor_plugin(input).await {
         Ok(plugin) => plugin_json(plugin),
+        Err(error) => plugin_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn uninstall_vendor_plugin(
+    State(gateway): State<Gateway>,
+    Path(vendor_id): Path<String>,
+) -> Response {
+    match gateway.admin().uninstall_vendor_plugin(&vendor_id).await {
+        Ok(()) => plugin_json(()),
         Err(error) => plugin_error(StatusCode::BAD_REQUEST, error),
     }
 }
