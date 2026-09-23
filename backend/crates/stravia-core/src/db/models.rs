@@ -44,8 +44,31 @@ pub struct Provider {
     pub last_test_success: Option<bool>,
     pub last_test_at: Option<String>,
     pub is_enabled: bool,
+    /// ADR-0073 凭据失效：`ok` / `invalid`。上游明确拒绝当前凭据组合后由
+    /// 条件写置为 `invalid`，只有新凭据证据（凭据变更、OAuth 重绑或刷新
+    /// 成功、测试成功）才恢复 `ok`。与 `is_enabled` 正交。
+    #[serde(default = "default_credential_status")]
+    pub credential_status: String,
+    pub credential_invalid_at: Option<String>,
+    /// 行写入代际，用于凭据失效的条件写竞态保护；不进入 API 序列化。
+    #[serde(default, skip_serializing)]
+    pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+pub fn default_credential_status() -> String {
+    "ok".to_string()
+}
+
+/// ADR-0073：发起请求时锁定的凭据代际。标记失效时若代际已变化（管理员
+/// 改了凭据、OAuth 已刷新/重绑），说明拒绝证据属于旧凭据，放弃写入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCredentialVersion {
+    pub provider_revision: i64,
+    /// 请求带 OAuth 凭据时锁定 `provider_oauth_credentials.status_version`；
+    /// 无 OAuth 连接时为 `None`，标记时要求该 Provider 仍无 OAuth 行。
+    pub oauth_status_version: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq, Eq)]
@@ -339,6 +362,32 @@ pub struct UpdateProvider {
     pub auth_mode: Option<String>,
     pub use_proxy: Option<bool>,
     pub is_enabled: Option<bool>,
+    /// Internal flag, never serialized: admin updates resolve into a
+    /// full-field rewrite, so the store cannot distinguish "the caller
+    /// wrote credential fields" from "fields were backfilled with current
+    /// values". Set when the original input only carries display/intent
+    /// fields, to keep an existing credential-invalid marker.
+    #[serde(skip)]
+    pub preserve_credential_status: bool,
+}
+
+impl UpdateProvider {
+    /// ADR-0073 黑名单清除：除纯展示/意图字段（name、is_enabled、
+    /// models_source、static_models）外，任何字段写入都视为凭据证据场景
+    /// 变化（换平台、协议、代理都可能使旧的拒绝证据失效），清除失效标记。
+    /// `credential_status` 不在本结构体中，管理 API 无法直接写该字段。
+    pub fn resets_credential_status(&self) -> bool {
+        self.vendor.is_some()
+            || self.protocol.is_some()
+            || self.base_url.is_some()
+            || self.preset_key.is_some()
+            || self.channel.is_some()
+            || self.api_key.is_some()
+            || self.adapter_credentials.is_some()
+            || self.vendor_options.is_some()
+            || self.auth_mode.is_some()
+            || self.use_proxy.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -747,6 +796,12 @@ impl Provider {
     pub fn effective_api_key(&self) -> String {
         self.adapter_credential("apiKey")
             .unwrap_or_else(|| self.api_key.trim().to_string())
+    }
+
+    /// ADR-0073：上游已确认拒绝当前凭据组合。失效 Provider 的 Target
+    /// 在调度快照装配时被排除，直到出现新凭据证据。
+    pub fn credential_invalid(&self) -> bool {
+        self.credential_status == "invalid"
     }
 
     pub fn effective_auth_mode(&self) -> String {

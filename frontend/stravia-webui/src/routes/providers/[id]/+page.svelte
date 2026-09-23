@@ -139,6 +139,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
       title={provider.name}
       description={m.providers_page_summary()}>
       {#snippet meta()}
+        {@const credentialInvalid = provider.credential_status === 'invalid'}
         <div class="flex flex-wrap items-center gap-2">
           <ProviderMark
             icon={descriptor?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'}
@@ -150,8 +151,15 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
           {/each}
           <StatusIndicator
             compact
-            label={provider.is_enabled ? m.common_enabled_status() : m.common_inactive_status()}
-            tone={provider.is_enabled ? 'healthy' : 'neutral'} />
+            label={credentialInvalid && provider.is_enabled
+              ? m.providers_credential_invalid()
+              : provider.is_enabled
+                ? m.common_enabled_status()
+                : m.common_inactive_status()}
+            tone={credentialInvalid && provider.is_enabled ? 'error' : provider.is_enabled ? 'healthy' : 'neutral'} />
+          {#if credentialInvalid && !provider.is_enabled}
+            <Badge variant="destructive">{m.providers_credential_invalid()}</Badge>
+          {/if}
         </div>
       {/snippet}
       {#snippet actions()}

@@ -69,7 +69,7 @@ impl AdminService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("provider was removed"))?;
         anyhow::ensure!(
-            serde_json::to_vec(&current)? == serde_json::to_vec(provider)?,
+            crate::admin::provider_connection::same_provider_generation(&current, provider),
             "provider changed while binding OAuth credentials"
         );
         let updated = self
@@ -102,6 +102,7 @@ impl AdminService {
             stravia_runtime_contract::Deadline::fixed(
                 std::time::Instant::now() + std::time::Duration::from_secs(120),
             ),
+            false,
         )
         .await
     }
@@ -119,6 +120,7 @@ impl AdminService {
                 Some(pinned),
                 cancellation,
                 deadline,
+                true,
             )
             .await?;
             return Ok(());
@@ -135,6 +137,7 @@ impl AdminService {
                 &context,
             )
             .await?;
+        let credential_version = prepared.credential_version();
         let execution = self
             .gw
             .execute_prepared_vendor(
@@ -144,7 +147,20 @@ impl AdminService {
                 }),
                 context,
             )
-            .await?;
+            .await;
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                // ADR-0073：此路径只在已观测到上游 401 后进入——恢复未产出
+                // 新凭据即恢复耗尽，标记失效；取消/超时不是凭据证据。
+                if !crate::plugin::execution::is_execution_interruption(&error) {
+                    self.gw
+                        .mark_provider_credential_invalid(provider_id, credential_version)
+                        .await;
+                }
+                return Err(error);
+            }
+        };
         let publication = execution.publication.write_fence().await?;
         anyhow::ensure!(
             matches!(
@@ -155,16 +171,24 @@ impl AdminService {
             ),
             "vendor returned an invalid authentication refresh result"
         );
+        // ADR-0073：vendor 侧刷新产出了被上游接受的新凭据——清除失效。
+        self.gw
+            .clear_provider_credential_invalid(provider_id)
+            .await;
         drop(publication);
         Ok(())
     }
 
+    /// `mark_exhausted` 仅由已观测到上游 401 的恢复路径传入：此时任何非
+    /// 中断的刷新失败都等于恢复耗尽，应标记失效。主动刷新（后台任务、手动
+    /// 重连）只在刷新本身被上游凭据拒绝时标记。
     async fn force_refresh_provider_oauth_with_context(
         &self,
         provider_id: &str,
         pinned: Option<&crate::plugin::execution::PreparedVendorExecution>,
         cancellation: stravia_runtime_contract::CancellationToken,
         deadline: stravia_runtime_contract::Deadline,
+        mark_exhausted: bool,
     ) -> anyhow::Result<OAuthCredential> {
         let provider = self.get_provider(provider_id).await?;
         let vendor_id = provider
@@ -179,13 +203,26 @@ impl AdminService {
             .get(provider_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("provider OAuth credential not found"))?;
-        anyhow::ensure!(
-            credential
-                .refresh_token
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            "provider OAuth refresh token is missing"
-        );
+        if credential
+            .refresh_token
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            // ADR-0073：无 refresh token 意味着被拒的 access token 无法恢复，
+            // 恢复路径到此即耗尽。
+            if mark_exhausted {
+                self.gw
+                    .mark_provider_credential_invalid(
+                        provider_id,
+                        crate::db::models::ProviderCredentialVersion {
+                            provider_revision: provider.revision,
+                            oauth_status_version: Some(credential.status_version),
+                        },
+                    )
+                    .await;
+            }
+            anyhow::bail!("provider OAuth refresh token is missing");
+        }
         let Some(locked) = oauth_store
             .try_begin_refresh(provider_id, credential.status_version)
             .await?
@@ -206,7 +243,7 @@ impl AdminService {
             provider_id.to_owned(),
             locked.status_version,
         );
-        let provider_fingerprint = serde_json::to_vec(&provider)?;
+        let provider_fingerprint = provider.clone();
         let context = crate::plugin::VendorCallContext::new(cancellation, deadline);
         let execution = match pinned {
             Some(pinned) => match self
@@ -257,6 +294,23 @@ impl AdminService {
                         (fence, Some(operation))
                     }
                 };
+                // ADR-0073：标记必须在 fail_refresh 之前——后者 bump
+                // status_version，会让条件写把本证据判为过期。刷新请求本身被
+                // 上游凭据拒绝总是证据；恢复耗尽上下文里任何真实失败都是。
+                if crate::plugin::execution::is_credential_rejection(&error)
+                    || (mark_exhausted
+                        && !crate::plugin::execution::is_execution_interruption(&error))
+                {
+                    self.gw
+                        .mark_provider_credential_invalid(
+                            provider_id,
+                            crate::db::models::ProviderCredentialVersion {
+                                provider_revision: provider.revision,
+                                oauth_status_version: Some(locked.status_version),
+                            },
+                        )
+                        .await;
+                }
                 oauth_store
                     .fail_refresh(provider_id, locked.status_version, &error.to_string())
                     .await?;
@@ -282,7 +336,10 @@ impl AdminService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("provider was removed during OAuth refresh"))?;
         anyhow::ensure!(
-            serde_json::to_vec(&current_provider)? == provider_fingerprint,
+            crate::admin::provider_connection::same_provider_generation(
+                &current_provider,
+                &provider_fingerprint
+            ),
             "provider changed during OAuth refresh"
         );
         let current_credential = oauth_store.get(provider_id).await?.ok_or_else(|| {
@@ -300,6 +357,10 @@ impl AdminService {
                 upsert_credential_from_bundle(&vendor_id, &credential.scheme, &bundle),
             )
             .await?;
+        // ADR-0073：刷新成功=上游已接受新凭据，清除失效标记。
+        self.gw
+            .clear_provider_credential_invalid(provider_id)
+            .await;
         self.gw
             .vendor_plugins
             .store

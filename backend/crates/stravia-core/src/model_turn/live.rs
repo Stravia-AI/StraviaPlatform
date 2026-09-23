@@ -870,6 +870,9 @@ struct PreparedAttempt {
     websocket_affinity: Option<String>,
     execution: Option<PreparedVendorExecution>,
     pinned_execution: PreparedVendorExecution,
+    /// ADR-0073：最近一次实际执行的连接凭据代际；重试会重取快照，必须与
+    /// 被拒的那次执行一致，不能复用首个 lease 的版本。
+    attempt_credential_version: Option<crate::db::models::ProviderCredentialVersion>,
     response_continuation_available: Arc<AtomicBool>,
     first_token_timed_out: Option<Arc<AtomicBool>>,
     upstream_state: Arc<AtomicU8>,
@@ -1350,7 +1353,8 @@ async fn prepare_attempt(
             && transport_preference != TransportPreference::HttpOnly)
             .then_some(websocket_affinity),
         execution: Some(execution.clone()),
-        pinned_execution: execution,
+        pinned_execution: execution.clone(),
+        attempt_credential_version: Some(execution.credential_version()),
         response_continuation_available,
         first_token_timed_out: None,
         upstream_state: Arc::new(AtomicU8::new(UPSTREAM_NOT_STARTED)),
@@ -1798,6 +1802,8 @@ async fn drive_vendor_attempt(
                             failure_observer.as_ref(),
                             &policy,
                             &target,
+                            &gateway,
+                            prepared.attempt_credential_version,
                         )
                         .await;
                         return;
@@ -1822,6 +1828,8 @@ async fn drive_vendor_attempt(
                         failure_observer.as_ref(),
                         &policy,
                         &target,
+                        &gateway,
+                        prepared.attempt_credential_version,
                     )
                     .await;
                     return;
@@ -1968,6 +1976,8 @@ async fn drive_vendor_attempt(
                     failure_observer.as_ref(),
                     &policy,
                     &target,
+                    &gateway,
+                    prepared.attempt_credential_version,
                 )
                 .await;
                 return;
@@ -1998,14 +2008,17 @@ async fn drive_vendor_attempt(
                     operation_cancellation.clone(),
                     deadline.clone(),
                 );
+                let mut recovery_interrupted = false;
                 let refreshed = tokio::select! {
                     biased;
                     _ = parent_cancellation.cancelled() => {
                         operation_cancellation.cancel();
+                        recovery_interrupted = true;
                         Err(())
                     }
                     () = deadline.wait() => {
                         operation_cancellation.cancel();
+                        recovery_interrupted = true;
                         Err(())
                     }
                     result = refresh => result.map_err(|_| ()),
@@ -2014,6 +2027,9 @@ async fn drive_vendor_attempt(
                     auth_recovered = true;
                     continue;
                 }
+                // ADR-0073：恢复路径内部已按"恢复耗尽"规则完成失效标记；
+                // 这里只在恢复根本没跑起来（被取消/超时中断）时抑制标记——
+                // 中断不是凭据证据。
                 finish_vendor_failure(
                     AttemptFailure::terminal(
                         "provider_auth_error",
@@ -2028,6 +2044,12 @@ async fn drive_vendor_attempt(
                     failure_observer.as_ref(),
                     &policy,
                     &target,
+                    &gateway,
+                    if recovery_interrupted {
+                        None
+                    } else {
+                        prepared.attempt_credential_version
+                    },
                 )
                 .await;
                 return;
@@ -2063,6 +2085,8 @@ async fn drive_vendor_attempt(
                     failure_observer.as_ref(),
                     &policy,
                     &target,
+                    &gateway,
+                    prepared.attempt_credential_version,
                 )
                 .await;
                 return;
@@ -2153,6 +2177,7 @@ async fn run_vendor_operation(
             execution
         }
     };
+    prepared.attempt_credential_version = Some(execution_handle.credential_version());
     let connection_changed = execution_handle.protocol().trim() != prepared.protocol_hint
         || target_namespace(
             &prepared.route.provider_id,
@@ -2772,7 +2797,20 @@ async fn finish_vendor_failure(
     observer: Option<&crate::interaction_observation::RunObserver>,
     policy: &AttemptRoutePolicy,
     target: &SelectedTarget,
+    gateway: &Gateway,
+    credential_version: Option<crate::db::models::ProviderCredentialVersion>,
 ) {
+    // ADR-0073：上游确认的凭据拒绝 → 持久化 Provider 失效。OAuth 恢复路径
+    // 在此之前已尝试刷新；走到这里的拒绝即恢复耗尽后的终态。条件写失败只
+    // 记 warn，不改变本失败的既有处理。
+    if failure.error.code == "provider_auth_error"
+        && failure.is_upstream()
+        && let Some(version) = credential_version
+    {
+        gateway
+            .mark_provider_credential_invalid(&target.provider_id, version)
+            .await;
+    }
     if committed && failure.is_upstream() && failure.error.code == "upstream_error" {
         failure.error.code = "upstream_stream_error".into();
         failure.error.message = "Vendor upstream stream error".into();

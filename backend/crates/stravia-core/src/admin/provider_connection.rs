@@ -26,7 +26,10 @@ fn configured_secret_value(value: &Value) -> bool {
     }
 }
 
-fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
+/// ADR-0073：凭据健康字段（credential_status/credential_invalid_at/revision）
+/// 不属于配置代际——并发 mark/clear 不应中断进行中的 OAuth 绑定、刷新或
+/// 配置保存校验，这些写入本身就携带新凭据证据。
+pub(in crate::admin) fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
     left.id == right.id
         && left.name == right.name
         && left.vendor == right.vendor
@@ -942,6 +945,9 @@ impl AdminService {
             "provider vendor, channel, protocol, and authentication cannot be changed after creation"
         );
 
+        // ADR-0073：黑名单按 API 输入判定——下方写入总是全字段重写，
+        // 不能把"回填现值"误判成凭据变更。
+        let preserve_credential_status = !input.resets_credential_status();
         let changes_options = input.vendor_options.is_some();
         let credential_updates = input.adapter_credentials.clone().unwrap_or_default();
         let changes_credentials = credential_updates.values().any(configured_secret_value)
@@ -1060,6 +1066,7 @@ impl AdminService {
                     auth_mode: Some(auth_mode),
                     use_proxy: Some(input.use_proxy.unwrap_or(current.use_proxy)),
                     is_enabled: Some(input.is_enabled.unwrap_or(current.is_enabled)),
+                    preserve_credential_status,
                 },
             )
             .await?;
@@ -1213,7 +1220,19 @@ impl AdminService {
                     .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
             });
         let result = if supports_validation {
-            let preview = self
+            // ADR-0073：预览前先锁定凭据代际，手动测试的上游 401 同样算
+            // 失效证据（条件写仍按代际比对，不覆盖更新的凭据）。
+            let credential_version = crate::db::models::ProviderCredentialVersion {
+                provider_revision: provider.revision,
+                oauth_status_version: self
+                    .gw
+                    .storage
+                    .oauth_credentials()
+                    .get(&provider.id)
+                    .await?
+                    .map(|credential| credential.status_version),
+            };
+            let preview = match self
                 .preview_provider_configuration(ProviderConfigurationPreviewInput {
                     provider_id: Some(provider.id.clone()),
                     vendor_id: vendor_id.to_owned(),
@@ -1222,7 +1241,18 @@ impl AdminService {
                     options: serde_json::from_str(&provider.vendor_options)?,
                     credentials: std::collections::BTreeMap::new(),
                 })
-                .await?;
+                .await
+            {
+                Ok(preview) => preview,
+                Err(error) => {
+                    if crate::plugin::execution::is_credential_rejection(&error) {
+                        self.gw
+                            .mark_provider_credential_invalid(&provider.id, credential_version)
+                            .await;
+                    }
+                    return Err(error);
+                }
+            };
             let error = if preview.issues.is_empty() {
                 None
             } else {

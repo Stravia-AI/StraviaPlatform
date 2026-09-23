@@ -840,7 +840,7 @@ impl AdminService {
         let write_fence = publication.write_fence().await?;
         let current = self.get_provider(id).await?;
         anyhow::ensure!(
-            serde_json::to_vec(&current)? == serde_json::to_vec(&provider)?,
+            super::provider_connection::same_provider_generation(&current, &provider),
             "provider changed while logging out"
         );
         self.gw
@@ -928,7 +928,7 @@ impl AdminService {
         let write_fence = publication.write_fence().await?;
         publication.ensure_current()?;
         let current = self.get_provider(provider_id).await?;
-        if serde_json::to_vec(&current)? != serde_json::to_vec(&provider)? {
+        if !super::provider_connection::same_provider_generation(&current, &provider) {
             drop(write_fence);
             *runtime.publication.lock().await = Some(publication);
             self.restore_auth_session_record(session).await?;

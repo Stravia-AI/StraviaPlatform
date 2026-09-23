@@ -13,7 +13,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -106,7 +105,7 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
+    mcp_access_enabled boolean DEFAULT false NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
@@ -349,7 +348,7 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text CONSTRAINT models_name_not_null NOT NULL,
+    model_id text NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text,
     is_enabled boolean DEFAULT true,
     priority integer DEFAULT 0,
@@ -596,7 +595,11 @@ CREATE TABLE public.providers (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     adapter_credentials text DEFAULT '{}'::text NOT NULL,
     vendor_options text DEFAULT '{}'::text NOT NULL,
-    CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text])))
+    credential_status text DEFAULT 'ok'::text NOT NULL,
+    credential_invalid_at timestamp with time zone,
+    revision bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text]))),
+    CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text])))
 );
 
 

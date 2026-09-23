@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +7,8 @@ use async_trait::async_trait;
 
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
-    ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, Route, StatsOverview,
+    ModelStats, OAuthCredential, Provider, ProviderCredentialVersion, ProviderStats, PutRoute,
+    Route, StatsOverview,
     StatsSeries, UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential,
     WebAccessSettings, WebProvider,
 };
@@ -61,6 +63,19 @@ pub trait ProviderStore: Send + Sync {
         provider_id: &str,
         result: ProviderTestResult,
     ) -> anyhow::Result<()>;
+    /// ADR-0073 条件写：仅当凭据代际未变时将 Provider 标记为凭据失效。
+    /// 返回 true 表示已标记；代际不匹配（凭据已被新证据替换）返回 false。
+    /// 写失败由调用方记 `tracing::warn!`，不改变原请求结果。
+    async fn mark_credential_invalid(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+    ) -> anyhow::Result<bool>;
+    /// 新凭据证据出现时清除失效标记。Provider 更新与测试成功在各自写
+    /// 路径内联处理；此方法用于不改 Provider 行的证据（OAuth 刷新成功）。
+    async fn clear_credential_invalid(&self, id: &str) -> anyhow::Result<()>;
+    /// 调度快照装配用：返回凭据失效的 Provider id 集合。
+    async fn credential_invalid_provider_ids(&self) -> anyhow::Result<HashSet<String>>;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

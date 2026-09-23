@@ -35,6 +35,9 @@ fn provider(protocol: &str) -> Provider {
         last_test_success: None,
         last_test_at: None,
         is_enabled: true,
+        credential_status: "ok".to_string(),
+        credential_invalid_at: None,
+        revision: 0,
         created_at: String::new(),
         updated_at: String::new(),
     }
