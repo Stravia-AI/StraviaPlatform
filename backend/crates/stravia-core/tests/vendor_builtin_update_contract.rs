@@ -365,7 +365,7 @@ async fn invoke(gateway: &Gateway, connection: &Connection) -> anyhow::Result<()
 }
 
 #[tokio::test]
-async fn an_incompatible_builtin_waits_for_consent_and_discards_only_the_incompatible_state()
+async fn an_incompatible_builtin_automatically_resets_only_the_incompatible_state()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let first = gateway(directory.path()).await?;
@@ -379,41 +379,6 @@ async fn an_incompatible_builtin_waits_for_consent_and_discards_only_the_incompa
     seed_previous_builtin(directory.path()).await?;
 
     let restarted = gateway(directory.path()).await?;
-    let waiting = installed(&restarted).await?;
-    assert_eq!(waiting.version, "0.0.0");
-    assert_eq!(waiting.status, "pending_update");
-    let preview = waiting.pending_update.expect("data-discard confirmation");
-    assert_eq!(preview.new_version, bundled.version);
-    assert_eq!(preview.discarded_data.len(), 1);
-    assert_eq!(
-        preview.discarded_data[0].provider.id,
-        connection.provider_id
-    );
-    assert_eq!(preview.discarded_data[0].kinds, ["private_state"]);
-    assert!(preview.discarded_data[0].recovery_actions.is_empty());
-    let rejected = restarted
-        .admin()
-        .confirm_vendor_plugin(ConfirmPluginUpdate {
-            preview_id: preview.id.clone(),
-            allow_data_discard: false,
-        })
-        .await;
-    assert!(rejected.is_err());
-    invoke(&restarted, &connection).await?;
-    upstream.assert_request(Some("1")).await;
-
-    // 活跃旧版本可继续改变待丢弃状态；重新预览再确认，避免使用已过期的数据快照。
-    let refreshed = restarted
-        .admin()
-        .preview_builtin_vendor_plugin("base")
-        .await?;
-    restarted
-        .admin()
-        .confirm_vendor_plugin(ConfirmPluginUpdate {
-            preview_id: refreshed.id,
-            allow_data_discard: true,
-        })
-        .await?;
     let updated = installed(&restarted).await?;
     assert_eq!(updated.source, PluginSource::Builtin);
     assert_eq!(updated.version, bundled.version);
@@ -429,7 +394,7 @@ async fn an_incompatible_builtin_waits_for_consent_and_discards_only_the_incompa
     invoke(&restarted, &connection).await?;
     upstream.assert_request(None).await;
 
-    // 相同新格式的探针不触发第二次清理；它应读到已确认更新留下的空状态。
+    // 相同新格式的探针不触发第二次清理；它应读到自动更新留下的空状态。
     install(&restarted, "lifecycle-base-same.wasm").await?;
     invoke(&restarted, &connection).await?;
     upstream.assert_request(Some("0")).await;
