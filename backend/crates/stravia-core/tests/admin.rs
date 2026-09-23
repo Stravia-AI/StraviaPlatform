@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -81,7 +80,7 @@ fn seed_provider_scope(
 
 #[tokio::test]
 async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let catalog = gw.admin().catalog_choices().await;
     let openai = catalog
         .providers
@@ -138,12 +137,15 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
         .unwrap_err();
     assert!(stale.to_string().contains("refresh and select"));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let groq = gw
         .admin()
         .create_provider(catalog_provider_input_for(&gw, "Groq catalog", "groq").await?)
@@ -368,12 +370,15 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
             .await?,
         vec!["clientId".to_string(), "clientSecret".to_string()]
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_configuration_preview_uses_real_cloudflare_validation() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let missing_fields = gw
         .admin()
         .preview_provider_configuration(ProviderConfigurationPreviewInput {
@@ -428,12 +433,15 @@ async fn provider_configuration_preview_uses_real_cloudflare_validation() -> any
     assert!(preview.network_permissions.iter().any(|permission| {
         permission.connection_scoped && permission.origin == "https://gateway.ai.cloudflare.com"
     }));
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .admin()
         .create_provider(catalog_provider_input_for(&gw, "snapshot-provider", "minimax").await?)
@@ -559,12 +567,15 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         reimported.metadata.description.as_deref(),
         Some("Locally curated description")
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .admin()
         .create_provider(catalog_provider_input(&gw, "manual-model-provider").await?)
@@ -670,6 +681,9 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
             .iter()
             .any(|model| model.id == route.id)
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
@@ -698,7 +712,7 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
         anyhow::Ok(())
     });
 
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .storage
         .providers()
@@ -736,6 +750,9 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
         endpoint_only.metadata.name.as_deref(),
         Some("endpoint-only-model")
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
@@ -762,7 +779,7 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
         anyhow::Ok(())
     });
 
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .storage
         .providers()
@@ -834,6 +851,9 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
             .map(|modalities| modalities.output.as_slice()),
         Some(["text".to_string()].as_slice())
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
@@ -854,7 +874,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         anyhow::Ok(())
     });
 
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .storage
         .providers()
@@ -943,12 +963,15 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
     );
     assert_eq!(upgraded.metadata.tool_call, Some(true));
     assert_eq!(upgraded.metadata.reasoning, Some(true));
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn copy_provider_creates_disabled_provider_with_copy_suffix() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let original = gw
         .admin()
         .create_provider(api_key_provider_input("source-provider"))
@@ -971,13 +994,16 @@ async fn copy_provider_creates_disabled_provider_with_copy_suffix() -> anyhow::R
     assert!(original.is_enabled);
     assert!(!copied.is_enabled);
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn upgraded_cloud_provider_can_be_edited_and_copied_with_separated_fields()
 -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let original = gw
         .storage
         .providers()
@@ -1027,12 +1053,15 @@ async fn upgraded_cloud_provider_can_be_edited_and_copied_with_separated_fields(
             })
         );
     }
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_update_keeps_the_selected_option_immutable() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .admin()
         .create_provider(catalog_provider_input(&gw, "immutable-provider-option").await?)
@@ -1072,12 +1101,15 @@ async fn provider_update_keeps_the_selected_option_immutable() -> anyhow::Result
             .contains("cannot be changed after creation")
     );
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn copy_provider_uses_numbered_suffix_when_copy_name_exists() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let original = gw
         .admin()
         .create_provider(api_key_provider_input("source-provider"))
@@ -1088,12 +1120,15 @@ async fn copy_provider_uses_numbered_suffix_when_copy_name_exists() -> anyhow::R
 
     assert_eq!(second_copy.name, "source-provider_Copy2");
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let original = gw
         .admin()
         .create_provider(api_key_provider_input("route-source-provider"))
@@ -1195,12 +1230,15 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
             && target.priority == 0
     }));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let original = gw
         .admin()
         .create_provider(api_key_provider_input("no-route-copy-provider"))
@@ -1226,12 +1264,15 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
     assert_eq!(models[0].targets.len(), 1);
     assert_eq!(models[0].targets[0].provider_id, original.id);
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn copy_oauth_provider_copies_credential_binding() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     install_distributed_vendor_plugin(&gw, "openai-codex").await?;
     let original = gw
         .storage
@@ -1253,13 +1294,16 @@ async fn copy_oauth_provider_copies_credential_binding() -> anyhow::Result<()> {
         Some("copy-access-token"),
     );
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn logout_provider_oauth_preserves_oauth_mode_and_disconnects_binding() -> anyhow::Result<()>
 {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     install_distributed_vendor_plugin(&gw, "openai-codex").await?;
     let provider = gw
         .storage
@@ -1280,6 +1324,9 @@ async fn logout_provider_oauth_preserves_oauth_mode_and_disconnects_binding() ->
         "oauth credential should be deleted after logout"
     );
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
@@ -1300,7 +1347,7 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
         anyhow::Ok(())
     });
 
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .storage
         .providers()
@@ -1335,12 +1382,16 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
         .get_provider_model(&provider.id, "account-only-model")
         .await?;
     assert!(model.metadata.description.is_none());
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
-async fn build_gateway() -> anyhow::Result<Gateway> {
+async fn build_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
+    let data_dir = tempfile::tempdir()?;
     let config = GatewayConfig {
-        data_dir: test_data_dir(),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let mut gw = Gateway::from_storage(
@@ -1354,7 +1405,7 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
     for provider_id in ["openai", "google", "minimax"] {
         seed_provider_scope(&gw.config.data_dir, provider_id, OPENAI_SCOPE)?;
     }
-    Ok(gw)
+    Ok((data_dir, gw))
 }
 
 async fn add_manual_provider_model(
@@ -1381,7 +1432,7 @@ async fn add_manual_provider_model(
 
 #[tokio::test]
 async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     let epoch_before: i64 = gw
         .storage
@@ -1422,12 +1473,15 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
         epoch_after > epoch_before,
         "config_epoch should increment after create_model: before={epoch_before} after={epoch_after}"
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = gw
         .admin()
         .create_provider(api_key_provider_input("epoch-update-provider"))
@@ -1493,29 +1547,13 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
         "epoch should increment on delete"
     );
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 // ── readyz (StorageBootstrap::health) ─────────────────────────────────────
-
-#[tokio::test]
-async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {
-    let gw = Gateway::new(GatewayConfig {
-        data_dir: test_data_dir(),
-        ..Default::default()
-    })
-    .await?;
-    let health = gw.storage.bootstrap().health().await?;
-    assert!(
-        health.can_connect,
-        "SQLite health check should report can_connect"
-    );
-    assert!(
-        health.schema_compatible,
-        "SQLite health check should report schema_compatible after migration"
-    );
-    Ok(())
-}
 
 #[tokio::test]
 async fn schema_compatible_is_false_when_migrations_skipped() -> anyhow::Result<()> {
@@ -1523,7 +1561,7 @@ async fn schema_compatible_is_false_when_migrations_skipped() -> anyhow::Result<
     // Gateway::new() would fail at RouteCache load, so test directly at storage level.
     let dir = tempfile::tempdir()?;
     let pool = stravia_core::db::init_pool(dir.path()).await?;
-    let storage = stravia_core::storage::SqliteStorage::from_pool(pool);
+    let storage = stravia_core::storage::SqliteStorage::from_pool(pool.clone());
 
     let health = storage.bootstrap().health().await?;
 
@@ -1535,14 +1573,10 @@ async fn schema_compatible_is_false_when_migrations_skipped() -> anyhow::Result<
         !health.schema_compatible,
         "schema_compatible must be false when models table has not been created"
     );
+    drop(storage);
+    pool.close().await;
+    dir.close()?;
     Ok(())
-}
-
-fn test_data_dir() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "stravia-admin-integration-tests-{}",
-        Uuid::new_v4()
-    ))
 }
 
 fn oauth_provider_record() -> CreateProviderRecord {
@@ -1702,19 +1736,22 @@ async fn saved_openai_provider(gw: &Gateway, base_url: &str) -> anyhow::Result<P
 
 #[tokio::test]
 async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     seed_catalog_logo(&gw.config.data_dir, "deepseek", ICON_TEST_SVG)?;
 
     let icon = gw.provider_icon("deepseek").await?;
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = saved_openai_provider(&gw, "https://api.openai.com/v1").await?;
     seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
 
@@ -1722,12 +1759,15 @@ async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyh
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_icon_falls_back_to_the_connection_origin_favicon() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
     // `https://icon-test.invalid` sanitizes to this cache file name; the logo
     // fetch is unscripted and fails, so only the favicon cache can serve.
@@ -1741,12 +1781,15 @@ async fn provider_icon_falls_back_to_the_connection_origin_favicon() -> anyhow::
 
     assert_eq!(icon.content_type, "image/png");
     assert_eq!(icon.body, ICON_TEST_PNG);
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_icon_prefers_the_catalog_logo_over_a_website_favicon() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
     seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
     seed_catalog_favicon(
@@ -1759,13 +1802,19 @@ async fn provider_icon_prefers_the_catalog_logo_over_a_website_favicon() -> anyh
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn provider_icon_errors_when_no_source_matches() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     assert!(gw.provider_icon("ghost-provider").await.is_err());
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }

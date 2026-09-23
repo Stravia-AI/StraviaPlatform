@@ -27,6 +27,24 @@ use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 
+async fn shutdown_test_gateway(gateway: Gateway) {
+    gateway.shutdown().await;
+    if let Some(pool) = &gateway._sqlite_pool {
+        pool.close().await;
+    }
+    if let Some(pool) = &gateway._postgres_pool {
+        pool.close().await;
+    }
+    drop(gateway);
+}
+
+async fn close_test_gateway(gateway: Gateway, data_dir: tempfile::TempDir) {
+    shutdown_test_gateway(gateway).await;
+    data_dir
+        .close()
+        .expect("remove temporary gateway directory");
+}
+
 async fn wait_for_observed_run_finish(
     events: &mut crate::interaction_observation::ObservationStream,
 ) {
@@ -539,6 +557,7 @@ async fn hidden_round_request_hook_response_is_delivered_impl() {
             .await,
         None,
     );
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn platform_only_stream_continues_with_marker_impl() {
@@ -651,12 +670,12 @@ async fn platform_only_stream_continues_with_marker_impl() {
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
     assert_eq!(*tool_calls.lock(), vec![1]);
+    close_test_gateway(gateway, data_dir).await;
 }
 
-async fn gateway_rewriting_model(test_name: &str, final_model: &str) -> Gateway {
+async fn gateway_rewriting_model(data_dir: &tempfile::TempDir, final_model: &str) -> Gateway {
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir()
-            .join(format!("stravia-{test_name}-{}", uuid::Uuid::new_v4())),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     crate::Gateway::builder(config)
@@ -762,11 +781,11 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
         .expect("set Principal Concurrency Limit");
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct AccessMutationFixture {
-    gateway: Arc<parking_lot::Mutex<Option<Gateway>>>,
-    key_id: Arc<parking_lot::Mutex<Option<String>>>,
-    replacement_model_id: Arc<parking_lot::Mutex<Option<String>>>,
+    gateway: parking_lot::Mutex<Option<Gateway>>,
+    key_id: parking_lot::Mutex<Option<String>>,
+    replacement_model_id: parking_lot::Mutex<Option<String>>,
 }
 
 impl AccessMutationFixture {
@@ -1769,7 +1788,7 @@ impl stravia_runtime_contract::hook::HookSession for ExposeAccessMutationSession
 }
 
 struct AccessMutationTool {
-    access: AccessMutationFixture,
+    access: std::sync::Weak<AccessMutationFixture>,
     mutation: TestAccessMutation,
 }
 
@@ -1792,23 +1811,24 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
         _arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
     ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
-        let gateway = self.access.gateway().ok_or_else(|| {
+        let access = self.access.upgrade().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing test fixture")
+        })?;
+        let gateway = access.gateway().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing test gateway")
         })?;
-        let key_id = self.access.key_id().ok_or_else(|| {
+        let key_id = access.key_id().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing test key")
         })?;
         let (is_enabled, model_ids) = match self.mutation {
             TestAccessMutation::DisableKey => (Some(false), None),
             TestAccessMutation::RevokeBinding => (
                 None,
-                Some(vec![self.access.replacement_model_id().ok_or_else(
-                    || {
-                        stravia_runtime_contract::hook::PlatformToolError::new(
-                            "missing replacement model",
-                        )
-                    },
-                )?]),
+                Some(vec![access.replacement_model_id().ok_or_else(|| {
+                    stravia_runtime_contract::hook::PlatformToolError::new(
+                        "missing replacement model",
+                    )
+                })?]),
             ),
         };
         gateway
@@ -1963,19 +1983,16 @@ async fn assert_hidden_round_rechecks_access(
     });
     let (base_url, provider_calls) =
         serve_openai_sequence(vec![tool_round, openai_response("must not be delivered")]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-hidden-round-{}-test-{}",
-            mutation.tool_id(),
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let access = AccessMutationFixture::default();
+    let access = Arc::new(AccessMutationFixture::default());
     let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(ExposeAccessMutationHook(mutation)))
         .platform_tool(Arc::new(AccessMutationTool {
-            access: access.clone(),
+            access: Arc::downgrade(&access),
             mutation,
         }))
         .build()
@@ -2029,6 +2046,8 @@ async fn assert_hidden_round_rechecks_access(
     assert_eq!(body["error"]["type"], expected_type);
     assert_eq!(body["error"]["message"], expected_message);
     assert!(body["error"].get("request_id").is_none());
+    drop(access);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn buffered_platform_only_executes_hidden_round_impl() {
@@ -2098,6 +2117,7 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     .await
     .expect("completed History Marker count");
     assert_eq!(completed_marker_count, 1);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn hidden_round_request_hook_rejection_is_delivered_impl() {
@@ -2144,7 +2164,7 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     .expect("Gateway");
     configure_route(&gateway, "hook-reject", &[base_url]).await;
 
-    let response = execute_stream(gateway, "hook-reject").await;
+    let response = execute_stream(gateway.clone(), "hook-reject").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -2158,6 +2178,7 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     assert!(!body.contains("stream aborted"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
     assert_eq!(*tool_calls.lock(), vec![1]);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn mixed_tool_continuation_replays_impl() {
@@ -2210,11 +2231,9 @@ async fn mixed_tool_continuation_replays_impl() {
         openai_response("fresh response"),
     ])
     .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-mixed-continuation-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2319,7 +2338,7 @@ async fn mixed_tool_continuation_replays_impl() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     assert_eq!(*tool_calls.lock(), vec![1]);
 
-    let branch = execute_non_stream_request_with_headers(gateway, headers, resumed).await;
+    let branch = execute_non_stream_request_with_headers(gateway.clone(), headers, resumed).await;
     assert_eq!(branch.status(), StatusCode::OK);
     let branch_body = to_bytes(branch.into_body(), usize::MAX)
         .await
@@ -2330,6 +2349,7 @@ async fn mixed_tool_continuation_replays_impl() {
         String::from_utf8_lossy(&branch_body)
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn platform_only_stream_preserves_client_tool_arguments_impl() {
@@ -2354,7 +2374,7 @@ async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     .expect("Gateway");
     configure_route(&gateway, "platform-client-tool-stream", &[base_url]).await;
 
-    let response = execute_stream(gateway, "platform-client-tool-stream").await;
+    let response = execute_stream(gateway.clone(), "platform-client-tool-stream").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -2388,6 +2408,7 @@ async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     assert!(!body.contains("stravia__ordered_tool"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     assert_eq!(*tool_calls.lock(), vec![1]);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn platform_markers_are_ingress_neutral_impl() {
@@ -2520,6 +2541,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
     assert_eq!(tool_calls.lock().len(), 4);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 fn openai_sse_platform_tool_call() -> String {

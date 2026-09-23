@@ -2,11 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn principal_concurrency_limit_rejects_new_roots_until_delivery_completes() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-principal-admission-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -68,15 +66,24 @@ async fn principal_concurrency_limit_rejects_new_roots_until_delivery_completes(
     let _ = to_bytes(third.into_body(), usize::MAX)
         .await
         .expect("third response body");
+    gateway.shutdown().await;
+    gateway
+        ._sqlite_pool
+        .as_ref()
+        .expect("Gateway SQLite pool")
+        .close()
+        .await;
+    drop(gateway);
+    data_dir
+        .close()
+        .expect("remove temporary gateway directory");
 }
 
 #[tokio::test]
 async fn principal_concurrency_limit_allows_multiple_slots_and_isolates_principals() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-principal-admission-matrix-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let entered = Arc::new(tokio::sync::Notify::new());

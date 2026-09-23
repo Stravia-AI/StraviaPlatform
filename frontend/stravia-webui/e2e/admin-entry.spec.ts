@@ -103,13 +103,18 @@ test('HTTP management and HTTPS proxy sessions retain browser cookie boundaries'
       })
       incoming.pipe(upstream)
     }
-  const http = createHttpServer(proxy('http'))
-  // 后端的自动目录／更新检查也只能访问隔离代理，不能联系生产服务。
-  http.on('connect', (_request, socket) => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'))
+  let http: Server | undefined
   let https: Server | undefined
   let backend: ChildProcess | undefined
+  let backendClosed: Promise<void> | undefined
   let browser: Browser | undefined
+  let testFailure: unknown
+  let failed = false
+  const cleanupErrors: unknown[] = []
   try {
+    http = createHttpServer(proxy('http'))
+    // 后端的自动目录／更新检查也只能访问隔离代理，不能联系生产服务。
+    http.on('connect', (_request, socket) => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'))
     execFileSync(
       'openssl',
       [
@@ -184,6 +189,9 @@ test('HTTP management and HTTPS proxy sessions retain browser cookie boundaries'
       },
     )
     const serverProcess = backend
+    const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>()
+    backendClosed = closed
+    serverProcess.once('close', resolveClosed)
     const setupToken = await new Promise<string>((resolve, reject) => {
       let token = ''
       let text = ''
@@ -269,14 +277,48 @@ test('HTTP management and HTTPS proxy sessions retain browser cookie boundaries'
     expect(denied?.status()).toBe(403)
     await expect(securePage.locator('#admin-username')).toHaveCount(0)
     await secureContext.close()
+  } catch (error) {
+    testFailure = error
+    failed = true
   } finally {
-    await browser?.close()
-    if (backend && backend.exitCode === null) {
-      backend.kill()
-      await once(backend, 'exit')
+    try {
+      await browser?.close()
+    } catch (error) {
+      cleanupErrors.push(error)
     }
-    if (http.listening) await close(http)
-    if (https?.listening) await close(https)
-    await rm(directory, { recursive: true, force: true })
+    try {
+      let waitForBackend = true
+      if (backend?.pid && backend.exitCode === null && backend.signalCode === null) {
+        if (!backend.kill()) {
+          cleanupErrors.push(new Error(`Failed to stop server process ${backend.pid}`))
+          waitForBackend = false
+        }
+      }
+      if (waitForBackend) await backendClosed
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      if (http?.listening) await close(http)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      if (https?.listening) await close(https)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      await rm(directory, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 })
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
   }
+  if (failed && cleanupErrors.length) {
+    throw new AggregateError([testFailure, ...cleanupErrors], `Test and cleanup failed in ${directory}`, {
+      cause: testFailure,
+    })
+  }
+  if (failed) throw testFailure
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, `Cleanup failed in ${directory}`)
 })
