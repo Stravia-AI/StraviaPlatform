@@ -51,9 +51,7 @@ export interface CreateRoute {
   model_id: string
   display_name?: string | null
   balance?: RouteSelectionStrategy
-  target_provider: string
-  target_model: string | null
-  targets?: CreateTarget[]
+  targets: CreateTarget[]
   default_thinking_level?: ThinkingLevel | null
 }
 
@@ -77,26 +75,12 @@ export interface UpdateRoute {
   model_id?: string
   display_name?: string | null
   balance?: RouteSelectionStrategy
-  target_provider?: string
-  target_model?: string | null
-  targets?: UpsertTarget[]
+  targets?: CreateTarget[]
   is_enabled?: boolean
   default_thinking_level?: ThinkingLevel | null
 }
 
 export interface CreateTarget {
-  provider_id: string
-  model: string | null
-  enabled?: boolean
-  priority?: number
-  first_token_timeout_ms?: number
-  target_retry_budget?: number
-  target_cooldown_ms?: number
-  thinking_level_map?: ThinkingLevelMapping[]
-}
-
-export interface UpsertTarget {
-  id?: string
   provider_id: string
   model: string | null
   enabled?: boolean

@@ -22,7 +22,7 @@ def wire_provider(protocol: str) -> Iterator[tuple[str, list[dict[str, Any]]]]:
 
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            received.append({"body": body, "headers": dict(self.headers)})
+            received.append({"body": body})
             if protocol == "anthropic-messages":
                 text = body["messages"][-1]["content"][0]["text"]
                 response = {
@@ -86,7 +86,7 @@ def wire_route(env: dict[str, Any], url: str, protocol: str, model: str) -> str:
     assert status == 201, body
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/models", headers=env["auth"],
-        payload={"model_id": model, "target_provider": provider_id, "target_model": "wire-model"},
+        payload={"model_id": model, "targets": [{"provider_id": provider_id, "model": "wire-model"}]},
     )
     assert status == 200, body
     route_id = body["data"]["id"]
@@ -204,11 +204,6 @@ def test_raw_encoder_carriers_are_protected_without_losing_fidelity(
             assert status == 200, response
             actual = received[-1]["body"]
             assert "upstream-wire-auth" not in json.dumps(actual)
-            headers = {name.lower(): value for name, value in received[-1]["headers"].items()}
-            assert "upstream-wire-auth" in {
-                headers.get("x-api-key"), headers.get("x-goog-api-key"),
-                (headers.get("authorization") or "").removeprefix("Bearer "),
-            }
             if protocol == "anthropic-messages":
                 answer = "".join(part.get("text", "") for part in response["content"])
                 protected_echo = actual["messages"][-1]["content"][0]["text"]

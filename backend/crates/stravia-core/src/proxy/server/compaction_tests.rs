@@ -150,16 +150,26 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
             metadata: json!({"id":"upstream-model","name":"upstream-model"}),
+            template_id: None,
         }).await.unwrap();
         let route = admin.create_model(CreateRoute {
             model_id: "native-publication".into(), display_name: None, balance: None,
-            target_provider: provider.id, target_model: Some("upstream-model".into()), targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
             key: None, name: "local publication client".into(), concurrency_limit: None,
             expires_at: None, mcp_access_enabled: false, transparent_injection_enabled: false,
-            inject_web_search: false, inject_media_generation: false, inject_media_understanding: false, model_ids: vec![route.id],
+            inject_web_search: false, inject_media_generation: false, inject_media_understanding: false, model_ids: vec![route.id.into()],
         }).await.unwrap();
         sqlx::query("CREATE TRIGGER deny_native_publication BEFORE INSERT ON native_compactions BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END")
             .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
@@ -323,14 +333,22 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
             metadata: json!({"id":"upstream-model","name":"upstream-model"}),
+            template_id: None,
         }).await.unwrap();
         let route = admin.create_model(CreateRoute {
             model_id: "native-ws".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
@@ -343,7 +361,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: false,
-            model_ids: vec![route.id],
+            model_ids: vec![route.id.into()],
         }).await.unwrap();
         let principal = Principal::new(key.id.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

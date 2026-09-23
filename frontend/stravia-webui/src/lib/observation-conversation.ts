@@ -101,13 +101,6 @@ export function observationConversationMessages(
       live: interaction.status === 'running',
       unsaved: false,
     })
-  // Legacy fallback is only valid for a complete history, never for a truncated event page.
-  if (
-    detail.older_events_cursor === null &&
-    !messages.some((message) => message.role === 'assistant' && message.text) &&
-    interaction.visible_tail
-  )
-    messages[messages.length - 1].text = interaction.visible_tail
   const byId = new Map(previous.map((message) => [message.id, message]))
   return messages.map((message) => {
     const prior = byId.get(message.id)

@@ -12,6 +12,8 @@ pub(crate) mod manager;
 pub(crate) mod network;
 pub(crate) mod permissions;
 mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod types;
 
 pub(crate) use execution::{

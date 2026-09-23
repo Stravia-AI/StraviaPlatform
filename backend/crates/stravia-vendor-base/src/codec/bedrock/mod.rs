@@ -301,13 +301,13 @@ impl BedrockStreamParser {
             let index = required_usize(start, "contentBlockIndex")?;
             if let Some(tool_use) = start.pointer("/start/toolUse") {
                 let call = ToolCall {
-                    id: required_string(tool_use, "toolUseId")?,
+                    id: (required_string(tool_use, "toolUseId")?).into(),
                     name: required_string(tool_use, "name")?,
                     arguments: String::new(),
                 };
                 deltas.push(AiStreamDelta::ToolCallStart {
                     index,
-                    id: call.id.clone(),
+                    id: call.id.to_string(),
                     name: call.name.clone(),
                 });
                 self.tools.insert(index, call);
@@ -611,7 +611,7 @@ fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
     }
     if let Some(tool) = block.get("toolUse") {
         return Ok(ContentBlock::ToolUse {
-            id: required_string(tool, "toolUseId")?,
+            id: (required_string(tool, "toolUseId")?).into(),
             name: required_string(tool, "name")?,
             input: tool.get("input").cloned().unwrap_or_else(|| json!({})),
             cache_control: None,
@@ -619,7 +619,7 @@ fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
     }
     if let Some(result) = block.get("toolResult") {
         return Ok(ContentBlock::ToolResult {
-            tool_use_id: required_string(result, "toolUseId")?,
+            tool_use_id: (required_string(result, "toolUseId")?).into(),
             content_kind: Some(
                 stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks,
             ),

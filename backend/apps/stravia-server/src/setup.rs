@@ -100,19 +100,21 @@ struct SetupStateResponse {
 pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<PreparedServerApp> {
     if let Some(database) = read_database_config(&startup.config_path)? {
         let gateway_config = gateway_config(&startup.gateway, &database)?;
-        let storage = Gateway::open_storage(&gateway_config).await.map_err(|_| {
-            anyhow::anyhow!(
-                "configured database is unavailable or incompatible ({})",
-                startup.config_path.display()
-            )
-        })?;
+        let storage = Gateway::open_storage(&gateway_config)
+            .await
+            .map_err(|error| {
+                error.context(format!(
+                    "configured database is unavailable or incompatible ({})",
+                    startup.config_path.display()
+                ))
+            })?;
         let auth = AdminAuth::new(storage);
         if auth.has_admin().await.map_err(auth_to_anyhow)? {
-            let gateway = Gateway::new(gateway_config).await.map_err(|_| {
-                anyhow::anyhow!(
+            let gateway = Gateway::new(gateway_config).await.map_err(|error| {
+                error.context(format!(
                     "configured Gateway could not start ({})",
                     startup.config_path.display()
-                )
+                ))
             })?;
             let auth = AdminAuth::new(gateway.storage.clone());
             let app = normal_app(gateway, auth, &startup);

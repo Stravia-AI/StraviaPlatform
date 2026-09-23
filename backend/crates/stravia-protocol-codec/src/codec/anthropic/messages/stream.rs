@@ -61,7 +61,7 @@ impl AnthropicResponseParser {
                                 .cloned()
                                 .unwrap_or(Value::Object(Default::default()));
                             items.push(AiItem::function_call(ToolCall {
-                                id: tc_id.to_string(),
+                                id: (tc_id.to_string()).into(),
                                 name: name.to_string(),
                                 arguments: input.to_string(),
                             }));

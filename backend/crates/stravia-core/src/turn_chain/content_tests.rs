@@ -127,33 +127,6 @@ async fn contract(store: SqlTurnChainStore) {
         "duplicate content must not scale with its occurrences"
     );
 
-    // 把一条旧格式节点插入真实存储，验证迁移保持未知字段、身份和保留期。
-    let legacy = TurnNodeId::response();
-    let text = serde_json::to_string(&original).unwrap();
-    let deadline = chrono::Utc::now().timestamp_millis() + 60_000;
-    macro_rules! legacy {
-        ($pool:expr) => { sqlx::query("INSERT INTO turn_chain_nodes (id,kind,principal,payload_version,payload,created_at,expires_at) VALUES ($1,'response',$2,6,$3,0,$4)")
-            .bind(legacy.as_str()).bind(owner.continuation_key()).bind(&text).bind(deadline).execute($pool).await.unwrap() };
-    }
-    match &store {
-        SqlTurnChainStore::Sqlite(pool) => {
-            legacy!(pool);
-        }
-        SqlTurnChainStore::Postgres(pool) => {
-            legacy!(pool);
-        }
-    }
-    assert_eq!(store.optimize_storage().await.unwrap(), 1);
-    assert_eq!(store.optimize_storage().await.unwrap(), 0);
-    assert_eq!(
-        store
-            .materialize(&owner, TurnNodeKind::Response, &legacy)
-            .await
-            .unwrap()[0]
-            .payload,
-        original
-    );
-
     let branch_a = TurnNodeId::response();
     let branch_b = TurnNodeId::response();
     for (id, payload) in [(&branch_a, &original), (&branch_b, &different)] {
@@ -216,7 +189,7 @@ async fn contract(store: SqlTurnChainStore) {
         different
     );
     execute(&store, "UPDATE turn_chain_nodes SET expires_at=0").await;
-    assert_eq!(store.sweep_expired().await.unwrap(), 3);
+    assert_eq!(store.sweep_expired().await.unwrap(), 2);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM turn_chain_contents").await,
         0

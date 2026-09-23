@@ -164,9 +164,12 @@ fn normalize_messages_for_openai(
     let mut unavailable_tool_ids = collect_supplied_tool_ids(&preprocessed);
 
     let mut out: Vec<AiItem> = Vec::with_capacity(preprocessed.len() + 2);
-    let mut seen_tool_call_ids: HashSet<String> = HashSet::new();
-    let mut consumed_tool_result_ids: HashSet<String> = HashSet::new();
-    let mut pending_tool_call_ids: VecDeque<String> = VecDeque::new();
+    let mut seen_tool_call_ids: HashSet<stravia_runtime_contract::protocol::ir::ToolCallId> =
+        HashSet::new();
+    let mut consumed_tool_result_ids: HashSet<stravia_runtime_contract::protocol::ir::ToolCallId> =
+        HashSet::new();
+    let mut pending_tool_call_ids: VecDeque<stravia_runtime_contract::protocol::ir::ToolCallId> =
+        VecDeque::new();
     let mut generated_seq: usize = 0;
     let fallback_tool_name = tools
         .and_then(|defs| defs.first())
@@ -319,26 +322,27 @@ fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
             continue;
         }
         let text = standalone_reasoning_text(&out[idx]);
-        if out
-            .get(idx + 1)
-            .is_some_and(|next| next.role == Role::Assistant)
-        {
-            let next_meta = out[idx + 1]
-                .meta
-                .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
-            if let Value::Object(map) = next_meta {
-                let existing = map
-                    .get("reasoning_content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let merged = match (text.is_empty(), existing.is_empty()) {
-                    (true, _) => existing,
-                    (false, true) => text,
-                    (false, false) => format!("{text}\n{existing}"),
-                };
-                map.insert("reasoning_content".into(), Value::String(merged));
-            }
+        if out.get(idx + 1).is_some_and(|next| {
+            next.role == Role::Assistant
+                && next
+                    .meta
+                    .as_ref()
+                    .is_none_or(|meta| meta.object_extensions().is_some())
+        }) {
+            let next_meta = out[idx + 1].meta.get_or_insert_with(Default::default);
+            let existing = next_meta
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let merged = match (text.is_empty(), existing.is_empty()) {
+                (true, _) => existing,
+                (false, true) => text,
+                (false, false) => format!("{text}\n{existing}"),
+            };
+            next_meta
+                .insert_extension("reasoning_content", Value::String(merged))
+                .expect("reasoning content is not reserved");
         }
         out.remove(idx);
     }
@@ -413,7 +417,7 @@ fn standalone_reasoning_text(item: &AiItem) -> String {
 }
 
 fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
-    let referenced_tool_ids: HashSet<String> = messages
+    let referenced_tool_ids: HashSet<stravia_runtime_contract::protocol::ir::ToolCallId> = messages
         .iter()
         .filter(|m| m.role == Role::Tool)
         .filter_map(|m| m.tool_call_id.clone())
@@ -438,7 +442,9 @@ fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
     out
 }
 
-fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
+fn collect_supplied_tool_ids(
+    messages: &[AiItem],
+) -> HashSet<stravia_runtime_contract::protocol::ir::ToolCallId> {
     let mut ids = HashSet::new();
     for msg in messages {
         if let Some(tool_calls) = &msg.tool_calls {
@@ -447,7 +453,7 @@ fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
                     .iter()
                     .map(|call| call.id.trim())
                     .filter(|id| !id.is_empty())
-                    .map(str::to_owned),
+                    .map(stravia_runtime_contract::protocol::ir::ToolCallId::new),
             );
         }
         if let Some(id) = msg
@@ -455,7 +461,7 @@ fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
             .as_deref()
             .filter(|id| !id.trim().is_empty())
         {
-            ids.insert(id.to_owned());
+            ids.insert(id.into());
         }
         if let MessageContent::Blocks(blocks) = &msg.content {
             for block in blocks {
@@ -470,7 +476,7 @@ fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
                     _ => None,
                 };
                 if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
-                    ids.insert(id.to_owned());
+                    ids.insert(id.into());
                 }
             }
         }
@@ -480,11 +486,12 @@ fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
 
 fn next_synthetic_tool_call_id(
     sequence: &mut usize,
-    unavailable_ids: &mut HashSet<String>,
-) -> String {
+    unavailable_ids: &mut HashSet<stravia_runtime_contract::protocol::ir::ToolCallId>,
+) -> stravia_runtime_contract::protocol::ir::ToolCallId {
     loop {
         *sequence += 1;
-        let id = format!("tc_{}", *sequence);
+        let id =
+            stravia_runtime_contract::protocol::ir::ToolCallId::new(format!("tc_{}", *sequence));
         if unavailable_ids.insert(id.clone()) {
             return id;
         }
@@ -505,7 +512,7 @@ fn assistant_has_tool_call_id(msg: &AiItem, tool_call_id: &str) -> bool {
 fn remap_duplicate_tool_call_ids(
     messages: &[AiItem],
     system: Option<&str>,
-    supplied_tool_ids: &HashSet<String>,
+    supplied_tool_ids: &HashSet<stravia_runtime_contract::protocol::ir::ToolCallId>,
 ) -> Vec<AiItem> {
     let mut out = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
     if let Some(system) = system {
@@ -518,8 +525,12 @@ fn remap_duplicate_tool_call_ids(
         });
     }
     out.extend_from_slice(messages);
-    let mut seen_counts: HashMap<String, usize> = HashMap::new();
-    let mut pending_by_original: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen_counts: HashMap<stravia_runtime_contract::protocol::ir::ToolCallId, usize> =
+        HashMap::new();
+    let mut pending_by_original: HashMap<
+        stravia_runtime_contract::protocol::ir::ToolCallId,
+        Vec<stravia_runtime_contract::protocol::ir::ToolCallId>,
+    > = HashMap::new();
     let mut unavailable_tool_ids = supplied_tool_ids.clone();
     let mut generated_seq: usize = 0;
 
@@ -648,6 +659,13 @@ fn trim_trailing_assistant_text_after_index(out: &mut Vec<AiItem>, source_idx: u
 }
 
 fn promote_reasoning_meta(message: &mut AiItem) {
+    if message
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.object_extensions().is_none())
+    {
+        return;
+    }
     let MessageContent::Blocks(blocks) = &message.content else {
         return;
     };
@@ -665,12 +683,11 @@ fn promote_reasoning_meta(message: &mut AiItem) {
     if reasoning.is_empty() {
         return;
     }
-    let meta = message
+    message
         .meta
-        .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if let Value::Object(meta) = meta {
-        meta.insert("reasoning_content".into(), Value::String(reasoning));
-    }
+        .get_or_insert_with(Default::default)
+        .insert_extension("reasoning_content", Value::String(reasoning))
+        .expect("reasoning content is not reserved");
 }
 
 fn encode_message(msg: &AiItem) -> Result<Value> {
@@ -694,7 +711,10 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
             .filter(|v| !v.trim().is_empty())
             .or_else(|| hinted_tool_call_id.filter(|v| !v.trim().is_empty()));
         if let Some(tool_call_id) = resolved_tool_call_id {
-            map.insert("tool_call_id".into(), Value::String(tool_call_id));
+            map.insert(
+                "tool_call_id".into(),
+                Value::String(tool_call_id.into_string()),
+            );
         }
         return Ok(obj);
     }
@@ -758,12 +778,15 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         map.insert("tool_calls".into(), Value::Array(arr));
     }
     if let Some(ref tid) = msg.tool_call_id {
-        map.insert("tool_call_id".into(), Value::String(tid.clone()));
+        map.insert(
+            "tool_call_id".into(),
+            Value::String(tid.clone().into_string()),
+        );
     }
 
     // Internal canonical metadata participates in local semantics but must never
     // become an upstream vendor field.
-    if let Some(Value::Object(extra)) = &msg.meta {
+    if let Some(extra) = msg.meta.as_ref().and_then(|meta| meta.object_extensions()) {
         for (key, value) in extra
             .iter()
             .filter(|(key, _)| !key.starts_with("__stravia_"))
@@ -878,7 +901,12 @@ fn media_source_to_url(source: &MediaSource) -> String {
     }
 }
 
-fn tool_message_payload(msg: &AiItem) -> (String, Option<String>) {
+fn tool_message_payload(
+    msg: &AiItem,
+) -> (
+    String,
+    Option<stravia_runtime_contract::protocol::ir::ToolCallId>,
+) {
     match &msg.content {
         MessageContent::Text(t) => (t.clone(), None),
         MessageContent::Blocks(blocks) => {

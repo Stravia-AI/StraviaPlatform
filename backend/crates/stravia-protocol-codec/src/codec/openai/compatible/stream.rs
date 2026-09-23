@@ -55,7 +55,7 @@ impl OpenAIResponseParser {
                     .filter_map(|tc| {
                         let func = tc.get("function")?;
                         Some(ToolCall {
-                            id: tc.get("id")?.as_str()?.to_string(),
+                            id: (tc.get("id")?.as_str()?.to_string()).into(),
                             name: func.get("name")?.as_str()?.to_string(),
                             arguments: func
                                 .get("arguments")
@@ -182,9 +182,9 @@ pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         tool_call_id: None,
         meta: (!reasoning.is_empty()).then(|| {
-            serde_json::json!({
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
                 "reasoning_content": reasoning,
-            })
+            }))
         }),
     }
 }

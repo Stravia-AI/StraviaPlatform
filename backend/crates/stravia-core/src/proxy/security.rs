@@ -8,7 +8,7 @@
 use axum::http::{HeaderMap, header};
 use chrono::{NaiveDateTime, Utc};
 
-use crate::db::models::Route;
+use crate::db::models::RouteConfig;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
 
@@ -129,7 +129,7 @@ impl<'a> Security<'a> {
     pub(crate) async fn authorize_principal_model(
         &self,
         principal: &stravia_runtime_contract::Principal,
-        model: &Route,
+        model: &RouteConfig,
     ) -> Result<ModelAccessGrant, GatewayError> {
         let key = self.principal_key(principal).await?;
         self.authorize_key_model(&key, model).await
@@ -198,7 +198,7 @@ impl<'a> Security<'a> {
     async fn authorize_key_model(
         &self,
         key: &ApiKeyAccessRecord,
-        model: &Route,
+        model: &RouteConfig,
     ) -> Result<ModelAccessGrant, GatewayError> {
         validate_key_state(key)?;
         let Some(auth) = self.auth else {
@@ -293,7 +293,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
     use super::{ClientCredential, Security, validate_key_state};
-    use crate::db::models::Route;
+    use crate::db::models::RouteConfig;
     use crate::error::{AccessDenial, AuthFailure, GatewayError};
     use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
     use stravia_runtime_contract::Principal;
@@ -477,18 +477,16 @@ mod tests {
         }
     }
 
-    fn protected_model() -> Route {
-        Route {
+    fn protected_model() -> RouteConfig {
+        RouteConfig {
             id: "protected-model-id".into(),
             model_id: "protected-model".into(),
             display_name: None,
             balance: "traffic_equalization".into(),
-            target_provider: String::new(),
-            target_model: None,
             is_enabled: true,
             created_at: "2000-01-01T00:00:00Z".into(),
             targets: Vec::new(),
-            supported_thinking_levels: sqlx::types::Json(Vec::new()),
+            supported_thinking_levels: Vec::new(),
             context_window: None,
             output_max_tokens: None,
             supports_image_input: false,

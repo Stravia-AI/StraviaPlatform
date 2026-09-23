@@ -1732,7 +1732,7 @@ fn marker_delta_for(openai_compatible: bool, post_text: bool, rendered: String) 
 fn push_projection_block(
     projected: &mut Vec<AiItem>,
     block: ContentBlock,
-    meta: &mut Option<serde_json::Value>,
+    meta: &mut Option<Box<stravia_runtime_contract::protocol::ir::AiItemMetadata>>,
 ) {
     projected.push(AiItem {
         role: Role::Assistant,

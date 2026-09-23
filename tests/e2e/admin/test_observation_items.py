@@ -215,8 +215,6 @@ def _create_media_route(env: dict[str, Any], name: str) -> tuple[str, str]:
         payload={
             "model_id": name,
             "display_name": f"{name} display",
-            "target_provider": provider_id,
-            "target_model": "gpt-4o-mini",
             "targets": [
                 {
                     "provider_id": provider_id,
@@ -483,7 +481,7 @@ def test_wire_bundle_is_four_direction_raw_only_and_malformed_capture_stays_comp
     marker = "wire-risk-marker-kept-outside-authorization"
     try:
         _enable_debug(env)
-        route_id, api_key = _create_route(env, "wire-only-main-seam")
+        route_id, api_key = _create_route(env, "wire-only-main-seam", retry_budget=0)
 
         prompt = f"valid-wire {marker}"
         request_body = json.dumps(

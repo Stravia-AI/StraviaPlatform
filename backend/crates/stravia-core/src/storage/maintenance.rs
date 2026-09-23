@@ -7,7 +7,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 #[derive(Debug, Serialize)]
 pub struct StorageOptimizationReport {
-    pub history_nodes_rewritten: u64,
     pub trace_directories: usize,
     pub database_bytes_before: u64,
     pub database_bytes_after: u64,
@@ -38,9 +37,6 @@ pub async fn optimize_data_copy(root: &Path) -> anyhow::Result<StorageOptimizati
         .await?;
     let result = async {
         crate::migrations::migrate_sqlite(&pool).await?;
-        let rewritten = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .optimize_storage()
-            .await?;
         let traces = paths.diagnostics().join("observation-debug");
         let reports = tokio::task::spawn_blocking(move || {
             crate::interaction_observation::optimize_trace_directory(&traces)
@@ -76,13 +72,12 @@ pub async fn optimize_data_copy(root: &Path) -> anyhow::Result<StorageOptimizati
             violations.is_empty(),
             "optimized SQLite reference check failed"
         );
-        Ok::<_, anyhow::Error>((rewritten, reports))
+        Ok::<_, anyhow::Error>(reports)
     }
     .await;
     pool.close().await;
-    let (rewritten, reports) = result?;
+    let reports = result?;
     Ok(StorageOptimizationReport {
-        history_nodes_rewritten: rewritten,
         trace_directories: reports.len(),
         database_bytes_before: before,
         database_bytes_after: database.metadata()?.len(),

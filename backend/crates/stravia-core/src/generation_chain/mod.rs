@@ -50,9 +50,8 @@ pub(crate) use store::{
     request_preserves_upstream_response,
 };
 
-// Version 5 reserves tool-result semantics metadata; earlier vendor meta is untrusted.
+// Persisted payloads must match this version exactly; older encodings are rejected.
 const RESPONSE_PAYLOAD_VERSION: u32 = 6;
-const LEGACY_RESPONSE_PAYLOAD_VERSION: u32 = 1;
 const GENERATION_MATERIALIZATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const GENERATION_SESSION_ID_META: &str = "__stravia_generation_session_id";
 
@@ -137,6 +136,7 @@ struct StagedGeneration {
 pub(crate) enum BeginError {
     PreviousResponseNotFound,
     ItemReferenceNotFound,
+    ItemReferenceAmbiguous,
     CompactionConflict,
     CompactionUnavailable,
     CompactionStorageFailed,
@@ -147,6 +147,7 @@ impl std::fmt::Display for BeginError {
         formatter.write_str(match self {
             Self::PreviousResponseNotFound => "previous_response_not_found",
             Self::ItemReferenceNotFound => "item_reference_not_found",
+            Self::ItemReferenceAmbiguous => "item_reference_ambiguous",
             Self::CompactionConflict => "compaction_conflict",
             Self::CompactionUnavailable => "compaction_unavailable",
             Self::CompactionStorageFailed => "compaction_storage_failed",
@@ -421,13 +422,17 @@ impl GenerationChain {
                 if extension.previous_response_id.is_some()
         );
 
-        if request_has_item_references(&request) {
+        // Explicit continuation resolves only against its authorized parent lineage.
+        if !has_explicit_parent && request_has_item_references(&request) {
             let ingress = ProtocolTransform::inferred_ingress(&request)
                 .ok_or(BeginError::ItemReferenceNotFound)?;
             self.store
                 .resolve_available_item_references(&principal, &mut request.items, ingress)
                 .await
-                .map_err(|_| BeginError::ItemReferenceNotFound)?;
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    _ => BeginError::ItemReferenceNotFound,
+                })?;
         }
 
         let mut parent = if let Some(native) = native.as_ref() {
@@ -490,12 +495,10 @@ impl GenerationChain {
             self.store
                 .materialize_parent(&principal, &mut request)
                 .await
-                .map_err(|error| {
-                    if error == "item_reference_not_found" {
-                        BeginError::ItemReferenceNotFound
-                    } else {
-                        BeginError::PreviousResponseNotFound
-                    }
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    "item_reference_not_found" => BeginError::ItemReferenceNotFound,
+                    _ => BeginError::PreviousResponseNotFound,
                 })?
         } else if request_has_item_references(&request) {
             return Err(BeginError::ItemReferenceNotFound);
@@ -628,7 +631,10 @@ impl GenerationChain {
                     ingress,
                 )
                 .await
-                .map_err(|_| BeginError::ItemReferenceNotFound)?;
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    _ => BeginError::ItemReferenceNotFound,
+                })?;
         }
         hydrate_response_artifact_references(
             &write.principal,
@@ -702,16 +708,9 @@ struct GenerationChainState {
     pub context_fingerprint: String,
     pub context_messages: usize,
     pub model: String,
-    pub instructions_fingerprint: String,
-    #[serde(default)]
     pub provider_model: String,
-    #[serde(default)]
     pub selected_target_key: String,
-    pub tools_fingerprint: String,
-    pub request_settings_fingerprint: String,
-    #[serde(default)]
     canonical_controls_fingerprint: String,
-    #[serde(rename = "provider")]
     pub target_namespace: String,
     pub protocol: String,
 }
@@ -745,21 +744,6 @@ impl GenerationChainState {
                     request,
                 ),
             );
-        // Keep writing the legacy proof fields until every durable v1-v3 node has
-        // expired. They are read only when a persisted node predates the canonical
-        // controls proof.
-        self.instructions_fingerprint = legacy_payload_fingerprint(&request.instructions);
-        self.tools_fingerprint =
-            legacy_payload_fingerprint(&request.tools.as_ref().filter(|tools| !tools.is_empty()));
-        self.request_settings_fingerprint = legacy_payload_fingerprint(&serde_json::json!({
-            "generation": &request.generation,
-            "tool_choice": &request.tool_choice,
-            "parallel_tool_calls": request.parallel_tool_calls,
-            "disable_parallel_tool_calls": request.disable_parallel_tool_calls,
-            "reasoning": &request.reasoning,
-            "response_format": &request.response_format,
-            "safety_settings": &request.safety_settings,
-        }));
     }
     pub(crate) fn with_provider_model(mut self, provider_model: &str) -> Self {
         self.provider_model = provider_model.to_owned();
@@ -778,15 +762,7 @@ impl GenerationChainState {
 
     fn compatible_continuation(&self, candidate: &Self) -> bool {
         self.same_target(candidate)
-            && if self.canonical_controls_fingerprint.is_empty()
-                || candidate.canonical_controls_fingerprint.is_empty()
-            {
-                self.instructions_fingerprint == candidate.instructions_fingerprint
-                    && self.tools_fingerprint == candidate.tools_fingerprint
-                    && self.request_settings_fingerprint == candidate.request_settings_fingerprint
-            } else {
-                self.canonical_controls_fingerprint == candidate.canonical_controls_fingerprint
-            }
+            && self.canonical_controls_fingerprint == candidate.canonical_controls_fingerprint
     }
 
     fn same_target(&self, candidate: &Self) -> bool {
@@ -1009,15 +985,11 @@ struct PersistedResponseNode {
     effective_history_mutation: Option<EffectiveHistoryMutation>,
     effective_system: Option<String>,
     effective_output: AiResponse,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    effective_input: Vec<AiItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_history: Option<ClientHistoryState>,
-    #[serde(default)]
     trusted_media_turn_ids: Vec<String>,
     upstream_response_id: Option<String>,
     effective_state: GenerationChainState,
-    #[serde(default)]
     effective_request: Option<EffectiveRequestConfig>,
 }
 

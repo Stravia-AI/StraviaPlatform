@@ -53,10 +53,10 @@ CREATE TABLE api_keys (
     id         TEXT PRIMARY KEY,
     token      TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL,
-    is_enabled INTEGER DEFAULT 1,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
     expires_at TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 , mcp_access_enabled INTEGER NOT NULL DEFAULT 0, concurrency_limit INTEGER CHECK (concurrency_limit > 0), transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE artifact_download_grants (
@@ -191,7 +191,7 @@ CREATE TABLE "model_backends" (
     provider_id            TEXT NOT NULL REFERENCES providers(id),
     model                  TEXT CHECK (model IS NULL OR length(trim(model)) > 0),
     priority               INTEGER NOT NULL DEFAULT 0,
-    created_at             TEXT DEFAULT (datetime('now')),
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     thinking_level_map     TEXT NOT NULL DEFAULT '[{"level":"off","control":{"type":"hidden"},"source":"generated"},{"level":"minimal","control":{"type":"hidden"},"source":"generated"},{"level":"low","control":{"type":"hidden"},"source":"generated"},{"level":"medium","control":{"type":"hidden"},"source":"generated"},{"level":"high","control":{"type":"hidden"},"source":"generated"},{"level":"xhigh","control":{"type":"hidden"},"source":"generated"},{"level":"max","control":{"type":"hidden"},"source":"generated"}]'
         CHECK (json_valid(thinking_level_map)),
     first_token_timeout_ms INTEGER NOT NULL DEFAULT 60000,
@@ -219,10 +219,10 @@ CREATE TABLE model_turn_observations (
 CREATE TABLE models (
     id           TEXT PRIMARY KEY,
     model_id     TEXT NOT NULL,
-    balance      TEXT DEFAULT 'traffic_equalization',
-    is_enabled   INTEGER DEFAULT 1,
+    balance      TEXT NOT NULL DEFAULT 'traffic_equalization',
+    is_enabled   INTEGER NOT NULL DEFAULT 1,
     priority     INTEGER DEFAULT 0,
-    created_at   TEXT DEFAULT (datetime('now')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     display_name TEXT
 , default_thinking_level TEXT);
 
@@ -350,7 +350,25 @@ CREATE TABLE provider_models (
         CHECK (json_valid(metadata_json) AND json_type(metadata_json) = 'object'),
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')), snapshot_state TEXT NOT NULL
+    DEFAULT '{"type":"edited","source":null}'
+    CHECK (COALESCE(CASE WHEN json_valid(snapshot_state) THEN
+        json_type(snapshot_state) = 'object'
+        AND CASE json_extract(snapshot_state, '$.type')
+            WHEN 'unregistered' THEN json_type(snapshot_state, '$.source') IS NULL
+            WHEN 'imported' THEN json_type(snapshot_state, '$.source') = 'object'
+                AND CASE json_extract(snapshot_state, '$.source.type')
+                    WHEN 'provider_catalog' THEN json_type(snapshot_state, '$.source.provider_id') = 'text'
+                    WHEN 'canonical' THEN json_type(snapshot_state, '$.source.model_id') = 'text'
+                    WHEN 'discovery' THEN 1 ELSE 0 END
+            WHEN 'edited' THEN json_type(snapshot_state, '$.source') = 'null'
+                OR (json_type(snapshot_state, '$.source') = 'object'
+                    AND CASE json_extract(snapshot_state, '$.source.type')
+                        WHEN 'provider_catalog' THEN json_type(snapshot_state, '$.source.provider_id') = 'text'
+                        WHEN 'canonical' THEN json_type(snapshot_state, '$.source.model_id') = 'text'
+                        WHEN 'discovery' THEN 1 ELSE 0 END)
+            ELSE 0 END
+        ELSE 0 END, 0)),
     PRIMARY KEY (provider_id, model_id)
 );
 
@@ -389,14 +407,19 @@ CREATE TABLE providers (
     access_token      TEXT,
     refresh_token     TEXT,
     expires_at        TEXT,
-    use_proxy         INTEGER DEFAULT 0,
+    use_proxy         INTEGER NOT NULL DEFAULT 0,
     last_test_success INTEGER,
     last_test_at      TEXT,
-    is_enabled        INTEGER DEFAULT 1,
+    is_enabled        INTEGER NOT NULL DEFAULT 1,
     priority          INTEGER DEFAULT 0,
-    created_at        TEXT DEFAULT (datetime('now')),
-    updated_at        TEXT DEFAULT (datetime('now'))
-, adapter_credentials TEXT NOT NULL DEFAULT '{}', vendor_options TEXT NOT NULL DEFAULT '{}', credential_status TEXT NOT NULL DEFAULT 'ok' CHECK (credential_status IN ('ok', 'invalid')), credential_invalid_at TEXT, revision INTEGER NOT NULL DEFAULT 0);
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    adapter_credentials TEXT NOT NULL DEFAULT '{}',
+    vendor_options    TEXT NOT NULL DEFAULT '{}',
+    credential_status TEXT NOT NULL DEFAULT 'ok' CHECK (credential_status IN ('ok', 'invalid')),
+    credential_invalid_at TEXT,
+    revision          INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE rejected_request_observations (
     id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,
@@ -453,20 +476,25 @@ CREATE TABLE turn_chain_contents (
     PRIMARY KEY (principal, content_key)
 );
 
-CREATE TABLE turn_chain_nodes (
-    id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK (kind IN ('response', 'agent', 'web_search')),
-    parent_id       TEXT REFERENCES turn_chain_nodes(id) ON DELETE RESTRICT,
-    principal       TEXT NOT NULL,
+CREATE TABLE "turn_chain_nodes" (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('response', 'agent', 'web_search')),
+    parent_id TEXT,
+    principal TEXT NOT NULL,
     payload_version INTEGER NOT NULL CHECK (payload_version > 0),
-    payload         TEXT NOT NULL CHECK (json_valid(payload)),
-    created_at      INTEGER NOT NULL,
-    expires_at      INTEGER NOT NULL,
-    prefix_namespace    TEXT,
-    prefix_fingerprint  TEXT,
-    prefix_item_count   INTEGER,
-    prefix_completed_at INTEGER
-, storage_format INTEGER NOT NULL DEFAULT 0 CHECK (storage_format IN (0, 1)));
+    payload TEXT NOT NULL CHECK (json_valid(payload)),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    prefix_namespace TEXT,
+    prefix_fingerprint TEXT,
+    prefix_item_count INTEGER,
+    prefix_completed_at INTEGER,
+    storage_format INTEGER NOT NULL DEFAULT 0 CHECK (storage_format IN (0, 1)),
+    UNIQUE (id, principal),
+    UNIQUE (id, principal, kind),
+    FOREIGN KEY (parent_id, principal, kind)
+        REFERENCES "turn_chain_nodes"(id, principal, kind) ON DELETE RESTRICT
+);
 
 CREATE TABLE vendor_data_recovery (
     provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
@@ -605,17 +633,10 @@ CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id);
 
 CREATE INDEX idx_turn_chain_principal_kind ON turn_chain_nodes(principal, kind);
 
-CREATE INDEX idx_turn_chain_reusable_prefix
-ON turn_chain_nodes (
-    principal,
-    kind,
-    prefix_namespace,
-    prefix_fingerprint,
-    prefix_item_count DESC,
-    prefix_completed_at DESC,
-    created_at DESC
-)
-WHERE prefix_namespace IS NOT NULL;
+CREATE INDEX idx_turn_chain_reusable_prefix ON turn_chain_nodes (
+    principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC,
+    prefix_completed_at DESC, expires_at, id DESC
+) WHERE prefix_namespace IS NOT NULL;
 
 CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
 
@@ -674,4 +695,122 @@ CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occur
 CREATE INDEX target_attempts_analytics_idx ON target_attempt_observations(started_at, provider_id, upstream_model, target_id, status);
 
 CREATE INDEX target_attempts_turn_idx ON target_attempt_observations(model_turn_id, started_at, id);
+
+CREATE TRIGGER api_keys_boolean_insert BEFORE INSERT ON api_keys
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER api_keys_boolean_update BEFORE UPDATE ON api_keys
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER debug_trace_manifests_boolean_insert BEFORE INSERT ON debug_trace_manifests
+WHEN (typeof(NEW.tombstoned) <> 'integer' OR NEW.tombstoned NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER debug_trace_manifests_boolean_update BEFORE UPDATE ON debug_trace_manifests
+WHEN (typeof(NEW.tombstoned) <> 'integer' OR NEW.tombstoned NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER inference_run_observations_boolean_insert BEFORE INSERT ON inference_run_observations
+WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER inference_run_observations_boolean_update BEFORE UPDATE ON inference_run_observations
+WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER inference_runs_contract_insert BEFORE INSERT ON inference_run_observations
+WHEN typeof(NEW.background_active) <> 'integer' OR NEW.background_active < 0
+BEGIN SELECT RAISE(ABORT, 'invalid background activity count'); END;
+
+CREATE TRIGGER inference_runs_contract_update BEFORE UPDATE ON inference_run_observations
+WHEN typeof(NEW.background_active) <> 'integer' OR NEW.background_active < 0
+BEGIN SELECT RAISE(ABORT, 'invalid background activity count'); END;
+
+CREATE TRIGGER interaction_observations_boolean_insert BEFORE INSERT ON interaction_observations
+WHEN (typeof(NEW.observation_gap) <> 'integer' OR NEW.observation_gap NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER interaction_observations_boolean_update BEFORE UPDATE ON interaction_observations
+WHEN (typeof(NEW.observation_gap) <> 'integer' OR NEW.observation_gap NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER model_backends_contract_insert BEFORE INSERT ON model_backends
+WHEN NEW.priority IS NULL OR typeof(NEW.priority) <> 'integer' OR NEW.priority < -2147483648 OR NEW.priority > 2147483647
+    OR typeof(NEW.target_retry_budget) <> 'integer' OR NEW.target_retry_budget < 0 OR NEW.target_retry_budget > 2147483647
+    OR typeof(NEW.first_token_timeout_ms) <> 'integer' OR NEW.first_token_timeout_ms < 0
+    OR typeof(NEW.target_cooldown_ms) <> 'integer' OR NEW.target_cooldown_ms < 0
+    OR typeof(NEW.enabled) <> 'integer' OR NEW.enabled NOT IN (0, 1)
+    OR CASE WHEN json_valid(NEW.thinking_level_map) THEN json_type(NEW.thinking_level_map) <> 'array' ELSE 1 END
+BEGIN SELECT RAISE(ABORT, 'invalid Target configuration'); END;
+
+CREATE TRIGGER model_backends_contract_update BEFORE UPDATE ON model_backends
+WHEN NEW.priority IS NULL OR typeof(NEW.priority) <> 'integer' OR NEW.priority < -2147483648 OR NEW.priority > 2147483647
+    OR typeof(NEW.target_retry_budget) <> 'integer' OR NEW.target_retry_budget < 0 OR NEW.target_retry_budget > 2147483647
+    OR typeof(NEW.first_token_timeout_ms) <> 'integer' OR NEW.first_token_timeout_ms < 0
+    OR typeof(NEW.target_cooldown_ms) <> 'integer' OR NEW.target_cooldown_ms < 0
+    OR typeof(NEW.enabled) <> 'integer' OR NEW.enabled NOT IN (0, 1)
+    OR CASE WHEN json_valid(NEW.thinking_level_map) THEN json_type(NEW.thinking_level_map) <> 'array' ELSE 1 END
+BEGIN SELECT RAISE(ABORT, 'invalid Target configuration'); END;
+
+CREATE TRIGGER models_contract_insert BEFORE INSERT ON models
+WHEN NEW.balance NOT IN ('traffic_equalization', 'latency_preference')
+    OR (NEW.default_thinking_level IS NOT NULL AND NEW.default_thinking_level NOT IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'))
+    OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
+BEGIN SELECT RAISE(ABORT, 'invalid Route configuration'); END;
+
+CREATE TRIGGER models_contract_update BEFORE UPDATE ON models
+WHEN NEW.balance NOT IN ('traffic_equalization', 'latency_preference')
+    OR (NEW.default_thinking_level IS NOT NULL AND NEW.default_thinking_level NOT IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'))
+    OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
+BEGIN SELECT RAISE(ABORT, 'invalid Route configuration'); END;
+
+CREATE TRIGGER providers_boolean_insert BEFORE INSERT ON providers
+WHEN (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER providers_boolean_update BEFORE UPDATE ON providers
+WHEN (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER providers_contract_insert BEFORE INSERT ON providers
+WHEN CASE WHEN json_valid(NEW.adapter_credentials) THEN json_type(NEW.adapter_credentials) <> 'object' ELSE 1 END
+    OR CASE WHEN json_valid(NEW.vendor_options) THEN json_type(NEW.vendor_options) <> 'object' ELSE 1 END
+    OR typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)
+    OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
+BEGIN SELECT RAISE(ABORT, 'invalid Provider configuration'); END;
+
+CREATE TRIGGER providers_contract_update BEFORE UPDATE ON providers
+WHEN CASE WHEN json_valid(NEW.adapter_credentials) THEN json_type(NEW.adapter_credentials) <> 'object' ELSE 1 END
+    OR CASE WHEN json_valid(NEW.vendor_options) THEN json_type(NEW.vendor_options) <> 'object' ELSE 1 END
+    OR typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)
+    OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
+BEGIN SELECT RAISE(ABORT, 'invalid Provider configuration'); END;
+
+CREATE TRIGGER rejected_request_observations_boolean_insert BEFORE INSERT ON rejected_request_observations
+WHEN (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER rejected_request_observations_boolean_update BEFORE UPDATE ON rejected_request_observations
+WHEN (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER target_attempt_observations_boolean_insert BEFORE INSERT ON target_attempt_observations
+WHEN (typeof(NEW.usage_recorded) <> 'integer' OR NEW.usage_recorded NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER target_attempt_observations_boolean_update BEFORE UPDATE ON target_attempt_observations
+WHEN (typeof(NEW.usage_recorded) <> 'integer' OR NEW.usage_recorded NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER web_providers_boolean_insert BEFORE INSERT ON web_providers
+WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)) OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+    OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)
+BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;
+
+CREATE TRIGGER web_providers_boolean_update BEFORE UPDATE ON web_providers
+WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)) OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+    OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)
+BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;
 

@@ -8,9 +8,8 @@ use async_trait::async_trait;
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
     ModelStats, OAuthCredential, Provider, ProviderCredentialVersion, ProviderStats, PutRoute,
-    Route, StatsOverview,
-    StatsSeries, UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential,
-    WebAccessSettings, WebProvider,
+    RouteConfig, StatsOverview, StatsSeries, UpdateApiKey, UpdateProvider, UpdateWebProvider,
+    UpsertOAuthCredential, WebAccessSettings, WebProvider,
 };
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
@@ -146,10 +145,12 @@ fn validate_web_access_priority_list(
 
 #[async_trait]
 pub trait RouteStore: Send + Sync {
-    async fn list(&self) -> anyhow::Result<Vec<Route>>;
-    async fn list_active(&self) -> anyhow::Result<Vec<Route>>;
-    async fn get(&self, route_id: &str) -> anyhow::Result<Option<Route>>;
-    async fn put(&self, route: PutRoute) -> anyhow::Result<Route>;
+    async fn list(&self) -> anyhow::Result<Vec<RouteConfig>>;
+    async fn list_active(&self) -> anyhow::Result<Vec<RouteConfig>>;
+    async fn get(&self, route_id: &str) -> anyhow::Result<Option<RouteConfig>>;
+    /// `targets: None` changes only Route fields; Target rows must not be read or rewritten.
+    /// `Some` atomically replaces the set while retaining IDs for matching destinations.
+    async fn put(&self, route: PutRoute) -> anyhow::Result<RouteConfig>;
     async fn delete(&self, route_id: &str) -> anyhow::Result<()>;
 }
 
@@ -204,6 +205,7 @@ pub trait ProviderModelStore: Send + Sync {
         provider_id: &str,
         model_id: &str,
         metadata: crate::provider_models::ProviderModelMetadata,
+        snapshot_state: crate::provider_models::SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation>;
     async fn update_selection_policy(

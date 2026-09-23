@@ -179,7 +179,7 @@ fn bare_tool_calls_without_input_stream_get_distinct_slots() {
         .iter()
         .filter_map(|d| match d {
             AiStreamDelta::ToolCallComplete { index, tool_call } => {
-                Some((*index, tool_call.id.clone()))
+                Some((*index, tool_call.id.to_string()))
             }
             _ => None,
         })

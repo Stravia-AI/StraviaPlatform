@@ -33,7 +33,7 @@ async fn manual_oauth_session_exposes_its_effective_callback_contract() -> anyho
 
 #[tokio::test]
 async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<()> {
-    let (data_dir, gw) = build_gateway().await?;
+    let (data_dir, gw) = build_gateway_with_vendors(&["devin"]).await?;
     let init = gw
         .admin()
         .init_oauth_session(
@@ -522,6 +522,12 @@ async fn init_codex_session(gw: &Gateway) -> anyhow::Result<AuthSessionInitData>
 }
 
 async fn build_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
+    build_gateway_with_vendors(&["openai-codex"]).await
+}
+
+async fn build_gateway_with_vendors(
+    vendors: &[&str],
+) -> anyhow::Result<(tempfile::TempDir, Gateway)> {
     let data_dir = tempfile::tempdir()?;
     let config = GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -536,6 +542,9 @@ async fn build_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
         )),
     )
     .await?;
+    for vendor in vendors {
+        crate::plugin::test_support::install_distributed_vendor(&gw, vendor).await?;
+    }
     Ok((data_dir, gw))
 }
 

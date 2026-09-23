@@ -18,15 +18,15 @@ pub use selector::{
     selected_target_key,
 };
 
-use crate::db::models::Route;
+use crate::db::models::RouteConfig;
 
 impl RouteCache {
-    pub fn match_model(&self, model: &str) -> Option<&Route> {
+    pub fn match_model(&self, model: &str) -> Option<&RouteConfig> {
         matcher::match_model(&self.models, model)
     }
 
     /// A request's `model` names a logical Model ID, falling back to a Route ID.
-    pub fn resolve(&self, model: &str) -> Option<&Route> {
+    pub fn resolve(&self, model: &str) -> Option<&RouteConfig> {
         self.match_model(model)
             .or_else(|| self.models.iter().find(|route| route.id == model))
     }

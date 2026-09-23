@@ -12,7 +12,7 @@ use stravia_core::config::GatewayConfig;
 use stravia_core::data_paths::DataPaths;
 use stravia_core::db::models::{
     CreateApiKey, CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput,
-    ProviderSourceInput, UpdateRoute, UpsertTarget,
+    ProviderSourceInput, UpdateRoute,
 };
 use stravia_core::plugin::{ConfirmPluginUpdate, PluginSource};
 use stravia_core::provider_models::CreateManualProviderModel;
@@ -290,6 +290,7 @@ async fn connection(
                     "name": "Fixture model",
                     "tool_call": true
                 }),
+                template_id: None,
             },
         )
         .await?;
@@ -299,8 +300,6 @@ async fn connection(
             model_id: route_id.into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
             targets: vec![CreateTarget {
                 enabled: true,
                 provider_id: provider.id.clone(),
@@ -316,8 +315,8 @@ async fn connection(
         .await?;
     Ok(Connection {
         provider_id: provider.id,
-        target_id: route.targets[0].id.clone(),
-        route_id: route.id,
+        target_id: route.targets[0].id.clone().into(),
+        route_id: route.id.into(),
     })
 }
 
@@ -1044,8 +1043,7 @@ async fn compatible_update_keeps_continuation_recovery_on_the_original_component
         .update_model(
             "lifecycle-continuation-recovery",
             UpdateRoute {
-                targets: Some(vec![UpsertTarget {
-                    id: Some(target.target_id.clone()),
+                targets: Some(vec![CreateTarget {
                     provider_id: target.provider_id.clone(),
                     model: Some("fixture-model".into()),
                     enabled: true,

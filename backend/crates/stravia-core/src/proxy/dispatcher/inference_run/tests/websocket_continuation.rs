@@ -232,8 +232,9 @@ async fn responses_websocket_fixture() -> ResponsesContinuationFixture {
         .find(|route| route.model_id == MODEL)
         .expect("fixture route")
         .targets[0]
-        .provider_id
-        .clone();
+        .provider_id()
+        .clone()
+        .into();
     let headers = authorized_headers(&gateway).await;
     ResponsesContinuationFixture {
         gateway,

@@ -42,7 +42,7 @@ fn synthetic_tool_ids_are_request_local_distinct_and_skip_supplied_ids() {
             content: MessageContent::Text(String::new()),
             tool_calls: Some(vec![
                 stravia_runtime_contract::protocol::ir::ToolCall {
-                    id: String::new(),
+                    id: "".into(),
                     name: "first".into(),
                     arguments: "{}".into(),
                 },
@@ -52,7 +52,7 @@ fn synthetic_tool_ids_are_request_local_distinct_and_skip_supplied_ids() {
                     arguments: "{}".into(),
                 },
                 stravia_runtime_contract::protocol::ir::ToolCall {
-                    id: String::new(),
+                    id: "".into(),
                     name: "second".into(),
                     arguments: "{}".into(),
                 },

@@ -109,9 +109,6 @@ fn field(record: &Value, name: &str, file: &mut File, offset: u64) -> io::Result
 
 pub(super) fn decode(line: &[u8], file: &mut File, offset: u64) -> io::Result<Value> {
     let stored: Value = serde_json::from_slice(line).map_err(io::Error::other)?;
-    if stored.get("trace_storage").is_none() {
-        return Ok(stored);
-    }
     if stored["trace_storage"].as_u64() != Some(1) {
         return Err(invalid());
     }
@@ -203,7 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offline_trace_migration_restores_legacy_and_rejects_forward_references() -> io::Result<()> {
+    fn encoded_segment_round_trips_and_legacy_records_are_rejected() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("segment-000001.jsonl");
         let payload = serde_json::json!({"text":"保留全部内容\n".repeat(2000)});
@@ -211,35 +208,45 @@ mod tests {
             .map(|sequence| {
                 serde_json::json!({
                     "sequence":sequence,"recorded_at":sequence*11,"layer":"canonical",
-                    "stage":"legacy_stage","payload":payload,"unknown":{"keep":true}
+                    "stage":"stage","payload":payload,"unknown":{"keep":true}
                 })
             })
             .collect::<Vec<_>>();
+        let mut encoder = Encoder::default();
         let mut file = File::create(&path)?;
+        let mut offset = 0;
         for record in &records {
-            serde_json::to_writer(&mut file, record)?;
-            file.write_all(b"\n")?;
+            let bytes = encoder.encode(&serde_json::to_vec(record)?, offset)?;
+            offset += bytes.len() as u64;
+            file.write_all(&bytes)?;
         }
         file.sync_all()?;
         drop(file);
-        let original_bytes = path.metadata()?.len();
-        let new_bytes = optimize_segment(&path)?;
-        assert!(new_bytes < original_bytes / 2);
         let mut restored = Vec::new();
-        visit(&path, new_bytes, |record| {
+        visit(&path, offset, |record| {
             restored.push(record);
             Ok(())
         })?;
         assert_eq!(restored, records);
-        assert_eq!(optimize_segment(&path)?, new_bytes);
+        // 当前格式已是编码不动点；优化只校验还原并可能收缩，绝不放大。
+        assert_eq!(optimize_segment(&path)?, offset);
         let corrupt = serde_json::json!({
-            "trace_storage":1,"sequence":10,"recorded_at":10,"meta_ref":new_bytes+1,"payload":null
+            "trace_storage":1,"sequence":10,"recorded_at":10,"meta_ref":offset+1,"payload":null
         });
         assert!(
             decode(
                 &serde_json::to_vec(&corrupt)?,
                 &mut File::open(&path)?,
-                new_bytes
+                offset
+            )
+            .is_err()
+        );
+        // 无 trace_storage 标记的旧版裸记录不再透传解码。
+        assert!(
+            decode(
+                &serde_json::to_vec(&records[0])?,
+                &mut File::open(&path)?,
+                0
             )
             .is_err()
         );

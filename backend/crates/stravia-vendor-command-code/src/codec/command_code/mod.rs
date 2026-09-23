@@ -395,7 +395,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
                     bail!("Command Code tool message must contain exactly one tool result");
                 }
                 blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: id,
+                    tool_use_id: (id).into(),
                     content: tool_result_content(part)?,
                     content_kind: Some(
                         stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -422,7 +422,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
         role,
         content: MessageContent::Blocks(blocks),
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-        tool_call_id,
+        tool_call_id: tool_call_id.map(Into::into),
         meta: None,
     })
 }
@@ -467,7 +467,7 @@ fn decode_tool_choice(value: &Value) -> anyhow::Result<ToolChoice> {
 
 fn decode_tool_call(value: &Value) -> anyhow::Result<ToolCall> {
     Ok(ToolCall {
-        id: required_string(value, "toolCallId")?,
+        id: (required_string(value, "toolCallId")?).into(),
         name: required_string(value, "toolName")?,
         arguments: match value.get("input") {
             Some(Value::String(text)) => text.clone(),
@@ -656,7 +656,7 @@ fn tool_names(request: &AiRequest) -> BTreeMap<String, String> {
         .items
         .iter()
         .flat_map(|item| item.tool_calls.as_deref().unwrap_or_default())
-        .map(|call| (call.id.clone(), call.name.clone()))
+        .map(|call| (call.id.to_string(), call.name.clone()))
         .collect()
 }
 
@@ -917,13 +917,13 @@ impl CommandCodeStreamParser {
                 let index = self.next_index;
                 self.next_index += 1;
                 let call = ToolCall {
-                    id: id.clone(),
+                    id: (id.clone()).into(),
                     name: required_string(&value, "toolName")?,
                     arguments: String::new(),
                 };
                 deltas.push(AiStreamDelta::ToolCallStart {
                     index,
-                    id: call.id.clone(),
+                    id: call.id.to_string(),
                     name: call.name.clone(),
                 });
                 self.tools.insert(id, (index, call));
@@ -964,22 +964,22 @@ impl CommandCodeStreamParser {
                 // `tool-input-*` events for the same call. Only treat it as a
                 // new call when no streamed form was seen.
                 let call = decode_tool_call(&value)?;
-                if self.completed_tools.contains(&call.id) {
+                if self.completed_tools.contains(call.id.as_str()) {
                     return Ok(());
                 }
-                let index = if let Some((index, _)) = self.tools.remove(&call.id) {
+                let index = if let Some((index, _)) = self.tools.remove(call.id.as_str()) {
                     index
                 } else {
                     let index = self.next_index;
                     self.next_index += 1;
                     deltas.push(AiStreamDelta::ToolCallStart {
                         index,
-                        id: call.id.clone(),
+                        id: call.id.to_string(),
                         name: call.name.clone(),
                     });
                     index
                 };
-                self.completed_tools.insert(call.id.clone());
+                self.completed_tools.insert(call.id.to_string());
                 deltas.push(AiStreamDelta::ToolCallComplete {
                     index,
                     tool_call: call,

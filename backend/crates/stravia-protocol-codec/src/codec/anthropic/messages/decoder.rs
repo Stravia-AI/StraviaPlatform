@@ -361,12 +361,12 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                         ..
                     } => {
                         tcs.push(ToolCall {
-                            id: id.clone(),
+                            id: (id.clone()).into(),
                             name: name.clone(),
                             arguments: input.to_string(),
                         });
                         content_blocks.push(ContentBlock::ToolUse {
-                            id,
+                            id: id.into(),
                             name,
                             input,
                             cache_control: cache_control.as_ref().map(map_cache_control),
@@ -386,7 +386,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                             stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json
                         };
                         content_blocks.push(ContentBlock::ToolResult {
-                            tool_use_id,
+                            tool_use_id: tool_use_id.into(),
                             content,
                             content_kind: Some(content_kind),
                             is_error: None,
@@ -429,7 +429,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                     role,
                     content: MessageContent::Text(text.clone()),
                     tool_calls: tool_calls_opt,
-                    tool_call_id: tc_id,
+                    tool_call_id: (tc_id).map(Into::into),
                     meta,
                 }]);
             }
@@ -438,7 +438,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                 role,
                 content: MessageContent::Blocks(content_blocks),
                 tool_calls: tool_calls_opt,
-                tool_call_id: tc_id,
+                tool_call_id: (tc_id).map(Into::into),
                 meta,
             }]);
         }
@@ -456,7 +456,9 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
 /// Build `meta = {"reasoning_content": ...}` so the OpenAI-compat encoder can
 /// re-emit thinking text as a top-level `reasoning_content` field on assistant
 /// messages (required by providers like Xiaomi Mimo / DeepSeek thinking mode).
-fn build_reasoning_meta(thinking_texts: &[String]) -> Option<Value> {
+fn build_reasoning_meta(
+    thinking_texts: &[String],
+) -> Option<Box<stravia_runtime_contract::protocol::ir::AiItemMetadata>> {
     if thinking_texts.is_empty() {
         return None;
     }
@@ -464,7 +466,11 @@ fn build_reasoning_meta(thinking_texts: &[String]) -> Option<Value> {
     if joined.is_empty() {
         return None;
     }
-    Some(serde_json::json!({ "reasoning_content": joined }))
+    Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({ "reasoning_content": joined }),
+        ),
+    )
 }
 
 fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>> {
@@ -483,9 +489,13 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                 } else {
                     "json"
                 };
-                let meta = Some(serde_json::json!({
-                    (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): content_kind
-                }));
+                let meta = Some(
+                    stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                        serde_json::json!({
+                            (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): content_kind
+                        }),
+                    ),
+                );
                 let tool_text = match content.unwrap_or(Value::Null) {
                     Value::String(s) => s,
                     Value::Null => String::new(),
@@ -495,7 +505,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                     role: Role::Tool,
                     content: MessageContent::Text(tool_text),
                     tool_calls: None,
-                    tool_call_id: Some(tool_use_id),
+                    tool_call_id: Some((tool_use_id).into()),
                     meta,
                 });
             }
@@ -541,7 +551,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                 ..
             } => {
                 user_blocks.push(ContentBlock::ToolUse {
-                    id,
+                    id: id.into(),
                     name,
                     input,
                     cache_control: cache_control.as_ref().map(map_cache_control),

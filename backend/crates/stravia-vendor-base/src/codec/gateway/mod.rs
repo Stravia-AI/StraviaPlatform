@@ -237,7 +237,7 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
                     response.push_reasoning(required_string(content, "text")?, None)
                 }
                 Some("tool-call") => response.push_tool_call(ToolCall {
-                    id: required_string(content, "toolCallId")?,
+                    id: (required_string(content, "toolCallId")?).into(),
                     name: required_string(content, "toolName")?,
                     arguments: serde_json::to_string(
                         content
@@ -362,7 +362,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
             }
             Some("tool-call") if role == Role::Assistant => {
                 tool_calls.push(ToolCall {
-                    id: required_string(part, "toolCallId")?,
+                    id: (required_string(part, "toolCallId")?).into(),
                     name: required_string(part, "toolName")?,
                     arguments: serde_json::to_string(
                         part.get("input")
@@ -384,7 +384,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
                     .map(str::to_string)
                     .unwrap_or_else(|| output.to_string());
                 blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: tool_call_id.clone().unwrap_or_default(),
+                    tool_use_id: (tool_call_id.clone().unwrap_or_default()).into(),
                     content: Value::String(text),
                     content_kind: Some(
                         stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -413,7 +413,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
         role,
         content: MessageContent::Blocks(blocks),
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-        tool_call_id,
+        tool_call_id: tool_call_id.map(Into::into),
         meta: None,
     })
 }
@@ -637,7 +637,7 @@ fn tool_names(request: &AiRequest) -> BTreeMap<String, String> {
         .items
         .iter()
         .flat_map(|item| item.tool_calls.as_deref().unwrap_or_default())
-        .map(|call| (call.id.clone(), call.name.clone()))
+        .map(|call| (call.id.to_string(), call.name.clone()))
         .collect()
 }
 
@@ -816,13 +816,13 @@ impl GatewayStreamParser {
                 let id = required_string(&value, "id")?;
                 let index = self.tools.len();
                 let call = ToolCall {
-                    id: id.clone(),
+                    id: (id.clone()).into(),
                     name: required_string(&value, "toolName")?,
                     arguments: String::new(),
                 };
                 deltas.push(AiStreamDelta::ToolCallStart {
                     index,
-                    id: call.id.clone(),
+                    id: call.id.to_string(),
                     name: call.name.clone(),
                 });
                 self.tools.insert(id, (index, call));
@@ -854,7 +854,7 @@ impl GatewayStreamParser {
             "tool-call" => deltas.push(AiStreamDelta::ToolCallComplete {
                 index: self.tools.len(),
                 tool_call: ToolCall {
-                    id: required_string(&value, "toolCallId")?,
+                    id: (required_string(&value, "toolCallId")?).into(),
                     name: required_string(&value, "toolName")?,
                     arguments: serde_json::to_string(
                         value

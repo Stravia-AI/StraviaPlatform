@@ -16,48 +16,6 @@ impl SqlTurnChainStore {
         Self::Postgres(pool)
     }
 
-    /// 离线维护：分批去重既有生成历史，校验完整还原后才提交。
-    /// 调用方必须独占实例；不修改父边、业务版本、保留期或索引。
-    /// 损坏内容、引用冲突和存储错误均返回错误，已完成批次可安全重入。
-    pub async fn optimize_storage(&self) -> anyhow::Result<u64> {
-        let mut rewritten = 0;
-        macro_rules! optimize {
-            ($pool:expr, $put:ident, $restore:ident) => {{
-                let mut cursor = String::new();
-                loop {
-                    let mut transaction = $pool.begin().await?;
-                    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
-                        "SELECT id, principal, CAST(payload_version AS BIGINT), payload FROM turn_chain_nodes \
-                         WHERE kind = 'response' AND storage_format = 0 AND id > $1 ORDER BY id LIMIT 64"
-                    ).bind(&cursor).fetch_all(&mut *transaction).await?;
-                    if rows.is_empty() { break; }
-                    for (id, principal, version, payload) in rows {
-                        cursor.clone_from(&id);
-                        let original = serde_json::from_str::<serde_json::Value>(&payload)?;
-                        let encoded = content::encode(original.clone())?;
-                        if encoded.format == 0 { continue; }
-                        content::$put(&mut transaction, &id, &principal, &encoded).await?;
-                        sqlx::query("UPDATE turn_chain_nodes SET payload = $1, storage_format = $2 WHERE id = $3")
-                            .bind(&encoded.payload).bind(encoded.format).bind(&id)
-                            .execute(&mut *transaction).await?;
-                        let mut restored = vec![decode_node(TurnNodeId::new(id), TurnNodeKind::Response, None, version, encoded.payload)
-                            .map_err(|error| anyhow::anyhow!("{error:?}"))?];
-                        content::$restore(&mut transaction, &mut restored).await?;
-                        anyhow::ensure!(restored[0].payload == original, "history restoration mismatch");
-                        rewritten += 1;
-                    }
-                    transaction.commit().await?;
-                }
-            }};
-        }
-        match self {
-            Self::Sqlite(pool) => optimize!(pool, put_sqlite, restore_sqlite),
-            Self::Postgres(pool) => optimize!(pool, put_postgres, restore_postgres),
-        }
-        self.remove_unreferenced_contents().await?;
-        Ok(rewritten)
-    }
-
     async fn remove_unreferenced_contents(&self) -> anyhow::Result<()> {
         const DELETE: &str = "DELETE FROM turn_chain_contents WHERE NOT EXISTS \
             (SELECT 1 FROM turn_chain_content_refs r WHERE r.principal = turn_chain_contents.principal \
@@ -531,7 +489,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 let now = chrono::Utc::now().timestamp_millis();
                 let stale = format!("{namespace_prefix}%");
                 let heads: Vec<(String, String, i64)> = sqlx::query_as(
-                    "SELECT id, principal, COALESCE(prefix_completed_at, created_at) FROM turn_chain_nodes \
+                    "SELECT id, principal, prefix_completed_at FROM turn_chain_nodes \
                      WHERE kind = 'response' AND prefix_namespace IS NOT NULL \
                      AND prefix_namespace NOT LIKE $1 AND expires_at > $2"
                 ).bind(&stale).bind(now).fetch_all(&mut *transaction).await

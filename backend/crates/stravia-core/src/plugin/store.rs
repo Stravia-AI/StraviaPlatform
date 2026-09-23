@@ -666,7 +666,7 @@ mod tests {
     use super::*;
     use crate::provider_models::{
         ModelCost, ModelLimit, PriceComponents, ProviderModelCostRule, ProviderModelCostRuleKind,
-        ProviderModelSelectionPolicy, ProviderModelSourceKind,
+        ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState, SourceStamp,
     };
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -701,6 +701,11 @@ mod tests {
             provider_id: "provider-a".to_owned(),
             model_id: "model-a".to_owned(),
             source_kind,
+            snapshot_state: SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog-a".to_owned(),
+                },
+            },
             metadata_source_provider_id: Some("catalog-a".to_owned()),
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::ForceEnabled,

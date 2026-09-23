@@ -68,8 +68,7 @@ def _create_route(
     route_payload: dict[str, Any] = {
         "model_id": name,
         "display_name": f"{name} display",
-        "target_provider": provider_id,
-        "target_model": "gpt-4o-mini",
+        "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
     }
     if retry_budget is not None or first_token_timeout_ms is not None:
         route_payload["targets"] = [

@@ -1,3 +1,4 @@
+pub mod identity;
 pub mod models;
 
 use std::path::Path;

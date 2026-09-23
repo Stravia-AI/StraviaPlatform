@@ -7,13 +7,13 @@ use tokio::sync::RwLock;
 use crate::db::models::{
     ApiKeyStats, CreateProviderRecord, DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS,
     DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider,
-    ProviderCredentialVersion, ProviderStats, PutRoute, Route, StatsOverview, StatsSeries, Target,
-    UpdateProvider, UpsertOAuthCredential,
+    ProviderCredentialVersion, ProviderStats, PutRoute, RouteConfig, StatsOverview, StatsSeries,
+    TargetConfig, UpdateProvider, UpsertOAuthCredential,
 };
 use crate::plugin::PluginStore;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
 };
 
 use super::traits::{
@@ -27,7 +27,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct MemoryStorage {
     providers: Arc<RwLock<Vec<Provider>>>,
-    models: Arc<RwLock<Vec<Route>>>,
+    models: Arc<RwLock<Vec<RouteConfig>>>,
     settings: Arc<RwLock<Vec<(String, String)>>>,
     provider_models: Arc<RwLock<Vec<ProviderModelRecord>>>,
     oauth_credentials: Arc<MemoryOAuthCredentialStore>,
@@ -37,7 +37,7 @@ pub struct MemoryStorage {
 impl MemoryStorage {
     pub fn new(
         providers: Vec<Provider>,
-        models: Vec<Route>,
+        models: Vec<RouteConfig>,
         settings: Vec<(String, String)>,
     ) -> Self {
         let providers = Arc::new(RwLock::new(providers));
@@ -215,11 +215,9 @@ impl ProviderStore for MemoryStorage {
         provider_models.retain(|model| model.provider_id != id);
         oauth_credentials.remove(id);
         for route in routes.iter_mut() {
-            route.targets.retain(|target| target.provider_id != id);
-            if let Some(primary) = route.targets.first() {
-                route.target_provider.clone_from(&primary.provider_id);
-                route.target_model.clone_from(&primary.model);
-            }
+            route
+                .targets
+                .retain(|target| target.provider_id().as_str() != id);
             route.refresh_supported_thinking_levels();
         }
         routes.retain(|route| !route.targets.is_empty());
@@ -317,11 +315,11 @@ impl ProviderStore for MemoryStorage {
 
 #[async_trait]
 impl RouteStore for MemoryStorage {
-    async fn list(&self) -> anyhow::Result<Vec<Route>> {
+    async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
         Ok(self.models.read().await.clone())
     }
 
-    async fn list_active(&self) -> anyhow::Result<Vec<Route>> {
+    async fn list_active(&self) -> anyhow::Result<Vec<RouteConfig>> {
         let models = self.models.read().await;
         Ok(models
             .iter()
@@ -330,7 +328,7 @@ impl RouteStore for MemoryStorage {
             .collect())
     }
 
-    async fn get(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
+    async fn get(&self, route_id: &str) -> anyhow::Result<Option<RouteConfig>> {
         Ok(self
             .models
             .read()
@@ -340,23 +338,45 @@ impl RouteStore for MemoryStorage {
             .cloned())
     }
 
-    async fn put(&self, input: PutRoute) -> anyhow::Result<Route> {
+    async fn put(&self, input: PutRoute) -> anyhow::Result<RouteConfig> {
         anyhow::ensure!(
-            input.targets.iter().any(|target| target.enabled),
+            input
+                .targets
+                .as_ref()
+                .is_none_or(|targets| targets.iter().any(|target| target.enabled)),
             "a Route requires at least one enabled Target"
+        );
+        anyhow::ensure!(
+            input.id.is_some() || input.targets.is_some(),
+            "a new Route requires Targets"
         );
         let mut routes = self.models.write().await;
         let storage_id = input
             .id
-            .clone()
+            .as_ref()
+            .map(|id| id.as_str().to_owned())
             .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
         anyhow::ensure!(
             !routes
                 .iter()
-                .any(|route| route.model_id == input.model_id && route.id != storage_id),
+                .any(|route| route.model_id == input.model_id.as_str() && route.id != storage_id),
             "Route ID already exists: {}",
             input.model_id
         );
+        if input.targets.is_none() {
+            let route = routes
+                .iter_mut()
+                .find(|route| route.id == storage_id)
+                .context("Route not found for update")?;
+            route.model_id = input.model_id;
+            route.display_name = input.display_name;
+            route.balance = input.selection_strategy;
+            route.is_enabled = input.is_enabled;
+            route.default_thinking_level = input
+                .default_thinking_level
+                .map(|level| level.as_str().to_owned());
+            return Ok(route.clone());
+        }
         let created_at = routes
             .iter()
             .find(|route| route.id == storage_id)
@@ -365,25 +385,26 @@ impl RouteStore for MemoryStorage {
         let existing_targets = routes
             .iter()
             .find(|route| route.id == storage_id)
-            .map(|route| route.targets.clone())
-            .unwrap_or_default();
+            .map(|route| route.targets.as_slice())
+            .unwrap_or(&[]);
         let targets = input
             .targets
+            .expect("checked target replacement")
             .into_iter()
             .map(|target| {
-                let provider_id = target.provider_id.trim().to_owned();
-                let model = target.model.as_deref().map(str::trim).map(str::to_owned);
-                Target {
-                    id: existing_targets
-                        .iter()
-                        .find(|current| {
-                            current.provider_id == provider_id && current.model == model
-                        })
+                let destination = crate::db::identity::TargetDestination::new(
+                    target.provider_id.trim().into(),
+                    target.model.as_deref().map(str::trim).map(Into::into),
+                );
+                let previous = existing_targets
+                    .iter()
+                    .find(|current| current.destination == destination);
+                TargetConfig {
+                    id: previous
                         .map(|current| current.id.clone())
-                        .unwrap_or_else(stravia_runtime_contract::identifier::new_id),
-                    model_id: storage_id.clone(),
-                    provider_id,
-                    model,
+                        .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id().into()),
+                    model_id: storage_id.clone().into(),
+                    destination,
                     enabled: target.enabled,
                     priority: target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
                     first_token_timeout_ms: target
@@ -395,34 +416,24 @@ impl RouteStore for MemoryStorage {
                     target_cooldown_ms: target
                         .target_cooldown_ms
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
-                    created_at: now_rfc3339(),
-                    thinking_level_map: sqlx::types::Json(target.thinking_level_map),
+                    created_at: previous
+                        .map(|current| current.created_at.clone())
+                        .unwrap_or_else(now_rfc3339),
+                    thinking_level_map: target.thinking_level_map,
                 }
             })
             .collect::<Vec<_>>();
-        let mut route = Route {
-            id: storage_id.clone(),
+        let mut route = RouteConfig {
+            id: storage_id.clone().into(),
             model_id: input.model_id,
             display_name: input.display_name,
             balance: input.selection_strategy,
-            target_provider: targets
-                .iter()
-                .find(|target| target.enabled)
-                .expect("validated enabled Target")
-                .provider_id
-                .clone(),
-            target_model: targets
-                .iter()
-                .find(|target| target.enabled)
-                .expect("validated enabled Target")
-                .model
-                .clone(),
             is_enabled: input.is_enabled,
             created_at,
             default_thinking_level: input
                 .default_thinking_level
                 .map(|level| level.as_str().to_string()),
-            supported_thinking_levels: sqlx::types::Json(Vec::new()),
+            supported_thinking_levels: Vec::new(),
             context_window: None,
             output_max_tokens: None,
             supports_image_input: false,
@@ -565,6 +576,23 @@ impl ProviderModelStore for MemoryStorage {
     ) -> anyhow::Result<()> {
         let now = now_rfc3339();
         let mut items = self.provider_models.write().await;
+        for update in &reconciliation.updates {
+            anyhow::ensure!(
+                items.iter().any(|item| item.provider_id == provider_id
+                    && item.model_id == update.model_id
+                    && item.source_kind == ProviderModelSourceKind::Discovered
+                    && item.revision == update.expected_revision),
+                "Provider Model has changed while synchronizing discovered models"
+            );
+        }
+        for input in &reconciliation.inserts {
+            anyhow::ensure!(
+                !items
+                    .iter()
+                    .any(|item| item.provider_id == provider_id && item.model_id == input.model_id),
+                "Provider Model has changed while synchronizing discovered models"
+            );
+        }
         for update in reconciliation.updates {
             if let Some(item) = items.iter_mut().find(|item| {
                 item.provider_id == provider_id
@@ -573,9 +601,15 @@ impl ProviderModelStore for MemoryStorage {
             }) {
                 let changed = item.presence != update.presence
                     || item.metadata.status != update.lifecycle_status
-                    || update.metadata.is_some();
+                    || update.metadata.is_some()
+                    || update.snapshot_state.is_some()
+                    || item.metadata_source_provider_id != update.metadata_source_provider_id;
                 if changed {
                     item.presence = update.presence;
+                    item.metadata_source_provider_id = update.metadata_source_provider_id;
+                    if let Some(snapshot_state) = update.snapshot_state {
+                        item.snapshot_state = snapshot_state;
+                    }
                     if let Some(metadata) = update.metadata {
                         item.metadata = metadata;
                         item.cost_rules = item.metadata.cost_rules();
@@ -588,11 +622,6 @@ impl ProviderModelStore for MemoryStorage {
             }
         }
         for input in reconciliation.inserts {
-            if items.iter().any(|item| {
-                item.provider_id == input.provider_id && item.model_id == input.model_id
-            }) {
-                continue;
-            }
             items.push(memory_provider_model(input, now.clone()));
         }
         Ok(())
@@ -616,6 +645,7 @@ impl ProviderModelStore for MemoryStorage {
         provider_id: &str,
         model_id: &str,
         metadata: crate::provider_models::ProviderModelMetadata,
+        snapshot_state: SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation> {
         let mut items = self.provider_models.write().await;
@@ -629,6 +659,7 @@ impl ProviderModelStore for MemoryStorage {
             return Ok(ProviderModelMutation::Conflict);
         }
         item.metadata = metadata;
+        item.snapshot_state = snapshot_state;
         item.cost_rules = item.metadata.cost_rules();
         item.revision += 1;
         item.updated_at = now_rfc3339();
@@ -676,6 +707,7 @@ fn memory_provider_model(input: NewProviderModelRecord, now: String) -> Provider
         provider_id: input.provider_id,
         model_id: input.model_id,
         source_kind: input.source_kind,
+        snapshot_state: input.snapshot_state,
         metadata_source_provider_id: input.metadata_source_provider_id,
         presence: input.presence,
         selection_policy: input.selection_policy,
@@ -913,7 +945,7 @@ mod tests {
                 display_name: None,
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
-                targets: vec![target("p1", "m1"), target("p2", "m2")],
+                targets: Some(vec![target("p1", "m1"), target("p2", "m2")]),
                 default_thinking_level: None,
             })
             .await
@@ -941,6 +973,22 @@ mod tests {
             2
         );
 
+        let renamed = storage
+            .put(PutRoute {
+                id: Some(route.id.clone()),
+                model_id: route.model_id.clone(),
+                display_name: Some("Friendly".into()),
+                selection_strategy: route.balance.clone(),
+                is_enabled: route.is_enabled,
+                targets: None,
+                default_thinking_level: None,
+            })
+            .await
+            .expect("metadata-only update");
+        assert_eq!(renamed.targets[0].id, route.targets[0].id);
+        assert_eq!(renamed.targets[1].created_at, route.targets[1].created_at);
+        let surviving_id = route.targets[1].id.clone();
+        let surviving_created_at = route.targets[1].created_at.clone();
         let updated = storage
             .put(PutRoute {
                 id: Some(route.id),
@@ -948,13 +996,15 @@ mod tests {
                 display_name: None,
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
-                targets: vec![target("p2", "m2")],
+                targets: Some(vec![target("p2", "m2")]),
                 default_thinking_level: None,
             })
             .await
             .expect("replace Route aggregate");
         assert_eq!(updated.targets.len(), 1);
-        assert_eq!(updated.targets[0].provider_id, "p2");
+        assert_eq!(updated.targets[0].provider_id(), "p2");
+        assert_eq!(updated.targets[0].id, surviving_id);
+        assert_eq!(updated.targets[0].created_at, surviving_created_at);
     }
 
     #[tokio::test]
@@ -968,7 +1018,7 @@ mod tests {
                 display_name: None,
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
-                targets: vec![target("p1", "m1")],
+                targets: Some(vec![target("p1", "m1")]),
                 default_thinking_level: None,
             })
             .await
@@ -980,7 +1030,13 @@ mod tests {
                 display_name: None,
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
-                targets: vec![target("p1", "m1"), target("p2", "m2")],
+                targets: Some(vec![
+                    target("p1", "m1"),
+                    crate::db::models::CreateTarget {
+                        enabled: false,
+                        ..target("p2", "m2")
+                    },
+                ]),
                 default_thinking_level: None,
             })
             .await
@@ -1001,7 +1057,14 @@ mod tests {
             .expect("get")
             .expect("surviving Route");
         assert_eq!(survivor.targets.len(), 1);
-        assert_eq!(survivor.targets[0].provider_id, "p2");
+        assert_eq!(survivor.targets[0].provider_id(), "p2");
+        assert!(!survivor.targets[0].enabled);
+        assert_eq!(
+            survivor
+                .primary_target()
+                .map(|target| target.provider_id().as_str()),
+            Some("p2")
+        );
     }
 
     #[tokio::test]
@@ -1160,11 +1223,80 @@ mod tests {
             provider_id: "provider".into(),
             model_id: model_id.into(),
             source_kind: ProviderModelSourceKind::Discovered,
+            snapshot_state: SnapshotState::Unregistered,
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
             metadata: crate::provider_models::ProviderModelMetadata::bare(model_id),
         }
+    }
+
+    #[tokio::test]
+    async fn stale_reconciliation_rejects_every_update_atomically() {
+        let storage = MemoryStorage::new(vec![], vec![], vec![]);
+        let store = storage.provider_models();
+        for model_id in ["first", "second"] {
+            store
+                .create(new_provider_model_record(model_id))
+                .await
+                .unwrap();
+        }
+        let second = store.get("provider", "second").await.unwrap().unwrap();
+        let changed = store
+            .update_metadata(
+                "provider",
+                "second",
+                crate::provider_models::ProviderModelMetadata {
+                    name: Some("Manual correction".into()),
+                    ..second.metadata
+                },
+                SnapshotState::Edited { source: None },
+                second.revision,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(changed, ProviderModelMutation::Applied(_)));
+
+        let updates = ["first", "second"]
+            .into_iter()
+            .map(
+                |model_id| crate::provider_models::ProviderModelPresenceUpdate {
+                    model_id: model_id.to_owned(),
+                    expected_revision: 1,
+                    snapshot_state: Some(SnapshotState::Imported {
+                        source: crate::provider_models::SourceStamp::Discovery,
+                    }),
+                    metadata_source_provider_id: None,
+                    presence: ProviderModelPresence::Missing,
+                    lifecycle_status: None,
+                    metadata: Some(crate::provider_models::ProviderModelMetadata::bare(
+                        model_id,
+                    )),
+                },
+            )
+            .collect();
+        assert!(
+            store
+                .apply_reconciliation(
+                    "provider",
+                    ProviderModelReconciliation {
+                        inserts: vec![],
+                        updates
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let first = store.get("provider", "first").await.unwrap().unwrap();
+        let second = store.get("provider", "second").await.unwrap().unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.presence, ProviderModelPresence::Present);
+        assert_eq!(first.snapshot_state, SnapshotState::Unregistered);
+        assert_eq!(second.metadata.name.as_deref(), Some("Manual correction"));
+        assert_eq!(
+            second.snapshot_state,
+            SnapshotState::Edited { source: None }
+        );
     }
 
     #[tokio::test]
@@ -1248,41 +1380,51 @@ mod tests {
             provider_revision: 99,
             oauth_status_version: None,
         };
-        assert!(!store
-            .mark_credential_invalid("p1", stale)
-            .await
-            .expect("mark"));
-        assert!(!store
-            .get("p1")
-            .await
-            .expect("get")
-            .expect("provider")
-            .credential_invalid());
+        assert!(
+            !store
+                .mark_credential_invalid("p1", stale)
+                .await
+                .expect("mark")
+        );
+        assert!(
+            !store
+                .get("p1")
+                .await
+                .expect("get")
+                .expect("provider")
+                .credential_invalid()
+        );
 
         let current = ProviderCredentialVersion {
             provider_revision: 0,
             oauth_status_version: None,
         };
-        assert!(store
-            .mark_credential_invalid("p1", current)
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid("p1", current)
+                .await
+                .expect("mark")
+        );
         let marked = store.get("p1").await.expect("get").expect("provider");
         assert!(marked.credential_invalid());
         assert!(marked.credential_invalid_at.is_some());
         assert_eq!(marked.revision, 1);
 
         // 已失效后再标记：代际已前进，旧证据不再重复写入
-        assert!(!store
-            .mark_credential_invalid("p1", current)
-            .await
-            .expect("mark"));
+        assert!(
+            !store
+                .mark_credential_invalid("p1", current)
+                .await
+                .expect("mark")
+        );
 
-        assert!(store
-            .credential_invalid_provider_ids()
-            .await
-            .expect("ids")
-            .contains("p1"));
+        assert!(
+            store
+                .credential_invalid_provider_ids()
+                .await
+                .expect("ids")
+                .contains("p1")
+        );
     }
 
     #[tokio::test]
@@ -1309,16 +1451,18 @@ mod tests {
         let store = storage.providers();
 
         // 有 OAuth 行但请求声称没有 → 拒绝标记
-        assert!(!store
-            .mark_credential_invalid(
-                "p1",
-                ProviderCredentialVersion {
-                    provider_revision: 0,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            !store
+                .mark_credential_invalid(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: 0,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
 
         // OAuth 凭据已被刷新（status_version 前进）→ 旧证据不得落库
         let stored_version = storage
@@ -1328,33 +1472,39 @@ mod tests {
             .expect("get oauth")
             .expect("oauth")
             .status_version;
-        assert!(!store
-            .mark_credential_invalid(
-                "p1",
-                ProviderCredentialVersion {
-                    provider_revision: 0,
-                    oauth_status_version: Some(stored_version + 1),
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            !store
+                .mark_credential_invalid(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: 0,
+                        oauth_status_version: Some(stored_version + 1),
+                    },
+                )
+                .await
+                .expect("mark")
+        );
 
-        assert!(store
-            .mark_credential_invalid(
-                "p1",
-                ProviderCredentialVersion {
-                    provider_revision: 0,
-                    oauth_status_version: Some(stored_version),
-                },
-            )
-            .await
-            .expect("mark"));
-        assert!(store
-            .get("p1")
-            .await
-            .expect("get")
-            .expect("provider")
-            .credential_invalid());
+        assert!(
+            store
+                .mark_credential_invalid(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: 0,
+                        oauth_status_version: Some(stored_version),
+                    },
+                )
+                .await
+                .expect("mark")
+        );
+        assert!(
+            store
+                .get("p1")
+                .await
+                .expect("get")
+                .expect("provider")
+                .credential_invalid()
+        );
     }
 
     #[tokio::test]
@@ -1365,10 +1515,12 @@ mod tests {
             provider_revision: 0,
             oauth_status_version: None,
         };
-        assert!(store
-            .mark_credential_invalid("p1", version)
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid("p1", version)
+                .await
+                .expect("mark")
+        );
 
         // 仅意图字段（is_enabled）不清除失效
         let updated = store
@@ -1417,16 +1569,18 @@ mod tests {
     async fn successful_test_result_clears_credential_invalid() {
         let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
         let store = storage.providers();
-        assert!(store
-            .mark_credential_invalid(
-                "p1",
-                ProviderCredentialVersion {
-                    provider_revision: 0,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: 0,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
 
         store
             .record_test_result(
@@ -1438,12 +1592,14 @@ mod tests {
             )
             .await
             .expect("record failure");
-        assert!(store
-            .get("p1")
-            .await
-            .expect("get")
-            .expect("provider")
-            .credential_invalid());
+        assert!(
+            store
+                .get("p1")
+                .await
+                .expect("get")
+                .expect("provider")
+                .credential_invalid()
+        );
 
         store
             .record_test_result(

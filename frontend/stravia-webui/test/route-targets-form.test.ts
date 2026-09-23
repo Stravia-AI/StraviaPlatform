@@ -94,9 +94,8 @@ describe('route targets form', () => {
     const result = buildRouteTargets(targets)
 
     expect(result.error).toBeUndefined()
-    expect(result.targets).toEqual([
+    expect(JSON.parse(JSON.stringify(result.targets))).toEqual([
       {
-        id: undefined,
         provider_id: 'provider-a',
         model: 'model-a',
         enabled: true,
@@ -134,7 +133,9 @@ describe('route targets form', () => {
 
     expect(reorderRouteTargetBefore(targets, 'target-2', 'target-1')).toBe(true)
     expect(priorityLanes(targets)[0].targets.map((target) => target.key)).toEqual(['target-2', 'target-1'])
-    expect(buildRouteTargets(targets).targets.map((target) => target.id)).toEqual(['target-b', 'target-a'])
+    const payload = buildRouteTargets(targets).targets
+    expect(payload.map((target) => target.provider_id)).toEqual(['provider-b', 'provider-a'])
+    expect(payload.every((target) => !('id' in target))).toBe(true)
   })
 
   test('moves targets into lanes and creates top and bottom priorities', () => {

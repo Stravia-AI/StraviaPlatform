@@ -9,7 +9,7 @@ pub(super) struct SqliteProviderStore {
 impl ProviderStore for SqliteProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(adapter_credentials, '{}') AS adapter_credentials, COALESCE(vendor_options, '{}') AS vendor_options, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, COALESCE(credential_status, 'ok') AS credential_status, credential_invalid_at, COALESCE(revision, 0) AS revision, created_at, updated_at FROM providers ORDER BY created_at DESC",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -17,7 +17,7 @@ impl ProviderStore for SqliteProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(adapter_credentials, '{}') AS adapter_credentials, COALESCE(vendor_options, '{}') AS vendor_options, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, COALESCE(credential_status, 'ok') AS credential_status, credential_invalid_at, COALESCE(revision, 0) AS revision, created_at, updated_at FROM providers WHERE id = ?",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -247,15 +247,13 @@ impl ProviderStore for SqliteProviderStore {
     async fn credential_invalid_provider_ids(
         &self,
     ) -> anyhow::Result<std::collections::HashSet<String>> {
-        Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT id FROM providers WHERE credential_status = 'invalid'",
-            )
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .collect(),
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT id FROM providers WHERE credential_status = 'invalid'",
         )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect())
     }
 }
 
@@ -311,33 +309,39 @@ mod tests {
         let provider = create_provider(&store, "p1").await;
         assert_eq!(provider.revision, 0);
 
-        assert!(!store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision + 1,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
-        assert!(!store
-            .get(&provider.id)
-            .await
-            .expect("get")
-            .expect("provider")
-            .credential_invalid());
+        assert!(
+            !store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision + 1,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
+        assert!(
+            !store
+                .get(&provider.id)
+                .await
+                .expect("get")
+                .expect("provider")
+                .credential_invalid()
+        );
 
-        assert!(store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
         let marked = store
             .get(&provider.id)
             .await
@@ -346,11 +350,13 @@ mod tests {
         assert!(marked.credential_invalid());
         assert!(marked.credential_invalid_at.is_some());
 
-        assert!(store
-            .credential_invalid_provider_ids()
-            .await
-            .expect("ids")
-            .contains(&provider.id));
+        assert!(
+            store
+                .credential_invalid_provider_ids()
+                .await
+                .expect("ids")
+                .contains(&provider.id)
+        );
     }
 
     #[tokio::test]
@@ -385,53 +391,61 @@ mod tests {
             .status_version;
 
         // OAuth 行存在但证据声称无 OAuth → 不标记
-        assert!(!store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            !store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
         // OAuth 凭据版本已前进 → 旧证据不落库
-        assert!(!store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: Some(status_version + 1),
-                },
-            )
-            .await
-            .expect("mark"));
-        assert!(store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: Some(status_version),
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            !store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: Some(status_version + 1),
+                    },
+                )
+                .await
+                .expect("mark")
+        );
+        assert!(
+            store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: Some(status_version),
+                    },
+                )
+                .await
+                .expect("mark")
+        );
     }
 
     #[tokio::test]
     async fn credential_invalid_clears_only_on_credential_evidence() {
         let store = store().await;
         let provider = create_provider(&store, "p1").await;
-        assert!(store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
 
         // 仅 is_enabled 写入不清除
         let updated = store
@@ -484,16 +498,18 @@ mod tests {
     async fn successful_test_result_clears_credential_invalid() {
         let store = store().await;
         let provider = create_provider(&store, "p1").await;
-        assert!(store
-            .mark_credential_invalid(
-                &provider.id,
-                ProviderCredentialVersion {
-                    provider_revision: provider.revision,
-                    oauth_status_version: None,
-                },
-            )
-            .await
-            .expect("mark"));
+        assert!(
+            store
+                .mark_credential_invalid(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: provider.revision,
+                        oauth_status_version: None,
+                    },
+                )
+                .await
+                .expect("mark")
+        );
 
         store
             .record_test_result(

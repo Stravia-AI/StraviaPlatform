@@ -71,7 +71,7 @@ impl GoogleResponseParser {
                         .map(str::to_owned)
                         .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                     items.push(AiItem::function_call(ToolCall {
-                        id: call_id,
+                        id: (call_id).into(),
                         name,
                         arguments: args.to_string(),
                     }));
@@ -715,7 +715,11 @@ fn google_media_item(part: &Value) -> Result<Option<AiItem>> {
         content: MessageContent::Blocks(vec![block]),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({"__google_media_part": extra})),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"__google_media_part": extra}),
+            ),
+        ),
     }))
 }
 

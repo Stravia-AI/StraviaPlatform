@@ -4,8 +4,8 @@
 //! dispatcher (PR-5) consume it.  Until PR-2 lands, `compat.rs` provides
 //! lossless `From` conversions from/to the old `InternalRequest`.
 
-use serde::{Deserialize, Serialize, Serializer};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
+use serde_json::{Map, Value};
 
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::cache::CacheControl;
@@ -156,14 +156,14 @@ pub enum ContentBlock {
 
     // ── Tool calls ────────────────────────────────────────────────────────────
     ToolUse {
-        id: String,
+        id: ToolCallId,
         name: String,
         input: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     ToolResult {
-        tool_use_id: String,
+        tool_use_id: ToolCallId,
         content: Value,
         /// Absent only in history written before payload semantics were recorded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,7 +178,7 @@ pub enum ContentBlock {
     /// A server-executed tool call (Anthropic `ServerToolUseBlockParam`,
     /// Google `Part.toolCall`).
     ServerToolUse {
-        id: String,
+        id: ToolCallId,
         /// Tool name (e.g. `"web_search"`, `"code_execution"`).
         name: String,
         input: Value,
@@ -190,7 +190,7 @@ pub enum ContentBlock {
     },
     /// Result from a server-executed tool.
     ServerToolResult {
-        tool_use_id: String,
+        tool_use_id: ToolCallId,
         content: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_kind: Option<ToolResultContentKind>,
@@ -313,6 +313,337 @@ impl MessageContent {
 
 // ── Message ───────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CanonicalItemId(String);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolCallId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ItemReference(String);
+
+macro_rules! identity {
+    ($name:ident) => {
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+identity!(CanonicalItemId);
+identity!(ToolCallId);
+identity!(ItemReference);
+
+impl std::borrow::Borrow<str> for ItemReference {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+impl std::borrow::Borrow<str> for ToolCallId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+impl std::ops::Deref for ToolCallId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+impl AsRef<str> for ToolCallId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+impl std::fmt::Display for ToolCallId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+impl From<String> for ToolCallId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ToolCallId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl ToolCallId {
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+impl PartialEq<str> for ToolCallId {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+impl PartialEq<&str> for ToolCallId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+impl PartialEq<String> for ToolCallId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+impl PartialEq<ToolCallId> for String {
+    fn eq(&self, other: &ToolCallId) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Lossless item metadata. Object-shaped metadata has typed graph fields; unknown
+/// fields and even malformed legacy graph fields remain byte-for-byte equivalent
+/// JSON values. Legacy non-objects are untouched until graph metadata is written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AiItemMetadata {
+    id: Option<CanonicalItemId>,
+    reference: Option<ItemReference>,
+    status: Option<AiItemStatus>,
+    provenance: Option<AiItemProvenance>,
+    audience: Option<AiItemAudience>,
+    extensions: Map<String, Value>,
+    opaque: Option<Value>,
+}
+
+impl From<Value> for AiItemMetadata {
+    fn from(value: Value) -> Self {
+        let Value::Object(mut fields) = value else {
+            return Self {
+                opaque: Some(value),
+                ..Self::default()
+            };
+        };
+        let id = if fields
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            match fields.remove("id") {
+                Some(Value::String(id)) => Some(CanonicalItemId(id)),
+                _ => unreachable!(),
+            }
+        } else {
+            None
+        };
+        let reference = if fields
+            .get("__open_responses_item_reference")
+            .and_then(Value::as_str)
+            .is_some_and(|reference| !reference.is_empty())
+        {
+            match fields.remove("__open_responses_item_reference") {
+                Some(Value::String(reference)) => Some(ItemReference(reference)),
+                _ => unreachable!(),
+            }
+        } else {
+            None
+        };
+        let status = fields
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(|s| match s {
+                "in_progress" => Some(AiItemStatus::InProgress),
+                "completed" => Some(AiItemStatus::Completed),
+                "incomplete" => Some(AiItemStatus::Incomplete),
+                "failed" => Some(AiItemStatus::Failed),
+                _ => None,
+            });
+        if status.is_some() {
+            fields.remove("status");
+        }
+        let provenance = fields
+            .get("provenance")
+            .and_then(Value::as_str)
+            .and_then(|s| match s {
+                "client" => Some(AiItemProvenance::Client),
+                "provider" => Some(AiItemProvenance::Provider),
+                "platform" => Some(AiItemProvenance::Platform),
+                _ => None,
+            });
+        if provenance.is_some() {
+            fields.remove("provenance");
+        }
+        let audience = fields
+            .get("audience")
+            .and_then(Value::as_str)
+            .and_then(|s| match s {
+                "client" => Some(AiItemAudience::Client),
+                "provider" => Some(AiItemAudience::Provider),
+                "internal" => Some(AiItemAudience::Internal),
+                _ => None,
+            });
+        if audience.is_some() {
+            fields.remove("audience");
+        }
+        Self {
+            id,
+            reference,
+            status,
+            provenance,
+            audience,
+            extensions: fields,
+            opaque: None,
+        }
+    }
+}
+
+impl Serialize for AiItemMetadata {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(opaque) = &self.opaque {
+            return opaque.serialize(serializer);
+        }
+        let count = self.extensions.len()
+            + usize::from(self.reference.is_some())
+            + usize::from(self.id.is_some())
+            + usize::from(self.status.is_some())
+            + usize::from(self.provenance.is_some())
+            + usize::from(self.audience.is_some());
+        let mut map = serializer.serialize_map(Some(count))?;
+        for (key, value) in &self.extensions {
+            map.serialize_entry(key, value)?;
+        }
+        if let Some(id) = &self.id {
+            map.serialize_entry("id", id)?;
+        }
+        if let Some(reference) = &self.reference {
+            map.serialize_entry("__open_responses_item_reference", reference)?;
+        }
+        if let Some(status) = &self.status {
+            map.serialize_entry("status", status)?;
+        }
+        if let Some(provenance) = &self.provenance {
+            map.serialize_entry("provenance", provenance)?;
+        }
+        if let Some(audience) = &self.audience {
+            map.serialize_entry("audience", audience)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AiItemMetadata {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(Value::deserialize(deserializer)?))
+    }
+}
+
+impl AiItemMetadata {
+    pub fn boxed(value: Value) -> Box<Self> {
+        Box::new(Self::from(value))
+    }
+
+    pub fn id(&self) -> Option<&CanonicalItemId> {
+        self.id.as_ref()
+    }
+    pub fn reference(&self) -> Option<&ItemReference> {
+        self.reference.as_ref()
+    }
+    pub fn status(&self) -> Option<AiItemStatus> {
+        self.status
+    }
+    pub fn provenance(&self) -> Option<AiItemProvenance> {
+        self.provenance
+    }
+    pub fn audience(&self) -> Option<AiItemAudience> {
+        self.audience
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        if self.opaque.is_some() {
+            return None;
+        }
+        self.extensions.get(key)
+    }
+
+    pub fn insert_extension(
+        &mut self,
+        key: impl Into<String>,
+        value: Value,
+    ) -> Result<Option<Value>, &'static str> {
+        let key = key.into();
+        if Self::is_graph_field(&key) {
+            return Err("reserved item metadata field");
+        }
+        if self.opaque.is_some() {
+            return Err("opaque item metadata requires an explicit graph write");
+        }
+        Ok(self.extensions.insert(key, value))
+    }
+
+    /// Core graph annotations may promote legacy metadata without discarding it.
+    /// Ordinary protocol extensions must not implicitly change its JSON shape.
+    pub fn insert_graph_extension(
+        &mut self,
+        key: impl Into<String>,
+        value: Value,
+    ) -> Result<Option<Value>, &'static str> {
+        let key = key.into();
+        if Self::is_graph_field(&key) {
+            return Err("reserved item metadata field");
+        }
+        self.promote_opaque();
+        Ok(self.extensions.insert(key, value))
+    }
+
+    fn is_graph_field(key: &str) -> bool {
+        matches!(
+            key,
+            "id" | "status" | "provenance" | "audience" | "__open_responses_item_reference"
+        )
+    }
+
+    fn promote_opaque(&mut self) {
+        if let Some(opaque) = self.opaque.take() {
+            self.extensions.insert("vendor_meta".into(), opaque);
+        }
+    }
+
+    pub fn object_extensions(&self) -> Option<&Map<String, Value>> {
+        self.opaque.is_none().then_some(&self.extensions)
+    }
+
+    pub fn remove_extension(&mut self, key: &str) -> Result<Option<Value>, &'static str> {
+        if Self::is_graph_field(key) {
+            return Err("reserved item metadata field");
+        }
+        Ok(self.extensions.remove(key))
+    }
+
+    pub fn set_graph(
+        &mut self,
+        id: Option<CanonicalItemId>,
+        status: Option<AiItemStatus>,
+        provenance: AiItemProvenance,
+        audience: AiItemAudience,
+    ) {
+        self.promote_opaque();
+        self.extensions.remove("id");
+        self.extensions.remove("__open_responses_item_reference");
+        self.extensions.remove("status");
+        if let Some(id) = id.filter(|id| !id.0.is_empty()) {
+            self.id = Some(id);
+        }
+        if let Some(status) = status {
+            self.status = Some(status);
+        }
+        self.extensions.remove("provenance");
+        self.extensions.remove("audience");
+        self.provenance = Some(provenance);
+        self.audience = Some(audience);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiItem {
     pub role: Role,
@@ -321,11 +652,23 @@ pub struct AiItem {
     pub tool_calls: Option<Vec<ToolCall>>,
     /// The `tool_call_id` this result answers.  Required for `Role::Tool` messages.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: Option<ToolCallId>,
     /// Provider-specific extras for this individual message (e.g. Anthropic
     /// `cache_control` on `system` array items).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_item_meta"
+    )]
+    pub meta: Option<Box<AiItemMetadata>>,
+}
+
+fn deserialize_item_meta<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Box<AiItemMetadata>>, D::Error> {
+    Ok(Some(AiItemMetadata::boxed(Value::deserialize(
+        deserializer,
+    )?)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +696,26 @@ pub enum AiItemAudience {
     Internal,
 }
 
+impl AiItemProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Provider => "provider",
+            Self::Platform => "platform",
+        }
+    }
+}
+
+impl AiItemAudience {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Provider => "provider",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 impl AiItemStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -375,22 +738,23 @@ impl AiItem {
             if matches!(blocks.as_slice(), [ContentBlock::CompactionTrigger {}]))
     }
 
-    pub fn id_ref(&self) -> Option<&str> {
+    pub fn canonical_id(&self) -> Option<&CanonicalItemId> {
         self.meta
             .as_ref()?
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .id()
+            .filter(|id| !id.as_str().is_empty())
+    }
+
+    pub fn id_ref(&self) -> Option<&str> {
+        self.canonical_id().map(CanonicalItemId::as_str)
     }
 
     pub fn status(&self) -> Option<AiItemStatus> {
-        match self.meta.as_ref()?.get("status")?.as_str()? {
-            "in_progress" => Some(AiItemStatus::InProgress),
-            "completed" => Some(AiItemStatus::Completed),
-            "incomplete" => Some(AiItemStatus::Incomplete),
-            "failed" => Some(AiItemStatus::Failed),
-            _ => None,
-        }
+        self.meta.as_ref()?.status()
+    }
+
+    pub fn item_reference(&self) -> Option<&ItemReference> {
+        self.meta.as_ref()?.reference()
     }
 
     pub fn with_graph_metadata(
@@ -411,43 +775,12 @@ impl AiItem {
         provenance: AiItemProvenance,
         audience: AiItemAudience,
     ) {
-        let mut meta = self
-            .meta
-            .take()
-            .map(|value| match value {
-                Value::Object(object) => object,
-                other => serde_json::Map::from_iter([("vendor_meta".into(), other)]),
-            })
-            .unwrap_or_default();
-        if let Some(id) = id.filter(|value| !value.is_empty()) {
-            meta.insert("id".into(), Value::String(id));
-        }
-        if let Some(status) = status {
-            meta.insert("status".into(), Value::String(status.as_str().into()));
-        }
-        meta.insert(
-            "provenance".into(),
-            Value::String(
-                match provenance {
-                    AiItemProvenance::Client => "client",
-                    AiItemProvenance::Provider => "provider",
-                    AiItemProvenance::Platform => "platform",
-                }
-                .into(),
-            ),
+        self.meta.get_or_insert_with(Default::default).set_graph(
+            id.map(CanonicalItemId::new),
+            status,
+            provenance,
+            audience,
         );
-        meta.insert(
-            "audience".into(),
-            Value::String(
-                match audience {
-                    AiItemAudience::Client => "client",
-                    AiItemAudience::Provider => "provider",
-                    AiItemAudience::Internal => "internal",
-                }
-                .into(),
-            ),
-        );
-        self.meta = Some(Value::Object(meta));
     }
     pub fn output_text(text: impl Into<String>) -> Self {
         Self {
@@ -515,20 +848,15 @@ impl AiItem {
     /// Mark plain tool text only at a fresh producer boundary, never during replay.
     pub fn with_plain_tool_text_kind(mut self) -> Self {
         if self.role == Role::Tool && matches!(self.content, MessageContent::Text(_)) {
-            let meta = self
-                .meta
-                .get_or_insert_with(|| Value::Object(Default::default()));
-            if let Some(meta) = meta.as_object_mut() {
-                meta.insert(
-                    TOOL_RESULT_CONTENT_KIND_META.into(),
-                    Value::String("json".into()),
-                );
-            }
+            self.meta
+                .get_or_insert_with(Default::default)
+                .insert_graph_extension(TOOL_RESULT_CONTENT_KIND_META, Value::String("json".into()))
+                .expect("tool result kind key is not reserved");
         }
         self
     }
 
-    pub fn function_call_output(call_id: impl Into<String>, output: Value) -> Self {
+    pub fn function_call_output(call_id: impl Into<ToolCallId>, output: Value) -> Self {
         let call_id = call_id.into();
         let content = match output {
             Value::String(text) => MessageContent::Text(text),
@@ -753,7 +1081,7 @@ impl AiItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    pub id: String,
+    pub id: ToolCallId,
     pub name: String,
     pub arguments: String,
 }
@@ -1083,7 +1411,84 @@ impl AiRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentSource, MediaSource};
+    use super::{
+        AiItem, AiItemAudience, AiItemMetadata, AiItemProvenance, AiItemStatus, DocumentSource,
+        MediaSource,
+    };
+    use serde_json::{Value, json};
+
+    #[test]
+    fn item_metadata_preserves_opaque_and_unknown_values_until_graph_mutation() {
+        for raw in [json!("opaque"), json!([1, {"unknown": true}]), Value::Null] {
+            let item: AiItem = serde_json::from_value(json!({
+                "role": "assistant", "content": "answer", "meta": raw,
+            }))
+            .expect("deserialize legacy item");
+            assert_eq!(serde_json::to_value(&item).expect("serialize")["meta"], raw);
+            let mut item = item;
+            assert!(
+                item.meta
+                    .as_mut()
+                    .expect("legacy metadata")
+                    .insert_extension("reasoning_content", json!(""))
+                    .is_err()
+            );
+            assert_eq!(serde_json::to_value(&item).expect("serialize")["meta"], raw);
+            item.set_graph_metadata(
+                Some("msg_1".into()),
+                Some(AiItemStatus::Completed),
+                AiItemProvenance::Provider,
+                AiItemAudience::Client,
+            );
+            let metadata = serde_json::to_value(&item).expect("serialize")["meta"].clone();
+            assert_eq!(metadata["vendor_meta"], raw);
+            assert_eq!(metadata["id"], "msg_1");
+        }
+        let raw = json!({"id": 41, "status": "future", "__open_responses_item_reference": 42, "extension": [1, 2]});
+        let mut metadata = AiItemMetadata::from(raw.clone());
+        assert_eq!(serde_json::to_value(&metadata).expect("serialize"), raw);
+        metadata.set_graph(
+            None,
+            None,
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        );
+        assert_eq!(
+            serde_json::to_value(metadata).expect("serialize"),
+            json!({"provenance": "provider", "audience": "client", "extension": [1, 2]})
+        );
+        let valid = json!({"id": "msg_1", "status": "completed", "provenance": "provider",
+            "audience": "client", "__open_responses_item_reference": "msg_saved", "future": {"enabled": true}});
+        let metadata = AiItemMetadata::from(valid.clone());
+        assert_eq!(
+            metadata.id().map(super::CanonicalItemId::as_str),
+            Some("msg_1")
+        );
+        assert_eq!(
+            metadata.reference().map(super::ItemReference::as_str),
+            Some("msg_saved")
+        );
+        assert_eq!(serde_json::to_value(metadata).expect("serialize"), valid);
+    }
+
+    #[test]
+    fn metadata_extension_mutator_protects_reserved_graph_fields() {
+        let mut metadata = AiItemMetadata::from(json!({"future": {"field": true}}));
+        for field in [
+            "id",
+            "status",
+            "provenance",
+            "audience",
+            "__open_responses_item_reference",
+        ] {
+            assert!(metadata.insert_extension(field, json!("forged")).is_err());
+            assert!(metadata.remove_extension(field).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(metadata).expect("serialize"),
+            json!({"future": {"field": true}})
+        );
+    }
 
     #[test]
     fn media_and_document_urls_survive_ir_serialization() {

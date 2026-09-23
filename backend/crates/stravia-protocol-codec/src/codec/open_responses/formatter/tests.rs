@@ -164,17 +164,19 @@ fn clears_text_metadata_when_canonical_text_changes() {
         }]),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({
-            "id": "msg_provider",
-            "status": "completed",
-            "phase": "final_answer",
-            "__open_responses_content": [{
-                "type": "output_text",
-                "text": "before",
-                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-                "logprobs": [{"token": "before", "logprob": -0.1}]
-            }]
-        })),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                "id": "msg_provider",
+                "status": "completed",
+                "phase": "final_answer",
+                "__open_responses_content": [{
+                    "type": "output_text",
+                    "text": "before",
+                    "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                    "logprobs": [{"token": "before", "logprob": -0.1}]
+                }]
+            })),
+        ),
     }];
 
     let formatted = ResponsesResponseFormatter.format_response(&response);

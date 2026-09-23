@@ -26,3 +26,9 @@ Stravia 将管理员侧的连接写入与 Target 绑定收成 `stravia-core` 里
 - Provider 删除由 Storage 在同一事务里摘除关联 Target 并删除空 Route；HTTP 看不到 Target 行，也不编排持久化细节。
 - `ProviderCatalog` 仍是 revision/索引事实源。Canonical Model 只给 Route 当一次性模板。custom 是第二种 source，不是伪装的 Catalog Entry。
 - 测试打这两条 module interface。被替代的表单扁平化、手搓 Route 引用、重复 `/models` parse 与浅 Admin 编排测试一并删除。
+
+### Route 数据契约
+
+SQL 行、运行时 `RouteConfig` 与管理 `RouteView` 分离。SQL adapter 的 JSON 包装与查询列不进入运行时配置；管理投影可以附加展示信息，但不能成为第二份可写事实源。Route 存储主键、客户端 Route ID、Provider ID、上游模型 ID 与 Target ID 分属不同身份空间。
+
+`targets` 是唯一 Target 写入入口；`target_provider` / `target_model` 只保留为派生读投影，不接受调用方指定 Target ID。更新省略 `targets` 时，存储事务不得删除或重建 Target 行；显式提交时才原子替换。显示名称与默认思考级别省略表示不改，`null` 表示清除；非空字段和 `targets` 不接受 `null`。这让修改展示或启用状态不会意外改变运行策略与 Target 身份。

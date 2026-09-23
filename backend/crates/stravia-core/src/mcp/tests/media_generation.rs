@@ -86,6 +86,9 @@ impl Drop for GenerationApp {
 
 async fn generation_app() -> GenerationApp {
     let app = test_app().await;
+    crate::plugin::test_support::install_distributed_vendor(&app.gateway, "openai-codex")
+        .await
+        .expect("Codex vendor plugin");
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let observed = requests.clone();
     let replies = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
@@ -170,6 +173,7 @@ async fn generation_app() -> GenerationApp {
         .unwrap();
     app.gateway.admin().create_manual_provider_model(&provider.id, "gpt-5.4", crate::provider_models::CreateManualProviderModel {
         metadata: json!({"id":"gpt-5.4","name":"Local GPT","attachment":true,"tool_call":true,"capabilities":["media_image"],"modalities":{"input":["text","image"],"output":["text"]}}),
+        template_id: None,
     }).await.unwrap();
     let route = app
         .gateway
@@ -178,8 +182,6 @@ async fn generation_app() -> GenerationApp {
             model_id: "image-generation".into(),
             display_name: Some("Image generation".into()),
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("gpt-5.4".into()),
             targets: vec![CreateTarget {
                 provider_id: provider.id,
                 model: Some("gpt-5.4".into()),
@@ -221,7 +223,7 @@ async fn generation_app() -> GenerationApp {
         .update_media_generation_config(MediaGenerationConfig {
             enabled: true,
             image: ImageGenerationConfig {
-                route_id: Some(route.model_id.clone()),
+                route_id: Some(route.model_id.clone().into()),
             },
         })
         .await
@@ -230,7 +232,7 @@ async fn generation_app() -> GenerationApp {
         app,
         requests,
         upstream,
-        route_id: route.model_id,
+        route_id: route.model_id.into(),
         replies,
         entered,
     }
@@ -480,7 +482,7 @@ async fn route_failover_handles_typed_status_and_transport_failures() {
             .get_model(&fixture.route_id)
             .await
             .unwrap();
-        let provider = &route.targets[0].provider_id;
+        let provider = route.targets[0].provider_id().as_str();
         fixture
             .app
             .gateway
@@ -490,6 +492,7 @@ async fn route_failover_handles_typed_status_and_transport_failures() {
                 "gpt-5.2",
                 crate::provider_models::CreateManualProviderModel {
                     metadata: json!({"id":"gpt-5.2","name":"Fallback GPT","tool_call":true,"capabilities":["media_image"]}),
+                    template_id: None,
                 },
             )
             .await

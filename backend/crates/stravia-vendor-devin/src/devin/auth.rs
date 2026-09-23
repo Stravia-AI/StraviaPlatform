@@ -28,20 +28,13 @@ struct PendingAuth {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TokenResponse {
-    #[serde(alias = "session_token")]
     session_token: Option<String>,
-    #[serde(alias = "api_key")]
     api_key: Option<String>,
-    #[serde(alias = "windsurf_api_key")]
     windsurf_api_key: Option<String>,
-    #[serde(alias = "access_token")]
     access_token: Option<String>,
-    #[serde(alias = "refresh_token")]
     refresh_token: Option<String>,
-    #[serde(alias = "expires_in")]
     expires_in: Option<i64>,
     scope: Option<String>,
-    #[serde(alias = "api_server_url")]
     api_server_url: Option<String>,
 }
 

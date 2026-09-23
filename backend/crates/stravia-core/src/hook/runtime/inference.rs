@@ -127,7 +127,7 @@ impl DetachedPlatformExecution {
         tools
             .execute(
                 &call.tool_id,
-                call.call.id.clone(),
+                call.call.id.to_string(),
                 serde_json::from_str(&call.call.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(call.call.arguments.clone())),
                 context,

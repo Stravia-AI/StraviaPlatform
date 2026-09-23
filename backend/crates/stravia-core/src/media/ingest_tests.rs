@@ -49,15 +49,23 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         .unwrap();
     admin.create_manual_provider_model(&provider.id, "vision", crate::provider_models::CreateManualProviderModel {
         metadata: serde_json::json!({"id":"vision","name":"Vision","attachment":true,"tool_call":true,"modalities":{"input":["text","image"],"output":["text"]}}),
+        template_id: None,
     }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
             model_id: "vision".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("vision".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("vision".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -72,7 +80,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![route.id],
+            model_ids: vec![route.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -303,15 +311,22 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         })
         .await
         .unwrap();
-    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","attachment":true,"modalities":{"input":["text","image"],"output":["text","image"]}}) }).await.unwrap();
+    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","attachment":true,"modalities":{"input":["text","image"],"output":["text","image"]}}), template_id: None }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
             model_id: "painter".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("painter".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("painter".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -328,7 +343,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 transparent_injection_enabled: false,
                 inject_web_search: false,
                 inject_media_generation: false,
-                model_ids: vec![route.id.clone()],
+                model_ids: vec![route.id.clone().into()],
                 inject_media_understanding: false,
             })
             .await

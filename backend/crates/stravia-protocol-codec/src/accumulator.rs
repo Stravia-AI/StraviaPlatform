@@ -181,12 +181,12 @@ impl StreamResponseAccumulator {
                 ensure_tool_index(&mut self.tool_calls, *index);
                 if let Some(call) = self.tool_calls[*index].as_mut() {
                     if call.id.is_empty() && !id.is_empty() {
-                        call.id = id.clone();
+                        call.id = id.clone().into();
                     }
                     call.name.push_str(name);
                 } else {
                     self.tool_calls[*index] = Some(ToolCall {
-                        id: id.clone(),
+                        id: (id.clone()).into(),
                         name: name.clone(),
                         arguments: String::new(),
                     });
@@ -203,7 +203,7 @@ impl StreamResponseAccumulator {
                     tc.arguments.push_str(arguments);
                 } else {
                     self.tool_calls[*index] = Some(ToolCall {
-                        id: stravia_runtime_contract::identifier::new_id(),
+                        id: (stravia_runtime_contract::identifier::new_id()).into(),
                         name: String::new(),
                         arguments: arguments.clone(),
                     });

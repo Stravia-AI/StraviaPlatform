@@ -175,11 +175,11 @@ export const admin = {
       }),
     model: (id: string, modelId: string) =>
       request<ProviderModelDetail>('GET', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
-    createManualModel: (id: string, modelId: string, metadataJson: string) =>
+    createManualModel: (id: string, modelId: string, metadataJson: string, templateId?: string) =>
       request<ProviderModelDetail>(
         'POST',
         `/providers/${id}/models`,
-        `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson}}`,
+        `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson},"template_id":${JSON.stringify(templateId ?? null)}}`,
       ),
     updateModel: (id: string, modelId: string, metadataJson: string, revision: number) =>
       request<ProviderModelDetail>(

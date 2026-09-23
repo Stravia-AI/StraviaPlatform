@@ -137,15 +137,15 @@ impl MediaHost for GatewayHost {
 
 pub(crate) async fn route_metadata(
     gateway: &crate::Gateway,
-    route: &crate::db::models::Route,
+    route: &crate::db::models::RouteConfig,
 ) -> MediaRoute {
     let mut targets = Vec::with_capacity(route.targets.len());
     for target in &route.targets {
-        let metadata = if let Some(actual_model) = target.model.as_deref() {
+        let metadata = if let Some(actual_model) = target.model().map(|model| model.as_str()) {
             gateway
                 .storage
                 .provider_models()
-                .find(&target.provider_id, actual_model)
+                .find(target.provider_id().as_str(), actual_model)
                 .await
                 .ok()
                 .flatten()
@@ -154,8 +154,8 @@ pub(crate) async fn route_metadata(
             None
         };
         targets.push(MediaTarget {
-            provider_id: target.provider_id.clone(),
-            model: target.model.clone(),
+            provider_id: target.provider_id().clone().into(),
+            model: target.model().cloned().map(Into::into),
             input_modalities: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.modalities.as_ref())
@@ -165,7 +165,7 @@ pub(crate) async fn route_metadata(
         });
     }
     MediaRoute {
-        id: route.id.clone(),
+        id: route.id.clone().into(),
         is_enabled: route.is_enabled,
         targets,
     }
@@ -190,7 +190,7 @@ pub(crate) fn platform_tools(
 }
 pub(crate) async fn model_is_image_capable(
     gateway: &crate::Gateway,
-    model: &crate::db::models::Route,
+    model: &crate::db::models::RouteConfig,
 ) -> bool {
     stravia_media::platform::model_is_image_capable(&route_metadata(gateway, model).await)
 }

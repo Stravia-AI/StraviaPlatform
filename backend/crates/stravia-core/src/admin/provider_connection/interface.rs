@@ -369,6 +369,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_authorization_start_is_one_provider_operation() -> anyhow::Result<()> {
         let (_data_dir, gateway) = memory_gateway().await?;
+        crate::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex").await?;
         let admin = gateway.admin();
         let result = ProviderConnection::new(&admin)
             .reconnect(ProviderReconnect::Start(
@@ -483,6 +484,7 @@ mod tests {
     #[tokio::test]
     async fn vendor_options_validate_against_declared_fields_and_persist() -> anyhow::Result<()> {
         let (_data_dir, gateway) = memory_gateway().await?;
+        crate::plugin::test_support::install_distributed_vendor(&gateway, "command-code").await?;
         let admin = gateway.admin();
         let providers = ProviderConnection::new(&admin);
         let provider = providers
@@ -679,6 +681,7 @@ mod tests {
                         "id": "disposable-model",
                         "name": "Disposable Model"
                     }),
+                    template_id: None,
                 },
             )
             .await?;
@@ -738,6 +741,7 @@ mod tests {
                 "primary-model",
                 CreateManualProviderModel {
                     metadata: json!({"id": "primary-model", "name": "Primary Model"}),
+                    template_id: None,
                 },
             )
             .await?;
@@ -747,6 +751,7 @@ mod tests {
                 "fallback-model",
                 CreateManualProviderModel {
                     metadata: json!({"id": "fallback-model", "name": "Fallback Model"}),
+                    template_id: None,
                 },
             )
             .await?;
@@ -755,8 +760,6 @@ mod tests {
                 model_id: "durable-route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: primary.id.clone(),
-                target_model: Some("primary-model".into()),
                 targets: vec![
                     CreateTarget {
                         provider_id: primary.id.clone(),
@@ -787,10 +790,23 @@ mod tests {
 
         let routes = admin.list_models().await?;
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].target_provider, fallback.id);
-        assert_eq!(routes[0].target_model.as_deref(), Some("fallback-model"));
+        assert_eq!(
+            routes[0]
+                .primary_target()
+                .map(|target| target.provider_id().as_str()),
+            Some(fallback.id.as_str())
+        );
+        assert_eq!(
+            routes[0]
+                .primary_target()
+                .and_then(|target| target.model().map(|model| model.as_str())),
+            Some("fallback-model")
+        );
         assert_eq!(routes[0].targets.len(), 1);
-        assert_eq!(routes[0].targets[0].provider_id, fallback.id);
+        assert_eq!(
+            routes[0].targets[0].provider_id().as_str(),
+            fallback.id.as_str()
+        );
         assert!(
             gateway
                 .model_cache

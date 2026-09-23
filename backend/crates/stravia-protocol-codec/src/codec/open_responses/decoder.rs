@@ -539,10 +539,10 @@ pub(super) fn set_input_graph_metadata(item: &mut AiItem, wire: &Value) {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if !extras.is_empty() {
-            let meta = item.meta.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(meta) = meta.as_object_mut() {
-                meta.insert("__open_responses_item_fields".into(), Value::Object(extras));
-            }
+            item.meta
+                .get_or_insert_with(Default::default)
+                .insert_extension("__open_responses_item_fields", Value::Object(extras))
+                .expect("item fields is not reserved");
         }
     }
     let id = wire
@@ -607,7 +607,11 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 content: MessageContent::Blocks(vec![block]),
                 tool_calls: None,
                 tool_call_id: None,
-                meta: Some(serde_json::json!({"__open_responses_item": item})),
+                meta: Some(
+                    stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                        serde_json::json!({"__open_responses_item": item}),
+                    ),
+                ),
             };
             set_input_graph_metadata(&mut canonical, item);
             Ok(Some(canonical))
@@ -623,9 +627,13 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 content: MessageContent::Text(String::new()),
                 tool_calls: None,
                 tool_call_id: None,
-                meta: Some(serde_json::json!({
-                    "__open_responses_item_reference": id
-                })),
+                meta: Some(
+                    stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                        serde_json::json!({
+                            "__open_responses_item_reference": id
+                        }),
+                    ),
+                ),
             }))
         }
         "reasoning" => {
@@ -682,7 +690,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                     role: Role::Tool,
                     content,
                     tool_calls: None,
-                    tool_call_id: Some(call_id),
+                    tool_call_id: Some((call_id).into()),
                     meta: None,
                 }
                 .with_plain_tool_text_kind(),
@@ -716,7 +724,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 role: Role::Assistant,
                 content: MessageContent::Text(String::new()),
                 tool_calls: Some(vec![ToolCall {
-                    id: call_id,
+                    id: (call_id).into(),
                     name,
                     arguments,
                 }]),
@@ -891,7 +899,9 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
             content,
             tool_calls: None,
             tool_call_id: None,
-            meta: (!meta.is_empty()).then_some(Value::Object(meta)),
+            meta: (!meta.is_empty()).then(|| {
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(Value::Object(meta))
+            }),
         }
         .with_plain_tool_text_kind(),
     ))

@@ -126,10 +126,10 @@ fn prepare_reasoning_history(vendor_id: &str, model: &str, request: &mut AiReque
         if item.role != Role::Assistant {
             continue;
         }
-        let meta = item.meta.get_or_insert_with(|| json!({}));
-        if let Some(meta) = meta.as_object_mut() {
-            meta.entry("reasoning_content")
-                .or_insert_with(|| Value::String(String::new()));
+        let meta = item.meta.get_or_insert_with(Default::default);
+        if meta.object_extensions().is_some() && meta.get("reasoning_content").is_none() {
+            meta.insert_extension("reasoning_content", Value::String(String::new()))
+                .expect("reasoning content is not reserved");
         }
     }
 }

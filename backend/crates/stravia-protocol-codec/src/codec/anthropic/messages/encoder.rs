@@ -400,7 +400,7 @@ fn encode_message(
         }));
     }
 
-    let meta_obj = msg.meta.as_ref().and_then(|m| m.as_object());
+    let meta_obj = msg.meta.as_ref().and_then(|m| m.object_extensions());
     let content = match &msg.content {
         MessageContent::Text(t) => {
             let reasoning = meta_obj
@@ -638,7 +638,7 @@ fn anthropic_tool_result_payload(
                         tool_use_id,
                         content,
                         ..
-                    } => return (content.clone(), Some(tool_use_id.clone())),
+                    } => return (content.clone(), Some(tool_use_id.to_string())),
                     _ => {}
                 }
             }
@@ -655,7 +655,7 @@ fn anthropic_tool_result_payload(
                         })
                         .collect(),
                 ),
-                msg.tool_call_id.clone(),
+                msg.tool_call_id.as_ref().map(ToString::to_string),
             )
         }
     }

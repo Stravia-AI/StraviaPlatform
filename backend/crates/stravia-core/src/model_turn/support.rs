@@ -59,7 +59,7 @@ pub(crate) fn ai_response_to_deltas(
         } else if let Some(call) = item.function_call_ref() {
             deltas.push(AiStreamDelta::ToolCallStart {
                 index: output_index,
-                id: call.id.clone(),
+                id: call.id.to_string(),
                 name: call.name.clone(),
             });
             if !call.arguments.is_empty() {

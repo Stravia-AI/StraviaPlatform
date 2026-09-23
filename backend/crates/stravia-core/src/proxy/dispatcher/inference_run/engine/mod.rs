@@ -664,7 +664,7 @@ pub(super) async fn orchestrate(
         .resolve(&request.model)
         .map(|model| {
             (
-                model.id.clone(),
+                model.id.clone().into(),
                 Some(model.effective_display_name().to_owned()),
             )
         })

@@ -138,8 +138,7 @@ def _create_connection(
         {
             "model_id": model_id,
             "display_name": f"{name} route",
-            "target_provider": provider_id,
-            "target_model": "fixture-model",
+            "targets": [{"provider_id": provider_id, "model": "fixture-model"}],
         },
     )
     assert status == 200, body

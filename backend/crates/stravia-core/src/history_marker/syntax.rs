@@ -388,22 +388,17 @@ fn mark_restored(
         provenance,
         stravia_runtime_contract::protocol::ir::AiItemAudience::Internal,
     );
-    item.meta
-        .as_mut()
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("graph metadata is an object")
-        .insert(
-            "__stravia_history_marker_restored".into(),
-            serde_json::Value::Bool(true),
-        );
-    item.meta
-        .as_mut()
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("graph metadata is an object")
-        .insert(
-            "__stravia_history_marker_reference".into(),
-            serde_json::Value::String(reference.to_owned()),
-        );
+    let meta = item.meta.as_mut().expect("graph metadata set above");
+    meta.insert_extension(
+        "__stravia_history_marker_restored",
+        serde_json::Value::Bool(true),
+    )
+    .expect("marker key is not reserved");
+    meta.insert_extension(
+        "__stravia_history_marker_reference",
+        serde_json::Value::String(reference.to_owned()),
+    )
+    .expect("marker key is not reserved");
     item
 }
 
@@ -608,7 +603,7 @@ fn legacy_cleaned_item(original: &AiItem, atoms: &[CarrierAtom]) -> Option<AiIte
 fn client_fragment(
     original: &AiItem,
     block: ContentBlock,
-    meta: &mut Option<serde_json::Value>,
+    meta: &mut Option<Box<stravia_runtime_contract::protocol::ir::AiItemMetadata>>,
 ) -> AiItem {
     AiItem {
         role: original.role,

@@ -502,7 +502,7 @@ pub(crate) fn safe_error_details(stage: StartupStage, error: &anyhow::Error) -> 
         .to_ascii_lowercase();
     match stage {
         StartupStage::DataDirectory if categories.contains("legacy data layout") => {
-            "The data directory uses an older layout. Run `stravia-tools migrate-data` before starting Stravia."
+            "The data directory uses an incompatible older layout that this version cannot upgrade. Move it aside or start with a fresh data directory."
         }
         StartupStage::DataDirectory
             if categories.contains("in use by another instance")

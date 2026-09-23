@@ -40,6 +40,7 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
               name: 'Prefill model',
               available: true,
               source_kind: 'discovered',
+              snapshot_state: { type: 'unregistered' },
               selection_policy: 'auto',
               specification: {
                 limit: null,
@@ -592,6 +593,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     name: 'GPT Available',
     available: true,
     source_kind: 'discovered',
+    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
       limit: { context: 1050000, input: 1048576, output: 32000 },
@@ -840,7 +842,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => createAttempts).toBe(2)
   expect(createBody?.model_id).toBe('gpt-5.4')
-  expect(createBody?.display_name).toBe('')
+  expect(createBody?.display_name).toBeNull()
   await expect.poll(() => disableBody?.is_enabled).toBe(false)
   await expect(page).toHaveURL(/\/models$/)
   await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
@@ -944,10 +946,10 @@ test('Provider-managed search saves a Provider-only Target with null model ident
     .poll(() => createBody)
     .toMatchObject({
       model_id: 'search-route',
-      target_provider: provider.id,
-      target_model: null,
       targets: [{ provider_id: provider.id, model: null, enabled: true, priority: 0 }],
     })
+  expect(createBody).not.toHaveProperty('target_provider')
+  expect(createBody).not.toHaveProperty('target_model')
 })
 
 test('Provider-managed search waits for descriptors, recovers errors, and applies real capability support', async ({

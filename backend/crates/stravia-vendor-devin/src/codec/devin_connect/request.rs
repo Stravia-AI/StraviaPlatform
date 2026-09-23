@@ -904,7 +904,7 @@ fn encode_user_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()>
                     ChatMsg {
                         source: SOURCE_TOOL_RESULT,
                         text: tool_result_text(content),
-                        tool_call_id: Some(tool_use_id.clone()),
+                        tool_call_id: Some(tool_use_id.clone().into_string()),
                         tool_error: *is_error == Some(true),
                         ..ChatMsg::default()
                     },
@@ -1989,7 +1989,7 @@ mod tests {
         ]);
         let result = |id: &str| {
             let mut item = text_item(Role::Tool, "out");
-            item.tool_call_id = Some(id.to_string());
+            item.tool_call_id = Some(id.into());
             item
         };
         // Results arrive out of call order plus one orphan.

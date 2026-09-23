@@ -10,7 +10,7 @@ pub use negotiator::{
     OrderedStrategy, ProtocolMode, ProtocolPlan, RoutingStrategy, get_routing_strategy, negotiate,
 };
 
-use crate::db::models::{Route, Target};
+use crate::db::models::{RouteConfig, TargetConfig};
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 // ── Plan ──────────────────────────────────────────────────────────────────────
@@ -20,9 +20,9 @@ use stravia_runtime_contract::protocol::ids::ProtocolId;
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// The route that was matched.
-    pub route: Route,
+    pub route: RouteConfig,
     /// The ordered list of targets to try (already sorted by strategy).
-    pub ordered_targets: Vec<Target>,
+    pub ordered_targets: Vec<TargetConfig>,
     /// The ingress protocol (copied from `RequestContext`).
     pub ingress: ProtocolId,
     /// The resolved protocol negotiation plan.

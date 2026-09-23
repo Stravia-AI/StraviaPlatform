@@ -228,6 +228,7 @@ async fn provider_route_and_key(
             upstream_model,
             CreateManualProviderModel {
                 metadata: model_metadata,
+                template_id: None,
             },
         )
         .await?;
@@ -237,9 +238,16 @@ async fn provider_route_and_key(
             model_id: format!("{name}-route"),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some(upstream_model.to_string()),
-            targets: Vec::new(),
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some(upstream_model.to_string()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -255,10 +263,10 @@ async fn provider_route_and_key(
             inject_media_understanding: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![route.id],
+            model_ids: vec![route.id.into()],
         })
         .await?;
-    Ok((route.model_id, key.token))
+    Ok((route.model_id.into(), key.token))
 }
 
 async fn chat(gateway: Gateway, token: &str, body: Value) -> anyhow::Result<(StatusCode, Value)> {
@@ -501,7 +509,7 @@ async fn supplemental_discovery_capabilities_preserve_explicit_model_specificati
         {"id":"minimax-m3","tool_call":true,"reasoning":true,"attachment":true,"structured_output":true},
         {"id":"explicitly-disabled","tool_call":false,"reasoning":false,
             "capabilities":["tools","reasoning"]},
-        {"id":"capabilities-only","capabilities":["image_input","structured_output"]}
+        {"id":"capabilities-only","capabilities":["image_input","structured_output"],"context_window":16384}
     ]}))).await?;
     let (_directory, gateway) = gateway().await?;
     let provider = gateway
@@ -544,6 +552,23 @@ async fn supplemental_discovery_capabilities_preserve_explicit_model_specificati
         .await?;
     assert_eq!(inferred.metadata.attachment, Some(true));
     assert_eq!(inferred.metadata.structured_output, Some(true));
+    assert_eq!(
+        inferred
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
+        Some(16384)
+    );
+    assert_eq!(
+        inferred
+            .metadata
+            .modalities
+            .as_ref()
+            .expect("discovered input")
+            .input,
+        ["image"]
+    );
     server.await??;
     Ok(())
 }
@@ -2292,9 +2317,16 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             model_id: "devin-contract-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("claude-opus-4.8".into()),
-            targets: Vec::new(),
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("claude-opus-4.8".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -2310,7 +2342,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             inject_media_understanding: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![route.id],
+            model_ids: vec![route.id.into()],
         })
         .await?;
     let request = json!({

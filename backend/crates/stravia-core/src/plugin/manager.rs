@@ -1226,7 +1226,7 @@ async fn binding_impacts(
     let mut impacts = Vec::new();
     for route in gw.storage.routes().list().await? {
         for target in route.targets {
-            let Some(provider) = providers.get(target.provider_id.as_str()) else {
+            let Some(provider) = providers.get(target.provider_id().as_str()) else {
                 continue;
             };
             let descriptor = provider.vendor.as_ref().and_then(|id| profiles.get(id));
@@ -1247,10 +1247,10 @@ async fn binding_impacts(
                     .find(|channel| Some(channel.id.as_str()) == provider.channel.as_deref())
             });
             let mut required = bound_capabilities
-                .get(&route.model_id)
+                .get(route.model_id.as_str())
                 .cloned()
                 .unwrap_or_default();
-            if target.model.is_none() {
+            if target.model().is_none() {
                 required.insert(Capability::Search);
             } else if required.is_empty()
                 || previous_channel
@@ -1263,25 +1263,24 @@ async fn binding_impacts(
                     && channel.is_some_and(|channel| {
                         channel.capabilities.contains(&capability)
                             && match capability {
-                                Capability::Infer => target.model.is_some(),
+                                Capability::Infer => target.model().is_some(),
                                 Capability::Search => {
                                     !channel.search_model_required
-                                        || target.model.as_deref().is_some_and(|model| {
-                                            !model.trim().is_empty() && model != "*"
+                                        || target.model().is_some_and(|model| {
+                                            !model.trim().is_empty() && model.as_str() != "*"
                                         })
                                 }
-                                Capability::MediaImage => target
-                                    .model
-                                    .as_deref()
-                                    .is_some_and(|model| !model.trim().is_empty() && model != "*"),
+                                Capability::MediaImage => target.model().is_some_and(|model| {
+                                    !model.trim().is_empty() && model.as_str() != "*"
+                                }),
                                 _ => true,
                             }
                     });
                 if !supported {
                     impacts.push(PluginBindingImpact {
-                        route_id: route.model_id.clone(),
+                        route_id: route.model_id.clone().into(),
                         provider_id: provider.id.clone(),
-                        upstream_model: target.model.clone(),
+                        upstream_model: target.model().cloned().map(Into::into),
                         capability: capability.as_str().to_owned(),
                     });
                 }

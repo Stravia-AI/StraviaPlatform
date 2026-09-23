@@ -198,14 +198,13 @@ impl WebProviderStore for PostgresWebProviderStore {
         )))
         .fetch_all(&mut *tx)
         .await?;
-        let api_key_permissions = sqlx::query_scalar::<_, bool>(
-            "SELECT COALESCE(is_enabled, TRUE) FROM api_keys WHERE id = $1",
-        )
-        .bind(api_key_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .map(|api_key_enabled| WebAccessApiKeyPermissions { api_key_enabled })
-        .unwrap_or_default();
+        let api_key_permissions =
+            sqlx::query_scalar::<_, bool>("SELECT is_enabled FROM api_keys WHERE id = $1")
+                .bind(api_key_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|api_key_enabled| WebAccessApiKeyPermissions { api_key_enabled })
+                .unwrap_or_default();
         tx.commit().await?;
 
         let values = rows

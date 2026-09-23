@@ -110,7 +110,11 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
         name: "lookup".into(),
         arguments: "{}".into(),
     }]);
-    mixed.meta = Some(json!({"ordinary":"retained"}));
+    mixed.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            json!({"ordinary":"retained"}),
+        ),
+    );
     request.items.insert(1, mixed);
     request.items.insert(
         2,
@@ -123,7 +127,12 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     ));
     assert_eq!(request.items.len(), 3);
     assert_eq!(
-        request.items[0].meta.as_ref().unwrap()["ordinary"],
+        request.items[0]
+            .meta
+            .as_ref()
+            .unwrap()
+            .get("ordinary")
+            .unwrap(),
         "retained"
     );
     let body = pair.encode_request(&request).unwrap().body;
@@ -1631,14 +1640,16 @@ fn response_annotations_and_logprobs_fail_closed_outside_open_responses() {
         )
         .expect("registered protocol pair");
     let mut item = AiItem::output_text("answer");
-    item.meta = Some(json!({
-        "__open_responses_content": [{
-            "type": "output_text",
-            "text": "answer",
-            "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-            "logprobs": [{"token": "answer", "logprob": -0.1}]
-        }]
-    }));
+    item.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(json!({
+            "__open_responses_content": [{
+                "type": "output_text",
+                "text": "answer",
+                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                "logprobs": [{"token": "answer", "logprob": -0.1}]
+            }]
+        })),
+    );
     let mut response = AiResponse::new("resp-metadata", "logical-model");
     response.items.push(item);
 

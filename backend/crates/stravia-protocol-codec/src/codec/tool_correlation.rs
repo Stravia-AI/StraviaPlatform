@@ -4,7 +4,7 @@ use stravia_runtime_contract::protocol::ir::request::AiRequest;
 use stravia_runtime_contract::protocol::ir::request::ContentBlock;
 use stravia_runtime_contract::protocol::ir::request::MessageContent;
 use stravia_runtime_contract::protocol::ir::request::Role;
-use stravia_runtime_contract::protocol::ir::request::ToolCall;
+use stravia_runtime_contract::protocol::ir::request::{ToolCall, ToolCallId};
 
 pub fn normalize_request_tool_results(req: &mut AiRequest) {
     let mut supplied_ids = HashSet::new();
@@ -15,7 +15,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
                     .iter()
                     .map(|call| call.id.trim())
                     .filter(|id| !id.is_empty())
-                    .map(str::to_owned),
+                    .map(ToolCallId::new),
             );
         }
         if let Some(id) = msg
@@ -23,7 +23,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
             .as_deref()
             .filter(|id| !id.trim().is_empty())
         {
-            supplied_ids.insert(id.to_owned());
+            supplied_ids.insert(ToolCallId::new(id));
         }
         if let Some(id) = extract_tool_result_hint(&msg.content) {
             supplied_ids.insert(id);
@@ -41,7 +41,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
         .get(stravia_runtime_contract::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META)
         .and_then(serde_json::Value::as_bool)
         == Some(true);
-    let mut pending_calls: VecDeque<(String, String)> = VecDeque::new();
+    let mut pending_calls: VecDeque<(ToolCallId, String)> = VecDeque::new();
     let mut generated_id_seq: usize = 0;
     let mut normalized_messages: Vec<AiItem> = Vec::with_capacity(req.items.len());
 
@@ -71,7 +71,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
             .cloned();
         let has_existing_id = existing_id.is_some();
 
-        let mut resolved_id: Option<String> = None;
+        let mut resolved_id: Option<ToolCallId> = None;
         let mut has_linked_pending_call = false;
 
         if let Some(id) = existing_id.as_ref()
@@ -101,7 +101,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
             && let Some(hint) = hinted_value.clone()
             && let Some(pos) = pending_calls
                 .iter()
-                .position(|(_, pending_name)| pending_name.eq_ignore_ascii_case(&hint))
+                .position(|(_, pending_name)| pending_name.eq_ignore_ascii_case(hint.as_str()))
             && let Some((call_id, _)) = pending_calls.remove(pos)
         {
             resolved_id = Some(call_id);
@@ -128,7 +128,9 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
 
         let final_id = resolved_id.expect("final tool_call_id should always exist");
         if !has_linked_pending_call && !(inherits_tool_calls && has_existing_id) {
-            let synth_name = hinted_value.unwrap_or_else(|| "unknown_tool".to_string());
+            let synth_name = hinted_value
+                .map(ToolCallId::into_string)
+                .unwrap_or_else(|| "unknown_tool".to_string());
             normalized_messages.push(AiItem {
                 role: Role::Assistant,
                 content: MessageContent::Text(String::new()),
@@ -149,17 +151,20 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
     req.items = normalized_messages;
 }
 
-fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {
+fn next_synthetic_tool_call_id(
+    sequence: &mut usize,
+    supplied_ids: &HashSet<ToolCallId>,
+) -> ToolCallId {
     loop {
         *sequence += 1;
         let id = format!("tc_{}", *sequence);
-        if !supplied_ids.contains(&id) {
-            return id;
+        if !supplied_ids.contains(id.as_str()) {
+            return ToolCallId::new(id);
         }
     }
 }
 
-fn extract_tool_result_hint(content: &MessageContent) -> Option<String> {
+fn extract_tool_result_hint(content: &MessageContent) -> Option<ToolCallId> {
     let MessageContent::Blocks(blocks) = content else {
         return None;
     };

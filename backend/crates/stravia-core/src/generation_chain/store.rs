@@ -108,19 +108,14 @@ pub(crate) async fn hydrate_response_artifact_references(
             }));
         }
         if !hydrated_artifacts.is_empty() {
-            let mut meta = message
+            message
                 .meta
-                .take()
-                .map(|value| match value {
-                    serde_json::Value::Object(object) => object,
-                    other => serde_json::Map::from_iter([("vendor_meta".into(), other)]),
-                })
-                .unwrap_or_default();
-            meta.insert(
-                "__stravia_artifact_references".into(),
-                serde_json::Value::Array(hydrated_artifacts),
-            );
-            message.meta = Some(serde_json::Value::Object(meta));
+                .get_or_insert_with(Default::default)
+                .insert_graph_extension(
+                    "__stravia_artifact_references",
+                    serde_json::Value::Array(hydrated_artifacts),
+                )
+                .expect("artifact reference key is not reserved");
         }
     }
     Ok(())
@@ -845,7 +840,6 @@ impl GenerationChainStore {
             compaction_record_ids: parent.compaction_record_ids.clone(),
             effective_history_mutation: Some(effective_history_mutation),
             effective_system,
-            effective_input: Vec::new(),
             client_history: Some(client_history),
             effective_output: response,
             trusted_media_turn_ids,

@@ -112,13 +112,13 @@ impl<'a> RouteModule<'a> {
             .collect())
     }
 
-    pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<Route> {
-        let mut targets = normalize_create_route_targets(&input)?;
-        self.ensure_new_targets_available(&[], &targets).await?;
-        self.prepare_thinking_maps(&[], &mut targets).await?;
-        self.ensure_thinking_controls_representable(&targets)
+    pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<RouteConfig> {
+        ensure_route_targets_valid(&input.targets)?;
+        self.ensure_new_targets_available(&[], &input.targets)
             .await?;
-        input.targets = targets;
+        self.prepare_thinking_maps(&[], &mut input.targets).await?;
+        self.ensure_thinking_controls_representable(&input.targets)
+            .await?;
         self.create_record(input).await
     }
 
@@ -126,37 +126,22 @@ impl<'a> RouteModule<'a> {
         &self,
         route_id: &str,
         mut input: UpdateRoute,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         let current = self.get(route_id).await?;
-        let mut targets = normalize_update_route_targets(&current, &input)?;
-        self.ensure_new_targets_available(&current.targets, &targets)
-            .await?;
-        self.prepare_thinking_maps(&current.targets, &mut targets)
-            .await?;
-        self.ensure_thinking_controls_representable(&targets)
-            .await?;
-        input.targets = Some(
-            targets
-                .iter()
-                .map(|target| UpsertTarget {
-                    id: None,
-                    provider_id: target.provider_id.clone(),
-                    model: target.model.clone(),
-                    enabled: target.enabled,
-                    priority: target.priority,
-                    first_token_timeout_ms: target.first_token_timeout_ms,
-                    target_retry_budget: target.target_retry_budget,
-                    target_cooldown_ms: target.target_cooldown_ms,
-                    thinking_level_map: target.thinking_level_map.clone(),
-                })
-                .collect(),
-        );
+        if let Some(targets) = input.targets.as_mut() {
+            ensure_route_targets_valid(targets)?;
+            self.ensure_new_targets_available(&current.targets, targets)
+                .await?;
+            self.prepare_thinking_maps(&current.targets, targets)
+                .await?;
+            self.ensure_thinking_controls_representable(targets).await?;
+        }
         self.change_record(route_id, input).await
     }
 
     async fn ensure_new_targets_available(
         &self,
-        existing: &[Target],
+        existing: &[TargetConfig],
         proposed: &[CreateTarget],
     ) -> anyhow::Result<()> {
         for target in proposed {
@@ -167,8 +152,11 @@ impl<'a> RouteModule<'a> {
                 .map(normalize_model_id)
                 .transpose()?;
             if existing.iter().any(|current| {
-                current.provider_id == provider_id
-                    && same_target_model(current.model.as_deref(), provider_model_id.as_deref())
+                current.provider_id().as_str() == provider_id
+                    && same_target_model(
+                        current.model().map(|model| model.as_str()),
+                        provider_model_id.as_deref(),
+                    )
             }) {
                 continue;
             }
@@ -278,17 +266,17 @@ impl<'a> RouteModule<'a> {
             route
                 .targets
                 .iter()
-                .any(|target| target.provider_id == original_provider_id)
+                .any(|target| target.provider_id().as_str() == original_provider_id)
         }) {
             let copied_targets = route
                 .targets
                 .iter()
-                .filter(|target| target.provider_id == original_provider_id)
+                .filter(|target| target.provider_id().as_str() == original_provider_id)
                 .cloned()
                 .collect::<Vec<_>>();
 
             for target in &copied_targets {
-                if let Some(model) = target.model.as_deref() {
+                if let Some(model) = target.model().map(|model| model.as_str()) {
                     self.copy_provider_model(original_provider_id, copied_provider_id, model)
                         .await?;
                 }
@@ -297,28 +285,29 @@ impl<'a> RouteModule<'a> {
             let mut targets = route
                 .targets
                 .iter()
-                .map(|target| UpsertTarget {
-                    id: Some(target.id.clone()),
-                    provider_id: target.provider_id.clone(),
-                    model: target.model.clone(),
+                .map(|target| CreateTarget {
+                    provider_id: target.provider_id().clone().into(),
+                    model: target.model().cloned().map(Into::into),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    thinking_level_map: target.thinking_level_map.0.clone(),
+                    thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect::<Vec<_>>();
-            targets.extend(copied_targets.into_iter().map(|target| UpsertTarget {
-                id: None,
-                provider_id: copied_provider_id.to_string(),
-                model: target.model,
-                enabled: target.enabled,
-                priority: Some(target.priority),
-                first_token_timeout_ms: Some(target.first_token_timeout_ms),
-                target_retry_budget: Some(target.target_retry_budget),
-                target_cooldown_ms: Some(target.target_cooldown_ms),
-                thinking_level_map: Vec::new(),
+            targets.extend(copied_targets.into_iter().map(|target| {
+                let (_, model) = target.destination.into_parts();
+                CreateTarget {
+                    provider_id: copied_provider_id.to_string(),
+                    model: model.map(Into::into),
+                    enabled: target.enabled,
+                    priority: Some(target.priority),
+                    first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                    target_retry_budget: Some(target.target_retry_budget),
+                    target_cooldown_ms: Some(target.target_cooldown_ms),
+                    thinking_level_map: Vec::new(),
+                }
             }));
 
             self.change(
@@ -356,6 +345,7 @@ impl<'a> RouteModule<'a> {
                 metadata_source_provider_id: original.metadata_source_provider_id,
                 presence: original.presence,
                 selection_policy: original.selection_policy,
+                snapshot_state: original.snapshot_state,
                 metadata: original.metadata,
             },
             None => NewProviderModelRecord {
@@ -365,6 +355,7 @@ impl<'a> RouteModule<'a> {
                 metadata_source_provider_id: None,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
+                snapshot_state: crate::provider_models::SnapshotState::Edited { source: None },
                 metadata: serde_json::from_value(serde_json::json!({
                     "id": provider_model_id,
                     "name": provider_model_id,
@@ -384,7 +375,7 @@ impl<'a> RouteModule<'a> {
         self.delete_record(route_id).await
     }
 
-    pub(crate) async fn bind(&self, input: RouteBind) -> anyhow::Result<Route> {
+    pub(crate) async fn bind(&self, input: RouteBind) -> anyhow::Result<RouteConfig> {
         let (
             route_id,
             provider_id,
@@ -449,10 +440,13 @@ impl<'a> RouteModule<'a> {
         }
         if let Some(existing) = existing.as_ref()
             && existing.targets.iter().any(|target| {
-                target.provider_id == provider_id
-                    && target.model.as_deref().is_some_and(|model| {
-                        model_id_match_key(model) == model_id_match_key(&provider_model_id)
-                    })
+                target.provider_id().as_str() == provider_id
+                    && target
+                        .model()
+                        .map(|model| model.as_str())
+                        .is_some_and(|model| {
+                            model_id_match_key(model) == model_id_match_key(&provider_model_id)
+                        })
             })
         {
             return Ok(existing.clone());
@@ -493,8 +487,6 @@ impl<'a> RouteModule<'a> {
                     model_id: route_id,
                     display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),
-                    target_provider: provider_id.clone(),
-                    target_model: Some(provider_model_id.clone()),
                     default_thinking_level: None,
                     targets: vec![CreateTarget {
                         provider_id,
@@ -510,8 +502,8 @@ impl<'a> RouteModule<'a> {
                 .await;
         };
         if existing.targets.iter().any(|target| {
-            target.provider_id == provider_id
-                && target.model.as_deref() == Some(provider_model_id.as_str())
+            target.provider_id().as_str() == provider_id
+                && target.model().map(|model| model.as_str()) == Some(provider_model_id.as_str())
         }) {
             return Ok(existing);
         }
@@ -519,20 +511,18 @@ impl<'a> RouteModule<'a> {
         let mut targets = existing
             .targets
             .iter()
-            .map(|target| UpsertTarget {
-                id: Some(target.id.clone()),
-                provider_id: target.provider_id.clone(),
-                model: target.model.clone(),
+            .map(|target| CreateTarget {
+                provider_id: target.provider_id().clone().into(),
+                model: target.model().cloned().map(Into::into),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                thinking_level_map: target.thinking_level_map.0.clone(),
+                thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
-        targets.push(UpsertTarget {
-            id: None,
+        targets.push(CreateTarget {
             provider_id,
             model: Some(provider_model_id),
             enabled: true,
@@ -552,7 +542,7 @@ impl<'a> RouteModule<'a> {
         .await
     }
 
-    pub(crate) async fn unbind(&self, input: RouteUnbind) -> anyhow::Result<Option<Route>> {
+    pub(crate) async fn unbind(&self, input: RouteUnbind) -> anyhow::Result<Option<RouteConfig>> {
         let route_id = normalize_name(&input.route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&input.provider_model_id)?;
         let route = self
@@ -567,19 +557,19 @@ impl<'a> RouteModule<'a> {
             .targets
             .iter()
             .filter(|target| {
-                target.provider_id != input.provider_id
-                    || target.model.as_deref() != Some(provider_model_id.as_str())
+                target.provider_id().as_str() != input.provider_id
+                    || target.model().map(|model| model.as_str())
+                        != Some(provider_model_id.as_str())
             })
-            .map(|target| UpsertTarget {
-                id: Some(target.id.clone()),
-                provider_id: target.provider_id.clone(),
-                model: target.model.clone(),
+            .map(|target| CreateTarget {
+                provider_id: target.provider_id().clone().into(),
+                model: target.model().cloned().map(Into::into),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                thinking_level_map: target.thinking_level_map.0.clone(),
+                thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
         if targets.len() == route.targets.len() {
@@ -602,7 +592,7 @@ impl<'a> RouteModule<'a> {
 }
 
 impl AdminService {
-    pub async fn bind_route(&self, input: BindRouteInput) -> anyhow::Result<Route> {
+    pub async fn bind_route(&self, input: BindRouteInput) -> anyhow::Result<RouteConfig> {
         let bind = match input.route_id {
             Some(route_id) => RouteBind::At {
                 route_id,
@@ -627,7 +617,10 @@ impl AdminService {
         RouteModule::new(self).bind(bind).await
     }
 
-    pub async fn unbind_route(&self, input: UnbindRouteInput) -> anyhow::Result<Option<Route>> {
+    pub async fn unbind_route(
+        &self,
+        input: UnbindRouteInput,
+    ) -> anyhow::Result<Option<RouteConfig>> {
         RouteModule::new(self)
             .unbind(RouteUnbind {
                 route_id: input.route_id,
@@ -642,7 +635,7 @@ impl AdminService {
         route_id: &str,
         target_id: &str,
         level: ThinkingLevel,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         RouteModule::new(self)
             .reset_thinking_mapping(route_id, target_id, level)
             .await
@@ -652,7 +645,7 @@ impl AdminService {
         &self,
         route_id: &str,
         target_id: &str,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         RouteModule::new(self)
             .regenerate_thinking_map(route_id, target_id)
             .await
@@ -667,35 +660,21 @@ fn same_target_model(left: Option<&str>, right: Option<&str>) -> bool {
     }
 }
 
-fn route_targets_for_update(route: &Route) -> Vec<UpsertTarget> {
+fn route_targets_for_update(route: &RouteConfig) -> Vec<CreateTarget> {
     route
         .targets
         .iter()
-        .map(|target| UpsertTarget {
-            id: Some(target.id.clone()),
-            provider_id: target.provider_id.clone(),
-            model: target.model.clone(),
+        .map(|target| CreateTarget {
+            provider_id: target.provider_id().clone().into(),
+            model: target.model().cloned().map(Into::into),
             enabled: target.enabled,
             priority: Some(target.priority),
             first_token_timeout_ms: Some(target.first_token_timeout_ms),
             target_retry_budget: Some(target.target_retry_budget),
             target_cooldown_ms: Some(target.target_cooldown_ms),
-            thinking_level_map: target.thinking_level_map.0.clone(),
+            thinking_level_map: target.thinking_level_map.clone(),
         })
         .collect()
-}
-
-fn create_backend_from_upsert(target: &UpsertTarget) -> CreateTarget {
-    CreateTarget {
-        provider_id: target.provider_id.clone(),
-        model: target.model.clone(),
-        enabled: target.enabled,
-        priority: target.priority,
-        first_token_timeout_ms: target.first_token_timeout_ms,
-        target_retry_budget: target.target_retry_budget,
-        target_cooldown_ms: target.target_cooldown_ms,
-        thinking_level_map: target.thinking_level_map.clone(),
-    }
 }
 
 #[cfg(test)]

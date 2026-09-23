@@ -439,7 +439,11 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
         ]),
         tool_calls: Some(vec![public_call.clone()]),
         tool_call_id: None,
-        meta: Some(serde_json::json!({"reasoning_content": "summary"})),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"reasoning_content": "summary"}),
+            ),
+        ),
     };
     let result =
         AiItem::function_call_output("call_public", serde_json::Value::String("result".into()));
@@ -453,9 +457,11 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
 
     let mut restored =
         AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("encrypted".into()));
-    restored.meta = Some(serde_json::json!({
-        "__stravia_history_marker_restored": true
-    }));
+    restored.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            "__stravia_history_marker_restored": true
+        })),
+    );
     let stripped = AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
@@ -470,7 +476,11 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
         ]),
         tool_calls: Some(vec![public_call]),
         tool_call_id: None,
-        meta: Some(serde_json::json!({"reasoning_content": "summary"})),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"reasoning_content": "summary"}),
+            ),
+        ),
     };
     let mut effective = write.request().clone();
     effective.items = vec![user_message("question"), restored, stripped, result];
@@ -761,9 +771,11 @@ async fn begin_reports_a_typed_missing_item_reference_error() {
     let chain = generation_chain().await;
     let owner = principal("owner");
     let mut reference = user_message("");
-    reference.meta = Some(serde_json::json!({
-        "__open_responses_item_reference": "msg_missing"
-    }));
+    reference.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            "__open_responses_item_reference": "msg_missing"
+        })),
+    );
 
     let error = chain
         .begin(owner, responses_request(vec![reference]))

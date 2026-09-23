@@ -485,6 +485,7 @@ async fn media_test_app_with_answer(
                     "attachment": true,
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
+                template_id: None,
             },
         )
         .await
@@ -495,9 +496,16 @@ async fn media_test_app_with_answer(
             model_id: "mcp-vision".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("vision".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("vision".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -506,7 +514,7 @@ async fn media_test_app_with_answer(
         .admin()
         .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
-            model_id: Some(model.id),
+            model_id: Some(model.id.into()),
             thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
         })
         .await

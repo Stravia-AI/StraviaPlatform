@@ -79,6 +79,7 @@ mod tests {
                         "id": "tool-model",
                         "tool_call": true,
                     }),
+                    template_id: None,
                 },
             )
             .await
@@ -88,9 +89,16 @@ mod tests {
                 model_id: "Search Model".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: provider.id.clone(),
-                target_model: Some("tool-model".into()),
-                targets: vec![],
+                targets: vec![crate::db::models::CreateTarget {
+                    provider_id: provider.id.clone(),
+                    model: Some("tool-model".into()),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
                 default_thinking_level: None,
             })
             .await
@@ -102,7 +110,7 @@ mod tests {
             .expect("eligible Models");
 
         assert_eq!(eligible.len(), 1);
-        assert_eq!(eligible[0].id, model.id);
+        assert_eq!(eligible[0].id, model.id.as_str());
         assert_eq!(eligible[0].model_id, "Search Model");
         assert_eq!(eligible[0].display_name, "Search Model");
 
@@ -117,7 +125,7 @@ mod tests {
         let config = WebSearchConfig {
             enabled: true,
             backend: Some(WebSearchBackendDraft::Local {
-                model_id: Some(model.id),
+                model_id: Some(model.id.into()),
             }),
             ..current.config
         };

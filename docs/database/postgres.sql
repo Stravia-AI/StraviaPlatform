@@ -13,6 +13,7 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -101,11 +102,11 @@ CREATE TABLE public.api_keys (
     id text NOT NULL,
     token text NOT NULL,
     name text NOT NULL,
-    is_enabled boolean DEFAULT true,
+    is_enabled boolean DEFAULT true NOT NULL,
     expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    mcp_access_enabled boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
@@ -251,7 +252,8 @@ CREATE TABLE public.inference_run_observations (
     last_event_sequence bigint DEFAULT 0 NOT NULL,
     expires_at bigint NOT NULL,
     failure_json text,
-    request_model text
+    request_model text,
+    CONSTRAINT inference_run_background_active_contract CHECK ((background_active >= 0))
 );
 
 
@@ -308,13 +310,18 @@ CREATE TABLE public.model_backends (
     provider_id text NOT NULL,
     model text,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     thinking_level_map jsonb DEFAULT '[{"level": "off", "source": "generated", "control": {"type": "hidden"}}, {"level": "minimal", "source": "generated", "control": {"type": "hidden"}}, {"level": "low", "source": "generated", "control": {"type": "hidden"}}, {"level": "medium", "source": "generated", "control": {"type": "hidden"}}, {"level": "high", "source": "generated", "control": {"type": "hidden"}}, {"level": "xhigh", "source": "generated", "control": {"type": "hidden"}}, {"level": "max", "source": "generated", "control": {"type": "hidden"}}]'::jsonb NOT NULL,
     first_token_timeout_ms bigint DEFAULT 60000 NOT NULL,
     target_retry_budget integer DEFAULT 5 NOT NULL,
     target_cooldown_ms bigint DEFAULT 120000 NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
-    CONSTRAINT model_backends_model_nonblank CHECK (((model IS NULL) OR (btrim(model) <> ''::text)))
+    CONSTRAINT model_backends_cooldown_contract CHECK ((target_cooldown_ms >= 0)),
+    CONSTRAINT model_backends_first_token_timeout_contract CHECK ((first_token_timeout_ms >= 0)),
+    CONSTRAINT model_backends_model_nonblank CHECK (((model IS NULL) OR (btrim(model) <> ''::text))),
+    CONSTRAINT model_backends_priority_contract CHECK ((priority IS NOT NULL)),
+    CONSTRAINT model_backends_retry_contract CHECK ((target_retry_budget >= 0)),
+    CONSTRAINT model_backends_thinking_map_contract CHECK ((jsonb_typeof(thinking_level_map) = 'array'::text))
 );
 
 
@@ -348,13 +355,15 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text NOT NULL,
-    balance text DEFAULT 'traffic_equalization'::text,
-    is_enabled boolean DEFAULT true,
+    model_id text CONSTRAINT models_name_not_null NOT NULL,
+    balance text DEFAULT 'traffic_equalization'::text NOT NULL,
+    is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     display_name text,
-    default_thinking_level text
+    default_thinking_level text,
+    CONSTRAINT models_balance_contract CHECK ((balance = ANY (ARRAY['traffic_equalization'::text, 'latency_preference'::text]))),
+    CONSTRAINT models_default_thinking_level_contract CHECK (((default_thinking_level IS NULL) OR (default_thinking_level = ANY (ARRAY['off'::text, 'minimal'::text, 'low'::text, 'medium'::text, 'high'::text, 'xhigh'::text, 'max'::text]))))
 );
 
 
@@ -530,6 +539,7 @@ CREATE TABLE public.provider_models (
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    snapshot_state jsonb DEFAULT '{"type": "edited", "source": null}'::jsonb NOT NULL,
     CONSTRAINT provider_models_lifecycle_status_check CHECK ((lifecycle_status = ANY (ARRAY['alpha'::text, 'beta'::text, 'deprecated'::text]))),
     CONSTRAINT provider_models_limit_context_check CHECK (((limit_context IS NULL) OR (limit_context >= 0))),
     CONSTRAINT provider_models_limit_input_check CHECK (((limit_input IS NULL) OR (limit_input >= 0))),
@@ -538,6 +548,25 @@ CREATE TABLE public.provider_models (
     CONSTRAINT provider_models_presence_check CHECK ((presence = ANY (ARRAY['present'::text, 'missing'::text]))),
     CONSTRAINT provider_models_revision_check CHECK ((revision > 0)),
     CONSTRAINT provider_models_selection_policy_check CHECK ((selection_policy = ANY (ARRAY['auto'::text, 'force_enabled'::text, 'force_disabled'::text]))),
+    CONSTRAINT provider_models_snapshot_state_shape CHECK (((jsonb_typeof(snapshot_state) = 'object'::text) AND
+CASE (snapshot_state ->> 'type'::text)
+    WHEN 'unregistered'::text THEN (NOT (snapshot_state ? 'source'::text))
+    WHEN 'imported'::text THEN COALESCE(((jsonb_typeof((snapshot_state -> 'source'::text)) = 'object'::text) AND
+    CASE ((snapshot_state -> 'source'::text) ->> 'type'::text)
+        WHEN 'provider_catalog'::text THEN (jsonb_typeof(((snapshot_state -> 'source'::text) -> 'provider_id'::text)) = 'string'::text)
+        WHEN 'canonical'::text THEN (jsonb_typeof(((snapshot_state -> 'source'::text) -> 'model_id'::text)) = 'string'::text)
+        WHEN 'discovery'::text THEN true
+        ELSE false
+    END), false)
+    WHEN 'edited'::text THEN (COALESCE(((snapshot_state -> 'source'::text) = 'null'::jsonb), false) OR COALESCE(((jsonb_typeof((snapshot_state -> 'source'::text)) = 'object'::text) AND
+    CASE ((snapshot_state -> 'source'::text) ->> 'type'::text)
+        WHEN 'provider_catalog'::text THEN (jsonb_typeof(((snapshot_state -> 'source'::text) -> 'provider_id'::text)) = 'string'::text)
+        WHEN 'canonical'::text THEN (jsonb_typeof(((snapshot_state -> 'source'::text) -> 'model_id'::text)) = 'string'::text)
+        WHEN 'discovery'::text THEN true
+        ELSE false
+    END), false))
+    ELSE false
+END)),
     CONSTRAINT provider_models_source_kind_check CHECK ((source_kind = ANY (ARRAY['discovered'::text, 'manual'::text])))
 );
 
@@ -589,17 +618,19 @@ CREATE TABLE public.providers (
     use_proxy boolean DEFAULT false NOT NULL,
     last_test_success boolean,
     last_test_at timestamp with time zone,
-    is_enabled boolean DEFAULT true,
+    is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     adapter_credentials text DEFAULT '{}'::text NOT NULL,
     vendor_options text DEFAULT '{}'::text NOT NULL,
     credential_status text DEFAULT 'ok'::text NOT NULL,
     credential_invalid_at timestamp with time zone,
     revision bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT providers_adapter_credentials_contract CHECK (((adapter_credentials IS NOT NULL) AND (jsonb_typeof((adapter_credentials)::jsonb) = 'object'::text))),
     CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text]))),
-    CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text])))
+    CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text]))),
+    CONSTRAINT providers_vendor_options_contract CHECK (((vendor_options IS NOT NULL) AND (jsonb_typeof((vendor_options)::jsonb) = 'object'::text)))
 );
 
 
@@ -793,7 +824,8 @@ CREATE TABLE public.web_providers (
     use_proxy boolean DEFAULT false NOT NULL,
     local_engines jsonb,
     CONSTRAINT web_providers_credentials_check CHECK ((((kind = 'local'::text) AND (api_key IS NULL) AND (local_engines IS NOT NULL)) OR ((kind = ANY (ARRAY['exa'::text, 'zhipu'::text])) AND (api_key IS NOT NULL) AND (length(TRIM(BOTH FROM api_key)) > 0) AND (local_engines IS NULL)))),
-    CONSTRAINT web_providers_kind_check CHECK ((kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text])))
+    CONSTRAINT web_providers_kind_check CHECK ((kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text]))),
+    CONSTRAINT web_providers_local_engines_contract CHECK (((kind <> 'local'::text) OR COALESCE((jsonb_typeof(local_engines) = 'object'::text), false)))
 );
 
 
@@ -1115,6 +1147,14 @@ ALTER TABLE ONLY public.turn_chain_content_refs
 
 ALTER TABLE ONLY public.turn_chain_contents
     ADD CONSTRAINT turn_chain_contents_pkey PRIMARY KEY (principal, content_key);
+
+
+--
+-- Name: turn_chain_nodes turn_chain_nodes_id_principal_kind_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_nodes
+    ADD CONSTRAINT turn_chain_nodes_id_principal_kind_key UNIQUE (id, principal, kind);
 
 
 --
@@ -1897,11 +1937,11 @@ ALTER TABLE ONLY public.turn_chain_content_refs
 
 
 --
--- Name: turn_chain_nodes turn_chain_nodes_parent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_chain_nodes turn_chain_nodes_parent_principal_kind_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.turn_chain_nodes
-    ADD CONSTRAINT turn_chain_nodes_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.turn_chain_nodes(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT turn_chain_nodes_parent_principal_kind_fkey FOREIGN KEY (parent_id, principal, kind) REFERENCES public.turn_chain_nodes(id, principal, kind) ON DELETE RESTRICT;
 
 
 --

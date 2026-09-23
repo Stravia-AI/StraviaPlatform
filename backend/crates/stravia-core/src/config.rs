@@ -55,7 +55,6 @@ impl Default for GatewayStorageConfig {
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub data_dir: PathBuf,
-    pub auth_key: Option<String>,
     pub storage: GatewayStorageConfig,
     /// Whether this process has a trusted Desktop updater bridge.
     pub product_update_download_supported: bool,
@@ -79,7 +78,6 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
-            auth_key: None,
             storage: GatewayStorageConfig::default(),
             product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,

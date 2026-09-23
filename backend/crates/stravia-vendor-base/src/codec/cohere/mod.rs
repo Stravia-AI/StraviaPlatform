@@ -186,7 +186,7 @@ impl ProtocolAdapter for CohereChatV2 {
                 .get("function")
                 .context("Cohere tool call is missing function")?;
             response.push_tool_call(ToolCall {
-                id: required_string(tool, "id")?,
+                id: (required_string(tool, "id")?).into(),
                 name: required_string(function, "name")?,
                 arguments: cohere_tool_arguments(function)?,
             });
@@ -338,7 +338,7 @@ impl CohereStreamParser {
                 let index = self.next_tool_index;
                 self.next_tool_index += 1;
                 let call = ToolCall {
-                    id: required_string(tool, "id")?,
+                    id: (required_string(tool, "id")?).into(),
                     name: required_string(
                         tool.pointer("/function")
                             .context("Cohere tool start is missing function")?,
@@ -352,7 +352,7 @@ impl CohereStreamParser {
                 };
                 deltas.push(AiStreamDelta::ToolCallStart {
                     index,
-                    id: call.id.clone(),
+                    id: call.id.to_string(),
                     name: call.name.clone(),
                 });
                 if !call.arguments.is_empty() {
@@ -691,7 +691,7 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                                 .get("function")
                                 .context("Cohere tool call is missing function")?;
                             Ok(ToolCall {
-                                id: required_string(call, "id")?,
+                                id: (required_string(call, "id")?).into(),
                                 name: required_string(function, "name")?,
                                 arguments: cohere_tool_arguments(function)?,
                             })
@@ -703,10 +703,11 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                 role,
                 content,
                 tool_calls,
-                tool_call_id: message
+                tool_call_id: (message
                     .get("tool_call_id")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(str::to_string))
+                .map(Into::into),
                 meta: None,
             }
             .with_plain_tool_text_kind())

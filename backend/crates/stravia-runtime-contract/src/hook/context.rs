@@ -88,25 +88,25 @@ pub enum ContextItem {
         role: Role,
         text: String,
         signature: Option<String>,
-        meta: Option<serde_json::Value>,
+        meta: Option<Box<crate::protocol::ir::AiItemMetadata>>,
     },
     ToolCall {
         id: ContextItemId,
         role: Role,
         call: ToolCall,
         cache_control: Option<CacheControl>,
-        meta: Option<serde_json::Value>,
+        meta: Option<Box<crate::protocol::ir::AiItemMetadata>>,
     },
     ToolResult {
         id: ContextItemId,
         role: Role,
-        tool_use_id: String,
+        tool_use_id: crate::protocol::ir::ToolCallId,
         content: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_kind: Option<ToolResultContentKind>,
         is_error: Option<bool>,
         cache_control: Option<CacheControl>,
-        meta: Option<serde_json::Value>,
+        meta: Option<Box<crate::protocol::ir::AiItemMetadata>>,
     },
 }
 
@@ -365,7 +365,7 @@ fn push_message_segment(
     items: &mut Vec<ContextItem>,
     source: &AiItem,
     blocks: Vec<ContentBlock>,
-    message_meta: &mut Option<serde_json::Value>,
+    message_meta: &mut Option<Box<crate::protocol::ir::AiItemMetadata>>,
 ) {
     if blocks.is_empty() {
         return;
@@ -801,7 +801,9 @@ mod tests {
             ]),
             tool_calls: Some(vec![call]),
             tool_call_id: None,
-            meta: Some(serde_json::json!({"source": "provider"})),
+            meta: Some(crate::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"source": "provider"}),
+            )),
         };
         let tool_result = AiItem {
             role: Role::Tool,

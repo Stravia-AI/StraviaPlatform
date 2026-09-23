@@ -147,6 +147,8 @@ Model Turn 是一次完整的规范化模型交互，可以包含同一逻辑模
 
 Canonical Item 是一次规范化交互中具有独立身份与语义边界的有序内容单元。同一项的流式增量不形成多个 Canonical Item；不同项不因类型相同而合并，项内内容分段保持不变。
 
+Canonical Item ID 标识内容项，Tool Call ID 关联调用与结果，Item Reference 选择已有内容项，三者不能互换。引用只在 Principal 与历史范围允许的候选中解析；同一被引用 ID 对应不同语义时属于歧义，不能以最后一项覆盖前一项。
+
 ## Effective Model Request
 
 Effective Model Request 是一次 Model Turn 在历史恢复、继承状态与 Hook 变更全部解析后，准备交给某个 Target 的完整 canonical 任务语义。它不等于客户端原始 wire request，也不包含纯 transport 或交付格式差异。
@@ -376,6 +378,11 @@ _避免使用_：Provider Offering、Catalog Model
 
 Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照，可以表示纯媒体生成模型，不以具备聊天能力为前提。它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target；模型身份与其支持的能力相互区分。
 _避免使用_：Provider Model Override、Catalog Model
+
+## Model Snapshot State
+
+Model Snapshot State 表达 Provider Model 规格快照的来源与编辑状态：尚未登记、已从明确来源导入、或已经管理员编辑。未知规格保持未知；普通同步不能覆盖已导入或人工修正的规格。它不同于发现方式、当前是否提供模型以及 Selection Policy。
+_避免使用_：模型可用性、占位默认规格、从字段值推断人工修改
 
 ## Model Specification
 

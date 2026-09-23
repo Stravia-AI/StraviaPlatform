@@ -645,24 +645,21 @@ async function regenerateThinkingMap(): Promise<void> {
 }
 
 async function saveModel(): Promise<void> {
-  const result = buildRouteTargets(targets)
-  if (result.error && result.error !== 'incomplete-target' && result.error !== 'no-enabled-target') {
+  const targetsChanged = !initialModel || JSON.stringify(draftSnapshot().targets) !== JSON.stringify(savedDraft.targets)
+  const result = targetsChanged ? buildRouteTargets(targets) : undefined
+  if (result?.error && result.error !== 'incomplete-target' && result.error !== 'no-enabled-target') {
     toast.error(m.model_editor_invalid_target_controls())
     return
   }
-  const cleanTargets = result.targets
-  const firstTarget = cleanTargets.find((target) => target.enabled)
-  if (
-    !form.modelId.trim() ||
-    !firstTarget ||
-    result.error === 'incomplete-target' ||
-    result.error === 'no-enabled-target'
-  ) {
+  const cleanTargets = result?.targets
+  if (!form.modelId.trim() || (targetsChanged && (!cleanTargets?.some((target) => target.enabled) || result?.error))) {
     toast.error(m.model_editor_enabled_destination_required())
     return
   }
 
-  const blocked = targets.find((target) => target.enabled && unwritableThinkingLevels(target).length > 0)
+  const blocked = targetsChanged
+    ? targets.find((target) => target.enabled && unwritableThinkingLevels(target).length > 0)
+    : undefined
   if (blocked) {
     toast.error(m.model_editor_thinking_enable_blocked({ levels: formatList(unwritableThinkingLevels(blocked)) }))
     editTarget(blocked)
@@ -671,34 +668,37 @@ async function saveModel(): Promise<void> {
 
   saving = true
   try {
-    for (const target of targets) {
-      if (target.model === null) continue
-      const modelId = target.model.trim()
-      const needsSnapshot =
-        target.custom && !target.persisted && !target.inventory.some((providerModel) => providerModel.id === modelId)
-      if (needsSnapshot) {
-        await admin.providers.createManualModel(
-          target.providerId,
-          modelId,
-          JSON.stringify({ id: modelId, name: modelId }),
-        )
+    if (targetsChanged) {
+      for (const target of targets) {
+        if (target.model === null) continue
+        const modelId = target.model.trim()
+        const needsSnapshot =
+          target.custom && !target.persisted && !target.inventory.some((providerModel) => providerModel.id === modelId)
+        if (needsSnapshot) {
+          await admin.providers.createManualModel(
+            target.providerId,
+            modelId,
+            JSON.stringify({ id: modelId, name: modelId }),
+          )
+        }
       }
     }
 
     const input = {
       model_id: form.modelId.trim(),
-      display_name: form.displayName.trim(),
+      display_name: form.displayName.trim() || null,
       balance: form.balance,
-      target_provider: firstTarget.provider_id,
-      target_model: firstTarget.model,
-      targets: cleanTargets,
       default_thinking_level:
         form.defaultThinkingLevel === UNSPECIFIED_THINKING_LEVEL ? null : (form.defaultThinkingLevel as ThinkingLevel),
     }
     if (initialModel) {
-      await admin.models.update(initialModel.model_id, { ...input, is_enabled: form.enabled })
+      await admin.models.update(initialModel.model_id, {
+        ...input,
+        is_enabled: form.enabled,
+        ...(targetsChanged ? { targets: cleanTargets! } : {}),
+      })
     } else {
-      const created = await admin.models.create(input)
+      const created = await admin.models.create({ ...input, targets: cleanTargets! })
       if (!form.enabled) {
         try {
           await admin.models.update(created.model_id, { is_enabled: false })

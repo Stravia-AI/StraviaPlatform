@@ -270,6 +270,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             "fixture-model",
             CreateManualProviderModel {
                 metadata: serde_json::json!({"id":"fixture-model", "name":"Fixture model"}),
+                template_id: None,
             },
         )
         .await?;
@@ -279,9 +280,16 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             model_id: "builtin-update-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("fixture-model".into()),
-            targets: Vec::new(),
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("fixture-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -297,12 +305,12 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: false,
-            model_ids: vec![route.id.clone()],
+            model_ids: vec![route.id.clone().into()],
         })
         .await?;
     Ok(Connection {
         provider_id: provider.id,
-        route_id: route.id,
+        route_id: route.id.into(),
         token: key.token,
     })
 }

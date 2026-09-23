@@ -199,17 +199,20 @@ impl SearchAdminHost for SearchHost {
                     .map(|model| {
                         let display_name = model.effective_display_name().to_owned();
                         SearchRoute {
-                            id: model.id,
-                            model_id: model.model_id,
+                            id: model.id.into(),
+                            model_id: model.model_id.into(),
                             display_name,
                             is_enabled: model.is_enabled,
                             targets: model
                                 .targets
                                 .into_iter()
-                                .map(|target| SearchRouteTarget {
-                                    provider_id: target.provider_id,
-                                    model: target.model,
-                                    enabled: target.enabled,
+                                .map(|target| {
+                                    let (provider_id, model) = target.destination.into_parts();
+                                    SearchRouteTarget {
+                                        provider_id: provider_id.into(),
+                                        model: model.map(Into::into),
+                                        enabled: target.enabled,
+                                    }
                                 })
                                 .collect(),
                         }

@@ -171,7 +171,6 @@ def build_harness(work_dir: Path) -> None:
         # 链接冲突,且会重复编译另一套主版本依赖。
         reqwest = {{ version = "0.13", default-features = false, features = ["json"] }}
         serde_json = "1"
-        sha2 = "0.10"
         sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }}
         tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "time"] }}
 
@@ -208,7 +207,6 @@ def build_harness(work_dir: Path) -> None:
         use stravia_core::Gateway;
         use stravia_server::{AdminMode, HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
         use reqwest::StatusCode;
-        use sha2::{Digest, Sha384};
         use sqlx::postgres::PgPoolOptions;
 
         #[tokio::main]
@@ -233,51 +231,6 @@ def build_harness(work_dir: Path) -> None:
                         )))
                         .execute(&pool)
                         .await?;
-                    }
-                    "prepare_legacy" => {
-                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                            .execute(&pool)
-                            .await?;
-                        sqlx::raw_sql(
-                            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)",
-                        )
-                        .execute(&pool)
-                        .await?;
-                        let migration_dir = PathBuf::from(
-                            env::var("STRAVIA_STORAGE_MIGRATIONS").context("STRAVIA_STORAGE_MIGRATIONS")?,
-                        );
-                        let mut migrations = std::fs::read_dir(migration_dir)?
-                            .collect::<Result<Vec<_>, _>>()?;
-                        migrations.sort_by_key(|entry| entry.file_name());
-                        for entry in migrations {
-                            let name = entry.file_name().to_string_lossy().into_owned();
-                            let Some((version, description)) = name.strip_suffix(".sql").and_then(|name| name.split_once('_')) else { continue; };
-                            let version: i64 = version.parse()?;
-                            if version >= 34 { continue; }
-                            let sql = std::fs::read_to_string(entry.path())?;
-                            // SQL 仅来自测试指定的仓库迁移文件，不插入请求或配置数据。
-                            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                                .execute(&pool)
-                                .await?;
-                            sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES ($1, $2, TRUE, $3, 0)")
-                                .bind(version)
-                                .bind(description.replace('_', " "))
-                                .bind(Sha384::digest(sql.as_bytes()).to_vec())
-                                .execute(&pool)
-                                .await?;
-                        }
-                        sqlx::query("INSERT INTO request_logs (id, created_at, client_request_body) VALUES ($1, $2, $3)")
-                            .bind("legacy-log-must-not-survive")
-                            .bind(1_i64)
-                            .bind(r#"{"secret":"legacy"}"#)
-                            .execute(&pool)
-                            .await?;
-                        sqlx::query("INSERT INTO api_keys (id, token, name) VALUES ($1, $2, $3)")
-                            .bind("legacy-generation-key")
-                            .bind("isolated-upgrade-fixture-key")
-                            .bind("Existing key")
-                            .execute(&pool)
-                            .await?;
                     }
                     "inspect_observation" => {
                         let tables: i64 = sqlx::query_scalar(
@@ -372,6 +325,7 @@ def build_harness(work_dir: Path) -> None:
                 &provider.id,
                 "gpt-4o-mini",
                 CreateManualProviderModel {
+                    template_id: None,
                     metadata: serde_json::json!({
                         "id": "gpt-4o-mini",
                         "name": "GPT-4o mini",
@@ -383,9 +337,16 @@ def build_harness(work_dir: Path) -> None:
                 model_id: format!("{backend}-model"),
                 display_name: Some(format!("{backend} Model")),
                 balance: None,
-                target_provider: provider.id.clone(),
-                target_model: Some("gpt-4o-mini".to_string()),
-                targets: vec![],
+                targets: vec![stravia_core::db::models::CreateTarget {
+                    provider_id: provider.id.clone(),
+                    model: Some("gpt-4o-mini".to_string()),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
                 default_thinking_level: None,
             }).await?;
 
@@ -399,7 +360,7 @@ def build_harness(work_dir: Path) -> None:
                 inject_web_search: false,
                 inject_media_generation: false,
                 expires_at: None,
-                model_ids: vec![route.id.clone()],
+                model_ids: vec![route.id.clone().into()],
             }).await?;
 
             ensure!(!api_key.inject_media_generation, "new keys must not auto-inject media generation");
@@ -415,9 +376,9 @@ def build_harness(work_dir: Path) -> None:
             ensure!(routes[0].model_id == format!("{backend}-model"), "Route Model ID");
             ensure!(routes[0].display_name.as_deref() == Some(format!("{backend} Model").as_str()), "Route display name");
             ensure!(routes[0].targets.len() == 1, "Route aggregate Target count");
-            ensure!(routes[0].targets[0].provider_id == provider.id, "Route aggregate Provider");
+            ensure!(routes[0].targets[0].provider_id().as_str() == provider.id, "Route aggregate Provider");
             let updated = admin.update_model(&route.model_id, UpdateRoute {
-                display_name: Some(format!("{backend} Renamed Model")),
+                display_name: Some(Some(format!("{backend} Renamed Model"))),
                 ..Default::default()
             }).await?;
             ensure!(updated.id == route.id, "display-name update preserves Route identity");
@@ -430,7 +391,7 @@ def build_harness(work_dir: Path) -> None:
                 selection_strategy: "latency_preference".to_string(),
                 is_enabled: false,
                 default_thinking_level: None,
-                targets: vec![CreateTarget {
+                targets: Some(vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
                     model: Some("missing-model".to_string()),
                     enabled: true,
@@ -439,14 +400,14 @@ def build_harness(work_dir: Path) -> None:
                     target_retry_budget: Some(5),
                     target_cooldown_ms: Some(120_000),
                     thinking_level_map: vec![],
-                }],
+                }]),
             }).await;
             ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");
             let preserved = gw.storage.routes().get(&route.model_id).await?.context("preserved Route")?;
             ensure!(preserved.balance == route.balance, "failed put preserves Route strategy");
             ensure!(preserved.is_enabled == route.is_enabled, "failed put preserves Route state");
             ensure!(preserved.targets.len() == 1, "failed put preserves Target count");
-            ensure!(preserved.targets[0].provider_id == provider.id, "failed put preserves Target");
+            ensure!(preserved.targets[0].provider_id().as_str() == provider.id, "failed put preserves Target");
             ensure!(admin.list_api_keys().await?.len() == 1, "api key count");
 
             let admin_auth = AdminAuth::new(gw.storage.clone());
@@ -569,9 +530,6 @@ def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) 
     env["STRAVIA_STORAGE_SCHEMA_ACTION"] = action
     env["STRAVIA_STORAGE_PG_URL"] = pg_url
     env["STRAVIA_STORAGE_PG_SCHEMA"] = schema
-    env["STRAVIA_STORAGE_MIGRATIONS"] = str(
-        REPO_ROOT / "backend" / "crates" / "stravia-core" / "migrations" / "postgres"
-    )
 
     proc = subprocess.run(
         ["cargo", "run", "--quiet", "--manifest-path", str(work_dir / "Cargo.toml")],

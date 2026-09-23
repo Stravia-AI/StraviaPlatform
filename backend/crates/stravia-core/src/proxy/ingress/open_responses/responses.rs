@@ -445,6 +445,7 @@ pub(super) async fn normalize_error_response(response: Response) -> Response {
             "unsupported_feature" => Some("unsupported_feature"),
             "previous_response_not_found" => Some("previous_response_not_found"),
             "item_reference_not_found" => Some("item_reference_not_found"),
+            "item_reference_ambiguous" => Some("item_reference_ambiguous"),
             "web_search_unavailable" => Some("web_search_unavailable"),
             "response_in_progress" => Some("response_in_progress"),
             "compaction_unsupported" => Some("compaction_unsupported"),

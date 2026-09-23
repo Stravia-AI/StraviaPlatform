@@ -7,7 +7,7 @@ fn gemini_tool_result_correlation_success() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_abc".to_string(),
+                id: ("call_abc".to_string()).into(),
                 name: "read_file".to_string(),
                 arguments: "{\"path\":\"src/main.rs\"}".to_string(),
             }]),
@@ -17,7 +17,7 @@ fn gemini_tool_result_correlation_success() {
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "read_file".to_string(),
+                tool_use_id: "read_file".into(),
                 content: serde_json::json!({"ok": true}),
                 content_kind: Some(
                     stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -52,12 +52,12 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: "call_a".to_string(),
+                    id: ("call_a".to_string()).into(),
                     name: "Glob".to_string(),
                     arguments: "{}".to_string(),
                 },
                 ToolCall {
-                    id: "call_b".to_string(),
+                    id: ("call_b".to_string()).into(),
                     name: "Bash".to_string(),
                     arguments: "{}".to_string(),
                 },
@@ -68,7 +68,7 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "call_b".to_string(),
+                tool_use_id: "call_b".into(),
                 content: serde_json::json!({"ok": true}),
                 content_kind: Some(
                     stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -83,7 +83,7 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "call_a".to_string(),
+                tool_use_id: "call_a".into(),
                 content: serde_json::json!({"ok": true}),
                 content_kind: Some(
                     stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,

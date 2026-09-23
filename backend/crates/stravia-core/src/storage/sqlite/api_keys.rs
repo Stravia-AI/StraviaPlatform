@@ -9,7 +9,7 @@ pub(super) struct SqliteApiKeyStore {
 impl ApiKeyStore for SqliteApiKeyStore {
     async fn list(&self) -> anyhow::Result<Vec<ApiKeyWithBindings>> {
         let rows = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, 1) AS is_enabled, COALESCE(mcp_access_enabled, 0) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, 0) AS transparent_injection_enabled, COALESCE(inject_media_understanding, 0) AS inject_media_understanding, COALESCE(inject_web_search, 0) AS inject_web_search, COALESCE(inject_media_generation, 0) AS inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
+            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -39,7 +39,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<ApiKeyWithBindings>> {
         let row = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, 1) AS is_enabled, COALESCE(mcp_access_enabled, 0) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, 0) AS transparent_injection_enabled, COALESCE(inject_media_understanding, 0) AS inject_media_understanding, COALESCE(inject_web_search, 0) AS inject_web_search, COALESCE(inject_media_generation, 0) AS inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -94,7 +94,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
         let current = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, 1) AS is_enabled, COALESCE(mcp_access_enabled, 0) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, 0) AS transparent_injection_enabled, COALESCE(inject_media_understanding, 0) AS inject_media_understanding, COALESCE(inject_web_search, 0) AS inject_web_search, COALESCE(inject_media_generation, 0) AS inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -214,7 +214,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 bool,
                 bool,
             ),
-        >("SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, 1) AS is_enabled, expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, 0) AS transparent_injection_enabled, COALESCE(inject_media_understanding, 0) AS inject_media_understanding, COALESCE(inject_web_search, 0) AS inject_web_search, COALESCE(inject_media_generation, 0) AS inject_media_generation FROM api_keys WHERE token = ?")
+        >("SELECT id, name, is_enabled, expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
         .bind(raw_key)
         .fetch_optional(&self.pool)
         .await?;
@@ -258,7 +258,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 bool,
                 bool,
             ),
-        >("SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, 1) AS is_enabled, expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, 0) AS transparent_injection_enabled, COALESCE(inject_media_understanding, 0) AS inject_media_understanding, COALESCE(inject_web_search, 0) AS inject_web_search, COALESCE(inject_media_generation, 0) AS inject_media_generation FROM api_keys WHERE id = ?")
+        >("SELECT id, name, is_enabled, expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;

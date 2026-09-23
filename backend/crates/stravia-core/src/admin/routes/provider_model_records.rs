@@ -5,8 +5,8 @@ use crate::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
     ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
     ProviderModelReconciliation, ProviderModelSelectionPolicy, ProviderModelSourceKind,
-    ProviderModelSummary, ProviderModelSyncSummary, UpdateProviderModel,
-    UpdateProviderModelSelection, normalize_model_id,
+    ProviderModelSummary, ProviderModelSyncSummary, SnapshotState, SourceStamp,
+    UpdateProviderModel, UpdateProviderModelSelection, normalize_model_id,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -17,6 +17,7 @@ pub struct ProviderModelList {
 #[derive(Debug, Clone, Serialize)]
 pub struct PreparedProviderModel {
     pub id: String,
+    pub snapshot_state: SnapshotState,
     pub metadata: ProviderModelMetadata,
     pub extensions: Value,
 }
@@ -98,14 +99,22 @@ impl AdminService {
         {
             return Err(provider_model_conflict(provider_id, &model_id));
         }
-        let metadata = match template_id {
+        let (metadata, snapshot_state) = match template_id {
             Some(template_id) => {
                 let template = self
                     .gw
                     .provider_catalog
                     .canonical_model(template_id)
                     .await?;
-                metadata_from_canonical_template(&model_id, template)?
+                let canonical_id = canonical_template_id(&template)?;
+                (
+                    metadata_from_canonical_template(&model_id, template)?,
+                    SnapshotState::Imported {
+                        source: SourceStamp::Canonical {
+                            model_id: canonical_id,
+                        },
+                    },
+                )
             }
             None => match self
                 .gw
@@ -113,13 +122,27 @@ impl AdminService {
                 .canonical_model_matching_upstream_id(&model_id)
                 .await
             {
-                Some(template) => metadata_from_canonical_template(&model_id, template)?,
-                None => ProviderModelMetadata::bare(&model_id),
+                Some(template) => {
+                    let canonical_id = canonical_template_id(&template)?;
+                    (
+                        metadata_from_canonical_template(&model_id, template)?,
+                        SnapshotState::Imported {
+                            source: SourceStamp::Canonical {
+                                model_id: canonical_id,
+                            },
+                        },
+                    )
+                }
+                None => (
+                    ProviderModelMetadata::bare(&model_id),
+                    SnapshotState::Unregistered,
+                ),
             },
         };
         let extensions = metadata.extension_value();
         Ok(PreparedProviderModel {
             id: model_id,
+            snapshot_state,
             metadata,
             extensions,
         })
@@ -151,6 +174,19 @@ impl AdminService {
         let _write_fence = operation.write_fence().await?;
         let model_id = normalize_model_id(model_id)?;
         let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
+        let source = match input.template_id {
+            Some(template_id) => {
+                let template = self
+                    .gw
+                    .provider_catalog
+                    .canonical_model(&template_id)
+                    .await?;
+                Some(SourceStamp::Canonical {
+                    model_id: canonical_template_id(&template)?,
+                })
+            }
+            None => None,
+        };
         apply_provider_model_mutation(
             self,
             self.gw
@@ -160,6 +196,7 @@ impl AdminService {
                     provider_id: provider_id.to_string(),
                     model_id: model_id.clone(),
                     source_kind: ProviderModelSourceKind::Manual,
+                    snapshot_state: SnapshotState::Edited { source },
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -202,7 +239,15 @@ impl AdminService {
             self.gw
                 .storage
                 .provider_models()
-                .update_metadata(provider_id, &model_id, metadata, input.revision)
+                .update_metadata(
+                    provider_id,
+                    &model_id,
+                    metadata,
+                    SnapshotState::Edited {
+                        source: existing.snapshot_state.source().cloned(),
+                    },
+                    input.revision,
+                )
                 .await?,
             &provider,
             &model_id,
@@ -274,7 +319,17 @@ impl AdminService {
             self.gw
                 .storage
                 .provider_models()
-                .update_metadata(provider_id, &model_id, metadata.clone(), revision)
+                .update_metadata(
+                    provider_id,
+                    &model_id,
+                    metadata.clone(),
+                    SnapshotState::Imported {
+                        source: SourceStamp::ProviderCatalog {
+                            provider_id: source_provider_id.to_owned(),
+                        },
+                    },
+                    revision,
+                )
                 .await?,
             &provider,
             &model_id,
@@ -348,6 +403,7 @@ impl AdminService {
 
         for (model_id, source) in sources {
             let metadata = source.metadata;
+            let incoming_state = source.snapshot_state;
             if let Some(current) = existing_by_id.get(model_id.as_str()) {
                 if current.source_kind == ProviderModelSourceKind::Manual {
                     continue;
@@ -360,37 +416,32 @@ impl AdminService {
                 {
                     summary.deprecated += 1;
                 }
-                // 未登记快照允许整体替换：命中真实规格时补全；只有 id/name 的
-                // 历史空快照也升级到 bare() 占位默认。人工改过的未登记记录不适用
-                // 后者，避免覆盖非规格字段的编辑。
-                let fill_specification = current.metadata.lacks_registered_specification()
-                    && (!metadata.lacks_registered_specification()
-                        || current.metadata.is_identity_only());
-                // Fields hidden from the manual editor remain guest-owned and
-                // are refreshed on every discovery. User-editable labels,
-                // limits and capability overrides are retained once a record
-                // has a registered specification.
-                let generated_changed = current.metadata.provider != metadata.provider
-                    || current.metadata.experimental != metadata.experimental
-                    || current.metadata.extensions != metadata.extensions;
-                let refreshed_metadata = if fill_specification {
-                    Some(metadata.clone())
-                } else if generated_changed {
-                    let mut merged = current.metadata.clone();
-                    merged.status = metadata.status.clone();
-                    merged.provider = metadata.provider.clone();
-                    merged.experimental = metadata.experimental.clone();
-                    merged.extensions = metadata.extensions.clone();
-                    Some(merged)
+                // Only explicitly unregistered snapshots may accept a first authoritative
+                // specification. All later discovery refreshes plugin-owned runtime fields,
+                // never user-editable model specifications or historical provenance.
+                let first_import = current.snapshot_state == SnapshotState::Unregistered
+                    && matches!(incoming_state, SnapshotState::Imported { .. });
+                let mut merged = if first_import {
+                    metadata.clone()
                 } else {
-                    None
+                    current.metadata.clone()
                 };
+                merged.status = metadata.status.clone();
+                merged.provider = metadata.provider.clone();
+                merged.experimental = metadata.experimental.clone();
+                merged.extensions = metadata.extensions.clone();
+                let refreshed_metadata =
+                    (first_import || merged != current.metadata).then_some(merged);
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
+                    || current.metadata_source_provider_id != source.metadata_source_provider_id
                     || refreshed_metadata.is_some()
                 {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
+                        expected_revision: current.revision,
+                        snapshot_state: first_import.then_some(incoming_state),
+                        metadata_source_provider_id: source.metadata_source_provider_id,
                         presence: ProviderModelPresence::Present,
                         lifecycle_status: metadata.status.clone(),
                         metadata: refreshed_metadata,
@@ -406,6 +457,7 @@ impl AdminService {
                 provider_id: provider_id.to_string(),
                 model_id,
                 source_kind: ProviderModelSourceKind::Discovered,
+                snapshot_state: incoming_state,
                 metadata_source_provider_id: source.metadata_source_provider_id,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -423,6 +475,9 @@ impl AdminService {
                 summary.missing += 1;
                 reconciliation.updates.push(ProviderModelPresenceUpdate {
                     model_id: current.model_id.clone(),
+                    expected_revision: current.revision,
+                    snapshot_state: None,
+                    metadata_source_provider_id: current.metadata_source_provider_id.clone(),
                     presence: ProviderModelPresence::Missing,
                     lifecycle_status: current.metadata.status.clone(),
                     metadata: None,
@@ -495,22 +550,46 @@ impl AdminService {
         for model in discovered.models {
             let model_id = normalize_model_id(&model.id)?;
             let catalog_source = catalog_sources.remove(&model_id);
-            let (template, metadata_source_provider_id) = match catalog_source {
-                Some(source) => (Some(source.metadata), Some(source.provider_id)),
-                None => (
-                    self.gw
-                        .provider_catalog
-                        .canonical_model_matching_upstream_id(&model_id)
-                        .await,
-                    None,
-                ),
+            let (template, metadata_source_provider_id, stamp) = match catalog_source {
+                Some(source) => {
+                    let provider_id = source.provider_id;
+                    (
+                        Some(source.metadata),
+                        Some(provider_id.clone()),
+                        SourceStamp::ProviderCatalog { provider_id },
+                    )
+                }
+                None => match self
+                    .gw
+                    .provider_catalog
+                    .canonical_model_matching_upstream_id(&model_id)
+                    .await
+                {
+                    Some(template) => {
+                        let canonical_id = canonical_template_id(&template)?;
+                        (
+                            Some(template),
+                            None,
+                            SourceStamp::Canonical {
+                                model_id: canonical_id,
+                            },
+                        )
+                    }
+                    None => (None, None, SourceStamp::Discovery),
+                },
             };
             let metadata = metadata_from_discovered_model(&model_id, model, template)?;
+            let snapshot_state = if metadata.has_specification() {
+                SnapshotState::Imported { source: stamp }
+            } else {
+                SnapshotState::Unregistered
+            };
             sources.insert(
                 model_id,
                 DiscoveredModelSource {
                     metadata,
                     metadata_source_provider_id,
+                    snapshot_state,
                 },
             );
         }
@@ -521,6 +600,15 @@ impl AdminService {
 struct DiscoveredModelSource {
     metadata: ProviderModelMetadata,
     metadata_source_provider_id: Option<String>,
+    snapshot_state: SnapshotState,
+}
+
+fn canonical_template_id(template: &Value) -> anyhow::Result<String> {
+    template
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Canonical Model template is missing id"))
 }
 
 fn same_discovery_provider(left: &Provider, right: &Provider) -> bool {
@@ -554,10 +642,9 @@ fn metadata_from_discovered_model(
         Some(value) => value,
         None => ProviderModelMetadata::bare(model_id).to_value()?,
     };
-    let mut object = base
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Canonical Model metadata must be an object"))?;
+    let Value::Object(mut object) = base else {
+        anyhow::bail!("Canonical Model metadata must be an object");
+    };
     object.extend(model.metadata);
     object.insert("id".into(), Value::String(model_id.to_owned()));
     let discovered_name = model.display_name.trim();
@@ -617,10 +704,15 @@ fn metadata_from_discovered_model(
         let limit = object
             .entry("limit")
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if limit.is_null() {
+            *limit = Value::Object(serde_json::Map::new());
+        }
         let limit = limit
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("Discovered Model limit metadata must be an object"))?;
-        limit.entry("context").or_insert(Value::from(context));
+        if limit.get("context").is_none_or(Value::is_null) {
+            limit.insert("context".into(), Value::from(context));
+        }
     }
     ProviderModelMetadata::from_source_value(model_id, Value::Object(object))
 }
@@ -632,7 +724,11 @@ fn ensure_discovered_modality(
 ) -> anyhow::Result<()> {
     let modalities = metadata
         .entry("modalities")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if modalities.is_null() {
+        *modalities = Value::Object(serde_json::Map::new());
+    }
+    let modalities = modalities
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Discovered Model modalities metadata must be an object"))?;
     let values = modalities

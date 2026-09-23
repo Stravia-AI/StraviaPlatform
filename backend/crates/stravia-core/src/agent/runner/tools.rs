@@ -141,7 +141,7 @@ impl AgentRunner {
                 let mut result = match result {
                     Ok(output) => PlatformToolResult {
                         tool_id: ToolId::new(tool_id.id.clone()),
-                        call_id: call.id.clone(),
+                        call_id: call.id.to_string(),
                         content_kind: output.content_kind,
                         content: output.content,
                         is_error: false,
@@ -149,7 +149,7 @@ impl AgentRunner {
                     },
                     Err(error) => PlatformToolResult {
                         tool_id: ToolId::new(tool_id.id.clone()),
-                        call_id: call.id.clone(),
+                        call_id: call.id.to_string(),
                         content_kind:
                             stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                         content: serde_json::json!({

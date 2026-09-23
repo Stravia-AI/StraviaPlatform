@@ -279,7 +279,6 @@ fn materialize_media_turns(
         .filter(|item| {
             item.meta
                 .as_ref()
-                .and_then(serde_json::Value::as_object)
                 .and_then(|meta| meta.get("__stravia_history_marker_restored"))
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
@@ -295,7 +294,6 @@ fn materialize_media_turns(
             || item
                 .meta
                 .as_ref()
-                .and_then(serde_json::Value::as_object)
                 .and_then(|meta| meta.get("__stravia_history_marker_restored"))
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -491,12 +489,12 @@ mod tests {
         result
             .meta
             .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
             .expect("graph metadata")
-            .insert(
-                "__stravia_history_marker_restored".into(),
+            .insert_extension(
+                "__stravia_history_marker_restored",
                 serde_json::Value::Bool(true),
-            );
+            )
+            .expect("marker key is not reserved");
         let mut call = stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::Assistant,
             content: stravia_runtime_contract::protocol::ir::MessageContent::Text(String::new()),
@@ -516,12 +514,12 @@ mod tests {
         );
         call.meta
             .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
             .expect("graph metadata")
-            .insert(
-                "__stravia_history_marker_restored".into(),
+            .insert_extension(
+                "__stravia_history_marker_restored",
                 serde_json::Value::Bool(true),
-            );
+            )
+            .expect("marker key is not reserved");
         let mut request =
             stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![call, result]);
 

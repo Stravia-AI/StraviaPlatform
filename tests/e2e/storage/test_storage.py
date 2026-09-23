@@ -118,9 +118,14 @@ def test_failed_request_projection_survives_restart_and_clear(
             storage_runtime["run_schema_action"]("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
 
 
-def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:
-    connection = sqlite3.connect(database)
-    try:
+@pytest.mark.e2e
+@pytest.mark.storage
+def test_sqlite_rejects_incompatible_migration_history(
+    stravia_binary: Path, tmp_path: Path
+) -> None:
+    database = tmp_path / "db" / "gateway.db"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
         connection.execute(
             """
             CREATE TABLE _sqlx_migrations (
@@ -133,114 +138,41 @@ def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:
             )
             """
         )
-        for migration in sorted(migrations.glob("*.sql")):
-            version = int(migration.name.split("_", 1)[0])
-            if version >= 34:
-                continue
-            sql = migration.read_text(encoding="utf-8")
-            connection.executescript(sql)
-            description = migration.stem.split("_", 1)[1].replace("_", " ")
-            connection.execute(
-                "INSERT INTO _sqlx_migrations "
-                "(version, description, success, checksum, execution_time) "
-                "VALUES (?, ?, 1, ?, 0)",
-                (version, description, hashlib.sha384(sql.encode()).digest()),
-            )
-        connection.execute(
-            "INSERT INTO request_logs (id, created_at, client_request_body) VALUES (?, ?, ?)",
-            ("legacy-log-must-not-survive", 1, '{"secret":"legacy"}'),
+        # Marker rows alone decide compatibility; no historical DDL is needed.
+        connection.executemany(
+            "INSERT INTO _sqlx_migrations "
+            "(version, description, success, checksum, execution_time) "
+            "VALUES (?, ?, 1, ?, 0)",
+            [
+                (version, f"historical migration {version}", hashlib.sha384(b"old").digest())
+                for version in range(1, 59)
+            ],
         )
-        connection.execute(
-            "INSERT INTO api_keys (id, token, name) VALUES (?, ?, ?)",
-            ("legacy-generation-key", "isolated-upgrade-fixture-key", "Existing key"),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-@pytest.mark.e2e
-@pytest.mark.storage
-def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
-    stravia_binary: Path, repo_root: Path, tmp_path: Path
-) -> None:
-    database = tmp_path / "db" / "gateway.db"
-    database.parent.mkdir()
-    _prepare_legacy_sqlite(
-        database, repo_root / "backend" / "crates" / "stravia-core" / "migrations" / "sqlite"
+    # A configured backend opens the database during startup instead of waiting
+    # for the interactive setup flow.
+    (tmp_path / "server.toml").write_text(
+        "[database]\nbackend = 'sqlite'\n", encoding="utf-8"
     )
-    orphan = tmp_path / "diagnostics" / "observation-debug" / "abcdefghijklmnopqrstuvwxyzab"
-    orphan.mkdir(parents=True)
-    (orphan / "segment-000001.jsonl").write_text('{"orphan":true}\n', encoding="utf-8")
     server_port = find_free_port()
     proc, logs = start_stravia_server(
         stravia_binary=stravia_binary,
         args=["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(server_port)],
     )
-    base = f"http://127.0.0.1:{server_port}"
     try:
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
-        session = initialize_server(
-            base,
-            wait_for_setup_token(logs, proc),
-            {"backend": "sqlite"},
-        )
-        status, key = session.request("GET", "/api/v1/api-keys/legacy-generation-key")
-        assert status == 200, key
-        assert key["data"]["inject_media_generation"] is False
-        status, body = http_request(
-            "GET", f"{base}/api/v1/observations/interactions", headers=session.auth_headers()
-        )
-        assert status == 200, body
-        assert body["data"]["root_total"] == 0
-        deadline = time.time() + 5.0
-        while orphan.exists() and time.time() < deadline:
-            time.sleep(0.05)
-        assert not orphan.exists()
-        status, _ = http_request("GET", f"{base}/api/v1/logs", headers=session.auth_headers())
-        assert status == 404
-
-        with sqlite3.connect(database) as connection:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            assert "request_logs" not in tables
-            assert {
-                "interaction_observations",
-                "inference_run_observations",
-                "model_turn_observations",
-                "target_attempt_observations",
-                "observation_events",
-                "rejected_request_observations",
-                "debug_trace_manifests",
-            } <= tables
-            indexes = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'index'"
-                )
-            }
-            assert {
-                "interaction_observations_window_idx",
-                "model_turns_analytics_idx",
-                "target_attempts_analytics_idx",
-                "observation_events_expiry_idx",
-            } <= indexes
+        proc.wait(timeout=30)
+        assert proc.returncode != 0
     finally:
         stop_stravia_server(proc, logs)
 
 
 @pytest.mark.e2e
 @pytest.mark.storage
-def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
+def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
     stravia_binary: Path, storage_runtime: dict[str, object]
 ) -> None:
     pg_url = storage_runtime["pg_url"]
     if not isinstance(pg_url, str) or not pg_url:
-        pytest.skip("postgres server migration requires DB_URL")
+        pytest.skip("postgres server requires DB_URL")
 
     server_port = find_free_port()
     work_dir = storage_runtime["work_dir"]
@@ -252,7 +184,6 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
     ]  # type: ignore[assignment]
     schema = make_schema("stravia_server_e2e")
     run_schema_action("create", work_dir=work_dir, pg_url=pg_url, schema=schema)
-    run_schema_action("prepare_legacy", work_dir=work_dir, pg_url=pg_url, schema=schema)
 
     try:
         postgres_dsn = postgres_dsn_for_schema(pg_url, schema)
@@ -278,9 +209,6 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                     {"backend": "postgres", "url": postgres_dsn},
                 )
                 headers = session.auth_headers()
-                status, key = session.request("GET", "/api/v1/api-keys/legacy-generation-key")
-                assert status == 200, key
-                assert key["data"]["inject_media_generation"] is False
                 status, body = http_request(
                     "GET", f"{admin_base}/api/v1/status", headers=headers
                 )
@@ -331,8 +259,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                     payload={
                         "model_id": "postgres-server-e2e-model",
                         "display_name": "PostgreSQL server E2E model",
-                        "target_provider": provider_id,
-                        "target_model": "gpt-4o-mini",
+                        "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
                     },
                     headers=headers,
                 )
@@ -384,9 +311,11 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
             finally:
                 stop_stravia_server(proc, logs)
 
-            # 插件二进制属于实例文件，重连旧数据库时须一并迁移。
+            # 本地插件二进制属于实例文件，重连旧数据库时须一并迁移；内嵌插件不写盘。
             plugin_dir = work_dir / "postgres-reconnect-plugins"
-            (Path(data_dir) / "plugins").rename(plugin_dir)
+            plugins = Path(data_dir) / "plugins"
+            if plugins.exists():
+                plugins.rename(plugin_dir)
 
         schema_report = run_schema_action(
             "inspect_observation", work_dir=work_dir, pg_url=pg_url, schema=schema
@@ -398,7 +327,8 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
         reconnect_port = find_free_port()
         reconnect_base = f"http://127.0.0.1:{reconnect_port}"
         with tempfile.TemporaryDirectory(prefix="stravia-postgres-reconnect-e2e-") as reconnect_dir:
-            plugin_dir.rename(Path(reconnect_dir) / "plugins")
+            if plugin_dir.exists():
+                plugin_dir.rename(Path(reconnect_dir) / "plugins")
             reconnect_proc, reconnect_logs = start_stravia_server(
                 stravia_binary=stravia_binary,
                 args=[

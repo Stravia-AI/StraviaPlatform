@@ -13,7 +13,7 @@ use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan;
 
-use crate::db::models::{Route, Target};
+use crate::db::models::{RouteConfig, TargetConfig};
 use crate::interaction_observation::{RunEvent, RunObserver};
 use crate::storage::DynStorage;
 
@@ -68,7 +68,7 @@ impl RouteSelector {
     pub(crate) async fn select(
         &self,
         principal: &Principal,
-        route: &Route,
+        route: &RouteConfig,
         request: &AiRequest,
         media_plan: Option<&MediaRoutingPlan>,
         observer: Option<&RunObserver>,
@@ -89,7 +89,7 @@ impl RouteSelector {
             .map_err(SelectionError::SchedulingEvidence)?;
         let context = RouteAttemptContext {
             principal: principal.continuation_key(),
-            route_id: route.id.clone(),
+            route_id: route.id.clone().into(),
             conversation,
             conversation_affinity_target,
             cache_affinity_target: self
@@ -124,7 +124,7 @@ impl RouteSelector {
     pub(crate) async fn select_independent(
         &self,
         principal: &Principal,
-        route: &Route,
+        route: &RouteConfig,
         estimated_input_tokens: u64,
         observer: Option<&RunObserver>,
     ) -> Result<RouteAttemptPolicy, SelectionError> {
@@ -134,7 +134,7 @@ impl RouteSelector {
             .map_err(SelectionError::SchedulingEvidence)?;
         let context = RouteAttemptContext {
             principal: principal.continuation_key(),
-            route_id: route.id.clone(),
+            route_id: route.id.clone().into(),
             conversation: None,
             conversation_affinity_target: None,
             cache_affinity_target: None,
@@ -158,7 +158,7 @@ impl RouteSelector {
     /// default entry per configured Target so every candidate has a snapshot.
     async fn scheduling_snapshot(
         &self,
-        targets: &[Target],
+        targets: &[TargetConfig],
         observer: Option<&RunObserver>,
     ) -> anyhow::Result<RouteSchedulingSnapshot> {
         let usage = self.storage.usage_stats().route_scheduling_snapshot().await;
@@ -178,7 +178,10 @@ impl RouteSelector {
                 .await?,
         };
         for target in targets {
-            let key = target_key(&target.provider_id, target.model.as_deref());
+            let key = target_key(
+                target.provider_id().as_str(),
+                target.model().map(|model| model.as_str()),
+            );
             let index = snapshot
                 .targets
                 .iter()
@@ -190,13 +193,13 @@ impl RouteSelector {
                     });
                     snapshot.targets.len() - 1
                 });
-            let Some(model) = target.model.as_deref() else {
+            let Some(model) = target.model().map(|model| model.as_str()) else {
                 continue;
             };
             let Some(provider_model) = self
                 .storage
                 .provider_models()
-                .find(&target.provider_id, model)
+                .find(target.provider_id().as_str(), model)
                 .await?
             else {
                 continue;
@@ -232,12 +235,12 @@ mod tests {
     use super::*;
     use crate::db::models::{
         DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_RETRY_BUDGET,
-        Target,
+        TargetConfig,
     };
     use crate::provider_models::{
         ModelCost, NewProviderModelRecord, PriceComponents, ProviderModelMetadata,
         ProviderModelMutation, ProviderModelPresence, ProviderModelReconciliation,
-        ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+        ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
     };
     use crate::router::continuation::ContinuationTarget;
     use crate::router::selector::{
@@ -255,33 +258,34 @@ mod tests {
         AiErrorKind, AiItem, MessageContent, OpenResponsesExt, ProtocolExt, Role, Usage,
     };
 
-    fn target(provider: &str, priority: i32) -> Target {
-        Target {
-            id: format!("target-{provider}"),
+    fn target(provider: &str, priority: i32) -> TargetConfig {
+        TargetConfig {
+            id: format!("target-{provider}").into(),
             model_id: "route".into(),
-            provider_id: provider.into(),
-            model: Some("model".into()),
+            destination: crate::db::identity::TargetDestination::Model {
+                provider_id: provider.into(),
+                model_id: "model".into(),
+            },
             enabled: true,
             priority,
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
             created_at: String::new(),
-            thinking_level_map: sqlx::types::Json(Vec::new()),
+            thinking_level_map: Vec::new(),
         }
     }
 
-    fn route(targets: Vec<Target>) -> Route {
-        Route {
+    fn route(targets: Vec<TargetConfig>) -> RouteConfig {
+        RouteConfig {
             id: "route-id".into(),
             model_id: "route".into(),
             display_name: None,
             balance: "traffic_equalization".into(),
-            target_provider: String::new(),
-            target_model: None,
+
             is_enabled: true,
             created_at: String::new(),
-            supported_thinking_levels: sqlx::types::Json(Vec::new()),
+            supported_thinking_levels: Vec::new(),
             context_window: None,
             output_max_tokens: None,
             supports_image_input: false,
@@ -385,7 +389,9 @@ mod tests {
     }
 
     fn next_provider(policy: &mut RouteAttemptPolicy) -> Option<String> {
-        policy.next_healthy().map(|target| target.provider_id)
+        policy
+            .next_healthy()
+            .map(|target| target.destination.into_parts().0.into())
     }
 
     fn large_usage() -> Usage {
@@ -537,6 +543,7 @@ mod tests {
             provider_id: &str,
             model_id: &str,
             metadata: ProviderModelMetadata,
+            snapshot_state: SnapshotState,
             expected_revision: i64,
         ) -> anyhow::Result<ProviderModelMutation> {
             ProviderModelStore::update_metadata(
@@ -544,6 +551,7 @@ mod tests {
                 provider_id,
                 model_id,
                 metadata,
+                snapshot_state,
                 expected_revision,
             )
             .await
@@ -648,7 +656,7 @@ mod tests {
             .await
             .expect("first select");
         let failed = first.next_healthy().expect("cooling target selected first");
-        assert_eq!(failed.provider_id, "cooling");
+        assert_eq!(failed.provider_id().as_str(), "cooling");
         assert_eq!(
             first.record_failure(
                 &failed,
@@ -780,7 +788,9 @@ mod tests {
             Arc::new(CountingContinuation(Arc::clone(&consultations))),
         );
         let mut provider_only = target("research", 0);
-        provider_only.model = None;
+        provider_only.destination = crate::db::identity::TargetDestination::ProviderOnly {
+            provider_id: provider_only.provider_id().clone(),
+        };
         let route = route(vec![provider_only]);
 
         let mut policy = fixture
@@ -791,8 +801,8 @@ mod tests {
         let selected = policy.next_healthy().expect("Provider-only Target");
 
         assert_eq!(consultations.load(Ordering::SeqCst), 0);
-        assert_eq!(selected.provider_id, "research");
-        assert!(selected.model.is_none());
+        assert_eq!(selected.provider_id().as_str(), "research");
+        assert!(selected.model().is_none());
     }
 
     #[tokio::test]
@@ -933,6 +943,9 @@ mod tests {
                     provider_id: provider.into(),
                     model_id: "model".into(),
                     source_kind: ProviderModelSourceKind::Discovered,
+                    snapshot_state: SnapshotState::Imported {
+                        source: crate::provider_models::SourceStamp::Discovery,
+                    },
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
