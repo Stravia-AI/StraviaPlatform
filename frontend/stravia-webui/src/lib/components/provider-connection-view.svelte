@@ -11,7 +11,6 @@ import type { OAuthCandidateConfiguration, Provider, ProviderConfigurationPrevie
 import ProviderConfigFields from '$lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
 import * as Alert from '$lib/components/ui/alert'
-import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -244,14 +243,6 @@ async function save(): Promise<void> {
           oninput={configurationChanged} />
       </Field.Field>
       {#if descriptor && channel}
-        <Field.Field class="sm:col-span-2">
-          <Field.Label>{m.provider_config_channel_capabilities()}</Field.Label>
-          <div class="flex flex-wrap gap-1.5">
-            {#each channel.capabilities as capability (capability)}
-              <Badge variant="secondary" class="font-technical">{capability}</Badge>
-            {/each}
-          </div>
-        </Field.Field>
         <ProviderConfigFields
           fields={configFields}
           bind:values={form.values}

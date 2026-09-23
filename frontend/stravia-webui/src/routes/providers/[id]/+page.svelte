@@ -145,10 +145,6 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
             icon={descriptor?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'}
             name={provider.name}
             logo={provider.id} />
-          {#if provider.protocol}<Badge variant="outline">{provider.protocol}</Badge>{/if}
-          {#each channel?.capabilities ?? [] as capability (capability)}
-            <Badge variant="secondary" class="font-technical">{capability}</Badge>
-          {/each}
           <StatusIndicator
             compact
             label={credentialInvalid && provider.is_enabled

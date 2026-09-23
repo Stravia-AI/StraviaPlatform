@@ -216,9 +216,6 @@ function setText(field: VendorConfigField, value: string): void {
                 oninput={(event: Event & { currentTarget: HTMLInputElement }) =>
                   setText(field, event.currentTarget.value)} />
             {/if}
-            {#if field.secret && availableSecretFields.has(field.key)}
-              <Field.Description>{m.provider_config_secret_configured()}</Field.Description>
-            {/if}
             {#each currentIssues as issue (`${issue.code}:${issue.message}`)}
               <Field.Error>{issue.message}</Field.Error>
             {/each}
