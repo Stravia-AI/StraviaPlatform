@@ -171,6 +171,11 @@ impl RouteSelector {
         }
         let mut snapshot = RouteSchedulingSnapshot {
             targets: usage.targets,
+            credential_invalid_providers: self
+                .storage
+                .providers()
+                .credential_invalid_provider_ids()
+                .await?,
         };
         for target in targets {
             let key = target_key(&target.provider_id, target.model.as_deref());

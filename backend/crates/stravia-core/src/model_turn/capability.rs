@@ -350,6 +350,17 @@ impl Gateway {
                         });
                     }
                     Err(failure) => {
+                        // ADR-0073：上游确认的凭据拒绝按执行快照的凭据代际
+                        // 条件写 Provider 失效；失败只记 warn，不影响重试决策。
+                        if let Some(execution) = &prepared
+                            && crate::plugin::execution::is_credential_rejection(&failure.error)
+                        {
+                            self.mark_provider_credential_invalid(
+                                &target.provider_id,
+                                execution.credential_version(),
+                            )
+                            .await;
+                        }
                         if let Some(attempt) = &attempt {
                             attempt.finish(
                                 "failed",

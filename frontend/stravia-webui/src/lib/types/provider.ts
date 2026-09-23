@@ -20,6 +20,9 @@ export interface Provider {
   /** Descriptor-declared secret keys that have saved values; values are never returned. */
   configured_credential_fields?: string[]
   is_enabled: boolean
+  /** ADR-0073: `ok` | `invalid` — upstream confirmed rejection of the current credentials. */
+  credential_status?: string
+  credential_invalid_at?: string | null
   created_at: string
   updated_at: string
 }

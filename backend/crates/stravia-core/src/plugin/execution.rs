@@ -8,7 +8,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 use stravia_runtime_contract::CancellationToken;
-use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent,
@@ -21,7 +21,7 @@ use stravia_vendor_sdk::{
 use tokio::sync::{Mutex, mpsc};
 
 use crate::Gateway;
-use crate::db::models::{OAuthCredential, Provider};
+use crate::db::models::{OAuthCredential, Provider, ProviderCredentialVersion};
 use crate::interaction_observation::ProtectedSecrets;
 use crate::provider_models::ProviderModelRecord;
 
@@ -136,6 +136,8 @@ pub(crate) struct PreparedVendorExecution {
     use_proxy: bool,
     origins: BTreeSet<String>,
     kind: Operation,
+    /// ADR-0073：连接快照锁定的凭据代际，供上游凭据拒绝的条件写比对。
+    credential_version: ProviderCredentialVersion,
 }
 
 impl PreparedVendorExecution {
@@ -156,6 +158,12 @@ impl PreparedVendorExecution {
 
     pub(crate) fn provider(&self) -> &ProviderSnapshot {
         &self.provider
+    }
+
+    /// ADR-0073：本执行锁定的凭据代际。上游拒绝证据只能按此代际条件写
+    /// `credential_status`——代际已变说明拒绝的是旧凭据，放弃标记。
+    pub(crate) fn credential_version(&self) -> ProviderCredentialVersion {
+        self.credential_version
     }
 
     pub(crate) fn oauth_connection_id(&self) -> Option<&str> {
@@ -436,6 +444,13 @@ impl Gateway {
             } else {
                 None
             };
+            let credential_version = ProviderCredentialVersion {
+                provider_revision: connection.provider.revision,
+                oauth_status_version: connection
+                    .oauth
+                    .as_ref()
+                    .map(|credential| credential.status_version),
+            };
             let (mut provider, use_proxy, origins) =
                 provider_snapshot(descriptor, connection, model, kind, context)?;
             if let Some(models) = catalog_models {
@@ -455,6 +470,7 @@ impl Gateway {
                 use_proxy,
                 origins,
                 kind,
+                credential_version,
             })
         };
         tokio::select! {
@@ -1135,6 +1151,47 @@ async fn ensure_recovery_complete(
     Ok(())
 }
 
+/// ADR-0073：判定 vendor 执行错误是否为"上游确认拒绝当前凭据"的证据，
+/// 与推理路径归一化为 upstream `provider_auth_error` 的规则一致：
+/// 上游 401、非 403 的 AuthenticationError，或 Vendor 声明的 Auth 拒绝。
+/// 本地校验、Hook 拒绝与 403 授权失败不算。
+pub(crate) fn is_credential_rejection(error: &anyhow::Error) -> bool {
+    let Some(error) = error.downcast_ref::<RuntimeError>() else {
+        return false;
+    };
+    if error.is_upstream_failure() {
+        return error.upstream_status() == Some(401)
+            || (error.upstream_status() != Some(403)
+                && matches!(
+                    error.model_error_kind(),
+                    Some(AiErrorKind::AuthenticationError)
+                ));
+    }
+    matches!(
+        error,
+        RuntimeError::Plugin {
+            kind: ErrorKind::Auth,
+            ..
+        }
+    )
+}
+
+/// ADR-0073：取消与超时是执行中断而非凭据证据——恢复路径因中断失败时
+/// 不得把 Provider 标记为凭据失效。
+pub(crate) fn is_execution_interruption(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<RuntimeError>(),
+        Some(
+            RuntimeError::Cancelled
+                | RuntimeError::DeadlineExceeded
+                | RuntimeError::Plugin {
+                    kind: ErrorKind::Cancelled | ErrorKind::DeadlineExceeded,
+                    ..
+                }
+        )
+    )
+}
+
 fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
     left.id == right.id
         && left.vendor == right.vendor
@@ -1433,5 +1490,77 @@ fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
         ),
         PluginStorageError::StaleOperation | PluginStorageError::Changed => cancelled_failure(),
         PluginStorageError::Storage => storage_failure(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime(kind: ErrorKind, upstream_status: Option<u16>) -> anyhow::Error {
+        RuntimeError::from_guest(kind, "diagnostic".to_string(), upstream_status).into()
+    }
+
+    #[test]
+    fn credential_rejection_requires_upstream_evidence() {
+        // 上游 401 是最直接的凭据拒绝证据
+        assert!(is_credential_rejection(&runtime(
+            ErrorKind::upstream(None, None),
+            Some(401),
+        )));
+        // 上游明确分类为 AuthenticationError（非 403）同样算证据
+        assert!(is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthenticationError), None),
+            Some(400),
+        )));
+        // vendor 直接声明凭据失败（如 OAuth 不可刷新）
+        assert!(is_credential_rejection(&runtime(ErrorKind::Auth, None)));
+
+        // 403 是授权问题而非凭据失效——key 有效但无权限
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthenticationError), None),
+            Some(403),
+        )));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthorizationError), None),
+            Some(403),
+        )));
+        // 非认证类上游失败（限流、无效请求）不算
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::RateLimitError), None),
+            Some(429),
+        )));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(None, None),
+            Some(500),
+        )));
+        // 本地/插件失败不是上游证据
+        assert!(!is_credential_rejection(&runtime(ErrorKind::Invalid, None)));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::Trapped,
+            None
+        )));
+        // 非 RuntimeError（如本地 anyhow）不算
+        assert!(!is_credential_rejection(&anyhow::anyhow!("local")));
+    }
+
+    #[test]
+    fn execution_interruption_covers_cancel_and_deadline() {
+        assert!(is_execution_interruption(
+            &RuntimeError::Cancelled.into()
+        ));
+        assert!(is_execution_interruption(
+            &RuntimeError::DeadlineExceeded.into()
+        ));
+        assert!(is_execution_interruption(&runtime(
+            ErrorKind::Cancelled,
+            None
+        )));
+        assert!(is_execution_interruption(&runtime(
+            ErrorKind::DeadlineExceeded,
+            None
+        )));
+        assert!(!is_execution_interruption(&runtime(ErrorKind::Auth, None)));
+        assert!(!is_execution_interruption(&anyhow::anyhow!("local")));
     }
 }

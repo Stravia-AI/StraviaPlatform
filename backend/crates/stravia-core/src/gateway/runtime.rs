@@ -571,6 +571,43 @@ impl Gateway {
         admin::AdminService::new(self.clone())
     }
 
+    /// ADR-0073 收口：把一条上游凭据拒绝证据按条件写落库。代际已变（凭据
+    /// 已被新证据替换）时不写；存储失败只记 warn，不改变原请求结果。
+    pub(crate) async fn mark_provider_credential_invalid(
+        &self,
+        provider_id: &str,
+        expected: crate::db::models::ProviderCredentialVersion,
+    ) {
+        match self
+            .storage
+            .providers()
+            .mark_credential_invalid(provider_id, expected)
+            .await
+        {
+            Ok(true) => tracing::warn!(
+                provider_id,
+                "provider credentials marked invalid after upstream authentication rejection"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(provider_id, %error, "failed to record provider credential invalidation")
+            }
+        }
+    }
+
+    /// ADR-0073 收口：新凭据证据出现时清除失效标记（OAuth 刷新成功等不改
+    /// Provider 行的路径）；写失败同样只记 warn。
+    pub(crate) async fn clear_provider_credential_invalid(&self, provider_id: &str) {
+        if let Err(error) = self
+            .storage
+            .providers()
+            .clear_credential_invalid(provider_id)
+            .await
+        {
+            tracing::warn!(provider_id, %error, "failed to clear provider credential invalidation");
+        }
+    }
+
     pub fn web_access(&self) -> web_access::WebAccessService {
         web_access::WebAccessService::new(self.clone())
     }

@@ -396,7 +396,7 @@ CREATE TABLE providers (
     priority          INTEGER DEFAULT 0,
     created_at        TEXT DEFAULT (datetime('now')),
     updated_at        TEXT DEFAULT (datetime('now'))
-, adapter_credentials TEXT NOT NULL DEFAULT '{}', vendor_options TEXT NOT NULL DEFAULT '{}');
+, adapter_credentials TEXT NOT NULL DEFAULT '{}', vendor_options TEXT NOT NULL DEFAULT '{}', credential_status TEXT NOT NULL DEFAULT 'ok' CHECK (credential_status IN ('ok', 'invalid')), credential_invalid_at TEXT, revision INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE rejected_request_observations (
     id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,

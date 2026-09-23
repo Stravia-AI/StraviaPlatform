@@ -10,7 +10,7 @@ use crate::db::models::{
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_PRIORITY,
     DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute,
     Route, StatsOverview, StatsSeries, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
-    is_valid_provider_auth_mode,
+    ProviderCredentialVersion, is_valid_provider_auth_mode,
 };
 use crate::plugin::PluginStore;
 use crate::storage::sql::config::SqlBackendConfig;

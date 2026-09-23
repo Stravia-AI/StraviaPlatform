@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 use crate::db::models::{
     ApiKeyStats, CreateProviderRecord, DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS,
     DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider,
-    ProviderStats, PutRoute, Route, StatsOverview, StatsSeries, Target, UpdateProvider,
-    UpsertOAuthCredential,
+    ProviderCredentialVersion, ProviderStats, PutRoute, Route, StatsOverview, StatsSeries, Target,
+    UpdateProvider, UpsertOAuthCredential,
 };
 use crate::plugin::PluginStore;
 use crate::provider_models::{
@@ -135,6 +135,9 @@ impl ProviderStore for MemoryStorage {
             last_test_success: None,
             last_test_at: None,
             is_enabled: true,
+            credential_status: "ok".to_string(),
+            credential_invalid_at: None,
+            revision: 0,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -143,6 +146,9 @@ impl ProviderStore for MemoryStorage {
     }
 
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider> {
+        // ADR-0073：黑名单字段之外的写入视为新凭据证据，恢复 ok。
+        let reset_credential_status =
+            !input.preserve_credential_status && input.resets_credential_status();
         let mut providers = self.providers.write().await;
         let provider = providers
             .iter_mut()
@@ -190,6 +196,11 @@ impl ProviderStore for MemoryStorage {
         if let Some(value) = input.is_enabled {
             provider.is_enabled = value;
         }
+        if reset_credential_status {
+            provider.credential_status = "ok".to_string();
+            provider.credential_invalid_at = None;
+        }
+        provider.revision += 1;
         provider.updated_at = now_rfc3339();
         Ok(provider.clone())
     }
@@ -234,8 +245,73 @@ impl ProviderStore for MemoryStorage {
             .context("provider not found for test result")?;
         provider.last_test_success = Some(result.success);
         provider.last_test_at = Some(result.tested_at);
+        // ADR-0073：测试成功是恢复路径——上游接受了当前凭据，清除失效。
+        if result.success {
+            provider.credential_status = "ok".to_string();
+            provider.credential_invalid_at = None;
+        }
+        provider.revision += 1;
         provider.updated_at = now_rfc3339();
         Ok(())
+    }
+
+    async fn mark_credential_invalid(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+    ) -> anyhow::Result<bool> {
+        // 条件写：凭据代际未变才把拒绝证据归到当前凭据上。
+        let mut providers = self.providers.write().await;
+        let Some(index) = providers.iter().position(|provider| provider.id == id) else {
+            return Ok(false);
+        };
+        if providers[index].revision != expected.provider_revision {
+            return Ok(false);
+        }
+        let oauth_status_version = self
+            .oauth_credentials
+            .credentials
+            .read()
+            .await
+            .get(id)
+            .map(|credential| credential.status_version);
+        if oauth_status_version != expected.oauth_status_version {
+            return Ok(false);
+        }
+        let provider = &mut providers[index];
+        provider.credential_status = "invalid".to_string();
+        if provider.credential_invalid_at.is_none() {
+            provider.credential_invalid_at = Some(now_rfc3339());
+        }
+        provider.revision += 1;
+        Ok(true)
+    }
+
+    async fn clear_credential_invalid(&self, id: &str) -> anyhow::Result<()> {
+        let mut providers = self.providers.write().await;
+        // 仅在失效时落写，与 SQL 实现一致——避免主动刷新空转 revision。
+        if let Some(provider) = providers
+            .iter_mut()
+            .find(|provider| provider.id == id && provider.credential_invalid())
+        {
+            provider.credential_status = "ok".to_string();
+            provider.credential_invalid_at = None;
+            provider.revision += 1;
+        }
+        Ok(())
+    }
+
+    async fn credential_invalid_provider_ids(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        Ok(self
+            .providers
+            .read()
+            .await
+            .iter()
+            .filter(|provider| provider.credential_invalid())
+            .map(|provider| provider.id.clone())
+            .collect())
     }
 }
 
@@ -806,6 +882,9 @@ mod tests {
             last_test_success: None,
             last_test_at: None,
             is_enabled: true,
+            credential_status: "ok".into(),
+            credential_invalid_at: None,
+            revision: 0,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         }
@@ -1155,5 +1234,229 @@ mod tests {
                 .model_id,
             "openai/gpt-4o"
         );
+    }
+
+    // ADR-0073：凭据失效是条件写——凭据代际（providers.revision +
+    // OAuth status_version）不一致时放弃标记，避免旧凭据的 401
+    // 误杀已更换的新凭据。
+    #[tokio::test]
+    async fn credential_invalid_marking_is_conditional_on_credential_generation() {
+        let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
+        let store = storage.providers();
+
+        let stale = ProviderCredentialVersion {
+            provider_revision: 99,
+            oauth_status_version: None,
+        };
+        assert!(!store
+            .mark_credential_invalid("p1", stale)
+            .await
+            .expect("mark"));
+        assert!(!store
+            .get("p1")
+            .await
+            .expect("get")
+            .expect("provider")
+            .credential_invalid());
+
+        let current = ProviderCredentialVersion {
+            provider_revision: 0,
+            oauth_status_version: None,
+        };
+        assert!(store
+            .mark_credential_invalid("p1", current)
+            .await
+            .expect("mark"));
+        let marked = store.get("p1").await.expect("get").expect("provider");
+        assert!(marked.credential_invalid());
+        assert!(marked.credential_invalid_at.is_some());
+        assert_eq!(marked.revision, 1);
+
+        // 已失效后再标记：代际已前进，旧证据不再重复写入
+        assert!(!store
+            .mark_credential_invalid("p1", current)
+            .await
+            .expect("mark"));
+
+        assert!(store
+            .credential_invalid_provider_ids()
+            .await
+            .expect("ids")
+            .contains("p1"));
+    }
+
+    #[tokio::test]
+    async fn credential_invalid_marking_requires_matching_oauth_version() {
+        let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
+        storage
+            .oauth_credentials()
+            .upsert(
+                "p1",
+                crate::db::models::UpsertOAuthCredential {
+                    driver_key: "driver".into(),
+                    scheme: "authorization_code".into(),
+                    access_token: "token".into(),
+                    refresh_token: None,
+                    expires_at: None,
+                    resource_url: None,
+                    subject_id: None,
+                    scopes: None,
+                    meta: None,
+                },
+            )
+            .await
+            .expect("upsert oauth");
+        let store = storage.providers();
+
+        // 有 OAuth 行但请求声称没有 → 拒绝标记
+        assert!(!store
+            .mark_credential_invalid(
+                "p1",
+                ProviderCredentialVersion {
+                    provider_revision: 0,
+                    oauth_status_version: None,
+                },
+            )
+            .await
+            .expect("mark"));
+
+        // OAuth 凭据已被刷新（status_version 前进）→ 旧证据不得落库
+        let stored_version = storage
+            .oauth_credentials()
+            .get("p1")
+            .await
+            .expect("get oauth")
+            .expect("oauth")
+            .status_version;
+        assert!(!store
+            .mark_credential_invalid(
+                "p1",
+                ProviderCredentialVersion {
+                    provider_revision: 0,
+                    oauth_status_version: Some(stored_version + 1),
+                },
+            )
+            .await
+            .expect("mark"));
+
+        assert!(store
+            .mark_credential_invalid(
+                "p1",
+                ProviderCredentialVersion {
+                    provider_revision: 0,
+                    oauth_status_version: Some(stored_version),
+                },
+            )
+            .await
+            .expect("mark"));
+        assert!(store
+            .get("p1")
+            .await
+            .expect("get")
+            .expect("provider")
+            .credential_invalid());
+    }
+
+    #[tokio::test]
+    async fn credential_invalid_clears_only_on_credential_evidence() {
+        let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
+        let store = storage.providers();
+        let version = ProviderCredentialVersion {
+            provider_revision: 0,
+            oauth_status_version: None,
+        };
+        assert!(store
+            .mark_credential_invalid("p1", version)
+            .await
+            .expect("mark"));
+
+        // 仅意图字段（is_enabled）不清除失效
+        let updated = store
+            .update(
+                "p1",
+                UpdateProvider {
+                    is_enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update");
+        assert!(updated.credential_invalid());
+        assert!(updated.credential_invalid_at.is_some());
+
+        // 全字段回填但调用方声明保留 → 仍不清除
+        let updated = store
+            .update(
+                "p1",
+                UpdateProvider {
+                    api_key: Some("same".into()),
+                    preserve_credential_status: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update");
+        assert!(updated.credential_invalid());
+
+        // 凭据字段变更 → 新证据，恢复 ok
+        let updated = store
+            .update(
+                "p1",
+                UpdateProvider {
+                    api_key: Some("new-key".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update");
+        assert!(!updated.credential_invalid());
+        assert!(updated.credential_invalid_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn successful_test_result_clears_credential_invalid() {
+        let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
+        let store = storage.providers();
+        assert!(store
+            .mark_credential_invalid(
+                "p1",
+                ProviderCredentialVersion {
+                    provider_revision: 0,
+                    oauth_status_version: None,
+                },
+            )
+            .await
+            .expect("mark"));
+
+        store
+            .record_test_result(
+                "p1",
+                ProviderTestResult {
+                    success: false,
+                    tested_at: now_rfc3339(),
+                },
+            )
+            .await
+            .expect("record failure");
+        assert!(store
+            .get("p1")
+            .await
+            .expect("get")
+            .expect("provider")
+            .credential_invalid());
+
+        store
+            .record_test_result(
+                "p1",
+                ProviderTestResult {
+                    success: true,
+                    tested_at: now_rfc3339(),
+                },
+            )
+            .await
+            .expect("record success");
+        let provider = store.get("p1").await.expect("get").expect("provider");
+        assert!(!provider.credential_invalid());
+        assert!(provider.credential_invalid_at.is_none());
     }
 }

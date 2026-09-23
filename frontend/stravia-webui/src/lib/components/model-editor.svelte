@@ -999,8 +999,14 @@ async function saveModel(): Promise<void> {
                             <StatusIndicator
                               compact
                               class="@max-md/target:col-span-2 @max-md/target:col-start-2"
-                              label={targetStateLabel(status.state, status.cooldown_remaining_ms)}
-                              tone={status.state === 'available' ? 'healthy' : 'warning'} />
+                              label={status.credential_invalid
+                                ? m.model_editor_target_status_credential_invalid()
+                                : targetStateLabel(status.state, status.cooldown_remaining_ms)}
+                              tone={status.credential_invalid
+                                ? 'error'
+                                : status.state === 'available'
+                                  ? 'healthy'
+                                  : 'warning'} />
                           {/if}
                         </div>
                         <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">

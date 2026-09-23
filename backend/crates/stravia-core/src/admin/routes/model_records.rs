@@ -17,6 +17,9 @@ pub struct RouteTargetStatus {
     pub provider_id: String,
     pub model: Option<String>,
     pub state: TargetRuntimeState,
+    /// ADR-0073：Provider 凭据失效时置位。失效压过冷却态呈现——凭据死了
+    /// 冷却无意义；与 `state` 熔断状态机正交，不新增枚举值。
+    pub credential_invalid: bool,
     pub cooldown_remaining_ms: Option<u64>,
 }
 
@@ -41,6 +44,12 @@ impl AdminService {
             .get(&route_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
+        let credential_invalid = self
+            .gw
+            .storage
+            .providers()
+            .credential_invalid_provider_ids()
+            .await?;
         Ok(route
             .targets
             .into_iter()
@@ -52,11 +61,13 @@ impl AdminService {
                         &target.provider_id,
                         target.model.as_deref(),
                     ));
+                let credential_invalid = credential_invalid.contains(&target.provider_id);
                 RouteTargetStatus {
                     target_id: target.id,
                     provider_id: target.provider_id,
                     model: target.model,
                     state: status.state,
+                    credential_invalid,
                     cooldown_remaining_ms: status.cooldown_remaining_ms,
                 }
             })

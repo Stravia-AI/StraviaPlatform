@@ -333,10 +333,18 @@ async function copyProvider(): Promise<void> {
 
 {#snippet providerStatusCell(context: DataTableCellContext<Provider>)}
   {@const provider = context.row.original}
+  {@const credentialInvalid = provider.credential_status === 'invalid'}
   <StatusIndicator
     compact
-    label={provider.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
-    tone={provider.is_enabled ? 'healthy' : 'neutral'} />
+    label={credentialInvalid && provider.is_enabled
+      ? m.providers_credential_invalid()
+      : provider.is_enabled
+        ? m.common_enabled_status()
+        : m.common_disabled_status()}
+    tone={credentialInvalid && provider.is_enabled ? 'error' : provider.is_enabled ? 'healthy' : 'neutral'} />
+  {#if credentialInvalid && !provider.is_enabled}
+    <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
+  {/if}
   {#if profileDescriptorsQuery.isPending}
     <p class="mt-1 text-xs text-muted-foreground">{m.common_loading()}</p>
   {:else if profileDescriptorsQuery.isError}
@@ -418,6 +426,7 @@ async function copyProvider(): Promise<void> {
       <div class="route-mobile-list">
         {#each providers as provider (provider.id)}
           {@const drifts = driftsByProvider[provider.id] ?? []}
+          {@const credentialInvalid = provider.credential_status === 'invalid'}
           <div class="route-mobile-row">
             <div class="min-w-0">
               <div class="flex items-center gap-3">
@@ -441,8 +450,15 @@ async function copyProvider(): Promise<void> {
               <StatusIndicator
                 class="mt-1"
                 compact
-                label={provider.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
-                tone={provider.is_enabled ? 'healthy' : 'neutral'} />
+                label={credentialInvalid && provider.is_enabled
+                  ? m.providers_credential_invalid()
+                  : provider.is_enabled
+                    ? m.common_enabled_status()
+                    : m.common_disabled_status()}
+                tone={credentialInvalid && provider.is_enabled ? 'error' : provider.is_enabled ? 'healthy' : 'neutral'} />
+              {#if credentialInvalid && !provider.is_enabled}
+                <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
+              {/if}
               {#if drifts.length > 0}
                 <Badge
                   class="mt-2"

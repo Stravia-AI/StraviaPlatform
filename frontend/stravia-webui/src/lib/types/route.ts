@@ -114,5 +114,7 @@ export interface TargetRuntimeStatus {
   provider_id: string
   model: string | null
   state: TargetRuntimeState
+  /** ADR-0073: the owning Provider's credentials were rejected upstream. */
+  credential_invalid?: boolean
   cooldown_remaining_ms: number | null
 }
