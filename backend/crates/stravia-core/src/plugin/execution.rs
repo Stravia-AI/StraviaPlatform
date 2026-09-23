@@ -28,7 +28,7 @@ use crate::provider_models::ProviderModelRecord;
 use super::lifecycle::{VendorOperation, VendorPublicationFence};
 use super::network::VendorNetwork;
 use super::permissions::resolve_permissions;
-use super::store::{MAX_PRIVATE_STATE_BYTES, PluginStorageError, PluginStore};
+use super::store::{PluginStorageError, PluginStore};
 
 #[derive(Debug, Clone)]
 pub(crate) enum VendorRequest {
@@ -1260,12 +1260,6 @@ impl HostServices for ScopedHostServices {
     }
 
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure> {
-        if bytes.len() > MAX_PRIVATE_STATE_BYTES {
-            return Err(HostFailure::new(
-                ErrorKind::ResourceExhausted,
-                "vendor private state exceeds its size limit",
-            ));
-        }
         self.ensure_current()?;
         let fence = self
             .operation
@@ -1427,10 +1421,6 @@ fn storage_failure() -> HostFailure {
 
 fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
     match error {
-        PluginStorageError::StateTooLarge => HostFailure::new(
-            ErrorKind::ResourceExhausted,
-            "vendor private state exceeds its size limit",
-        ),
         PluginStorageError::StaleOperation | PluginStorageError::Changed => cancelled_failure(),
         PluginStorageError::Storage => storage_failure(),
     }

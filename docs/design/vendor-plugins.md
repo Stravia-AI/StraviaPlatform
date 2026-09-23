@@ -67,7 +67,7 @@
 ## 已确认的技术栈与插件契约
 
 - 唯一目标技术栈为 Wasmtime + WebAssembly Component Model + WIT，不同时提供 Extism 或另一套自定义 Core Wasm ABI。
-- Wasmtime 负责加载、执行与资源限制；`stravia:vendor@0.2.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
+- Wasmtime 负责加载、执行与能力隔离；`stravia:vendor@0.2.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
 - `VendorDescriptor` 包含 `vendor_id`、版本、展示元数据、canonical 格式版本、`kind` 与 `providers`；`kind` 为 `fallback` 或 `dedicated`。每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、channel、能力、配置、网络权限和数据兼容信息。
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
@@ -78,7 +78,7 @@
 - `descriptor`、`select-protocol`、`execute` 的导出结构保持不变。首先提供 Rust 插件 SDK，以复用现有供应商实现；WIT 契约不限定插件必须使用 Rust，其他语言的实际工具链兼容性需要验证。
 - 发布产物为单个自包含 Wasm Component，携带锁定的 codec 依赖；不直接跨契约暴露 Gateway、数据库对象或 Rust trait 内存布局。
 - 宿主与插件通过明确版本的类型和资源交互。Wasmtime 版本以根目录 `Cargo.toml` 与 `Cargo.lock` 为准，guest 工具链以 `rust-toolchain.toml` 为准；技术栈决策见 [ADR-0072](../adr/0072-use-wasmtime-components-and-wit-for-vendor-plugins.md)。
-- 推理与原生压缩在执行前调用同一固定版本的 `select-protocol` 导出，由插件根据连接快照与 canonical 请求选择实际上游协议。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消、截止时间与资源预算约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
+- 推理与原生压缩在执行前调用同一固定版本的 `select-protocol` 导出，由插件根据连接快照与 canonical 请求选择实际上游协议。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消与截止时间约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
 
 ### 实现与验证入口
 

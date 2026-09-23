@@ -5,8 +5,6 @@ use stravia_vendor_sdk::ErrorKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("plugin artifact exceeds the configured size limit")]
-    ArtifactTooLarge,
     #[error("plugin is not a valid WebAssembly Component")]
     InvalidComponent(String),
     #[error("plugin imports forbidden interface `{0}`")]
