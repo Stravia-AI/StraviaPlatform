@@ -19,6 +19,9 @@ use tokio::time::{Duration, timeout};
 
 use uuid::Uuid;
 
+mod vendor_plugin_artifacts;
+use vendor_plugin_artifacts::install_distributed_vendor_plugin;
+
 const FAR_FUTURE_RFC3339: &str = "2099-01-01T00:00:00Z";
 const CODEX_RUNTIME_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_SCOPE: &[u8] = br#"{
@@ -1229,6 +1232,7 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
 #[tokio::test]
 async fn copy_oauth_provider_copies_credential_binding() -> anyhow::Result<()> {
     let gw = build_gateway().await?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
     let original = gw
         .storage
         .providers()
@@ -1256,6 +1260,7 @@ async fn copy_oauth_provider_copies_credential_binding() -> anyhow::Result<()> {
 async fn logout_provider_oauth_preserves_oauth_mode_and_disconnects_binding() -> anyhow::Result<()>
 {
     let gw = build_gateway().await?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
     let provider = gw
         .storage
         .providers()
