@@ -297,7 +297,9 @@ async fn fetch_provider_allowance(
                             ),
                             VendorCallContext::new(
                                 stravia_runtime_contract::CancellationToken::new(),
-                                Instant::now() + REQUEST_TIMEOUT,
+                                stravia_runtime_contract::Deadline::fixed(
+                                    Instant::now() + REQUEST_TIMEOUT,
+                                ),
                             ),
                         )
                         .await;

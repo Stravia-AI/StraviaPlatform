@@ -29,6 +29,7 @@ use crate::router::{
     RoutePolicyState, SelectedTarget, selected_target_key,
 };
 use crate::router::{ContinuationLookup, ContinuationTarget};
+use stravia_runtime_contract::Deadline;
 use stravia_runtime_contract::hook::RouteContext;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
@@ -69,8 +70,8 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
         if !input.attachments_normalized {
             tokio::select! {
                 biased;
-                _ = input.cancellation.cancelled() => return Err(interruption_error(input.deadline)),
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+                _ = input.cancellation.cancelled() => return Err(interruption_error(&input.deadline)),
+                () = input.deadline.wait() => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
                 result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
             }
         }
@@ -120,21 +121,21 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             finished: false,
         });
         let result = if input.cancellation.is_cancelled() {
-            Err(interruption_error(input.deadline))
-        } else if Instant::now() >= input.deadline {
+            Err(interruption_error(&input.deadline))
+        } else if input.deadline.is_exceeded() {
             Err(ModelTurnError::new(
                 "deadline_exceeded",
                 "Model Turn deadline exceeded",
             ))
         } else {
-            let deadline = tokio::time::Instant::from_std(input.deadline);
+            let deadline = input.deadline.clone();
             let cancellation = input.cancellation.clone();
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    Err(interruption_error(deadline.into_std()))
+                    Err(interruption_error(&deadline))
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                () = deadline.wait() => {
                     Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
                 }
                 result = async {
@@ -202,7 +203,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         principal,
                         trace,
                         cancellation: cancellation.clone(),
-                        deadline,
+                        deadline: deadline.clone(),
                         publication: turn.target.publication.clone(),
                         terminal: terminal.take().expect("Model Turn terminal owner"),
                     });
@@ -459,7 +460,7 @@ struct CompletionStreamSpec {
     principal: stravia_runtime_contract::Principal,
     trace: stravia_runtime_contract::redaction::RedactionTrace,
     cancellation: stravia_runtime_contract::CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: Deadline,
     publication: Option<VendorPublication>,
     terminal: ModelTurnTerminal,
 }
@@ -488,7 +489,9 @@ fn completion_stream(spec: CompletionStreamSpec) -> super::CanonicalEventStream 
         publication,
         terminal,
     );
-    Box::pin(stream::unfold(state, move |mut state| async move {
+    Box::pin(stream::unfold(state, move |mut state| {
+        let deadline = deadline.clone();
+        async move {
         let (output, redaction, principal, trace, cancellation, publication, terminal) =
             &mut state;
         if terminal.finished {
@@ -496,12 +499,12 @@ fn completion_stream(spec: CompletionStreamSpec) -> super::CanonicalEventStream 
         }
         let result = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Err(if tokio::time::Instant::now() >= deadline {
+            _ = cancellation.cancelled() => Err(if deadline.is_exceeded() {
                 ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")
             } else {
                 ModelTurnError::new("cancelled", "Model Turn cancelled")
             }),
-            _ = tokio::time::sleep_until(deadline) => Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+            () = deadline.wait() => Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
             result = async {
                 match output.next().await {
                     Some(Ok(CanonicalEvent::Completed(response))) => {
@@ -545,7 +548,7 @@ fn completion_stream(spec: CompletionStreamSpec) -> super::CanonicalEventStream 
         };
         // The publication future may have made cancellation/deadline ready during
         // its final poll. Success is still provisional until this last decision.
-        let result = if tokio::time::Instant::now() >= deadline {
+        let result = if deadline.is_exceeded() {
             Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
         } else if cancellation.is_cancelled() {
             Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
@@ -560,6 +563,7 @@ fn completion_stream(spec: CompletionStreamSpec) -> super::CanonicalEventStream 
             Ok(CanonicalEvent::Delta(_)) => {}
         }
         Some((result, state))
+        }
     }).fuse())
 }
 
@@ -712,7 +716,7 @@ fn execute_inner(
                         let deadline_guard = AttemptDeadlineGuard::armed(
                             &attempts,
                             &target,
-                            input.deadline,
+                            input.deadline.clone(),
                             upstream_state,
                         );
                         begin_attempt(
@@ -827,11 +831,11 @@ const UPSTREAM_FAILURE_MASK: u8 =
 
 struct UpstreamLocalWork<'a> {
     state: &'a AtomicU8,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
 impl<'a> UpstreamLocalWork<'a> {
-    fn begin(state: &'a AtomicU8, deadline: Instant) -> Self {
+    fn begin(state: &'a AtomicU8, deadline: Deadline) -> Self {
         state.fetch_or(UPSTREAM_LOCAL_WORK, Ordering::AcqRel);
         Self { state, deadline }
     }
@@ -839,7 +843,7 @@ impl<'a> UpstreamLocalWork<'a> {
 
 impl Drop for UpstreamLocalWork<'_> {
     fn drop(&mut self) {
-        if Instant::now() >= self.deadline {
+        if self.deadline.is_exceeded() {
             self.state
                 .fetch_or(UPSTREAM_LOCAL_DEADLINE, Ordering::AcqRel);
         }
@@ -1002,7 +1006,7 @@ async fn prepare_attempt(
     let compact = input.purpose == super::ModelTurnPurpose::Compact;
     let response_continuation_available = Arc::new(AtomicBool::new(false));
     let mut preparation_context =
-        VendorCallContext::new(input.cancellation.clone(), input.deadline);
+        VendorCallContext::new(input.cancellation.clone(), input.deadline.clone());
     preparation_context.observer = input.observer.clone();
     preparation_context.metadata.insert(
         TRANSPORT_PREFERENCE_METADATA_KEY.into(),
@@ -1023,10 +1027,10 @@ async fn prepare_attempt(
         )
         .await
         .map_err(|_| {
-            if input.cancellation.is_cancelled() || Instant::now() >= input.deadline {
+            if input.cancellation.is_cancelled() || input.deadline.is_exceeded() {
                 AttemptFailure::terminal(
-                    interruption_error(input.deadline).code,
-                    interruption_error(input.deadline).message,
+                    interruption_error(&input.deadline).code,
+                    interruption_error(&input.deadline).message,
                 )
             } else {
                 AttemptFailure::reroutable(
@@ -1392,7 +1396,7 @@ struct AttemptDeadlineGuard {
     epoch: u64,
     retry_budget: i32,
     cooldown_ms: i64,
-    deadline: Instant,
+    deadline: Deadline,
     upstream_state: Arc<AtomicU8>,
     armed: bool,
 }
@@ -1401,7 +1405,7 @@ impl AttemptDeadlineGuard {
     fn armed(
         attempts: &RouteAttemptPolicy,
         target: &SelectedTarget,
-        deadline: Instant,
+        deadline: Deadline,
         upstream_state: Arc<AtomicU8>,
     ) -> Self {
         Self {
@@ -1424,7 +1428,7 @@ impl AttemptDeadlineGuard {
 impl Drop for AttemptDeadlineGuard {
     fn drop(&mut self) {
         if self.armed
-            && Instant::now() >= self.deadline
+            && self.deadline.is_exceeded()
             && self.upstream_state.load(Ordering::Acquire) & UPSTREAM_FAILURE_MASK
                 == UPSTREAM_STARTED
         {
@@ -1624,7 +1628,7 @@ async fn begin_attempt(
     let principal = input.principal.clone();
     let canonical_request = input.request.clone();
     let parent_cancellation = input.cancellation.clone();
-    let deadline = input.deadline;
+    let deadline = input.deadline.clone();
     let observer = input.observer.clone();
     let join = tokio::spawn(async move {
         drive_vendor_attempt(
@@ -1724,7 +1728,7 @@ async fn drive_vendor_attempt(
     canonical_request: AiRequest,
     parent_cancellation: stravia_runtime_contract::CancellationToken,
     operation_cancellation: stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: Deadline,
     failure_observer: Option<crate::interaction_observation::RunObserver>,
     mut prepared: PreparedAttempt,
     policy: AttemptRoutePolicy,
@@ -1760,7 +1764,7 @@ async fn drive_vendor_attempt(
             &principal,
             &parent_cancellation,
             &operation_cancellation,
-            deadline,
+            deadline.clone(),
             &mut prepared,
             &policy,
             &target,
@@ -1839,7 +1843,7 @@ async fn drive_vendor_attempt(
                     &publication,
                     &parent_cancellation,
                     &operation_cancellation,
-                    deadline,
+                    &deadline,
                     Ok(CanonicalEvent::Completed(response)),
                 )
                 .await;
@@ -1891,7 +1895,7 @@ async fn drive_vendor_attempt(
                     &publication,
                     &parent_cancellation,
                     &operation_cancellation,
-                    deadline,
+                    &deadline,
                     Ok(CanonicalEvent::Compacted(Box::new(response))),
                 )
                 .await;
@@ -1992,7 +1996,7 @@ async fn drive_vendor_attempt(
                     &prepared.route.provider_id,
                     &prepared.pinned_execution,
                     operation_cancellation.clone(),
-                    deadline,
+                    deadline.clone(),
                 );
                 let refreshed = tokio::select! {
                     biased;
@@ -2000,7 +2004,7 @@ async fn drive_vendor_attempt(
                         operation_cancellation.cancel();
                         Err(())
                     }
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    () = deadline.wait() => {
                         operation_cancellation.cancel();
                         Err(())
                     }
@@ -2084,7 +2088,7 @@ async fn run_vendor_operation(
     principal: &stravia_runtime_contract::Principal,
     parent_cancellation: &stravia_runtime_contract::CancellationToken,
     operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: Deadline,
     prepared: &mut PreparedAttempt,
     policy: &AttemptRoutePolicy,
     target: &SelectedTarget,
@@ -2102,7 +2106,7 @@ async fn run_vendor_operation(
         .upstream_state
         .store(UPSTREAM_NOT_STARTED, Ordering::Release);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
-    let mut context = VendorCallContext::new(operation_cancellation.clone(), deadline);
+    let mut context = VendorCallContext::new(operation_cancellation.clone(), deadline.clone());
     context.events = Some(event_tx);
     context.observer = prepared.observer.clone();
     context.model_turn_id = Some(prepared.model_turn_id.clone());
@@ -2130,10 +2134,10 @@ async fn run_vendor_operation(
                 )
                 .await
                 .map_err(|_| {
-                    if operation_cancellation.is_cancelled() || Instant::now() >= deadline {
+                    if operation_cancellation.is_cancelled() || deadline.is_exceeded() {
                         AttemptFailure::terminal(
-                            interruption_error(deadline).code,
-                            interruption_error(deadline).message,
+                            interruption_error(&deadline).code,
+                            interruption_error(&deadline).message,
                         )
                     } else {
                         AttemptFailure::reroutable(
@@ -2201,7 +2205,7 @@ async fn run_vendor_operation(
             biased;
             _ = parent_cancellation.cancelled() => {
                 operation_cancellation.cancel();
-                let interruption = interruption_error(deadline);
+                let interruption = interruption_error(&deadline);
                 return Err(if interruption.code == "deadline_exceeded"
                     && prepared.upstream_state.load(Ordering::Acquire)
                         & UPSTREAM_FAILURE_MASK
@@ -2218,7 +2222,7 @@ async fn run_vendor_operation(
                     AttemptFailure::terminal(interruption.code, interruption.message)
                 });
             }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 operation_cancellation.cancel();
                 return Err(if prepared.upstream_state.load(Ordering::Acquire)
                     & UPSTREAM_FAILURE_MASK
@@ -2251,7 +2255,7 @@ async fn run_vendor_operation(
                     output,
                     parent_cancellation,
                     operation_cancellation,
-                    deadline,
+                    &deadline,
                     ready,
                     committed,
                     streamed,
@@ -2269,7 +2273,7 @@ async fn run_vendor_operation(
                 None => break,
             },
             result = &mut execution => {
-                mark_upstream_operation_finished(&prepared.upstream_state, &result, deadline);
+                mark_upstream_operation_finished(&prepared.upstream_state, &result, &deadline);
                 operation_result = Some(result);
                 break;
             }
@@ -2278,7 +2282,7 @@ async fn run_vendor_operation(
 
     if operation_result.is_none() {
         let result = execution.await;
-        mark_upstream_operation_finished(&prepared.upstream_state, &result, deadline);
+        mark_upstream_operation_finished(&prepared.upstream_state, &result, &deadline);
         operation_result = Some(result);
     }
     while let Some(event) = event_rx.recv().await {
@@ -2290,7 +2294,7 @@ async fn run_vendor_operation(
             output,
             parent_cancellation,
             operation_cancellation,
-            deadline,
+            &deadline,
             ready,
             committed,
             streamed,
@@ -2317,7 +2321,7 @@ async fn run_vendor_operation(
     } = operation_result
         .expect("operation result")
         .map_err(|error| {
-            classify_vendor_operation_error(error, &prepared.upstream_state, deadline)
+            classify_vendor_operation_error(error, &prepared.upstream_state, &deadline)
         })?;
     if protocol.trim() != prepared.protocol_hint {
         return Err(if *committed {
@@ -2363,11 +2367,11 @@ async fn run_vendor_operation(
                     _ = parent_cancellation.cancelled() => {
                         operation_cancellation.cancel();
                         return Err(AttemptFailure::terminal(
-                            interruption_error(deadline).code,
-                            interruption_error(deadline).message,
+                            interruption_error(&deadline).code,
+                            interruption_error(&deadline).message,
                         ));
                     }
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    () = deadline.wait() => {
                         operation_cancellation.cancel();
                         return Err(AttemptFailure::terminal(
                             "deadline_exceeded",
@@ -2395,7 +2399,7 @@ async fn run_vendor_operation(
                     output,
                     parent_cancellation,
                     operation_cancellation,
-                    deadline,
+                    &deadline,
                     ready,
                     committed,
                     streamed,
@@ -2415,7 +2419,7 @@ async fn run_vendor_operation(
                     output,
                     parent_cancellation,
                     operation_cancellation,
-                    deadline,
+                    &deadline,
                     ready,
                     committed,
                     streamed,
@@ -2443,10 +2447,10 @@ async fn run_vendor_operation(
 fn mark_upstream_operation_finished(
     upstream_state: &AtomicU8,
     result: &anyhow::Result<VendorExecution>,
-    deadline: Instant,
+    deadline: &Deadline,
 ) {
     let ended_by_deadline =
-        Instant::now() >= deadline && result.as_ref().err().is_some_and(runtime_error_is_deadline);
+        deadline.is_exceeded() && result.as_ref().err().is_some_and(runtime_error_is_deadline);
     if !ended_by_deadline {
         upstream_state.fetch_or(UPSTREAM_FINISHED, Ordering::AcqRel);
     }
@@ -2466,9 +2470,9 @@ fn runtime_error_is_deadline(error: &anyhow::Error) -> bool {
 fn classify_vendor_operation_error(
     error: anyhow::Error,
     upstream_state: &AtomicU8,
-    deadline: Instant,
+    deadline: &Deadline,
 ) -> AttemptFailure {
-    if Instant::now() >= deadline
+    if deadline.is_exceeded()
         && upstream_state.load(Ordering::Acquire) & UPSTREAM_FAILURE_MASK == UPSTREAM_STARTED
         && runtime_error_is_deadline(&error)
     {
@@ -2493,7 +2497,7 @@ async fn process_runtime_event(
     output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
     parent_cancellation: &stravia_runtime_contract::CancellationToken,
     operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: &Deadline,
     ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
     committed: &mut bool,
     streamed: &mut bool,
@@ -2517,7 +2521,7 @@ async fn process_runtime_event(
             upstream_state.fetch_or(UPSTREAM_STARTED, Ordering::AcqRel);
         }
         RuntimeEvent::Delta(mut delta) => {
-            let _local_work = UpstreamLocalWork::begin(upstream_state, deadline);
+            let _local_work = UpstreamLocalWork::begin(upstream_state, deadline.clone());
             if matches!(&delta, AiStreamDelta::ItemDone { .. }) {
                 let normalization = tokio::select! {
                     biased;
@@ -2528,7 +2532,7 @@ async fn process_runtime_event(
                             interruption_error(deadline).message,
                         ));
                     }
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    () = deadline.wait() => {
                         operation_cancellation.cancel();
                         return Err(AttemptFailure::terminal(
                             "deadline_exceeded",
@@ -2626,7 +2630,7 @@ async fn commit_vendor_stream(
     output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
     parent_cancellation: &stravia_runtime_contract::CancellationToken,
     operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: &Deadline,
     ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
     committed: &mut bool,
     streamed: &mut bool,
@@ -2679,7 +2683,7 @@ struct VendorOutputDelivery<'a> {
     output: &'a tokio::sync::mpsc::Sender<VendorPublishedResult>,
     parent_cancellation: &'a stravia_runtime_contract::CancellationToken,
     operation_cancellation: &'a stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: &'a Deadline,
 }
 
 async fn observe_and_send_delta(
@@ -2709,7 +2713,7 @@ async fn send_vendor_output(
     publication: &VendorPublicationFence,
     parent_cancellation: &stravia_runtime_contract::CancellationToken,
     operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: Instant,
+    deadline: &Deadline,
     event: Result<CanonicalEvent, ModelTurnError>,
 ) -> Result<(), ModelTurnError> {
     let permit = tokio::select! {
@@ -2721,7 +2725,7 @@ async fn send_vendor_output(
             operation_cancellation.cancel();
             return Err(interruption_error(deadline));
         }
-        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+        () = deadline.wait() => {
             operation_cancellation.cancel();
             return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"));
         }
@@ -3215,8 +3219,8 @@ fn vendor_metadata_supports_modality(
         })
 }
 
-fn interruption_error(deadline: Instant) -> ModelTurnError {
-    if Instant::now() >= deadline {
+fn interruption_error(deadline: &Deadline) -> ModelTurnError {
+    if deadline.is_exceeded() {
         ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")
     } else {
         ModelTurnError::new("cancelled", "Model Turn cancelled")
@@ -3248,6 +3252,7 @@ mod tests {
     use crate::router::{RoutePolicyState, TargetRuntimeState};
     use std::sync::{Arc, atomic::AtomicU8};
     use std::time::{Duration, Instant};
+    use stravia_runtime_contract::Deadline;
     use stravia_runtime_contract::protocol::ids::{
         ANTHROPIC_MESSAGES_2023_06_01, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
     };
@@ -3399,7 +3404,7 @@ mod tests {
 
     fn armed_deadline_guard(
         state: &RoutePolicyState,
-        deadline: Instant,
+        deadline: Deadline,
         upstream_state: bool,
     ) -> AttemptDeadlineGuard {
         AttemptDeadlineGuard {
@@ -3421,15 +3426,16 @@ mod tests {
     #[tokio::test]
     async fn expired_armed_guard_records_an_upstream_failure() {
         let state = RoutePolicyState::default();
-        let deadline = Instant::now() + Duration::from_millis(20);
+        let deadline = Deadline::from_now(Duration::from_millis(20));
         let pending = {
             let state = state.clone();
+            let deadline = deadline.clone();
             async move {
                 let _guard = armed_deadline_guard(&state, deadline, true);
                 std::future::pending::<()>().await
             }
         };
-        while Instant::now() < deadline {
+        while !deadline.is_exceeded() {
             tokio::task::yield_now().await;
         }
         let _ = tokio::time::timeout(Duration::from_millis(50), pending).await;
@@ -3449,7 +3455,7 @@ mod tests {
             publication_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deadline_guard: Some(armed_deadline_guard(
                 &state,
-                Instant::now() - Duration::from_secs(1),
+                Deadline::fixed(Instant::now() - Duration::from_secs(1)),
                 true,
             )),
         };
@@ -3467,8 +3473,11 @@ mod tests {
         let pending = {
             let state = state.clone();
             async move {
-                let _guard =
-                    armed_deadline_guard(&state, Instant::now() + Duration::from_secs(3600), true);
+                let _guard = armed_deadline_guard(
+                    &state,
+                    Deadline::from_now(Duration::from_secs(3600)),
+                    true,
+                );
                 std::future::pending::<()>().await
             }
         };
@@ -3484,7 +3493,7 @@ mod tests {
         let state = RoutePolicyState::default();
         drop(armed_deadline_guard(
             &state,
-            Instant::now() - Duration::from_secs(1),
+            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
             false,
         ));
         assert_eq!(
@@ -3496,11 +3505,15 @@ mod tests {
     #[test]
     fn expired_local_delivery_keeps_target_available_for_next_selection() {
         let state = RoutePolicyState::default();
-        let guard = armed_deadline_guard(&state, Instant::now() - Duration::from_secs(1), true);
+        let guard = armed_deadline_guard(
+            &state,
+            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
+            true,
+        );
         {
             let _local_work = UpstreamLocalWork::begin(
                 &guard.upstream_state,
-                Instant::now() - Duration::from_secs(1),
+                Deadline::fixed(Instant::now() - Duration::from_secs(1)),
             );
         }
         drop(guard);
@@ -3513,7 +3526,11 @@ mod tests {
     #[test]
     fn expired_guard_after_upstream_completion_keeps_target_available_for_next_selection() {
         let state = RoutePolicyState::default();
-        let guard = armed_deadline_guard(&state, Instant::now() - Duration::from_secs(1), true);
+        let guard = armed_deadline_guard(
+            &state,
+            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
+            true,
+        );
         guard.upstream_state.store(
             UPSTREAM_STARTED | UPSTREAM_FINISHED,
             std::sync::atomic::Ordering::Release,
@@ -3528,7 +3545,11 @@ mod tests {
     #[test]
     fn disarmed_deadline_guard_does_not_record_failure() {
         let state = RoutePolicyState::default();
-        let mut guard = armed_deadline_guard(&state, Instant::now() - Duration::from_secs(1), true);
+        let mut guard = armed_deadline_guard(
+            &state,
+            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
+            true,
+        );
         guard.disarm();
         drop(guard);
         assert_eq!(

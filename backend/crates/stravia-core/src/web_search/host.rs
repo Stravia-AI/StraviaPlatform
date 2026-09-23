@@ -113,7 +113,10 @@ impl ExternalSearchHost for SearchHost {
                 principal,
                 &route,
                 crate::plugin::VendorRequest::Search(request),
-                crate::plugin::VendorCallContext::new(cancellation.clone(), deadline),
+                crate::plugin::VendorCallContext::new(
+                    cancellation.clone(),
+                    stravia_runtime_contract::Deadline::fixed(deadline),
+                ),
             )
             .await
             .map_err(external_execution_error)?;

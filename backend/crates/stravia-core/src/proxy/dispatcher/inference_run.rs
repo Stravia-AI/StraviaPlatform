@@ -107,9 +107,9 @@ impl Run {
             return engine::hook_failure_response(error);
         }
         let cancellation = self.input.context.cancellation.clone();
-        let deadline = tokio::time::Instant::from_std(self.input.context.deadline.at());
+        let deadline = self.input.context.deadline.clone();
         let deadline_monitor = tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
+            deadline.wait().await;
             cancellation.cancel();
         });
         let response =

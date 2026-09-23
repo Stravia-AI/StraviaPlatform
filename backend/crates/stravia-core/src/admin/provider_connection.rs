@@ -201,7 +201,9 @@ impl AdminService {
                     ),
                     crate::plugin::VendorCallContext::new(
                         stravia_runtime_contract::CancellationToken::new(),
-                        std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        stravia_runtime_contract::Deadline::fixed(
+                            std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        ),
                     ),
                 )
                 .await?;
@@ -792,7 +794,9 @@ impl AdminService {
                         let (_, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
                         let publication = operation.publication_fence(
                             stravia_runtime_contract::CancellationToken::new(),
-                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            stravia_runtime_contract::Deadline::fixed(
+                                std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            ),
                         );
                         drop(operation);
                         let write_fence = publication.write_fence().await?;

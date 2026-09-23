@@ -23,6 +23,46 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
+/// Distributed vendor components are not bundled into the gateway; install the
+/// artifact built by `task build:vendors:all` so dedicated-vendor scenarios run
+/// against the real component.
+async fn install_distributed_vendor(gateway: &Gateway, vendor_id: &str) {
+    #[derive(serde::Deserialize)]
+    struct DistributionRecord {
+        vendor_id: String,
+        file: String,
+    }
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("target/vendor-plugins-all");
+    let records: Vec<DistributionRecord> = serde_json::from_slice(
+        &std::fs::read(directory.join("manifest.json"))
+            .expect("vendor distribution manifest; run `task build:vendors:all`"),
+    )
+    .expect("vendor distribution manifest parses");
+    let file = records
+        .iter()
+        .find(|record| record.vendor_id == vendor_id)
+        .unwrap_or_else(|| panic!("{vendor_id} missing from vendor distribution"))
+        .file
+        .clone();
+    let component = std::fs::read(directory.join(file)).expect("vendor distribution artifact");
+    let preview = gateway
+        .admin()
+        .preview_vendor_plugin(component)
+        .await
+        .expect("vendor plugin preview");
+    assert_eq!(preview.vendor_id, vendor_id);
+    gateway
+        .admin()
+        .confirm_vendor_plugin(crate::plugin::ConfirmPluginUpdate {
+            preview_id: preview.id,
+            allow_data_discard: false,
+        })
+        .await
+        .expect("vendor plugin install");
+}
+
 async fn add_test_provider_model(gateway: &Gateway, provider_id: &str) {
     gateway
         .admin()
@@ -402,7 +442,10 @@ async fn execute_distinguishes_cancellation_from_deadline() {
                 Principal::new("principal"),
                 AiRequest::new("model", Vec::new()),
             )
-            .with_execution(cancellation, Instant::now() + Duration::from_secs(1)),
+            .with_execution(
+                cancellation,
+                stravia_runtime_contract::Deadline::from_now(Duration::from_secs(1)),
+            ),
         )
         .await
     {
@@ -416,7 +459,10 @@ async fn execute_distinguishes_cancellation_from_deadline() {
                 Principal::new("principal"),
                 AiRequest::new("model", Vec::new()),
             )
-            .with_execution(CancellationToken::new(), Instant::now()),
+            .with_execution(
+                CancellationToken::new(),
+                stravia_runtime_contract::Deadline::fixed(Instant::now()),
+            ),
         )
         .await
     {
@@ -1873,7 +1919,7 @@ async fn held_publication_turn(
                 .with_observer(observer)
                 .with_execution(
                     cancellation.clone(),
-                    Instant::now() + Duration::from_secs(300),
+                    stravia_runtime_contract::Deadline::from_now(Duration::from_secs(300)),
                 ),
         )
         .await
@@ -2202,6 +2248,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
     })
     .await
     .unwrap();
+    install_distributed_vendor(&gateway, "openai-codex").await;
     let provider = gateway
         .storage
         .providers()

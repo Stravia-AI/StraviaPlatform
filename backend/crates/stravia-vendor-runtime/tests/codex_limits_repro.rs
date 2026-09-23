@@ -4,11 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LogLevel,
     OperationScope, RuntimeEvent, VendorRuntime, WebSocketMessage,
@@ -284,7 +284,7 @@ async fn run_once(encrypted_len: usize) -> Option<(String, Arc<Recording>)> {
     let scope = OperationScope::new(
         services,
         CancellationToken::new(),
-        Instant::now() + Duration::from_secs(300),
+        Deadline::from_now(Duration::from_secs(300)),
         0,
     );
     let result = runtime

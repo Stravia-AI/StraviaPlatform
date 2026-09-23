@@ -99,7 +99,9 @@ impl AdminService {
             provider_id,
             None,
             stravia_runtime_contract::CancellationToken::new(),
-            std::time::Instant::now() + std::time::Duration::from_secs(120),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(120),
+            ),
         )
         .await
     }
@@ -109,7 +111,7 @@ impl AdminService {
         provider_id: &str,
         pinned: &crate::plugin::execution::PreparedVendorExecution,
         cancellation: stravia_runtime_contract::CancellationToken,
-        deadline: std::time::Instant,
+        deadline: stravia_runtime_contract::Deadline,
     ) -> anyhow::Result<()> {
         if pinned.oauth_connection_id().is_some() {
             self.force_refresh_provider_oauth_with_context(
@@ -162,7 +164,7 @@ impl AdminService {
         provider_id: &str,
         pinned: Option<&crate::plugin::execution::PreparedVendorExecution>,
         cancellation: stravia_runtime_contract::CancellationToken,
-        deadline: std::time::Instant,
+        deadline: stravia_runtime_contract::Deadline,
     ) -> anyhow::Result<OAuthCredential> {
         let provider = self.get_provider(provider_id).await?;
         let vendor_id = provider

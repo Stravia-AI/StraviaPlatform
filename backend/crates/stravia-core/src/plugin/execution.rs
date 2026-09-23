@@ -1,14 +1,12 @@
+use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
-
-use async_trait::async_trait;
-use serde_json::Value;
-use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent,
@@ -86,7 +84,7 @@ pub(crate) struct VendorExecution {
 
 pub(crate) struct VendorCallContext {
     pub(crate) cancellation: CancellationToken,
-    pub(crate) deadline: Instant,
+    pub(crate) deadline: Deadline,
     pub(crate) events: Option<mpsc::Sender<VendorEvent>>,
     pub(crate) observer: Option<crate::interaction_observation::RunObserver>,
     pub(crate) model_turn_id: Option<String>,
@@ -98,7 +96,7 @@ pub(crate) struct VendorCallContext {
 }
 
 impl VendorCallContext {
-    pub(crate) fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+    pub(crate) fn new(cancellation: CancellationToken, deadline: Deadline) -> Self {
         Self {
             cancellation,
             deadline,
@@ -260,7 +258,7 @@ impl Gateway {
                 &prepared.provider,
                 request,
                 context.cancellation.clone(),
-                context.deadline,
+                context.deadline.clone(),
             );
             tokio::select! {
                 biased;
@@ -295,7 +293,7 @@ impl Gateway {
             let provider = tokio::select! {
                 biased;
                 _ = context.cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
-                _ = tokio::time::sleep_until(context.deadline.into()) => return Err(RuntimeError::DeadlineExceeded.into()),
+                () = context.deadline.wait() => return Err(RuntimeError::DeadlineExceeded.into()),
                 result = self.storage.providers().get(provider_id) => result?,
             }
             .ok_or_else(|| anyhow::anyhow!("provider was not found"))?;
@@ -461,7 +459,7 @@ impl Gateway {
             biased;
             _ = context.cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
-            _ = tokio::time::sleep_until(context.deadline.into()) => Err(RuntimeError::DeadlineExceeded.into()),
+            () = context.deadline.wait() => Err(RuntimeError::DeadlineExceeded.into()),
             result = prepare => result,
         }
     }
@@ -665,7 +663,7 @@ impl Gateway {
         input: OperationInput,
         context: VendorCallContext,
     ) -> anyhow::Result<VendorExecution> {
-        if Instant::now() >= context.deadline {
+        if context.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded.into());
         }
         if context.cancellation.is_cancelled() {
@@ -681,7 +679,7 @@ impl Gateway {
         if context.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled.into());
         }
-        if Instant::now() >= context.deadline {
+        if context.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded.into());
         }
         operation.ensure_current()?;
@@ -729,7 +727,7 @@ impl Gateway {
             _ => anyhow::bail!("vendor operation has an invalid private-state scope"),
         };
         let publication =
-            operation.publication_fence(context.cancellation.clone(), context.deadline);
+            operation.publication_fence(context.cancellation.clone(), context.deadline.clone());
         let services = Arc::new(ScopedHostServices {
             network,
             operation: operation.clone(),
@@ -743,7 +741,7 @@ impl Gateway {
         let scope = OperationScope::new(
             services.clone(),
             context.cancellation.clone(),
-            context.deadline,
+            context.deadline.clone(),
             0,
         );
         let channel = input.provider().channel.clone();
@@ -760,7 +758,7 @@ impl Gateway {
             _ = operation.cancellation().cancelled() => {
                 return Err(RuntimeError::Cancelled.into());
             }
-            _ = tokio::time::sleep_until(context.deadline.into()) => {
+            () = context.deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded.into());
             }
             result = execution => result.map_err(anyhow::Error::from)?,

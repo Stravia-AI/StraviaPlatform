@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod artifact;
 mod cancellation;
+mod deadline;
 pub mod hook;
 pub mod identifier;
 mod identity;
@@ -13,4 +14,5 @@ pub mod thinking;
 pub mod turn_chain;
 
 pub use cancellation::CancellationToken;
+pub use deadline::Deadline;
 pub use identity::Principal;

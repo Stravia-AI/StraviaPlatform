@@ -594,7 +594,8 @@ pub(super) async fn orchestrate(
             attachment_ingest_error_response(error),
         );
     }
-    ctx.deadline = crate::proxy::context::Deadline::from_now(execution_window);
+    ctx.deadline
+        .reset(std::time::Instant::now() + execution_window);
     let admission = if marker_resolution.restored_platform_segments > 0 {
         tokio::select! {
             admission = gw.principal_admission.acquire_wait(&principal, concurrency_limit) => admission,
@@ -756,7 +757,7 @@ pub(super) async fn orchestrate(
     ctx.extensions.insert(ledger.clone());
     if compact {
         let mut turn_input = TurnInput::new(principal.clone(), request)
-            .with_execution(ctx.cancellation.clone(), ctx.deadline.at())
+            .with_execution(ctx.cancellation.clone(), ctx.deadline.clone())
             .with_observer(observer.clone())
             .with_extra_headers(forwarded_client_headers(&headers));
         turn_input.purpose = crate::model_turn::ModelTurnPurpose::Compact;
@@ -1081,7 +1082,7 @@ async fn acquire_turn(
         let mut input = TurnInput::new(generation.principal.clone(), effective_request)
             .with_execution(
                 request_context.cancellation.clone(),
-                request_context.deadline.at(),
+                request_context.deadline.clone(),
             )
             .with_observer(
                 request_context

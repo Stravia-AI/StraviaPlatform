@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_sdk::{
     AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationInput, OperationOutput,
     ProviderSnapshot, VendorDescriptor,
@@ -45,7 +45,7 @@ impl LoadedPlugin {
 pub struct OperationScope {
     pub services: Arc<dyn HostServices>,
     pub cancellation: CancellationToken,
-    pub deadline: Instant,
+    pub deadline: Deadline,
     pub generation: u64,
 }
 
@@ -53,7 +53,7 @@ impl OperationScope {
     pub fn new(
         services: Arc<dyn HostServices>,
         cancellation: CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
         generation: u64,
     ) -> Self {
         Self {
@@ -119,7 +119,7 @@ impl VendorRuntime {
         provider: &ProviderSnapshot,
         request: &AiRequest,
         cancellation: CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
     ) -> Result<String, RuntimeError> {
         if !matches!(operation, Operation::Infer | Operation::Compact) {
             return Err(RuntimeError::from_guest(
@@ -132,7 +132,7 @@ impl VendorRuntime {
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
 
@@ -152,13 +152,13 @@ impl VendorRuntime {
         let mut store = self.new_store(scope, None);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate =
             bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
@@ -174,7 +174,7 @@ impl VendorRuntime {
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = call => result,
@@ -196,7 +196,7 @@ impl VendorRuntime {
         if cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
         Ok(protocol)
@@ -214,7 +214,7 @@ impl VendorRuntime {
         if scope.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= scope.deadline {
+        if scope.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
         if !scope.services.generation_is_current(scope.generation) {
@@ -230,13 +230,13 @@ impl VendorRuntime {
         let mut store = self.new_store(scope, Some(operation));
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate =
             bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
@@ -246,7 +246,7 @@ impl VendorRuntime {
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = call => result,
@@ -321,18 +321,18 @@ impl VendorRuntime {
         let scope = OperationScope {
             services: Arc::new(DenyServices),
             cancellation: CancellationToken::new(),
-            deadline: Instant::now() + Duration::from_secs(2),
+            deadline: Deadline::from_now(Duration::from_secs(2)),
             generation: 0,
         };
         let mut store = self.new_store(scope, None);
         let linker = self
             .new_linker()
             .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate = bindings::Vendor::instantiate_async(&mut store, component, &linker);
         let instance = tokio::select! {
             result = instantiate => result,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(LoadError::DescriptorExecution("descriptor deadline elapsed".into()));
             }
         }
@@ -340,7 +340,7 @@ impl VendorRuntime {
         let descriptor_call = instance.call_descriptor(&mut store);
         let descriptor = tokio::select! {
             result = descriptor_call => result,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(LoadError::DescriptorExecution("descriptor deadline elapsed".into()));
             }
         }
@@ -389,7 +389,7 @@ struct StoreState {
     table: ResourceTable,
     services: Arc<dyn HostServices>,
     cancellation: CancellationToken,
-    deadline: Instant,
+    deadline: Deadline,
     generation: u64,
     operation: Option<Operation>,
     upstream_starts: usize,
@@ -413,12 +413,15 @@ impl StoreState {
                 "operation is no longer active",
             ));
         }
-        if Instant::now() >= self.deadline {
+        if self.deadline.is_exceeded() {
             return Err(HostFailure::new(
                 ErrorKind::DeadlineExceeded,
                 "operation deadline elapsed",
             ));
         }
+        // Every guest↔host boundary call is activity: renew the shared deadline
+        // so a streaming operation stays alive while data keeps flowing.
+        self.deadline.renew();
         Ok(())
     }
 
@@ -1003,6 +1006,60 @@ impl HostServices for DenyServices {
 
     fn generation_is_current(&self, _generation: u64) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn state(deadline: Deadline) -> StoreState {
+        StoreState {
+            wasi: WasiCtx::builder().build(),
+            table: ResourceTable::new(),
+            services: Arc::new(DenyServices),
+            cancellation: CancellationToken::new(),
+            deadline,
+            generation: 0,
+            operation: None,
+            upstream_starts: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn host_boundary_activity_renews_shared_deadline() {
+        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let state = state(deadline.clone());
+        let original = deadline.at();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        state.active().expect("boundary call before expiry");
+        // The renewal pushed the shared instant out, so a clone held by an
+        // outer layer observes the extension too.
+        assert!(deadline.at() > original);
+        assert!(!deadline.is_exceeded());
+    }
+
+    #[tokio::test]
+    async fn silent_operation_expires_at_deadline() {
+        let deadline = Deadline::from_now(Duration::from_millis(30));
+        let state = state(deadline);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let error = state.active().expect_err("silence must expire");
+        assert!(matches!(error.kind, ErrorKind::DeadlineExceeded));
+    }
+
+    #[tokio::test]
+    async fn cancelled_operation_fails_without_renewing() {
+        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let state = state(deadline.clone());
+        state.cancellation.cancel();
+        let at = deadline.at();
+        let error = state.active().expect_err("cancelled operation");
+        assert!(matches!(error.kind, ErrorKind::Cancelled));
+        // Cancellation returns before the renewal step, so the shared instant
+        // stays untouched.
+        assert_eq!(deadline.at(), at);
     }
 }
 
