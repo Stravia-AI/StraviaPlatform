@@ -845,7 +845,6 @@ impl GenerationChainStore {
             compaction_record_ids: parent.compaction_record_ids.clone(),
             effective_history_mutation: Some(effective_history_mutation),
             effective_system,
-            effective_input: Vec::new(),
             client_history: Some(client_history),
             effective_output: response,
             trusted_media_turn_ids,

@@ -9,16 +9,12 @@ pub(super) struct PostgresRouteStore {
 
 impl PostgresRouteStore {
     async fn load_routes(&self, active_only: bool) -> anyhow::Result<Vec<Route>> {
-        let where_clause = if active_only {
-            " WHERE COALESCE(is_enabled, TRUE) = TRUE"
-        } else {
-            ""
-        };
+        let where_clause = if active_only { " WHERE is_enabled" } else { "" };
         let sql = format!(
-            "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, default_thinking_level, balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
-             COALESCE(is_enabled, TRUE) AS is_enabled, \
+             is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -43,10 +39,10 @@ impl PostgresRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, default_thinking_level, balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              (SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1) AS target_model, \
-             COALESCE(is_enabled, TRUE) AS is_enabled, \
+             is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models WHERE model_id = $1",
         )

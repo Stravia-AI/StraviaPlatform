@@ -655,7 +655,6 @@ struct SearchTurnPayload {
     snapshot: SearchSnapshot,
     completion: SearchCompletion,
     report: SearchReport,
-    #[serde(default)]
     usage: Option<Usage>,
     elapsed_ms: u64,
 }

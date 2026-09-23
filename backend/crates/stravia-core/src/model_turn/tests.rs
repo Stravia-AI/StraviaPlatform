@@ -2202,6 +2202,9 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
     })
     .await
     .unwrap();
+    crate::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await
+        .expect("Codex vendor plugin");
     let provider = gateway
         .storage
         .providers()

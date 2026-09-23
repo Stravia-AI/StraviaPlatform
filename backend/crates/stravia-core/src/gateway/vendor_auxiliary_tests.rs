@@ -204,7 +204,10 @@ async fn read_http_request(
     })
 }
 
-async fn gateway_for(server: &LocalTlsServer) -> anyhow::Result<(tempfile::TempDir, Gateway)> {
+async fn gateway_for(
+    server: &LocalTlsServer,
+    vendors: &[&str],
+) -> anyhow::Result<(tempfile::TempDir, Gateway)> {
     let directory = tempfile::tempdir()?;
     let mut gateway = Gateway::from_storage(
         GatewayConfig {
@@ -218,6 +221,9 @@ async fn gateway_for(server: &LocalTlsServer) -> anyhow::Result<(tempfile::TempD
         )),
     )
     .await?;
+    for vendor in vendors {
+        crate::plugin::test_support::install_distributed_vendor(&gateway, vendor).await?;
+    }
     let root = reqwest::tls::Certificate::from_der(&server.certificate_der)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -381,7 +387,7 @@ async fn deepseek_allowance_uses_real_tls_get_and_preserves_multi_currency_unkno
         }))
     })
     .await?;
-    let (_directory, gateway) = gateway_for(&server).await?;
+    let (_directory, gateway) = gateway_for(&server, &[]).await?;
     let provider = create_vendor_provider(
         &gateway,
         "DeepSeek TLS allowance",
@@ -441,7 +447,7 @@ async fn devin_allowance_uses_real_tls_protobuf_request_and_decodes_credit_windo
 -> anyhow::Result<()> {
     let mut server =
         local_tls_server(1, |_| LocalResponse::protobuf(devin_allowance_fixture())).await?;
-    let (_directory, gateway) = gateway_for(&server).await?;
+    let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
     let authorization = gateway
         .admin()
         .init_oauth_session(
@@ -570,7 +576,7 @@ async fn devin_pkce_exchanges_are_session_isolated_and_bind_their_own_credential
         }))
     })
     .await?;
-    let (_directory, gateway) = gateway_for(&server).await?;
+    let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
     let first = start_devin_session(&gateway).await?;
     let second = start_devin_session(&gateway).await?;
     let first_url = first.auth_url.as_deref().expect("first authorization URL");
@@ -713,7 +719,7 @@ async fn cancelling_a_devin_exchange_prevents_a_late_tls_callback_from_restoring
         release: Some(Arc::clone(&response_release)),
     })
     .await?;
-    let (_directory, gateway) = gateway_for(&server).await?;
+    let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
     let session = start_devin_session(&gateway).await?;
     let auth_url = session.auth_url.as_deref().expect("authorization URL");
     let state = query_parameter(auth_url, "state")?;

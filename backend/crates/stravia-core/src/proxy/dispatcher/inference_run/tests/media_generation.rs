@@ -220,6 +220,9 @@ async fn generation_http_fixture(
     })
     .await
     .expect("Gateway");
+    crate::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await
+        .expect("Codex vendor plugin");
     let parent_route_id = configure_route_with_protocol(
         &gateway,
         PARENT_MODEL,

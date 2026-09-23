@@ -364,6 +364,7 @@ mod tests {
             )),
         )
         .await?;
+        crate::plugin::test_support::install_distributed_vendor(&gw, "openai-codex").await?;
         let admin = gw.admin();
         let candidate = AuthSessionCandidate {
             vendor_id: "openai-codex".into(),

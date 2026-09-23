@@ -13,7 +13,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -102,11 +101,11 @@ CREATE TABLE public.api_keys (
     id text NOT NULL,
     token text NOT NULL,
     name text NOT NULL,
-    is_enabled boolean DEFAULT true,
+    is_enabled boolean DEFAULT true NOT NULL,
     expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    mcp_access_enabled boolean DEFAULT false NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
@@ -309,7 +308,7 @@ CREATE TABLE public.model_backends (
     provider_id text NOT NULL,
     model text,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     thinking_level_map jsonb DEFAULT '[{"level": "off", "source": "generated", "control": {"type": "hidden"}}, {"level": "minimal", "source": "generated", "control": {"type": "hidden"}}, {"level": "low", "source": "generated", "control": {"type": "hidden"}}, {"level": "medium", "source": "generated", "control": {"type": "hidden"}}, {"level": "high", "source": "generated", "control": {"type": "hidden"}}, {"level": "xhigh", "source": "generated", "control": {"type": "hidden"}}, {"level": "max", "source": "generated", "control": {"type": "hidden"}}]'::jsonb NOT NULL,
     first_token_timeout_ms bigint DEFAULT 60000 NOT NULL,
     target_retry_budget integer DEFAULT 5 NOT NULL,
@@ -349,11 +348,11 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text CONSTRAINT models_name_not_null NOT NULL,
-    balance text DEFAULT 'traffic_equalization'::text,
-    is_enabled boolean DEFAULT true,
+    model_id text NOT NULL,
+    balance text DEFAULT 'traffic_equalization'::text NOT NULL,
+    is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     display_name text,
     default_thinking_level text
 );
@@ -590,10 +589,10 @@ CREATE TABLE public.providers (
     use_proxy boolean DEFAULT false NOT NULL,
     last_test_success boolean,
     last_test_at timestamp with time zone,
-    is_enabled boolean DEFAULT true,
+    is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     adapter_credentials text DEFAULT '{}'::text NOT NULL,
     vendor_options text DEFAULT '{}'::text NOT NULL,
     CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text])))

@@ -2589,19 +2589,12 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0034_interaction_observation.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await?;
         let at = writer::now();
         sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('historical','test','historical','initial','route','running',?,?,?)")
             .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0040_interaction_input_preview.sql"
-        ))
-        .execute(&pool)
-        .await?;
         let preview: Option<String> = sqlx::query_scalar(
             "SELECT input_preview FROM interaction_observations WHERE id='historical'",
         )
@@ -2700,16 +2693,9 @@ mod snapshot_tests {
             .max_connections(1)
             .connect_with(options.clone())
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0034_interaction_observation.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0040_interaction_input_preview.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await?;
         let now = chrono::Utc::now().timestamp_millis();
         for (id, status, last_active, gap) in [
             ("first", "failed", now + 100, false),
@@ -2833,21 +2819,9 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0034_interaction_observation.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0040_interaction_input_preview.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0045_failed_request_diagnostics.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await?;
         let mut observation = test_observation(&pool, directory.path(), false).await;
         let delivered_at = writer::now() - 100_000;
         for restarted in [false, true] {
@@ -3054,21 +3028,9 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0034_interaction_observation.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0040_interaction_input_preview.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0045_failed_request_diagnostics.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let make_run = |id: &str| {
             observation
@@ -3192,21 +3154,9 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0034_interaction_observation.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0040_interaction_input_preview.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/sqlite/0045_failed_request_diagnostics.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {

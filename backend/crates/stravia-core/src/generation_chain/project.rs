@@ -666,10 +666,3 @@ fn context_hash_from_hex(value: &str) -> Option<[u8; 32]> {
     }
     Some(hash)
 }
-
-pub(super) fn legacy_payload_fingerprint<T: Serialize>(value: &T) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&bytes),
-    )
-}

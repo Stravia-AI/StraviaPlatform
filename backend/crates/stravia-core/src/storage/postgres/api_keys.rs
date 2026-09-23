@@ -174,7 +174,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
             ),
         >(
-            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, COALESCE(inject_media_generation, FALSE) AS inject_media_generation FROM api_keys WHERE token = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1",
         )
         .bind(raw_key)
         .fetch_optional(&self.pool)
@@ -220,7 +220,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
             ),
         >(
-            "SELECT id, COALESCE(name, '') AS name, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, COALESCE(inject_media_generation, FALSE) AS inject_media_generation FROM api_keys WHERE id = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)

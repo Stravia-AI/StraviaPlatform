@@ -86,6 +86,9 @@ impl Drop for GenerationApp {
 
 async fn generation_app() -> GenerationApp {
     let app = test_app().await;
+    crate::plugin::test_support::install_distributed_vendor(&app.gateway, "openai-codex")
+        .await
+        .expect("Codex vendor plugin");
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let observed = requests.clone();
     let replies = Arc::new(parking_lot::Mutex::new(VecDeque::new()));

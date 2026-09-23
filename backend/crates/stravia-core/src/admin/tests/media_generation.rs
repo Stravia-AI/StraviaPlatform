@@ -45,6 +45,7 @@ impl GenerationRouteFixture {
             )),
         )
         .await?;
+        crate::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex").await?;
 
         let upstream_calls = Arc::new(AtomicUsize::new(0));
         let observed_calls = upstream_calls.clone();

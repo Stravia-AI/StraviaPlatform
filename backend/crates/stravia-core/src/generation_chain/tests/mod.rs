@@ -48,23 +48,6 @@ fn user_message(text: &str) -> AiItem {
     }
 }
 
-fn legacy_context_fingerprint(messages: &[AiItem]) -> String {
-    use sha2::{Digest, Sha256};
-
-    messages.iter().fold(
-        "stravia-response-chain-context-v2".to_owned(),
-        |previous, message| {
-            let message = serde_json::to_vec(message).expect("legacy test item must serialize");
-            let mut hasher = Sha256::new();
-            hasher.update(b"stravia-response-chain-context-v2\0");
-            hasher.update(previous.as_bytes());
-            hasher.update(message.len().to_be_bytes());
-            hasher.update(message);
-            stravia_runtime_contract::protocol::ir::canonical::hash_hex(&hasher.finalize().into())
-        },
-    )
-}
-
 fn responses_request(messages: Vec<AiItem>) -> AiRequest {
     let mut request = AiRequest::new("model", messages);
     request.ext = Some(ProtocolExt::OpenResponses(OpenResponsesExt::default()));

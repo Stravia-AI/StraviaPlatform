@@ -369,6 +369,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_authorization_start_is_one_provider_operation() -> anyhow::Result<()> {
         let (_data_dir, gateway) = memory_gateway().await?;
+        crate::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex").await?;
         let admin = gateway.admin();
         let result = ProviderConnection::new(&admin)
             .reconnect(ProviderReconnect::Start(
@@ -483,6 +484,7 @@ mod tests {
     #[tokio::test]
     async fn vendor_options_validate_against_declared_fields_and_persist() -> anyhow::Result<()> {
         let (_data_dir, gateway) = memory_gateway().await?;
+        crate::plugin::test_support::install_distributed_vendor(&gateway, "command-code").await?;
         let admin = gateway.admin();
         let providers = ProviderConnection::new(&admin);
         let provider = providers

@@ -9,7 +9,7 @@ pub(super) struct SqliteProviderStore {
 impl ProviderStore for SqliteProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(adapter_credentials, '{}') AS adapter_credentials, COALESCE(vendor_options, '{}') AS vendor_options, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers ORDER BY created_at DESC",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, created_at, updated_at FROM providers ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -17,7 +17,7 @@ impl ProviderStore for SqliteProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, COALESCE(adapter_credentials, '{}') AS adapter_credentials, COALESCE(vendor_options, '{}') AS vendor_options, COALESCE(auth_mode, 'apikey') AS auth_mode, COALESCE(use_proxy, 0) AS use_proxy, last_test_success, last_test_at, COALESCE(is_enabled, 1) AS is_enabled, created_at, updated_at FROM providers WHERE id = ?",
+            "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, created_at, updated_at FROM providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)

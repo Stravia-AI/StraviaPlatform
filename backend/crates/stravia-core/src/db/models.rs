@@ -24,7 +24,6 @@ pub struct Provider {
     pub base_url: String,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
-    #[serde(alias = "modelsEndpoint")]
     pub models_source: Option<String>,
     pub static_models: Option<String>,
     #[serde(skip_serializing)]
@@ -246,7 +245,6 @@ pub struct ApiKeyWithBindings {
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(alias = "route_ids")]
     pub model_ids: Vec<String>,
 }
 
@@ -327,7 +325,6 @@ pub struct UpdateProvider {
     pub base_url: Option<String>,
     pub preset_key: Option<String>,
     pub channel: Option<String>,
-    #[serde(alias = "modelsSource")]
     pub models_source: Option<String>,
     pub static_models: Option<String>,
     pub api_key: Option<String>,
@@ -346,7 +343,6 @@ pub struct UpdateProvider {
 pub struct UpdateRoute {
     pub model_id: Option<String>,
     pub display_name: Option<String>,
-    #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: Option<String>,
     /// Omitted preserves the projection; explicit `null` selects Provider-only.
@@ -365,7 +361,6 @@ pub struct CreateRoute {
     pub model_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: String,
     pub target_model: Option<String>,
@@ -438,7 +433,7 @@ pub struct CreateApiKey {
     pub inject_web_search: bool,
     #[serde(default)]
     pub inject_media_generation: bool,
-    #[serde(default, alias = "route_ids")]
+    #[serde(default)]
     pub model_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,7 +450,6 @@ pub struct UpdateApiKey {
     pub inject_web_search: Option<bool>,
     pub inject_media_generation: Option<bool>,
     pub expires_at: Option<String>,
-    #[serde(alias = "route_ids")]
     pub model_ids: Option<Vec<String>>,
 }
 

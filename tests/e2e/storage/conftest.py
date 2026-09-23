@@ -171,7 +171,6 @@ def build_harness(work_dir: Path) -> None:
         # 链接冲突,且会重复编译另一套主版本依赖。
         reqwest = {{ version = "0.13", default-features = false, features = ["json"] }}
         serde_json = "1"
-        sha2 = "0.10"
         sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }}
         tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "time"] }}
 
@@ -208,7 +207,6 @@ def build_harness(work_dir: Path) -> None:
         use stravia_core::Gateway;
         use stravia_server::{AdminMode, HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
         use reqwest::StatusCode;
-        use sha2::{Digest, Sha384};
         use sqlx::postgres::PgPoolOptions;
 
         #[tokio::main]
@@ -233,51 +231,6 @@ def build_harness(work_dir: Path) -> None:
                         )))
                         .execute(&pool)
                         .await?;
-                    }
-                    "prepare_legacy" => {
-                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                            .execute(&pool)
-                            .await?;
-                        sqlx::raw_sql(
-                            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)",
-                        )
-                        .execute(&pool)
-                        .await?;
-                        let migration_dir = PathBuf::from(
-                            env::var("STRAVIA_STORAGE_MIGRATIONS").context("STRAVIA_STORAGE_MIGRATIONS")?,
-                        );
-                        let mut migrations = std::fs::read_dir(migration_dir)?
-                            .collect::<Result<Vec<_>, _>>()?;
-                        migrations.sort_by_key(|entry| entry.file_name());
-                        for entry in migrations {
-                            let name = entry.file_name().to_string_lossy().into_owned();
-                            let Some((version, description)) = name.strip_suffix(".sql").and_then(|name| name.split_once('_')) else { continue; };
-                            let version: i64 = version.parse()?;
-                            if version >= 34 { continue; }
-                            let sql = std::fs::read_to_string(entry.path())?;
-                            // SQL 仅来自测试指定的仓库迁移文件，不插入请求或配置数据。
-                            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                                .execute(&pool)
-                                .await?;
-                            sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES ($1, $2, TRUE, $3, 0)")
-                                .bind(version)
-                                .bind(description.replace('_', " "))
-                                .bind(Sha384::digest(sql.as_bytes()).to_vec())
-                                .execute(&pool)
-                                .await?;
-                        }
-                        sqlx::query("INSERT INTO request_logs (id, created_at, client_request_body) VALUES ($1, $2, $3)")
-                            .bind("legacy-log-must-not-survive")
-                            .bind(1_i64)
-                            .bind(r#"{"secret":"legacy"}"#)
-                            .execute(&pool)
-                            .await?;
-                        sqlx::query("INSERT INTO api_keys (id, token, name) VALUES ($1, $2, $3)")
-                            .bind("legacy-generation-key")
-                            .bind("isolated-upgrade-fixture-key")
-                            .bind("Existing key")
-                            .execute(&pool)
-                            .await?;
                     }
                     "inspect_observation" => {
                         let tables: i64 = sqlx::query_scalar(
@@ -569,9 +522,6 @@ def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) 
     env["STRAVIA_STORAGE_SCHEMA_ACTION"] = action
     env["STRAVIA_STORAGE_PG_URL"] = pg_url
     env["STRAVIA_STORAGE_PG_SCHEMA"] = schema
-    env["STRAVIA_STORAGE_MIGRATIONS"] = str(
-        REPO_ROOT / "backend" / "crates" / "stravia-core" / "migrations" / "postgres"
-    )
 
     proc = subprocess.run(
         ["cargo", "run", "--quiet", "--manifest-path", str(work_dir / "Cargo.toml")],

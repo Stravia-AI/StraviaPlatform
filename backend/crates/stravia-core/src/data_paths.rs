@@ -97,7 +97,7 @@ impl<'a> DataPaths<'a> {
                 .context("inspect data layout")?
             {
                 bail!(
-                    "legacy data layout at {}; stop the instance and use stravia-tools migrate-data before starting",
+                    "legacy data layout at {}; this release cannot upgrade it — move it aside or start with a fresh data directory",
                     self.root.display()
                 );
             }

@@ -834,7 +834,7 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
-SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。结构以 migrations 为事实来源；两份 SQL 仅供 DBA 审阅，不能用于初始化部署，应由 `stravia-server` 对空数据库应用 migrations。
+SQLite 与 PostgreSQL 各由单一 SQLx 基线 migration（`0001_baseline.sql`）建立当前 schema。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。启动时核对 `_sqlx_migrations`：版本集不等于基线的旧版数据库、以及无任何迁移历史的非空数据库均明确拒绝启动，不增量升级、不自动清空；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。结构以 migration 为事实来源；两份 SQL 仅供 DBA 审阅，不能用于初始化部署，应由 `stravia-server` 对空数据库应用 migration。
 
 每次新增或修改 migration，都必须通过工具同步重新生成两份参考文件，并与 migration 一并交付，不得手工修改 schema 正文：
 
@@ -853,7 +853,7 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的本地导入 Component 均随源数据根复制；内嵌 `base` 由程序二进制提供，不形成待迁移文件。插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。存在本地导入插件时，数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含这些 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+旧布局启动失败且不可升级；`stravia-tools migrate-data` 只搬迁当前版本的数据根：停机复制、校验 SQLite schema 与快照完整性后发布完整目标，不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的本地导入 Component 均随源数据根复制；内嵌 `base` 由程序二进制提供，不形成待迁移文件。插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。存在本地导入插件时，数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含这些 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 
@@ -863,7 +863,7 @@ stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storag
 
 确认计划后，在同一命令末尾追加 `--apply --source-stopped`。工具只在目标副本中校验内容还原并回收 SQLite 空闲页，源数据保留用于回退；旧版程序不能读取新存储格式。历史数据在同一 Principal 内共享完全相同的 instructions、工具定义与响应 profile，Debug 分段通过内容和元数据引用去重，不使用压缩算法；去重不会补造已丢失的记录或交互关联。Debug 存储契约见[交互观察设计](interaction-observation.md)。
 
-> 首个 SQLx migration 直接创建基础表；后续版本在 SQLite 与 PostgreSQL 中等价演进，不通过删除数据库处理不兼容版本。
+> 单一基线 migration 在 SQLite 与 PostgreSQL 中分别直接创建全部当前表；不兼容的既有数据库被拒绝，不通过删除数据库处理。
 
 ```sql
 -- 提供商配置
@@ -1032,7 +1032,7 @@ CREATE TABLE provider_oauth_credentials (
 );
 ```
 
-Migration 34 在 SQLite/PostgreSQL 都先删除旧 `request_logs` 及其行，不做 Generation Chain backfill，再创建等价 Observation schema 与 sequence/index。升级后没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/series/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
+基线 schema 不再包含旧 `request_logs`，Observation schema 与 sequence/index 自初始创建即存在，不做 Generation Chain backfill。没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/series/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
 
 Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 7 天）；大 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；Trace 先 tombstone、幂等删除目录，再删除 owner rows，启动 reconciliation 继续处理 tombstone 与 orphan directory。
 

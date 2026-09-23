@@ -232,13 +232,13 @@ describe('observation conversation', () => {
     ])
   })
 
-  test('uses the retained tail only once when no run has delivered text events', () => {
+  test('does not substitute the retained tail for runs without text events', () => {
     const messages = observationConversationMessages(
       detail([run('first', 1, []), run('child', 2, [])], 'Retained ending'),
     )
     expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual([
       '',
-      'Retained ending',
+      '',
     ])
     const current = observationConversationMessages(
       detail(
@@ -255,13 +255,13 @@ describe('observation conversation', () => {
     ])
   })
 
-  test('keeps missing historical input empty while preserving the retained output', () => {
+  test('keeps missing historical input and retained tail empty', () => {
     const historical = detail([], 'Only the preserved ending')
     historical.interaction.input_preview = null
     const messages = observationConversationMessages(historical)
     expect(messages.map(({ role, text }) => ({ role, text }))).toEqual([
       { role: 'user', text: '' },
-      { role: 'assistant', text: 'Only the preserved ending' },
+      { role: 'assistant', text: '' },
     ])
   })
 })

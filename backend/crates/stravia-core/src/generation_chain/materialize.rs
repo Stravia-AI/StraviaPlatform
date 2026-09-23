@@ -3,37 +3,11 @@ use super::*;
 pub(super) fn decode_response_node(
     node: stravia_runtime_contract::turn_chain::TurnNode,
 ) -> Result<(TurnNodeId, PersistedResponseNode), String> {
-    if !(LEGACY_RESPONSE_PAYLOAD_VERSION..=RESPONSE_PAYLOAD_VERSION).contains(&node.payload_version)
-    {
+    if node.payload_version != RESPONSE_PAYLOAD_VERSION {
         return Err("unsupported generation payload version".into());
     }
-    let mut persisted = serde_json::from_value::<PersistedResponseNode>(node.payload)
+    let persisted = serde_json::from_value::<PersistedResponseNode>(node.payload)
         .map_err(|_| "invalid generation payload".to_string())?;
-    if node.payload_version < 5 {
-        // Visit typed AiItems only: business JSON can legitimately use the same key.
-        let mutation_items = match persisted.effective_history_mutation.as_mut() {
-            Some(EffectiveHistoryMutation::Append { items })
-            | Some(EffectiveHistoryMutation::Replace { items }) => items.as_mut_slice(),
-            None => &mut [],
-        };
-        for item in persisted
-            .client_delta
-            .messages
-            .iter_mut()
-            .chain(persisted.client_output.iter_mut().flatten())
-            .chain(persisted.effective_input.iter_mut())
-            .chain(persisted.effective_output.items.iter_mut())
-            .chain(mutation_items.iter_mut())
-        {
-            if let Some(meta) = item
-                .meta
-                .as_mut()
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                meta.remove(stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META);
-            }
-        }
-    }
     Ok((node.id, persisted))
 }
 
@@ -70,9 +44,6 @@ pub(super) fn materialize_generation_nodes(
         match persisted.effective_history_mutation.take() {
             Some(EffectiveHistoryMutation::Append { items }) => effective_items.extend(items),
             Some(EffectiveHistoryMutation::Replace { items }) => effective_items = items,
-            None if node_version == LEGACY_RESPONSE_PAYLOAD_VERSION => {
-                effective_items = std::mem::take(&mut persisted.effective_input);
-            }
             None => effective_items.extend_from_slice(&persisted.client_delta.messages),
         }
         if !persisted.trusted_media_turn_ids.is_empty() {
@@ -83,11 +54,6 @@ pub(super) fn materialize_generation_nodes(
         }
         fold_client_history(&mut client_items, &mut persisted);
         effective_items.append(&mut persisted.effective_output.items);
-        if node_version == LEGACY_RESPONSE_PAYLOAD_VERSION {
-            persisted.effective_state.context_fingerprint =
-                history_context_fingerprint(&effective_items);
-            persisted.effective_state.context_messages = effective_items.len();
-        }
         client_history = persisted.client_history;
         effective_request = persisted.effective_request;
         effective_system = persisted.effective_system.or(persisted.client_delta.system);
