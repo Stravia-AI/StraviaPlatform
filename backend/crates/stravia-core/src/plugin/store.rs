@@ -318,7 +318,7 @@ impl PluginStore {
         }
     }
 
-    /// 包替换与经确认的数据重置原子提交；调用者先持有供应商静默凭证。
+    /// 包替换与预览确定的数据重置原子提交；调用者先持有供应商静默凭证。
     pub(crate) async fn install(
         &self,
         next: &InstalledPlugin,

@@ -187,7 +187,7 @@ core 保留输入修整、错误映射、准入与异步解析调度；adapter �
 ## 9. 验证边界
 
 - 插件化目标：真实 Wasm 经公开搜索入口执行，覆盖同连接多能力、模型型与 Provider-only Target、Route 重试切换、外部续接拒绝与 Local 续接保留；使用本地上游，不调用收费生产服务。
-- 能力移除：保留受影响绑定并明确不可用；内置自动更新不为能力移除暂停确认，数据丢弃仍须确认。兼容在途搜索使用旧版完成，不兼容更新取消并阻止迟到报告提交。
+- 能力移除：保留受影响绑定并明确不可用；内置 `base` 自动更新不为能力移除或按格式版本差异重置数据暂停确认；本地包更新和手动恢复仍须确认数据丢弃。兼容在途搜索使用旧版完成，不兼容更新取消并阻止迟到报告提交。
 - Admin API：配置读写、Local/External Route validation、旧字段拒绝；
 - Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；
 - Search contract：Search Report provenance、continuation、branch、`stravia://turns/<turn-id>`，以及 `stravia://turns/<turn-id>/sources/<ordinal>` / `[stravia://turns/<turn-id>/sources/<ordinal>]` 的 Source 对应关系；

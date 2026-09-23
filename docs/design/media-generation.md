@@ -79,7 +79,7 @@ type ImageGenerateOutput = {
 
 按照已确认的 [Vendor 插件设计](vendor-plugins.md)，媒体生成可以与推理、完整搜索由同一 Vendor Plugin 和 Provider 连接提供，也可以是插件唯一的能力。沿用 Provider Model → Target → Route；Provider Model 可表示纯图片模型，不以聊天能力为前提，普通聊天执行不得选择不具备其所需能力的 Target。
 
-插件拥有供应商参数映射、请求及结果解析；宿主继续拥有公开 generate 工具、权限、输入处理、Artifact 收存与交付，不允许插件自行注册 MCP 工具。能力移除更新保留绑定并明确不可用；内置自动更新不为此暂停确认，但数据丢弃仍须确认。兼容在途生成使用旧版本完成，不兼容更新取消生成并阻止迟到结果提交。
+插件拥有供应商参数映射、请求及结果解析；宿主继续拥有公开 generate 工具、权限、输入处理、Artifact 收存与交付，不允许插件自行注册 MCP 工具。能力移除更新保留绑定并明确不可用；内置 `base` 自动更新不为此暂停确认，不兼容数据按格式版本差异自动重置；本地包更新和手动恢复仍须确认数据丢弃。兼容在途生成使用旧版本完成，不兼容更新取消生成并阻止迟到结果提交。
 
 Codex 参考 [OMP image-gen.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/tools/image-gen.ts) 的实现方式：
 

@@ -838,15 +838,25 @@ impl VendorPlugins {
                 continue;
             }
             let preview = self.restore(gw, vendor_id).await?;
-            if preview.discarded_data.is_empty() {
+            let auto_reset = vendor_id.as_str() == "base";
+            if auto_reset || preview.discarded_data.is_empty() {
+                let discarded_data = preview.discarded_data;
                 self.confirm(
                     gw,
                     ConfirmPluginUpdate {
                         preview_id: preview.id,
-                        allow_data_discard: false,
+                        allow_data_discard: auto_reset,
                     },
                 )
                 .await?;
+                for discard in discarded_data {
+                    tracing::warn!(
+                        vendor_id = %vendor_id,
+                        provider_id = %discard.provider.id,
+                        kinds = ?discard.kinds,
+                        "bundled plugin upgrade reset incompatible provider data"
+                    );
+                }
             }
         }
         Ok(())
