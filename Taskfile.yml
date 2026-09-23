@@ -25,11 +25,13 @@ tasks:
       - backend/crates/stravia-vendor-base/Cargo.toml
       - backend/crates/stravia-vendor-base/build.rs
       - backend/crates/stravia-vendor-base/src/**/*.rs
+      - backend/crates/stravia-vendor-base/messages/*.json
       - backend/crates/stravia-core/assets/providers.stravia.json
       - backend/crates/stravia-vendor-common/Cargo.toml
       - backend/crates/stravia-vendor-common/src/**/*.rs
       - backend/crates/stravia-vendor-sdk/Cargo.toml
       - backend/crates/stravia-vendor-sdk/src/**/*.rs
+      - backend/crates/stravia-vendor-sdk/build-support/**/*.rs
       - backend/crates/stravia-vendor-sdk/wit/**/*.wit
       - backend/crates/stravia-protocol-codec/Cargo.toml
       - backend/crates/stravia-protocol-codec/src/**/*.rs
@@ -58,8 +60,11 @@ tasks:
       - backend/crates/stravia-vendor-sdk/fixtures/build.ts
       - backend/crates/stravia-vendor-sdk/fixtures/*/Cargo.toml
       - backend/crates/stravia-vendor-sdk/fixtures/*/Cargo.lock
+      - backend/crates/stravia-vendor-sdk/fixtures/*/build.rs
+      - backend/crates/stravia-vendor-sdk/fixtures/*/messages/*.json
       - backend/crates/stravia-vendor-sdk/fixtures/*/src/**/*.rs
       - backend/crates/stravia-vendor-sdk/src/**/*.rs
+      - backend/crates/stravia-vendor-sdk/build-support/**/*.rs
       - backend/crates/stravia-vendor-sdk/wit/**/*.wit
       - backend/crates/stravia-runtime-contract/Cargo.toml
       - backend/crates/stravia-runtime-contract/src/**/*.rs

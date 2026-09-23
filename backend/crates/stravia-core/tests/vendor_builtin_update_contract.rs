@@ -182,6 +182,64 @@ struct Connection {
     token: String,
 }
 
+#[tokio::test]
+async fn restoring_unavailable_plugin_preserves_data_across_display_contract_changes()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let first = gateway(directory.path()).await?;
+    let connected = connection(&first, "http://127.0.0.1:19327/v1").await?;
+    let before = first.admin().get_provider(&connected.provider_id).await?;
+    drop(first);
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(DataPaths::new(directory.path()).database()),
+        )
+        .await?;
+    let raw: String =
+        sqlx::query_scalar("SELECT descriptor FROM vendor_plugins WHERE vendor_id = 'base'")
+            .fetch_one(&pool)
+            .await?;
+    let mut descriptor: serde_json::Value = serde_json::from_str(&raw)?;
+    // 旧安装的展示文本不满足新契约，但其持久化格式代际仍是可信的比较依据。
+    for profile in descriptor["providers"].as_array_mut().unwrap() {
+        for channel in profile["channels"].as_array_mut().unwrap() {
+            channel["name"] = serde_json::json!("Previous channel name");
+        }
+    }
+    sqlx::query("UPDATE vendor_plugins SET descriptor = ?, digest = ? WHERE vendor_id = 'base'")
+        .bind(serde_json::to_string(&descriptor)?)
+        .bind("0".repeat(64))
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+
+    let restarted = gateway(directory.path()).await?;
+    assert_eq!(installed(&restarted).await?.status, "unavailable");
+    let preview = restarted
+        .admin()
+        .preview_builtin_vendor_plugin("base")
+        .await?;
+    assert!(preview.discarded_data.is_empty());
+    restarted
+        .admin()
+        .confirm_vendor_plugin(ConfirmPluginUpdate {
+            preview_id: preview.id,
+            allow_data_discard: false,
+        })
+        .await?;
+    let after = restarted
+        .admin()
+        .get_provider(&connected.provider_id)
+        .await?;
+    assert_eq!(after.adapter_credentials, before.adapter_credentials);
+    assert_eq!(after.vendor_options, before.vendor_options);
+    assert_eq!(installed(&restarted).await?.status, "ready");
+    Ok(())
+}
+
 async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connection> {
     let provider = gateway
         .admin()

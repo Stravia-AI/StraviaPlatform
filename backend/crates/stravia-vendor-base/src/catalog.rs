@@ -288,6 +288,7 @@ fn ensure_success(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn derive_profiles_filters_unsupported_implementations() {
@@ -299,6 +300,7 @@ mod tests {
         assert_eq!(providers.len(), 1);
         let profile = &providers[0];
         assert_eq!(profile.provider_id, "remote-openai");
+        assert_eq!(profile.display_name, "Remote OpenAI");
         assert_eq!(profile.catalog_id.as_deref(), Some("remote-openai"));
         assert_eq!(
             profile.implementation.as_deref(),
@@ -307,6 +309,29 @@ mod tests {
         assert_eq!(
             profile.channels[0].default_base_url.as_deref(),
             Some("https://api.remote.test/v1")
+        );
+        let form = serde_json::to_value(profile).expect("catalog profile serializes");
+        for path in [
+            "/channels/0/name",
+            "/config_fields/0/label",
+            "/config_groups/0/label",
+        ] {
+            let text = form.pointer(path).expect("localized catalog field");
+            for locale in ["en-US", "zh-CN"] {
+                assert!(
+                    text.get(locale)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                );
+            }
+        }
+        assert_eq!(
+            form.pointer("/config_fields/0/group"),
+            Some(&serde_json::json!("credentials"))
+        );
+        assert_eq!(
+            form.pointer("/config_groups/0/id"),
+            Some(&serde_json::json!("credentials"))
         );
     }
 

@@ -1,0 +1,12 @@
+{
+  "channel_default": "Default",
+  "channel_description": "Command Code API key channel",
+  "authentication": "Authentication",
+  "privacy": "Privacy",
+  "api_key": "API key",
+  "api_key_description": "Command Code API key",
+  "zdr": "Zero Data Retention",
+  "zdr_description": "Send x-cmd-zdr: 1 on initialization and inference requests",
+  "invalid_zdr_type": "Zero Data Retention must be a boolean",
+  "invalid_api_key": "Command Code API key must be a non-empty string"
+}

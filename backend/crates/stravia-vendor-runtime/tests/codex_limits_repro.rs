@@ -15,26 +15,24 @@ use stravia_vendor_runtime::{
 };
 use stravia_vendor_sdk::{ErrorKind, OperationInput, ProviderSnapshot};
 
-/// Locate a locally built Codex component (`task` plugin build output lives
-/// under `target/vendor-plugins/`). The test skips when no build exists.
+/// Use the all-vendors manifest so stale artifacts cannot select an older contract.
+/// The test skips when no all-vendors build exists.
 fn codex_artifact() -> Option<std::path::PathBuf> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("target/vendor-plugins");
-    let mut candidates: Vec<_> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            let name = path.file_name()?.to_str()?.to_owned();
-            (name.starts_with("openai-codex-") && name.ends_with(".wasm")).then_some(path)
-        })
-        .collect();
-    candidates.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-    });
-    candidates.pop()
+        .join("target/vendor-plugins-all");
+    let manifest = match std::fs::read(dir.join("manifest.json")) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("read all-vendors manifest: {error}"),
+    };
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&manifest).expect("valid all-vendors manifest");
+    let entry = entries
+        .iter()
+        .find(|entry| entry["vendor_id"] == "openai-codex")
+        .expect("all-vendors manifest includes Codex");
+    Some(dir.join(entry["file"].as_str().expect("Codex component filename")))
 }
 
 #[derive(Default)]
@@ -270,7 +268,7 @@ fn request() -> AiRequest {
 
 async fn run_once(encrypted_len: usize) -> Option<(String, Arc<Recording>)> {
     let Some(path) = codex_artifact() else {
-        eprintln!("no built openai-codex component under target/vendor-plugins; skipping");
+        eprintln!("no all-vendors build under target/vendor-plugins-all; skipping");
         return None;
     };
     let runtime = VendorRuntime::new().expect("runtime");

@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+#[path = "../stravia-vendor-sdk/build-support/messages.rs"]
+mod messages;
+
 fn main() {
+    messages::generate().expect("generate bundled message accessors");
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let catalog_path = manifest_dir.join("../stravia-core/assets/providers.stravia.json");
     println!("cargo:rerun-if-changed={}", catalog_path.display());

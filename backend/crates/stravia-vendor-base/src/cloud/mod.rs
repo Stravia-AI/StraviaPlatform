@@ -15,10 +15,10 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AuthResponse, AuthStep, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigValidationResponse, DataCompatibility, DefaultModelsSource, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
-    ProviderSnapshot, ValidationIssue, read_http_body,
+    ConfigGroup, ConfigValidationResponse, DataCompatibility, DefaultModelsSource,
+    DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, LocalizedText, MODELS_SOURCE_CATALOG,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError,
+    ProviderDescriptor, ProviderSnapshot, ValidationIssue, read_http_body,
 };
 use url::Url;
 
@@ -1181,13 +1181,13 @@ fn validate_config(
             require_value(
                 &mut issues,
                 "resourceName",
-                "Azure resource name is required",
+                crate::messages::azure_resource_name_required(),
                 merged("resourceName").is_some(),
             );
             require_value(
                 &mut issues,
                 "apiKey",
-                "Azure API key is required",
+                crate::messages::azure_api_key_required(),
                 merged("apiKey").is_some(),
             );
         }
@@ -1195,7 +1195,7 @@ fn validate_config(
             require_value(
                 &mut issues,
                 "region",
-                "AWS region is required",
+                crate::messages::aws_region_required(),
                 merged("region").is_some(),
             );
             if merged("apiKey").is_none()
@@ -1204,7 +1204,7 @@ fn validate_config(
                 issues.push(validation_issue(
                     "apiKey",
                     "auth_required",
-                    "configure a Bedrock API key or both AWS access keys",
+                    crate::messages::bedrock_auth_required(),
                 ));
             }
         }
@@ -1213,7 +1213,7 @@ fn validate_config(
                 issues.push(validation_issue(
                     "credentials",
                     "auth_required",
-                    "service-account JSON or an access token is required",
+                    crate::messages::vertex_auth_required(),
                 ));
             }
             if let Some(credentials) = merged("credentials")
@@ -1228,7 +1228,7 @@ fn validate_config(
                 issues.push(validation_issue(
                     "credentials",
                     "invalid_service_account",
-                    "service-account JSON must contain client_email and private_key",
+                    crate::messages::invalid_service_account(),
                 ));
             }
             if vertex_project.is_none()
@@ -1239,7 +1239,7 @@ fn validate_config(
                 issues.push(validation_issue(
                     "project",
                     "required",
-                    "Google Cloud project is required when it is not present in service-account JSON",
+                    crate::messages::google_cloud_project_required(),
                 ));
             }
         }
@@ -1247,52 +1247,52 @@ fn validate_config(
             require_value(
                 &mut issues,
                 "deploymentUrl",
-                "SAP deployment URL is required",
+                crate::messages::sap_deployment_url_required(),
                 merged("deploymentUrl").is_some(),
             );
             require_value(
                 &mut issues,
                 "tokenUrl",
-                "SAP OAuth token URL is required",
+                crate::messages::sap_oauth_token_url_required(),
                 merged("tokenUrl").is_some(),
             );
             require_value(
                 &mut issues,
                 "clientId",
-                "SAP OAuth client ID is required",
+                crate::messages::sap_oauth_client_id_required(),
                 merged("clientId").is_some(),
             );
             require_value(
                 &mut issues,
                 "clientSecret",
-                "SAP OAuth client secret is required",
+                crate::messages::sap_oauth_client_secret_required(),
                 merged("clientSecret").is_some(),
             );
         }
         "gitlab" => require_value(
             &mut issues,
             "apiKey",
-            "GitLab access token is required",
+            crate::messages::gitlab_access_token_required(),
             merged("apiKey").is_some(),
         ),
         "watsonx" => {
             require_value(
                 &mut issues,
                 "apiKey",
-                "IBM Cloud API key is required",
+                crate::messages::ibm_cloud_api_key_required(),
                 merged("apiKey").is_some(),
             );
             require_value(
                 &mut issues,
                 "projectId",
-                "watsonx project ID is required",
+                crate::messages::watsonx_project_id_required(),
                 merged("projectId").is_some(),
             );
         }
         _ => issues.push(ValidationIssue {
             field: None,
             code: "unsupported_vendor".into(),
-            message: "cloud config validator does not own this vendor".into(),
+            message: crate::messages::unsupported_cloud_vendor(),
         }),
     }
     let proposed_base_url = if issues.is_empty() && provider.base_url.trim().is_empty() {
@@ -1342,17 +1342,22 @@ fn validate_config(
     }
 }
 
-fn require_value(issues: &mut Vec<ValidationIssue>, field: &str, message: &str, present: bool) {
+fn require_value(
+    issues: &mut Vec<ValidationIssue>,
+    field: &str,
+    message: LocalizedText,
+    present: bool,
+) {
     if !present {
         issues.push(validation_issue(field, "required", message));
     }
 }
 
-fn validation_issue(field: &str, code: &str, message: &str) -> ValidationIssue {
+fn validation_issue(field: &str, code: &str, message: LocalizedText) -> ValidationIssue {
     ValidationIssue {
         field: Some(field.into()),
         code: code.into(),
-        message: message.into(),
+        message,
     }
 }
 
@@ -1362,7 +1367,7 @@ fn azure_descriptor() -> ProviderDescriptor {
         "Azure OpenAI",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "openai-compatible",
             None,
             None,
@@ -1375,12 +1380,12 @@ fn azure_descriptor() -> ProviderDescriptor {
         vec![
             patterned_text_field(
                 "resourceName",
-                "Azure resource name",
+                crate::messages::azure_resource_name(),
                 true,
                 r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$",
             ),
-            text_field("apiKey", "API key", true, true),
-            optional_text_field("apiVersion", "API version", Some("v1")),
+            text_field("apiKey", crate::messages::api_key(), true, true),
+            optional_text_field("apiVersion", crate::messages::api_version(), Some("v1")),
         ],
         NetworkDeclaration::default(),
     )
@@ -1392,7 +1397,7 @@ fn bedrock_descriptor() -> ProviderDescriptor {
         "Amazon Bedrock",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "bedrock-converse",
             None,
             Some(DefaultModelsSource::Catalog),
@@ -1403,11 +1408,26 @@ fn bedrock_descriptor() -> ProviderDescriptor {
             ],
         )],
         vec![
-            patterned_text_field("region", "AWS region", true, r"^[a-z0-9-]+$"),
-            text_field("apiKey", "Bedrock API key", false, true),
-            text_field("accessKeyId", "Access key ID", false, true),
-            text_field("secretAccessKey", "Secret access key", false, true),
-            text_field("sessionToken", "Session token", false, true),
+            patterned_text_field(
+                "region",
+                crate::messages::aws_region(),
+                true,
+                r"^[a-z0-9-]+$",
+            ),
+            text_field("apiKey", crate::messages::bedrock_api_key(), false, true),
+            text_field("accessKeyId", crate::messages::access_key_id(), false, true),
+            text_field(
+                "secretAccessKey",
+                crate::messages::secret_access_key(),
+                false,
+                true,
+            ),
+            text_field(
+                "sessionToken",
+                crate::messages::session_token(),
+                false,
+                true,
+            ),
         ],
         NetworkDeclaration::default(),
     )
@@ -1420,7 +1440,7 @@ fn vertex_descriptor() -> ProviderDescriptor {
         vec![
             channel(
                 "native",
-                "Native Gemini",
+                crate::messages::native_gemini_channel(),
                 "google-gemini",
                 None,
                 None,
@@ -1432,7 +1452,7 @@ fn vertex_descriptor() -> ProviderDescriptor {
             ),
             channel(
                 "openai",
-                "OpenAI Compatible",
+                crate::messages::openai_compatible_channel(),
                 "openai-compatible",
                 None,
                 None,
@@ -1461,7 +1481,7 @@ fn vertex_anthropic_descriptor() -> ProviderDescriptor {
         "Vertex AI Anthropic",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "anthropic-messages",
             None,
             None,
@@ -1489,7 +1509,7 @@ fn sap_descriptor() -> ProviderDescriptor {
         "SAP AI Core",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "openai-compatible",
             None,
             None,
@@ -1500,11 +1520,26 @@ fn sap_descriptor() -> ProviderDescriptor {
             ],
         )],
         vec![
-            text_field("deploymentUrl", "Deployment URL", true, false),
-            text_field("tokenUrl", "OAuth token URL", true, false),
-            text_field("clientId", "OAuth client ID", true, true),
-            text_field("clientSecret", "OAuth client secret", true, true),
-            text_field("resourceGroup", "Resource group", false, false),
+            text_field(
+                "deploymentUrl",
+                crate::messages::deployment_url(),
+                true,
+                false,
+            ),
+            text_field("tokenUrl", crate::messages::oauth_token_url(), true, false),
+            text_field("clientId", crate::messages::oauth_client_id(), true, true),
+            text_field(
+                "clientSecret",
+                crate::messages::oauth_client_secret(),
+                true,
+                true,
+            ),
+            text_field(
+                "resourceGroup",
+                crate::messages::resource_group(),
+                false,
+                false,
+            ),
         ],
         NetworkDeclaration {
             base_url_field: Some("deploymentUrl".into()),
@@ -1520,7 +1555,7 @@ fn gitlab_descriptor() -> ProviderDescriptor {
         "GitLab Duo",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "openai-compatible",
             Some("https://cloud.gitlab.com/ai/v1/proxy/openai/v1"),
             None,
@@ -1532,15 +1567,15 @@ fn gitlab_descriptor() -> ProviderDescriptor {
             ],
         )],
         vec![
-            text_field("apiKey", "GitLab access token", true, true),
+            text_field("apiKey", crate::messages::gitlab_access_token(), true, true),
             optional_text_field(
                 "instanceUrl",
-                "GitLab instance URL",
+                crate::messages::gitlab_instance_url(),
                 Some("https://gitlab.com"),
             ),
             optional_text_field(
                 "aiGatewayUrl",
-                "GitLab AI Gateway URL",
+                crate::messages::gitlab_ai_gateway_url(),
                 Some("https://cloud.gitlab.com"),
             ),
         ],
@@ -1558,7 +1593,7 @@ fn watsonx_descriptor() -> ProviderDescriptor {
         "watsonx.ai",
         vec![channel(
             "default",
-            "Default",
+            crate::messages::default_channel(),
             "watsonx-text-chat",
             Some("https://us-south.ml.cloud.ibm.com"),
             Some(DefaultModelsSource::Catalog),
@@ -1569,14 +1604,18 @@ fn watsonx_descriptor() -> ProviderDescriptor {
             ],
         )],
         vec![
-            text_field("apiKey", "IBM Cloud API key", true, true),
-            text_field("projectId", "Project ID", true, false),
+            text_field("apiKey", crate::messages::ibm_cloud_api_key(), true, true),
+            text_field("projectId", crate::messages::project_id(), true, false),
             optional_text_field(
                 "baseUrl",
-                "Service URL",
+                crate::messages::service_url(),
                 Some("https://us-south.ml.cloud.ibm.com"),
             ),
-            optional_text_field("apiVersion", "API version", Some("2026-04-20")),
+            optional_text_field(
+                "apiVersion",
+                crate::messages::api_version(),
+                Some("2026-04-20"),
+            ),
         ],
         NetworkDeclaration {
             base_url_field: Some("baseUrl".into()),
@@ -1604,6 +1643,16 @@ fn descriptor_base(
         description: Some(format!("Built-in {display_name} vendor integration")),
         channels,
         capabilities,
+        config_groups: vec![
+            ConfigGroup {
+                id: "credentials".into(),
+                label: crate::messages::credentials_group(),
+            },
+            ConfigGroup {
+                id: "connection".into(),
+                label: crate::messages::connection_group(),
+            },
+        ],
         config_fields,
         network,
         data_compat: DataCompatibility::default(),
@@ -1614,7 +1663,7 @@ fn descriptor_base(
 
 fn channel(
     id: &str,
-    name: &str,
+    name: LocalizedText,
     protocol: &str,
     default_base_url: Option<&str>,
     default_models_source: Option<DefaultModelsSource>,
@@ -1622,7 +1671,7 @@ fn channel(
 ) -> ChannelDescriptor {
     ChannelDescriptor {
         id: id.into(),
-        name: name.into(),
+        name,
         description: None,
         auth: None,
         protocol: Some(protocol.into()),
@@ -1640,25 +1689,40 @@ fn vertex_fields() -> Vec<ConfigField> {
     vec![
         patterned_text_field(
             "project",
-            "Google Cloud project",
+            crate::messages::google_cloud_project(),
             false,
             r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
         ),
-        patterned_text_field("location", "Google Cloud location", false, r"^[a-z0-9-]+$"),
-        multiline_field("credentials", "Service account JSON", false, true),
-        text_field("apiKey", "Vertex access token", false, true),
+        patterned_text_field(
+            "location",
+            crate::messages::google_cloud_location(),
+            false,
+            r"^[a-z0-9-]+$",
+        ),
+        multiline_field(
+            "credentials",
+            crate::messages::service_account_json(),
+            false,
+            true,
+        ),
+        text_field(
+            "apiKey",
+            crate::messages::vertex_access_token(),
+            false,
+            true,
+        ),
     ]
 }
 
-fn text_field(key: &str, label: &str, required: bool, secret: bool) -> ConfigField {
+fn text_field(key: &str, label: LocalizedText, required: bool, secret: bool) -> ConfigField {
     ConfigField {
         key: key.into(),
-        label: label.into(),
+        label,
         description: None,
         kind: ConfigFieldKind::String { multiline: false },
         required,
         default_json: None,
-        group: Some(if secret { "Credentials" } else { "Connection" }.into()),
+        group: Some(if secret { "credentials" } else { "connection" }.into()),
         secret,
         min: None,
         max: None,
@@ -1668,19 +1732,24 @@ fn text_field(key: &str, label: &str, required: bool, secret: bool) -> ConfigFie
     }
 }
 
-fn patterned_text_field(key: &str, label: &str, required: bool, pattern: &str) -> ConfigField {
+fn patterned_text_field(
+    key: &str,
+    label: LocalizedText,
+    required: bool,
+    pattern: &str,
+) -> ConfigField {
     let mut field = text_field(key, label, required, false);
     field.pattern = Some(pattern.into());
     field
 }
 
-fn multiline_field(key: &str, label: &str, required: bool, secret: bool) -> ConfigField {
+fn multiline_field(key: &str, label: LocalizedText, required: bool, secret: bool) -> ConfigField {
     let mut field = text_field(key, label, required, secret);
     field.kind = ConfigFieldKind::String { multiline: true };
     field
 }
 
-fn optional_text_field(key: &str, label: &str, default: Option<&str>) -> ConfigField {
+fn optional_text_field(key: &str, label: LocalizedText, default: Option<&str>) -> ConfigField {
     let mut field = text_field(key, label, false, false);
     field.default_json = default.map(|value| Value::String(value.into()));
     field

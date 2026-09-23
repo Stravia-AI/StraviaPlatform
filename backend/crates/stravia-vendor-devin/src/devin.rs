@@ -19,8 +19,8 @@ use stravia_vendor_common::common;
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    DataCompatibility, DiscoverResponse, ErrorKind, GuestHost, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ConfigGroup, DataCompatibility, DiscoverResponse, ErrorKind, GuestHost, NetworkDeclaration,
+    Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
     ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
 
@@ -84,8 +84,8 @@ pub(crate) fn descriptor() -> VendorDescriptor {
             description: Some("Devin CLI OAuth and Connect-RPC API".into()),
             channels: vec![ChannelDescriptor {
                 id: "devin".into(),
-                name: "Devin".into(),
-                description: Some("Devin CLI OAuth and Connect-RPC API".into()),
+                name: crate::messages::channel_devin(),
+                description: Some(crate::messages::channel_description()),
                 auth: Some(AuthDescriptor {
                     flow: AuthFlow::AuthorizationCode,
                     callback: Some(AuthCallback {
@@ -98,10 +98,8 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                     }),
                     manual_input: Some(AuthManualInput {
                         input_type: AuthManualInputType::Text,
-                        label: "Devin token".into(),
-                        description: Some(
-                            "Paste the token returned by the Devin CLI authorization flow.".into(),
-                        ),
+                        label: crate::messages::manual_token(),
+                        description: Some(crate::messages::manual_token_description()),
                         secret: true,
                     }),
                 }),
@@ -117,16 +115,18 @@ pub(crate) fn descriptor() -> VendorDescriptor {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: vec![ConfigGroup {
+                id: "authentication".into(),
+                label: crate::messages::authentication(),
+            }],
             config_fields: vec![ConfigField {
                 key: "apiKey".into(),
-                label: "Session token".into(),
-                description: Some(
-                    "OAuth-created Devin session token or a manually pasted Windsurf token".into(),
-                ),
+                label: crate::messages::session_token(),
+                description: Some(crate::messages::session_token_description()),
                 kind: ConfigFieldKind::String { multiline: false },
                 required: true,
                 default_json: None,
-                group: Some("Authentication".into()),
+                group: Some("authentication".into()),
                 secret: true,
                 min: None,
                 max: None,

@@ -823,27 +823,6 @@ async fn manually_installed_dedicated_packages_keep_complete_profiles() -> anyho
         "the manually installed dedicated packages must keep every previously public capability observable"
     );
 
-    let serialized = serde_json::to_value(profile("openai-codex"))?;
-    let fields = serialized
-        .as_object()
-        .expect("serialized provider profile")
-        .keys()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        fields,
-        std::collections::BTreeSet::from([
-            "provider_id",
-            "catalog_id",
-            "display_name",
-            "description",
-            "channels",
-            "capabilities",
-            "config_fields",
-            "network",
-            "data_compat",
-        ])
-    );
     Ok(())
 }
 

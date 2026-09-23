@@ -3,17 +3,24 @@ use stravia_vendor_common::thinking;
 
 use serde_json::Value;
 use stravia_vendor_sdk::{
-    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, DataCompatibility,
-    MODEL_CAPABILITY_THINKING_TOGGLE, NetworkDeclaration, OriginDeclaration, ProviderDescriptor,
+    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, DataCompatibility,
+    LocalizedText, MODEL_CAPABILITY_THINKING_TOGGLE, NetworkDeclaration, OriginDeclaration,
+    ProviderDescriptor,
 };
 
 /// Selectable egress protocols merged into the `custom` profile. Values are
 /// protocol aliases, not endpoint IDs; `common::endpoint` resolves them.
-pub(crate) const CUSTOM_PROTOCOLS: &[(&str, &str)] = &[
-    ("openai-compatible", "OpenAI-Compatible"),
-    ("open-responses", "Open Responses"),
-    ("anthropic-messages", "Anthropic Messages"),
-    ("google-gemini", "Gemini"),
+pub(crate) const CUSTOM_PROTOCOLS: &[(&str, fn() -> LocalizedText)] = &[
+    (
+        "openai-compatible",
+        crate::messages::protocol_openai_compatible,
+    ),
+    ("open-responses", crate::messages::protocol_open_responses),
+    (
+        "anthropic-messages",
+        crate::messages::protocol_anthropic_messages,
+    ),
+    ("google-gemini", crate::messages::protocol_gemini),
 ];
 
 /// Provider ids whose model discovery always resolves through a live account
@@ -137,7 +144,6 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
             "DeepSeek",
             vec![channel(
                 "default",
-                "Default",
                 Some("openai-compatible"),
                 Some("https://api.deepseek.com"),
                 inference_capabilities(true, false),
@@ -186,7 +192,6 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
             "Ollama",
             vec![channel(
                 "default",
-                "Default",
                 Some("openai-compatible"),
                 Some("http://127.0.0.1:11434/v1"),
                 inference_capabilities(false, false),
@@ -198,35 +203,43 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
             "OpenRouter",
             vec![channel(
                 "default",
-                "Default",
                 Some("openai-compatible"),
                 Some("https://openrouter.ai/api/v1"),
                 inference_capabilities(false, false),
             )],
             vec![
                 optional_api_key(),
-                string_field("httpReferer", "App referer URL", false, false),
-                string_field("xTitle", "App title", false, false),
+                string_field(
+                    "httpReferer",
+                    crate::messages::app_referer_url(),
+                    false,
+                    false,
+                ),
+                string_field("xTitle", crate::messages::app_title(), false, false),
             ],
             NetworkDeclaration::default(),
         ),
         "cloudflare-ai-gateway" => (
             "Cloudflare AI Gateway",
-            vec![channel(
-                "default",
-                "Default",
-                Some("openai-compatible"),
-                None,
-                {
-                    let mut capabilities = inference_capabilities(false, false);
-                    capabilities.insert(Capability::ConfigValidation);
-                    capabilities
-                },
-            )],
+            vec![channel("default", Some("openai-compatible"), None, {
+                let mut capabilities = inference_capabilities(false, false);
+                capabilities.insert(Capability::ConfigValidation);
+                capabilities
+            })],
             vec![
-                string_field("apiToken", "AI Gateway API token", true, true),
-                string_field("accountId", "Cloudflare account ID", false, true),
-                string_field("gatewayId", "Gateway ID", false, true),
+                string_field(
+                    "apiToken",
+                    crate::messages::ai_gateway_api_token(),
+                    true,
+                    true,
+                ),
+                string_field(
+                    "accountId",
+                    crate::messages::cloudflare_account_id(),
+                    false,
+                    true,
+                ),
+                string_field("gatewayId", crate::messages::gateway_id(), false, true),
             ],
             NetworkDeclaration {
                 extra_origins: vec![origin("https", "gateway.ai.cloudflare.com")],
@@ -343,6 +356,7 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         capabilities,
         website: None,
         implementation: None,
+        config_groups: config_groups(&fields),
         config_fields: fields,
         network,
         data_compat: DataCompatibility::default(),
@@ -423,7 +437,6 @@ pub(crate) fn compatible_catalog_descriptor(
     }
     let mut channels = vec![channel(
         "default",
-        "Default",
         Some(protocol),
         api.or(fallback_base_url),
         capabilities.clone(),
@@ -440,6 +453,10 @@ pub(crate) fn compatible_catalog_descriptor(
         description: Some(format!("Built-in {name} vendor component")),
         channels,
         capabilities,
+        config_groups: vec![ConfigGroup {
+            id: "credentials".into(),
+            label: crate::messages::credentials_group(),
+        }],
         config_fields: vec![optional_api_key()],
         network: NetworkDeclaration::default(),
         data_compat: DataCompatibility::default(),
@@ -463,7 +480,6 @@ fn monitored_vendor(
         display_name,
         vec![channel(
             "default",
-            "Default",
             Some(protocol),
             Some(default_base_url),
             inference_capabilities(true, false),
@@ -493,7 +509,7 @@ fn custom_standard() -> (
         .iter()
         .map(|(value, label)| stravia_vendor_sdk::EnumOption {
             value: value.to_string(),
-            label: label.to_string(),
+            label: label(),
         })
         .collect();
     descriptor
@@ -531,7 +547,6 @@ fn codec_vendor(
         display_name,
         vec![channel(
             "default",
-            "Default",
             Some(protocol),
             default_base_url,
             inference_capabilities(false, false),
@@ -554,14 +569,13 @@ fn inference_capabilities(allowance: bool, oauth: bool) -> BTreeSet<Capability> 
 
 fn channel(
     id: &str,
-    name: &str,
     protocol: Option<&str>,
     default_base_url: Option<&str>,
     capabilities: BTreeSet<Capability>,
 ) -> ChannelDescriptor {
     ChannelDescriptor {
         id: id.to_owned(),
-        name: name.to_owned(),
+        name: crate::messages::default_channel(),
         description: None,
         auth: None,
         protocol: protocol.map(str::to_owned),
@@ -576,18 +590,18 @@ fn channel(
 }
 
 fn optional_api_key() -> ConfigField {
-    string_field("apiKey", "API key", true, false)
+    string_field("apiKey", crate::messages::api_key(), true, false)
 }
 
-fn string_field(key: &str, label: &str, secret: bool, required: bool) -> ConfigField {
+fn string_field(key: &str, label: LocalizedText, secret: bool, required: bool) -> ConfigField {
     ConfigField {
         key: key.to_owned(),
-        label: label.to_owned(),
+        label,
         description: None,
         kind: ConfigFieldKind::String { multiline: false },
         required,
         default_json: None::<Value>,
-        group: Some(if secret { "Credentials" } else { "Connection" }.to_owned()),
+        group: Some(if secret { "credentials" } else { "connection" }.to_owned()),
         secret,
         min: None,
         max: None,
@@ -595,6 +609,29 @@ fn string_field(key: &str, label: &str, secret: bool, required: bool) -> ConfigF
         pattern: None,
         visible_when: None,
     }
+}
+
+fn config_groups(fields: &[ConfigField]) -> Vec<ConfigGroup> {
+    let mut groups = Vec::new();
+    if fields
+        .iter()
+        .any(|field| field.group.as_deref() == Some("credentials"))
+    {
+        groups.push(ConfigGroup {
+            id: "credentials".into(),
+            label: crate::messages::credentials_group(),
+        });
+    }
+    if fields
+        .iter()
+        .any(|field| field.group.as_deref() == Some("connection"))
+    {
+        groups.push(ConfigGroup {
+            id: "connection".into(),
+            label: crate::messages::connection_group(),
+        });
+    }
+    groups
 }
 
 fn origin(scheme: &str, host: &str) -> OriginDeclaration {

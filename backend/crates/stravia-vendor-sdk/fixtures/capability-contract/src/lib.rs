@@ -1,11 +1,16 @@
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use stravia_vendor_sdk::{
     AiError, AiResponse, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
-    ConfigFieldKind, DataCompatibility, ErrorKind, GuestHost, HttpRequest, MediaImageResponse,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError, ProviderDescriptor,
-    SearchResponse, VendorDescriptor, VendorGuest, VendorKind, read_http_body,
+    ConfigFieldKind, ConfigGroup, DataCompatibility, ErrorKind, GuestHost, HttpRequest,
+    MediaImageResponse, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    PluginError, ProviderDescriptor, SearchResponse, VendorDescriptor, VendorGuest, VendorKind,
+    read_http_body,
 };
 
 struct CapabilityContractVendor;
@@ -82,9 +87,7 @@ impl Profile {
 
     fn capabilities(self) -> BTreeSet<Capability> {
         match self {
-            Self::PureSearch | Self::DedicatedDeepseek => {
-                BTreeSet::from([Capability::Search])
-            }
+            Self::PureSearch | Self::DedicatedDeepseek => BTreeSet::from([Capability::Search]),
             Self::PureImage => BTreeSet::from([Capability::MediaImage]),
             Self::Multi | Self::Incompatible | Self::BaseOlder => BTreeSet::from([
                 Capability::Infer,
@@ -117,56 +120,63 @@ impl VendorGuest for CapabilityContractVendor {
                 display_name: format!("Capability Contract ({})", profile_name(profile)),
                 description: None,
                 channels: vec![ChannelDescriptor {
-                id: profile.channel().into(),
-                name: if profile == Profile::DedicatedDeepseek {
-                    "Dedicated Search"
+                    id: profile.channel().into(),
+                    name: if profile == Profile::DedicatedDeepseek {
+                        crate::messages::dedicated_search()
+                    } else {
+                        crate::messages::channel_default()
+                    },
+                    description: None,
+                    auth: None,
+                    protocol: (profile == Profile::BaseOlder).then(|| "openai-compatible".into()),
+                    protocols: Vec::new(),
+                    default_base_url: None,
+                    default_models_source: None,
+                    consumes_catalog_models: false,
+                    capabilities: capabilities.clone(),
+                    model_capabilities: BTreeSet::new(),
+                    search_model_required: false,
+                }],
+                capabilities,
+                website: None,
+                implementation: None,
+                config_groups: if profile == Profile::BaseOlder {
+                    vec![ConfigGroup {
+                        id: "authentication".into(),
+                        label: crate::messages::authentication(),
+                    }]
                 } else {
-                    "Default"
-                }
-                .into(),
-                description: None,
-                auth: None,
-                protocol: (profile == Profile::BaseOlder).then(|| "openai-compatible".into()),
-                protocols: Vec::new(),
-                default_base_url: None,
-                default_models_source: None,
-                consumes_catalog_models: false,
-                capabilities: capabilities.clone(),
-                model_capabilities: BTreeSet::new(),
-                search_model_required: false,
-            }],
-            capabilities,
-            website: None,
-            implementation: None,
-            config_fields: if profile == Profile::BaseOlder {
-                vec![ConfigField {
-                    key: "api_key".into(),
-                    label: "API key".into(),
-                    description: Some("OpenAI-compatible test credential".into()),
-                    kind: ConfigFieldKind::String { multiline: false },
-                    required: false,
-                    default_json: None,
-                    group: Some("Authentication".into()),
-                    secret: true,
-                    min: None,
-                    max: None,
-                    max_length: Some(8192),
-                    pattern: None,
-                    visible_when: None,
-                }]
-            } else {
-                Vec::new()
-            },
-            network: NetworkDeclaration::default(),
-            data_compat: DataCompatibility {
-                private_state_format: if profile == Profile::Incompatible {
-                    2
-                } else {
-                    1
+                    Vec::new()
                 },
-                ..DataCompatibility::default()
-            },
-        }],
+                config_fields: if profile == Profile::BaseOlder {
+                    vec![ConfigField {
+                        key: "api_key".into(),
+                        label: crate::messages::api_key(),
+                        description: Some(crate::messages::api_key_description()),
+                        kind: ConfigFieldKind::String { multiline: false },
+                        required: false,
+                        default_json: None,
+                        group: Some("authentication".into()),
+                        secret: true,
+                        min: None,
+                        max: None,
+                        max_length: Some(8192),
+                        pattern: None,
+                        visible_when: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                network: NetworkDeclaration::default(),
+                data_compat: DataCompatibility {
+                    private_state_format: if profile == Profile::Incompatible {
+                        2
+                    } else {
+                        1
+                    },
+                    ..DataCompatibility::default()
+                },
+            }],
         }
     }
 

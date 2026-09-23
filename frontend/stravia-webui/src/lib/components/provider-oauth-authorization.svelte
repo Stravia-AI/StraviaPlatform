@@ -10,6 +10,7 @@ import { admin, isTauri } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { localeState } from '$lib/localization.svelte'
 import { openExternalUrl } from '$lib/open-external'
+import { resolvePluginText } from '$lib/plugin-text'
 import type { OAuthCallbackMode, OAuthCandidateConfiguration, OAuthSessionInitData } from '$lib/types'
 import * as Field from '$lib/components/ui/field'
 import { Button } from '$lib/components/ui/button'
@@ -360,8 +361,12 @@ onDestroy(() => {
 
       {#if supportsManualInput && manualInput}
         <Field.Field size="fill" class="mt-4">
-          <Field.Label for={manualInputId} hint={manualInput.description ?? undefined}>
-            {manualInput.label}
+          <Field.Label
+            for={manualInputId}
+            hint={manualInput.description
+              ? resolvePluginText(manualInput.description, localeState.current)
+              : undefined}>
+            {resolvePluginText(manualInput.label, localeState.current)}
           </Field.Label>
           <div class="flex gap-2">
             <div class="min-w-0 flex-1">

@@ -1,0 +1,7 @@
+{
+  "channel_default": "默认",
+  "authorization_callback": "授权回调",
+  "connection": "连接",
+  "workspace": "工作区",
+  "workspace_description": "测试插件所需的连接配置"
+}

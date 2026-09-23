@@ -91,7 +91,7 @@
 ## 已确认的技术栈与插件契约
 
 - 唯一目标技术栈为 Wasmtime + WebAssembly Component Model + WIT，不同时提供 Extism 或另一套自定义 Core Wasm ABI。
-- Wasmtime 负责加载、执行与能力隔离；`stravia:vendor@0.3.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
+- Wasmtime 负责加载、执行与能力隔离；`stravia:vendor@0.4.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
 - `VendorDescriptor` 包含 `vendor_id`、版本、展示元数据、canonical 格式版本、`kind` 与 `providers`；`kind` 为 `fallback` 或 `dedicated`。每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、channel、能力、配置、网络权限和数据兼容信息。
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
@@ -106,7 +106,7 @@
 
 ### 实现与验证入口
 
-- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.3.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
+- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.4.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/` 是五个 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。
 - `backend/crates/stravia-vendor-common/` 是只提供多个 guest 实际共用辅助代码的 `rlib`。标准 codec 由 guest 在 Rust 源码层链接 `stravia-protocol-codec` 并编入 Component，而非采用 Component composition；Command Code 与 Devin 私有 codec 留在各自 crate，Bedrock、Cohere、Gateway、WatsonX 等私有实现留在 `base`。
@@ -145,6 +145,91 @@
 - Command Code 的 zdr 等供应商选项通过同一声明机制呈现、校验和保存，不在宿主前端添加供应商专属表单代码。
 - OAuth 使用宿主提供的打开授权链接、输入授权码、等待完成等标准交互；供应商登录网站在浏览器打开，不作为插件自带页面嵌入管理面。
 - 此限制不缩减插件对 OAuth 请求构造、token 交换与供应商响应解析的所有权，也不授予插件访问管理会话的能力。
+
+### 已确认的动态表单多语言契约
+
+动态表单多语言使用 `stravia:vendor@0.4.0` 契约。语言只改变展示，不改变配置含义、校验规则、网络授权或插件执行行为。
+
+#### 文本所有权与结构
+
+- 插件作者通过语言文件维护文案，每个 guest 包使用 `messages/en-US.json`、`messages/zh-CN.json` 等扁平消息目录；稳定的消息 key 与翻译分离，Rust 业务代码不内联中英文文本对，也不按英文字符串查找翻译。
+- 所有 guest 共用 SDK 提供的构建期消息生成器。构建时校验语言目录，并为英文目录中的消息 key 生成有类型的 Rust 函数，将文案编入自包含 Wasm；错误消息 key 在编译时失败。运行时不解析语言文件，不从磁盘或网络加载语言包，安装包不需要附带额外资源文件。
+- 各包的 `build.rs` 调用 `stravia-vendor-sdk/build-support/messages.rs` 中的 `generate()`，源码包含生成的 `OUT_DIR/messages.rs`。消息 key 使用合法、非保留字的 snake_case Rust 标识符；`{field}` 等具名参数生成显式的 `&str` 参数，`{{` 与 `}}` 表示字面量大括号。Core 的通用约束错误使用自身的 `messages/` 目录和同一生成器。
+- 插件随描述符或校验结果携带解析后的完整多语言文本，而不是向宿主发送消息 key。宿主统一选择语言和处理回退，不按供应商身份补翻译，不把插件文案编入 WebUI 的 Paraglide 消息目录。动态新增 Provider Profile 不需要重新构建 WebUI。
+- 使用唯一的 `LocalizedText` 对象结构，不接受 `string | object` 双形态。键为语言标签，值为纯文本；`en-US` 必填且非空，作为规范默认值。其他语言可以缺省，但声明后必须具有有效语言标签和非空文本。仓库维护的插件表单文案同时提供 `en-US` 与 `zh-CN`。
+- 可选说明没有内容时使用 `null`，不能用空翻译隐藏某个语言下的说明。文本不作为 HTML 或脚本执行；不引入远端语言包或运行时插件模板引擎。需要动态参数的消息使用构建期检查的具名占位符，生成器要求各语言的参数集合一致，并生成显式参数函数；不支持任意表达式或 ICU 逻辑。
+- 构建期拒绝重复消息 key、空文本、无英文基线的翻译 key、非法语言标签与参数不一致。非英文目录可缺少个别消息，生成结果保留英文回退；仓库维护的正式插件文案仍须同时提供中英文，测试回退的夹具除外。
+
+例如，`messages/en-US.json` 与 `messages/zh-CN.json` 分别定义同一个 `zero_data_retention` key，插件通过 `messages::zero_data_retention()` 取得 `LocalizedText`。以下示例描述传给宿主的结构，不是 Rust 代码中的文案维护方式。
+
+```json
+{
+  "key": "zdr",
+  "label": {
+    "en-US": "Zero data retention",
+    "zh-CN": "零数据保留"
+  },
+  "description": {
+    "en-US": "Request zero data retention from the service.",
+    "zh-CN": "向服务请求零数据保留。"
+  },
+  "kind": { "type": "bool" },
+  "required": false,
+  "default_json": false,
+  "group": "privacy",
+  "secret": false
+}
+```
+
+以下展示字段使用同一 `LocalizedText`：配置字段的标签与说明、枚举及协议选项的标签、分组标题、Channel 名称与说明、OAuth 手动输入标签与说明，以及插件返回的表单业务校验消息。保存、取消、必填、请选择等宿主通用文案继续通过 Paraglide 提供。配置 key、枚举 value、协议 ID、错误 code、URL 与用户输入保持原值。
+
+#### 分组身份
+
+Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `id` 和多语言 `label`；`ConfigField.group` 只引用该 ID。宿主检查分组 ID 唯一且字段引用有效。分组归属与渲染 key 使用 ID，不使用翻译后的标题；语言切换不得改变分组、字段顺序或导致控件重新挂载。
+
+```json
+{
+  "config_groups": [
+    {
+      "id": "privacy",
+      "label": {
+        "en-US": "Privacy",
+        "zh-CN": "隐私"
+      }
+    }
+  ]
+}
+```
+
+#### 语言选择与状态保持
+
+- 宿主通过统一的 `resolvePluginText(text, locale)` 入口解析文本，规则为“当前界面语言精确匹配 → `en-US`”。不自动将 `zh-TW` 当作 `zh-CN`，也不选择映射中的第一项；未来扩展语言匹配策略时统一修改该入口。
+- Core 管理接口传递完整多语言结构，不按 `Accept-Language` 改写共享描述符或缓存。Desktop 与 Server WebUI 使用同一结构与解析规则。
+- 界面语言变化只重新派生展示文本，不重新请求描述符、不调用 Wasm、不重新执行校验，也不重建表单草稿或重新应用默认值。
+- 切换语言必须保留用户输入、枚举选择、秘密字段状态、校验结果、焦点和已完成的地址审阅；不得触发保存或改变网络授权。
+
+#### 校验反馈
+
+- 插件的 `ValidationIssue.message` 使用 `LocalizedText`；`field` 保持配置字段 key，`code` 保持稳定机器标识。已返回的错误可以直接随界面语言切换，不再次执行插件。
+- 通用字段约束由宿主校验，相关错误使用宿主消息目录；跨字段业务约束仍由插件校验并提供翻译。WebUI 不按供应商或英文错误字符串推断翻译，也不复制业务规则。
+- 原始上游错误不自动翻译；本次不扩大原始错误或敏感内容的暴露范围。
+
+#### 实施与兼容性
+
+- 这是从 `stravia:vendor@0.3.0` 到 `stravia:vendor@0.4.0` 的破坏性插件契约升级。SDK、五个 Vendor guest、base 运行时目录转换、测试组件、Core 管理链路及 WebUI 消费端统一使用新结构；本地导入的旧插件必须重新构建，不保留新旧文本双路径。
+- 即使 WIT 的 `descriptor()` 仍返回字符串，内部 JSON 形状变化也必须纳入契约兼容检查；旧包按既有不兼容机制明确处理，不能继续按新契约执行。
+- 安装加载和动态目录刷新使用相同的文本与分组结构校验。新描述符不合法时拒绝发布，更新或刷新失败保留当前有效版本，不覆盖 last-good。
+- 文案结构升级不等于配置数据格式升级。不得仅因增加翻译而递增 `config_fields_format`，也不得因此清空配置、凭据或插件私有状态。
+- 旧组件不可执行时，更新预览仍从已记录的安装元数据读取配置字段与数据兼容版本，不能因为旧展示字段无法按新契约解析而误判为需要丢弃数据。该元数据读取不允许旧组件继续执行。
+
+#### 验收
+
+1. 安装包含宿主事先不知道的字段名称的真实插件，在中英文下展示字段、分组、枚举、协议选项与 OAuth 输入文案；动态目录新增 Profile 无须修改宿主消息目录。
+2. 部分中文缺失时逐项回退英文；缺失英文、声明空文本、重复分组 ID 或无效分组引用时拒绝新描述符，保留当前有效版本。
+3. 枚举标签随语言变化，但提交值、条件显示、分组归属与字段顺序不变。
+4. 表单填写途中切换语言，草稿、焦点、秘密字段状态与已完成的地址审阅不丢失，不产生保存或重新校验请求。
+5. 插件业务校验错误随语言切换，`field` 与 `code` 不变，不重复调用插件。
+6. 浏览器与 Desktop 分别检查中英文、长文本和窄屏布局；编译通过不代替实际表面验证。
 
 ## 已确认的插件私有持久化状态
 

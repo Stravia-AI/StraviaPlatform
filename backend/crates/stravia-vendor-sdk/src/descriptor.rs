@@ -2,10 +2,86 @@
 //! export. The host validates it at load; nothing here grants trust by itself.
 //! Self-reported `authors`/`display_name` are never presented as verified.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use crate::language_tag::valid_language_tag;
+
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+/// Human-facing text keyed by BCP 47 locale. The wire format is the map itself,
+/// never a string or a wrapper object. `en-US` is required for fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct LocalizedText(BTreeMap<String, String>);
+
+impl LocalizedText {
+    /// Construct translations embedded in a component by generated message accessors.
+    pub fn from_static(translations: &[(&str, &str)]) -> Self {
+        Self::from_translations(translations.iter().copied())
+    }
+
+    /// Construct embedded translations whose placeholders were rendered at call time.
+    /// Takes ownership of formatted strings without cloning them again.
+    pub fn from_translations<K, V>(translations: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut text = BTreeMap::new();
+        for (locale, translation) in translations {
+            assert!(
+                text.insert(locale.into(), translation.into()).is_none(),
+                "localized text contains a duplicate language tag"
+            );
+        }
+        let text = Self(text);
+        assert!(
+            text.validate().is_ok(),
+            "localized text contains invalid translations"
+        );
+        text
+    }
+
+    /// Construct deliberately untranslated text with an English fallback.
+    pub fn english(en: impl Into<String>) -> Self {
+        let text = Self(BTreeMap::from([("en-US".into(), en.into())]));
+        assert!(text.validate().is_ok(), "localized text must not be blank");
+        text
+    }
+
+    /// English fallback for diagnostics, not localized UI presentation.
+    pub fn english_text(&self) -> &str {
+        &self.0["en-US"]
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if !self
+            .0
+            .get("en-US")
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return Err("localized text requires a nonblank en-US translation");
+        }
+        for (locale, text) in &self.0 {
+            if !valid_language_tag(locale) {
+                return Err("localized text contains an invalid language tag");
+            }
+            if text.trim().is_empty() {
+                return Err("localized text contains a blank translation");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalizedText {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = Self(BTreeMap::deserialize(deserializer)?);
+        text.validate().map_err(D::Error::custom)?;
+        Ok(text)
+    }
+}
 
 /// A vendor capability. Each channel declares its own non-empty set; the
 /// provider-level set is the union used for coarse admission checks.
@@ -110,8 +186,8 @@ pub enum AuthManualInputType {
 pub struct AuthManualInput {
     #[serde(rename = "type")]
     pub input_type: AuthManualInputType,
-    pub label: String,
-    pub description: Option<String>,
+    pub label: LocalizedText,
+    pub description: Option<LocalizedText>,
     #[serde(default)]
     pub secret: bool,
 }
@@ -153,8 +229,8 @@ pub struct ChannelDescriptor {
     /// Stable channel id within the vendor (e.g. `"default"`, `"oauth"`).
     pub id: String,
     /// Human-facing name.
-    pub name: String,
-    pub description: Option<String>,
+    pub name: LocalizedText,
+    pub description: Option<LocalizedText>,
     /// Host-owned authentication/callback policy for this channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthDescriptor>,
@@ -207,7 +283,7 @@ pub struct FieldCondition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumOption {
     pub value: String,
-    pub label: String,
+    pub label: LocalizedText,
 }
 
 /// Declared type of a config field; drives the host-generated form.
@@ -233,8 +309,8 @@ pub enum ConfigFieldKind {
 pub struct ConfigField {
     /// Stable key referenced by operations and `visible_when`.
     pub key: String,
-    pub label: String,
-    pub description: Option<String>,
+    pub label: LocalizedText,
+    pub description: Option<LocalizedText>,
     pub kind: ConfigFieldKind,
     #[serde(default)]
     pub required: bool,
@@ -261,6 +337,13 @@ pub struct ConfigField {
     pub pattern: Option<String>,
     #[serde(default)]
     pub visible_when: Option<FieldCondition>,
+}
+
+/// Named form section; fields reference its stable `id` through `group`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGroup {
+    pub id: String,
+    pub label: LocalizedText,
 }
 
 /// One exact additional origin the plugin is allowed to reach. No wildcards:
@@ -344,6 +427,9 @@ pub struct ProviderDescriptor {
     pub channels: Vec<ChannelDescriptor>,
     /// Union of all channel capabilities, used for coarse admission.
     pub capabilities: BTreeSet<Capability>,
+    /// Named form sections referenced by config fields.
+    #[serde(default)]
+    pub config_groups: Vec<ConfigGroup>,
     /// Declared admin-configurable fields (options + secrets).
     #[serde(default)]
     pub config_fields: Vec<ConfigField>,
@@ -488,7 +574,7 @@ impl ProviderDescriptor {
                     || (matches!(auth.flow, AuthFlow::Manual) && auth.manual_input.is_none())
                     || (matches!(auth.flow, AuthFlow::DeviceCode) && auth.manual_input.is_some())
                     || auth.manual_input.as_ref().is_some_and(|input| {
-                        input.label.trim().is_empty()
+                        input.label.english_text().trim().is_empty()
                             || matches!(auth.flow, AuthFlow::Manual)
                                 && input.input_type != AuthManualInputType::Text
                     })
@@ -540,7 +626,7 @@ impl ProviderDescriptor {
                 let mut values = BTreeSet::new();
                 for option in &ch.protocols {
                     if option.value.trim().is_empty()
-                        || option.label.trim().is_empty()
+                        || option.label.english_text().trim().is_empty()
                         || !values.insert(option.value.as_str())
                     {
                         return Err(DescriptorError::InvalidProtocols(ch.id.clone()));
@@ -560,6 +646,15 @@ impl ProviderDescriptor {
             .collect();
         if declared != self.capabilities {
             return Err(DescriptorError::CapabilityUnionMismatch);
+        }
+        let mut group_ids = BTreeSet::new();
+        for group in &self.config_groups {
+            if !valid_id(&group.id) {
+                return Err(DescriptorError::InvalidConfigGroupId(group.id.clone()));
+            }
+            if !group_ids.insert(group.id.as_str()) {
+                return Err(DescriptorError::DuplicateConfigGroup(group.id.clone()));
+            }
         }
         let field_keys: BTreeSet<&str> =
             self.config_fields.iter().map(|f| f.key.as_str()).collect();
@@ -601,6 +696,11 @@ impl ProviderDescriptor {
         for field in &self.config_fields {
             if field.key.is_empty() {
                 return Err(DescriptorError::EmptyConfigFieldKey);
+            }
+            if let Some(group) = &field.group
+                && !group_ids.contains(group.as_str())
+            {
+                return Err(DescriptorError::UnknownConfigGroup(group.clone()));
             }
             if field.secret && field.default_json.is_some() {
                 return Err(DescriptorError::SecretDefault(field.key.clone()));
@@ -702,6 +802,14 @@ pub enum DescriptorError {
     CatalogDefaultWithoutConsumption(String),
     #[error("top-level capabilities must equal the union of channel capabilities")]
     CapabilityUnionMismatch,
+    #[error(
+        "config group id `{0}` must contain only lowercase ASCII letters, digits, '.', '-', or '_'"
+    )]
+    InvalidConfigGroupId(String),
+    #[error("duplicate config group id `{0}`")]
+    DuplicateConfigGroup(String),
+    #[error("config field references unknown group `{0}`")]
+    UnknownConfigGroup(String),
     #[error("duplicate config field key")]
     DuplicateConfigField,
     #[error("config field key must not be empty")]
@@ -743,7 +851,7 @@ mod tests {
             description: None,
             channels: vec![ChannelDescriptor {
                 id: "default".into(),
-                name: "Default".into(),
+                name: LocalizedText::english("Default"),
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
@@ -758,6 +866,7 @@ mod tests {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: Vec::new(),
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),
@@ -829,6 +938,132 @@ mod tests {
             Err(DescriptorError::CatalogDefaultWithoutConsumption(
                 "default".into()
             ))
+        );
+    }
+
+    #[test]
+    fn localized_text_accepts_only_nonblank_locale_maps_with_english() {
+        let bilingual: LocalizedText = serde_json::from_value(serde_json::json!({
+            "en-US": "Name", "zh-CN": "名称", "sr-Latn-RS": "Ime",
+            "zh-cmn-Hans-CN": "名字", "de-1901-a-foo-x-private": "Name"
+        }))
+        .expect("valid locale map");
+        assert_eq!(bilingual.english_text(), "Name");
+        assert_eq!(serde_json::to_value(bilingual).unwrap()["zh-CN"], "名称");
+        assert_eq!(
+            serde_json::to_value(LocalizedText::english("Name")).unwrap(),
+            serde_json::json!({ "en-US": "Name" })
+        );
+        assert_eq!(
+            serde_json::to_value(LocalizedText::from_static(&[
+                ("en-US", "Name"),
+                ("zh-CN", "名称")
+            ]))
+            .unwrap(),
+            serde_json::json!({ "en-US": "Name", "zh-CN": "名称" })
+        );
+
+        for invalid in [
+            serde_json::json!("Legacy"),
+            serde_json::json!({}),
+            serde_json::json!({ "zh-CN": "名称" }),
+            serde_json::json!({ "en-US": "  " }),
+            serde_json::json!({ "en-US": "Name", "zh-CN": "\n" }),
+            serde_json::json!({ "en-US": "Name", "zh_CN": "名称" }),
+            serde_json::json!({ "en-US": "Name", "zh--CN": "名称" }),
+            serde_json::json!({ "en-US": "Name", "e": "invalid" }),
+            serde_json::json!({ "en-US": "Name", "de-1901-1901": "duplicate" }),
+            serde_json::json!({ "en-US": "Name", "sl-rozaj-ROZAJ": "duplicate" }),
+            serde_json::json!({ "en-US": "Name", "de-a": "unfinished extension" }),
+            serde_json::json!({ "en-US": "Name", "de-x": "unfinished private use" }),
+        ] {
+            assert!(
+                serde_json::from_value::<LocalizedText>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_nested_texts_are_checked_during_deserialization() {
+        let valid = serde_json::to_value(manifest(
+            "base",
+            VendorKind::Fallback,
+            vec![provider("alpha")],
+        ))
+        .expect("descriptor JSON");
+        for invalid in [
+            serde_json::json!("Legacy"),
+            serde_json::json!({"zh-CN": "名称"}),
+            serde_json::json!({"en-US": "  "}),
+            serde_json::json!({"en-US": "Name", "en_US": "Invalid"}),
+        ] {
+            let mut manifest = valid.clone();
+            manifest["providers"][0]["channels"][0]["name"] = invalid;
+            assert!(serde_json::from_value::<VendorDescriptor>(manifest).is_err());
+        }
+    }
+
+    #[test]
+    fn config_groups_require_unique_ids_and_resolved_field_references() {
+        let mut valid = provider("alpha");
+        valid.config_groups.push(ConfigGroup {
+            id: "account".into(),
+            label: LocalizedText::english("Account"),
+        });
+        valid.config_fields.push(ConfigField {
+            key: "token".into(),
+            label: LocalizedText::english("Token"),
+            description: None,
+            kind: ConfigFieldKind::String { multiline: false },
+            required: false,
+            default_json: None,
+            group: Some("account".into()),
+            secret: true,
+            min: None,
+            max: None,
+            max_length: None,
+            pattern: None,
+            visible_when: None,
+        });
+        assert!(
+            manifest("base", VendorKind::Fallback, vec![valid.clone()])
+                .validate()
+                .is_ok()
+        );
+        let json = serde_json::to_value(&valid).expect("provider JSON");
+        assert_eq!(json["config_groups"][0]["label"]["en-US"], "Account");
+
+        valid.config_groups.push(ConfigGroup {
+            id: "account".into(),
+            label: LocalizedText::english("Another account"),
+        });
+        assert_eq!(
+            manifest("base", VendorKind::Fallback, vec![valid.clone()]).validate(),
+            Err(DescriptorError::DuplicateConfigGroup("account".into()))
+        );
+        valid.config_groups.pop();
+        valid.config_groups[0].id = "Bad Group".into();
+        assert_eq!(
+            manifest("base", VendorKind::Fallback, vec![valid.clone()]).validate(),
+            Err(DescriptorError::InvalidConfigGroupId("Bad Group".into()))
+        );
+        valid.config_groups[0].id = "account".into();
+        valid.config_fields[0].group = Some("missing".into());
+        assert_eq!(
+            manifest("base", VendorKind::Fallback, vec![valid]).validate(),
+            Err(DescriptorError::UnknownConfigGroup("missing".into()))
+        );
+
+        let mut ungrouped = json;
+        ungrouped.as_object_mut().unwrap().remove("config_groups");
+        ungrouped["config_fields"][0]["group"] = serde_json::Value::Null;
+        let ungrouped: ProviderDescriptor = serde_json::from_value(ungrouped).unwrap();
+        assert!(ungrouped.config_groups.is_empty());
+        assert!(
+            manifest("base", VendorKind::Fallback, vec![ungrouped])
+                .validate()
+                .is_ok()
         );
     }
 

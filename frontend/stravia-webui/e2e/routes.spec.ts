@@ -873,7 +873,7 @@ test('Provider-managed search saves a Provider-only Target with null model ident
             channels: [
               {
                 id: 'default',
-                name: 'Default',
+                name: { 'en-US': 'Default', 'zh-CN': '默认' },
                 description: null,
                 auth: null,
                 protocol: null,
@@ -885,6 +885,7 @@ test('Provider-managed search saves a Provider-only Target with null model ident
             ],
             capabilities: ['search'],
             config_fields: [],
+            config_groups: [],
             network: { base_url_field: null, extra_origins: [], field_origins: [] },
             data_compat: {
               config_fields_format: 1,
@@ -1006,7 +1007,7 @@ test('Provider-managed search waits for descriptors, recovers errors, and applie
                   channels: [
                     {
                       id: 'default',
-                      name: 'Default',
+                      name: { 'en-US': 'Default', 'zh-CN': '默认' },
                       description: null,
                       auth: null,
                       protocol: 'fixture-search',
@@ -1018,6 +1019,7 @@ test('Provider-managed search waits for descriptors, recovers errors, and applie
                   ],
                   capabilities: ['infer'],
                   config_fields: [],
+                  config_groups: [],
                   network: { base_url_field: null, extra_origins: [], field_origins: [] },
                   data_compat: {
                     config_fields_format: 1,

@@ -1,6 +1,9 @@
 mod allowance;
 mod codec;
 mod devin;
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 
 use stravia_runtime_contract::protocol::ir::AiRequest;
 #[cfg(target_arch = "wasm32")]

@@ -1,5 +1,8 @@
 mod allowance;
 mod codec;
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,8 +19,8 @@ use stravia_vendor_common::{common, thinking};
 use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigValidationResponse, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    ConfigGroup, ConfigValidationResponse, DataCompatibility, DiscoverResponse, DiscoveredModel,
+    ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
     OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
     ValidationIssue, VendorDescriptor, VendorKind, read_http_body,
 };
@@ -107,8 +110,8 @@ pub fn descriptor() -> VendorDescriptor {
             ),
             channels: vec![ChannelDescriptor {
                 id: CHANNEL_ID.into(),
-                name: "Default".into(),
-                description: Some("Command Code API key channel".into()),
+                name: crate::messages::channel_default(),
+                description: Some(crate::messages::channel_description()),
                 auth: None,
                 protocol: Some("command-code".into()),
                 protocols: Vec::new(),
@@ -122,15 +125,25 @@ pub fn descriptor() -> VendorDescriptor {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: vec![
+                ConfigGroup {
+                    id: "authentication".into(),
+                    label: crate::messages::authentication(),
+                },
+                ConfigGroup {
+                    id: "privacy".into(),
+                    label: crate::messages::privacy(),
+                },
+            ],
             config_fields: vec![
                 ConfigField {
                     key: "apiKey".into(),
-                    label: "API key".into(),
-                    description: Some("Command Code API key".into()),
+                    label: crate::messages::api_key(),
+                    description: Some(crate::messages::api_key_description()),
                     kind: ConfigFieldKind::String { multiline: false },
                     required: true,
                     default_json: None,
-                    group: Some("Authentication".into()),
+                    group: Some("authentication".into()),
                     secret: true,
                     min: None,
                     max: None,
@@ -140,14 +153,12 @@ pub fn descriptor() -> VendorDescriptor {
                 },
                 ConfigField {
                     key: "zdr".into(),
-                    label: "Zero Data Retention".into(),
-                    description: Some(
-                        "Send x-cmd-zdr: 1 on initialization and inference requests".into(),
-                    ),
+                    label: crate::messages::zdr(),
+                    description: Some(crate::messages::zdr_description()),
                     kind: ConfigFieldKind::Bool,
                     required: false,
                     default_json: Some(Value::Bool(true)),
-                    group: Some("Privacy".into()),
+                    group: Some("privacy".into()),
                     secret: false,
                     min: None,
                     max: None,
@@ -258,7 +269,7 @@ fn validate_config(options: &BTreeMap<String, Value>) -> ConfigValidationRespons
         issues.push(ValidationIssue {
             field: Some("zdr".into()),
             code: "invalid_type".into(),
-            message: "Zero Data Retention must be a boolean".into(),
+            message: crate::messages::invalid_zdr_type(),
         });
     }
     if let Some(value) = options.get("apiKey")
@@ -267,7 +278,7 @@ fn validate_config(options: &BTreeMap<String, Value>) -> ConfigValidationRespons
         issues.push(ValidationIssue {
             field: Some("apiKey".into()),
             code: "invalid_value".into(),
-            message: "Command Code API key must be a non-empty string".into(),
+            message: crate::messages::invalid_api_key(),
         });
     }
     ConfigValidationResponse {

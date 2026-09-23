@@ -2,6 +2,9 @@ mod allowance;
 mod auth;
 mod codex;
 mod media_generation;
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +17,7 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
+    ConfigGroup, ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
     DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
     OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
     ProviderSnapshot, TransportPreference, ValidationIssue, VendorDescriptor, VendorKind,
@@ -63,11 +66,8 @@ pub fn descriptor() -> VendorDescriptor {
             ),
             channels: vec![ChannelDescriptor {
                 id: CHANNEL.into(),
-                name: "Codex".into(),
-                description: Some(
-                    "ChatGPT OAuth channel using Open Responses, hosted search, and image generation."
-                        .into(),
-                ),
+                name: crate::messages::channel_codex(),
+                description: Some(crate::messages::channel_description()),
                 auth: Some(AuthDescriptor {
                     flow: AuthFlow::AuthorizationCode,
                     callback: Some(AuthCallback {
@@ -78,17 +78,13 @@ pub fn descriptor() -> VendorDescriptor {
                             primary: 1455,
                             fallback: Some(1456),
                         },
-                        manual_redirect_uri: Some(
-                            "http://localhost:1457/auth/callback".into(),
-                        ),
+                        manual_redirect_uri: Some("http://localhost:1457/auth/callback".into()),
                         cancel_path: Some("/cancel".into()),
                     }),
                     manual_input: Some(AuthManualInput {
                         input_type: AuthManualInputType::CallbackUrl,
-                        label: "Callback URL".into(),
-                        description: Some(
-                            "Paste the full callback URL after completing authorization.".into(),
-                        ),
+                        label: crate::messages::callback_url(),
+                        description: Some(crate::messages::callback_description()),
                         secret: false,
                     }),
                 }),
@@ -104,17 +100,18 @@ pub fn descriptor() -> VendorDescriptor {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: vec![ConfigGroup {
+                id: "advanced".into(),
+                label: crate::messages::advanced(),
+            }],
             config_fields: vec![ConfigField {
                 key: "websocket_url".into(),
-                label: "Responses WebSocket URL".into(),
-                description: Some(
-                    "Optional full ws:// or wss:// Responses endpoint for a custom base URL."
-                        .into(),
-                ),
+                label: crate::messages::websocket_url(),
+                description: Some(crate::messages::websocket_description()),
                 kind: ConfigFieldKind::String { multiline: false },
                 required: false,
                 default_json: None,
-                group: Some("Advanced".into()),
+                group: Some("advanced".into()),
                 secret: false,
                 min: None,
                 max: None,
@@ -546,7 +543,7 @@ fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {
         issues.push(ValidationIssue {
             field: Some("websocket_url".into()),
             code: "invalid_websocket_url".into(),
-            message: "Responses WebSocket URL must be an absolute ws:// or wss:// URL.".into(),
+            message: crate::messages::invalid_websocket_url(),
         });
     }
     issues

@@ -5,6 +5,9 @@ mod cloud;
 mod codec;
 mod generic;
 mod metadata;
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 mod openai;
 
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;

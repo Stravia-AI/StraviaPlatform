@@ -4,8 +4,8 @@ import type { ProviderDescriptor } from '../src/lib/types'
 
 const codexManualInput = {
   type: 'callback_url',
-  label: 'Callback URL',
-  description: 'Paste the full callback URL after authorization.',
+  label: { 'en-US': 'Callback URL', 'zh-CN': '回调 URL' },
+  description: { 'en-US': 'Paste the full callback URL after authorization.', 'zh-CN': '授权后粘贴完整的回调 URL。' },
   secret: false,
 } as const
 
@@ -18,8 +18,8 @@ const providerDescriptors = [
     channels: [
       {
         id: 'default',
-        name: 'OpenAI API',
-        description: 'API key',
+        name: { 'en-US': 'OpenAI API', 'zh-CN': 'OpenAI API' },
+        description: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
         auth: null,
         protocol: 'openai-compatible',
         default_base_url: 'https://api.openai.com/v1',
@@ -32,13 +32,14 @@ const providerDescriptors = [
     config_fields: [
       {
         key: 'api_key',
-        label: 'API key',
-        description: 'OpenAI API key.',
+        label: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
+        description: { 'en-US': 'OpenAI API key.', 'zh-CN': 'OpenAI API 密钥。' },
         kind: { type: 'string', multiline: false },
         required: false,
         secret: true,
       },
     ],
+    config_groups: [],
     network: { base_url_field: null, extra_origins: [], field_origins: [] },
     data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
   },
@@ -50,8 +51,8 @@ const providerDescriptors = [
     channels: [
       {
         id: 'codex',
-        name: 'Codex',
-        description: 'OAuth account',
+        name: { 'en-US': 'Codex', 'zh-CN': 'Codex' },
+        description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
         auth: {
           flow: 'authorization_code',
           callback: {
@@ -91,6 +92,7 @@ const providerDescriptors = [
       'config_validation',
     ],
     config_fields: [],
+    config_groups: [],
     network: {
       base_url_field: null,
       extra_origins: [
@@ -109,8 +111,8 @@ const providerDescriptors = [
     channels: [
       {
         id: 'default',
-        name: 'Anthropic API',
-        description: 'API key',
+        name: { 'en-US': 'Anthropic API', 'zh-CN': 'Anthropic API' },
+        description: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
         auth: null,
         protocol: 'anthropic-messages',
         default_base_url: 'https://api.anthropic.com',
@@ -120,8 +122,8 @@ const providerDescriptors = [
       },
       {
         id: 'claude-code',
-        name: 'Claude Code',
-        description: 'OAuth account',
+        name: { 'en-US': 'Claude Code', 'zh-CN': 'Claude Code' },
+        description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
         auth: {
           flow: 'authorization_code',
           callback: {
@@ -143,13 +145,17 @@ const providerDescriptors = [
     config_fields: [
       {
         key: 'api_key',
-        label: 'API key',
-        description: 'Anthropic API key for the default channel.',
+        label: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
+        description: {
+          'en-US': 'Anthropic API key for the default channel.',
+          'zh-CN': '默认渠道的 Anthropic API 密钥。',
+        },
         kind: { type: 'string', multiline: false },
         required: false,
         secret: true,
       },
     ],
+    config_groups: [],
     network: { base_url_field: null, extra_origins: [], field_origins: [] },
     data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
   },
@@ -161,8 +167,8 @@ const providerDescriptors = [
     channels: [
       {
         id: 'default',
-        name: 'Default',
-        description: 'Bring your own endpoint',
+        name: { 'en-US': 'Default', 'zh-CN': '默认' },
+        description: { 'en-US': 'Bring your own endpoint', 'zh-CN': '自定义端点' },
         auth: null,
         protocol: 'openai-compatible',
         default_base_url: null,
@@ -175,13 +181,14 @@ const providerDescriptors = [
     config_fields: [
       {
         key: 'apiKey',
-        label: 'API key',
-        description: 'Credential sent to the configured endpoint.',
+        label: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
+        description: { 'en-US': 'Credential sent to the configured endpoint.', 'zh-CN': '发送给配置端点的凭据。' },
         kind: { type: 'string', multiline: false },
         required: true,
         secret: true,
       },
     ],
+    config_groups: [],
     network: { base_url_field: null, extra_origins: [], field_origins: [] },
     data_compat: { config_fields_format: 1, private_state_format: 1, credentials_format: 1, model_metadata_format: 1 },
   },

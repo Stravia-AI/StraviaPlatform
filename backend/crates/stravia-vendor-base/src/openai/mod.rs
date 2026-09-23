@@ -10,11 +10,11 @@ use stravia_runtime_contract::protocol::ids::{
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
-    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigValidationResponse,
-    DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
-    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, TransportPreference,
-    ValidationIssue,
+    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
+    ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ProviderSnapshot, TransportPreference, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "openai";
@@ -40,8 +40,8 @@ fn openai_descriptor() -> ProviderDescriptor {
         description: Some("OpenAI API-key integration for ordinary API endpoints.".into()),
         channels: vec![ChannelDescriptor {
             id: DEFAULT_CHANNEL.into(),
-            name: "OpenAI API".into(),
-            description: Some("OpenAI API-key channel.".into()),
+            name: crate::messages::openai_api_channel(),
+            description: Some(crate::messages::openai_api_channel_description()),
             auth: None,
             protocol: Some("openai-compatible".into()),
             protocols: Vec::new(),
@@ -55,15 +55,25 @@ fn openai_descriptor() -> ProviderDescriptor {
         capabilities,
         website: None,
         implementation: None,
+        config_groups: vec![
+            ConfigGroup {
+                id: "authentication".into(),
+                label: crate::messages::authentication_group(),
+            },
+            ConfigGroup {
+                id: "advanced".into(),
+                label: crate::messages::advanced_group(),
+            },
+        ],
         config_fields: vec![
             ConfigField {
                 key: "apiKey".into(),
-                label: "API key".into(),
-                description: Some("OpenAI API key.".into()),
+                label: crate::messages::api_key(),
+                description: Some(crate::messages::openai_api_key_description()),
                 kind: ConfigFieldKind::String { multiline: false },
                 required: false,
                 default_json: None,
-                group: Some("Authentication".into()),
+                group: Some("authentication".into()),
                 secret: true,
                 min: None,
                 max: None,
@@ -73,15 +83,12 @@ fn openai_descriptor() -> ProviderDescriptor {
             },
             ConfigField {
                 key: "websocket_url".into(),
-                label: "Responses WebSocket URL".into(),
-                description: Some(
-                    "Optional full ws:// or wss:// Responses endpoint for a custom base URL."
-                        .into(),
-                ),
+                label: crate::messages::responses_websocket_url(),
+                description: Some(crate::messages::responses_websocket_url_description()),
                 kind: ConfigFieldKind::String { multiline: false },
                 required: false,
                 default_json: None,
-                group: Some("Advanced".into()),
+                group: Some("advanced".into()),
                 secret: false,
                 min: None,
                 max: None,
@@ -539,7 +546,7 @@ fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {
         issues.push(ValidationIssue {
             field: Some("apiKey".into()),
             code: "secret_in_options".into(),
-            message: "API keys must be stored as credentials, not options.".into(),
+            message: crate::messages::secret_in_options(),
         });
     }
     if let Some(value) = options.get("websocket_url")
@@ -551,7 +558,7 @@ fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {
         issues.push(ValidationIssue {
             field: Some("websocket_url".into()),
             code: "invalid_websocket_url".into(),
-            message: "Responses WebSocket URL must be an absolute ws:// or wss:// URL.".into(),
+            message: crate::messages::invalid_websocket_url(),
         });
     }
     issues

@@ -1,12 +1,17 @@
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
+
 use std::collections::BTreeSet;
 
 use serde_json::Value;
 use stravia_vendor_sdk::{
     AiErrorKind, AiRequest, AiResponse, AiStreamDelta, CANONICAL_FORMAT_VERSION, Capability,
-    ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigValidationResponse, DataCompatibility,
-    EnumOption, ErrorKind, GuestHost, HttpRequest, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
-    VendorDescriptor, VendorGuest, VendorKind, read_http_body,
+    ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, ConfigValidationResponse,
+    DataCompatibility, EnumOption, ErrorKind, GuestHost, HttpRequest, LocalizedText,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
+    ProviderDescriptor, ProviderSnapshot, ValidationIssue, VendorDescriptor, VendorGuest,
+    VendorKind, read_http_body,
 };
 
 struct LifecycleContractVendor;
@@ -44,7 +49,7 @@ impl VendorGuest for LifecycleContractVendor {
                 description: None,
                 channels: vec![ChannelDescriptor {
                     id: "default".into(),
-                    name: "Default".into(),
+                    name: crate::messages::channel_default(),
                     description: None,
                     auth: None,
                     protocol: Some(
@@ -63,11 +68,21 @@ impl VendorGuest for LifecycleContractVendor {
                 capabilities,
                 website: None,
                 implementation: None,
+                config_groups: vec![
+                    ConfigGroup {
+                        id: "execution".into(),
+                        label: crate::messages::execution(),
+                    },
+                    ConfigGroup {
+                        id: "typed-settings".into(),
+                        label: crate::messages::typed_settings(),
+                    },
+                ],
                 config_fields: vec![
                     ConfigField {
                         key: "mode".into(),
-                        label: "Fixture mode".into(),
-                        description: None,
+                        label: crate::messages::fixture_mode(),
+                        description: Some(crate::messages::fixture_mode_description()),
                         kind: ConfigFieldKind::Enum {
                             options: [
                                 "base",
@@ -92,13 +107,33 @@ impl VendorGuest for LifecycleContractVendor {
                             .into_iter()
                             .map(|value| EnumOption {
                                 value: value.into(),
-                                label: value.into(),
+                                label: match value {
+                                    "base" => crate::messages::mode_base(),
+                                    "aux" => crate::messages::mode_aux(),
+                                    "parallel" => crate::messages::mode_parallel(),
+                                    "target" => crate::messages::mode_target(),
+                                    "redirect" => crate::messages::mode_redirect(),
+                                    "trap" => crate::messages::mode_trap(),
+                                    "fuel" => crate::messages::mode_fuel(),
+                                    "memory" => crate::messages::mode_memory(),
+                                    "oversized-event" => crate::messages::mode_oversized_event(),
+                                    "oversized-output" => crate::messages::mode_oversized_output(),
+                                    "websocket" => crate::messages::mode_websocket(),
+                                    "selection-http" => crate::messages::mode_selection_http(),
+                                    "selection-state" => crate::messages::mode_selection_state(),
+                                    "selection-event" => crate::messages::mode_selection_event(),
+                                    "selection-error" => crate::messages::mode_selection_error(),
+                                    "diagnostics" => crate::messages::mode_diagnostics(),
+                                    "continuation" => crate::messages::mode_continuation(),
+                                    "typed-quota" => crate::messages::mode_typed_quota(),
+                                    _ => unreachable!("unknown fixture mode"),
+                                },
                             })
                             .collect(),
                         },
                         required: false,
                         default_json: Some(Value::String("base".into())),
-                        group: None,
+                        group: Some("execution".into()),
                         secret: false,
                         min: None,
                         max: None,
@@ -114,7 +149,7 @@ impl VendorGuest for LifecycleContractVendor {
                     ),
                     scalar_field(
                         "enabled",
-                        "Enable diagnostics",
+                        crate::messages::enable_diagnostics(),
                         ConfigFieldKind::Bool,
                         Value::Bool(false),
                         None,
@@ -122,7 +157,7 @@ impl VendorGuest for LifecycleContractVendor {
                     ),
                     scalar_field(
                         "minimumSteps",
-                        "Minimum steps",
+                        crate::messages::minimum_steps(),
                         ConfigFieldKind::Int,
                         Value::from(1),
                         Some(1.0),
@@ -130,7 +165,7 @@ impl VendorGuest for LifecycleContractVendor {
                     ),
                     scalar_field(
                         "maximumSteps",
-                        "Maximum steps",
+                        crate::messages::maximum_steps(),
                         ConfigFieldKind::Int,
                         Value::from(8),
                         Some(1.0),
@@ -138,7 +173,7 @@ impl VendorGuest for LifecycleContractVendor {
                     ),
                     scalar_field(
                         "temperature",
-                        "Temperature",
+                        crate::messages::temperature(),
                         ConfigFieldKind::Decimal,
                         Value::from(0.5),
                         Some(0.0),
@@ -218,7 +253,7 @@ impl VendorGuest for LifecycleContractVendor {
                         vec![ValidationIssue {
                             field: None,
                             code: "invalid_step_range".into(),
-                            message: "Minimum steps must not exceed maximum steps.".into(),
+                            message: crate::messages::invalid_step_range(),
                         }]
                     } else {
                         Vec::new()
@@ -457,7 +492,12 @@ fn exceed_output_budget() -> Result<(), PluginError> {
 fn string_field(key: &str, secret: bool) -> ConfigField {
     ConfigField {
         key: key.into(),
-        label: key.into(),
+        label: match key {
+            "auxUrl" => crate::messages::auxiliary_url(),
+            "targetUrl" => crate::messages::target_url(),
+            "apiKey" => crate::messages::api_key(),
+            _ => LocalizedText::english(key),
+        },
         description: None,
         kind: ConfigFieldKind::String { multiline: false },
         required: secret,
@@ -474,17 +514,17 @@ fn string_field(key: &str, secret: bool) -> ConfigField {
 
 fn scalar_field(
     key: &str,
-    label: &str,
+    label: LocalizedText,
     kind: ConfigFieldKind,
     default: Value,
     min: Option<f64>,
     max: Option<f64>,
 ) -> ConfigField {
     ConfigField {
-        label: label.into(),
+        label,
         kind,
         default_json: Some(default),
-        group: Some("Typed settings".into()),
+        group: Some("typed-settings".into()),
         min,
         max,
         max_length: None,

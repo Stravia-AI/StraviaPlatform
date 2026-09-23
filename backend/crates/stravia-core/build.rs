@@ -6,6 +6,9 @@ use anyhow::{Context, ensure};
 use serde::Deserialize;
 use stravia_runtime_contract::protocol::ir::canonical::{hash_bytes, hash_hex};
 
+#[path = "../stravia-vendor-sdk/build-support/messages.rs"]
+mod messages;
+
 #[derive(Deserialize)]
 struct ComponentRecord {
     vendor_id: String,
@@ -15,6 +18,7 @@ struct ComponentRecord {
 }
 
 fn main() -> anyhow::Result<()> {
+    messages::generate().expect("compile host language catalogs");
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").context("missing CARGO_MANIFEST_DIR")?,
     );

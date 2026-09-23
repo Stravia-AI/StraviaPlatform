@@ -189,7 +189,13 @@ test('provider editor selects a service before validating its configuration', as
           base_url: input.base_url,
           issues:
             previewAttempts === 1
-              ? [{ field: 'apiKey', code: 'credential_rejected', message: 'Use a valid fixture credential.' }]
+              ? [
+                  {
+                    field: 'apiKey',
+                    code: 'credential_rejected',
+                    message: { 'en-US': 'Use a valid fixture credential.', 'zh-CN': '请使用有效的测试凭据。' },
+                  },
+                ]
               : [],
           network_permissions: [],
         },
@@ -353,7 +359,7 @@ test('Provider configuration follows plugin field visibility conditions', async 
             channels: [
               {
                 id: provider.channel,
-                name: 'Default',
+                name: { 'en-US': 'Default', 'zh-CN': '默认' },
                 description: null,
                 auth: null,
                 protocol: null,
@@ -367,12 +373,12 @@ test('Provider configuration follows plugin field visibility conditions', async 
             config_fields: [
               {
                 key: 'mode',
-                label: 'Connection mode',
+                label: { 'en-US': 'Connection mode', 'zh-CN': '连接模式' },
                 kind: {
                   type: 'enum',
                   options: [
-                    { value: 'basic', label: 'Basic' },
-                    { value: 'advanced', label: 'Advanced' },
+                    { value: 'basic', label: { 'en-US': 'Basic', 'zh-CN': '基础' } },
+                    { value: 'advanced', label: { 'en-US': 'Advanced', 'zh-CN': '高级' } },
                   ],
                 },
                 required: true,
@@ -381,13 +387,15 @@ test('Provider configuration follows plugin field visibility conditions', async 
               },
               {
                 key: 'endpoint_label',
-                label: 'Endpoint label',
+                label: { 'en-US': 'Endpoint label', 'zh-CN': '端点标签' },
                 kind: { type: 'string', multiline: false },
                 required: true,
                 secret: false,
+                group: 'advanced',
                 visible_when: { field: 'mode', equals: 'advanced' },
               },
             ],
+            config_groups: [{ id: 'advanced', label: { 'en-US': 'Advanced settings', 'zh-CN': '高级设置' } }],
             network: { base_url_field: null, extra_origins: [], field_origins: [] },
             data_compat: {
               config_fields_format: 1,
@@ -408,6 +416,7 @@ test('Provider configuration follows plugin field visibility conditions', async 
   await expect(page.getByLabel('Endpoint label', { exact: true })).toHaveCount(0)
   await page.getByLabel('Connection mode', { exact: true }).click()
   await page.getByRole('option', { name: 'Advanced', exact: true }).click()
+  await expect(page.getByRole('group', { name: 'Advanced settings' })).toBeVisible()
   await expect(page.getByLabel('Endpoint label', { exact: true })).toBeVisible()
   await page.getByLabel('Connection mode', { exact: true }).click()
   await page.getByRole('option', { name: 'Basic', exact: true }).click()
@@ -1266,8 +1275,11 @@ test('OAuth Provider configuration allows manual completion while the localhost 
 test('completed OAuth satisfies session credential fields and submits the provider form', async ({ page }) => {
   const manualInput = {
     type: 'text',
-    label: 'Devin token',
-    description: 'Paste the local fixture token returned by authorization.',
+    label: { 'en-US': 'Devin token', 'zh-CN': 'Devin 令牌' },
+    description: {
+      'en-US': 'Paste the local fixture token returned by authorization.',
+      'zh-CN': '粘贴授权返回的本地测试令牌。',
+    },
     secret: true,
   } as const
   const descriptor = {
@@ -1278,8 +1290,8 @@ test('completed OAuth satisfies session credential fields and submits the provid
     channels: [
       {
         id: 'devin',
-        name: 'Devin',
-        description: 'OAuth account',
+        name: { 'en-US': 'Devin', 'zh-CN': 'Devin' },
+        description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
         auth: {
           flow: 'authorization_code',
           callback: {
@@ -1302,14 +1314,18 @@ test('completed OAuth satisfies session credential fields and submits the provid
     config_fields: [
       {
         key: 'apiKey',
-        label: 'Session token',
-        description: 'OAuth-created session token or a manually pasted token.',
+        label: { 'en-US': 'Session token', 'zh-CN': '会话令牌' },
+        description: {
+          'en-US': 'OAuth-created session token or a manually pasted token.',
+          'zh-CN': 'OAuth 创建的会话令牌或手动粘贴的令牌。',
+        },
         kind: { type: 'string', multiline: false },
         required: true,
         secret: true,
         max_length: 16_384,
       },
     ],
+    config_groups: [],
     network: {
       base_url_field: null,
       extra_origins: [{ scheme: 'https', host: 'server.codeium.test' }],

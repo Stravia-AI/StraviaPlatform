@@ -597,7 +597,7 @@ pub struct ConfigValidationRequest {
 pub struct ValidationIssue {
     pub field: Option<String>,
     pub code: String,
-    pub message: String,
+    pub message: crate::LocalizedText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1095,7 +1095,7 @@ mod profile_admission_tests {
             description: None,
             channels: vec![ChannelDescriptor {
                 id: "default".into(),
-                name: "Default".into(),
+                name: crate::LocalizedText::english("Default"),
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
@@ -1110,6 +1110,7 @@ mod profile_admission_tests {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: Vec::new(),
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),
@@ -1136,6 +1137,28 @@ mod profile_admission_tests {
         let error = admit_provider::<MultiProfileGuest>(Operation::Search, &snapshot("alpha"))
             .expect_err("alpha must not inherit beta search support");
         assert!(matches!(error.kind, ErrorKind::Unsupported));
+    }
+
+    #[test]
+    fn validation_issues_require_localized_message_objects() {
+        let valid = serde_json::json!({
+            "issues": [{"field": "token", "code": "required", "message": {
+                "en-US": "Required", "zh-CN": "必填"
+            }}],
+            "proposed_base_url": null
+        });
+        let parsed: ConfigValidationResponse = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(parsed.issues[0].message.english_text(), "Required");
+        for message in [
+            serde_json::json!("Required"),
+            serde_json::json!({"zh-CN": "必填"}),
+            serde_json::json!({"en-US": " "}),
+            serde_json::json!({"en-US": "Required", "bad_tag": "Invalid"}),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["issues"][0]["message"] = message;
+            assert!(serde_json::from_value::<ConfigValidationResponse>(invalid).is_err());
+        }
     }
 
     #[test]

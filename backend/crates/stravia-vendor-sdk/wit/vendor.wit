@@ -1,10 +1,10 @@
-// Stravia vendor plugin contract, version 0.3.
+// Stravia vendor plugin contract, version 0.4.
 //
 // One package = one vendor. The guest orchestrates vendor flows and drives
 // controlled HTTP / WebSocket through host imports; it never gets raw sockets,
 // filesystem, env, or background tasks. Host enforces origin allowlists,
 // backpressure, cancellation, and resource limits.
-package stravia:vendor@0.3.0;
+package stravia:vendor@0.4.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
