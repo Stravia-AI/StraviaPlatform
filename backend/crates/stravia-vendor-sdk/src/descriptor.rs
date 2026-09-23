@@ -128,6 +128,10 @@ pub struct AuthDescriptor {
 /// thinking control for a model, even when its base codec cannot.
 pub const MODEL_CAPABILITY_THINKING_TOGGLE: &str = "thinking_toggle";
 
+/// `models_source` marker selecting the host-owned catalog inventory. Guests
+/// must treat it as an opaque source selector, never as a request URL.
+pub const MODELS_SOURCE_CATALOG: &str = "catalog";
+
 /// Host-owned model inventory source a channel may select by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,7 +142,7 @@ pub enum DefaultModelsSource {
 impl DefaultModelsSource {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Catalog => "catalog",
+            Self::Catalog => MODELS_SOURCE_CATALOG,
         }
     }
 }
@@ -172,6 +176,12 @@ pub struct ChannelDescriptor {
     /// explicitly select one. Currently only the host-owned catalog is valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_models_source: Option<DefaultModelsSource>,
+    /// `true` when catalog-sourced discovery on this channel consumes the
+    /// host-injected `catalog_models` scope. The host resolves the catalog
+    /// scope only for channels declaring this; channels that resolve
+    /// `catalog` into a live account request must leave it `false`.
+    #[serde(default)]
+    pub consumes_catalog_models: bool,
     /// Capabilities actually usable through this channel. Non-empty.
     pub capabilities: BTreeSet<Capability>,
     /// Positive model capability defaults, supplemented by discovered model
@@ -465,6 +475,13 @@ impl ProviderDescriptor {
             if ch.capabilities.is_empty() {
                 return Err(DescriptorError::ChannelWithoutCapabilities(ch.id.clone()));
             }
+            if ch.default_models_source == Some(DefaultModelsSource::Catalog)
+                && !ch.consumes_catalog_models
+            {
+                return Err(DescriptorError::CatalogDefaultWithoutConsumption(
+                    ch.id.clone(),
+                ));
+            }
             if let Some(auth) = &ch.auth {
                 let callback_expected = matches!(auth.flow, AuthFlow::AuthorizationCode);
                 if callback_expected != auth.callback.is_some()
@@ -679,6 +696,10 @@ pub enum DescriptorError {
     ChannelWithoutCapabilities(String),
     #[error("channel `{0}` declares an invalid authentication callback policy")]
     InvalidAuthPolicy(String),
+    #[error(
+        "channel `{0}` defaults to the catalog model source without consuming injected catalog models"
+    )]
+    CatalogDefaultWithoutConsumption(String),
     #[error("top-level capabilities must equal the union of channel capabilities")]
     CapabilityUnionMismatch,
     #[error("duplicate config field key")]
@@ -729,6 +750,7 @@ mod tests {
                 protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
@@ -788,6 +810,7 @@ mod tests {
     fn channel_default_models_source_accepts_only_catalog() {
         let mut valid = provider("alpha");
         valid.channels[0].default_models_source = Some(DefaultModelsSource::Catalog);
+        valid.channels[0].consumes_catalog_models = true;
         let descriptor = manifest("base", VendorKind::Fallback, vec![valid]);
         assert!(descriptor.validate().is_ok());
 
@@ -795,6 +818,18 @@ mod tests {
         invalid["providers"][0]["channels"][0]["default_models_source"] =
             serde_json::json!("https://inventory.test/models");
         assert!(serde_json::from_value::<VendorDescriptor>(invalid).is_err());
+    }
+
+    #[test]
+    fn catalog_default_requires_consuming_injected_models() {
+        let mut invalid = provider("alpha");
+        invalid.channels[0].default_models_source = Some(DefaultModelsSource::Catalog);
+        assert_eq!(
+            manifest("base", VendorKind::Fallback, vec![invalid]).validate(),
+            Err(DescriptorError::CatalogDefaultWithoutConsumption(
+                "default".into()
+            ))
+        );
     }
 
     #[test]

@@ -15,9 +15,9 @@ use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
-    TransportPreference, ValidationIssue, VendorDescriptor, VendorKind,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ProviderSnapshot, TransportPreference, ValidationIssue, VendorDescriptor, VendorKind,
 };
 
 const VENDOR_ID: &str = "openai-codex";
@@ -96,6 +96,7 @@ pub fn descriptor() -> VendorDescriptor {
                 protocols: Vec::new(),
                 default_base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: true,
@@ -389,7 +390,7 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_owned)
         .unwrap_or_else(|| endpoint(&provider.base_url, "/models"));
     url.push(if url.contains('?') { '&' } else { '?' });

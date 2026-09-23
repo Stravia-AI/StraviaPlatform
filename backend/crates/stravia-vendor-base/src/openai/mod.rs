@@ -12,8 +12,9 @@ use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigValidationResponse,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError,
-    ProviderDescriptor, ProviderSnapshot, TransportPreference, ValidationIssue,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, TransportPreference,
+    ValidationIssue,
 };
 
 const VENDOR_ID: &str = "openai";
@@ -46,6 +47,7 @@ fn openai_descriptor() -> ProviderDescriptor {
             protocols: Vec::new(),
             default_base_url: Some("https://api.openai.com/v1".into()),
             default_models_source: None,
+            consumes_catalog_models: false,
             capabilities: capabilities.clone(),
             model_capabilities: BTreeSet::new(),
             search_model_required: false,
@@ -444,7 +446,7 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_owned)
         .map_or_else(|| common::model_discovery_url(&provider.base_url), Ok)?;
     let mut headers = vec![("accept".into(), "application/json".into())];

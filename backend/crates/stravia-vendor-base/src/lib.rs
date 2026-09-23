@@ -410,23 +410,39 @@ mod tests {
             assert_eq!(profile.catalog_id.as_deref(), Some(provider_id));
         }
         for provider_id in ["amazon-bedrock", "watsonx"] {
+            let channel = &descriptor
+                .provider(provider_id)
+                .expect("cloud profile")
+                .channels[0];
             assert_eq!(
-                descriptor
-                    .provider(provider_id)
-                    .expect("cloud profile")
-                    .channels[0]
-                    .default_models_source,
+                channel.default_models_source,
                 Some(DefaultModelsSource::Catalog)
             );
+            assert!(channel.consumes_catalog_models);
         }
         for provider_id in ["openai", "google", "minimax", "azure-cognitive-services"] {
-            assert_eq!(
+            let channel = &descriptor
+                .provider(provider_id)
+                .expect("live profile")
+                .channels[0];
+            assert_eq!(channel.default_models_source, None);
+        }
+        for provider_id in ["minimax", "azure-cognitive-services"] {
+            assert!(
                 descriptor
                     .provider(provider_id)
-                    .expect("live profile")
+                    .expect("catalog-consuming profile")
                     .channels[0]
-                    .default_models_source,
-                None
+                    .consumes_catalog_models
+            );
+        }
+        for provider_id in ["openai", "google", "ollama", "google-vertex"] {
+            assert!(
+                !descriptor
+                    .provider(provider_id)
+                    .expect("account-discovery profile")
+                    .channels[0]
+                    .consumes_catalog_models
             );
         }
         for dedicated in ["openai-codex", "xai-grok", "command-code", "devin"] {

@@ -95,9 +95,9 @@
 - `VendorDescriptor` 包含 `vendor_id`、版本、展示元数据、canonical 格式版本、`kind` 与 `providers`；`kind` 为 `fallback` 或 `dedicated`。每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、channel、能力、配置、网络权限和数据兼容信息。
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
-- channel 可通过 `default_models_source: "catalog"` 声明未指定来源时默认使用模型目录；未声明时保留插件自身的发现行为，宿主不以默认值覆盖已保存的来源。该声明只接受目录枚举值，不接受任意 URL，不表示其他 channel 不能选择目录。目录创建入口只有在当前快照包含对应目录时才保存 `catalog` 来源；纯插件声明的入口使用其默认发现方式。宿主不按供应商 ID 猜测默认发现策略。
-- `base` 保留既有清单优先级：显式静态模型优先；原生 OpenAI、Anthropic、Google、Ollama、OpenRouter、xAI 的账户发现，以及 Claude Code、Vertex 的渠道精选清单，不被历史 `catalog` 来源标记覆盖。目录别名仍使用自己的目录范围，不能继承另一供应商的账户清单策略。该判定属于 guest，不移回 Core。
-- 发现操作与同步富化按 `catalog_id` 提供原始目录 scope，不再次套用目录的旧 channel 定义。只有 `ProviderNotFound` 表示可选目录条目不存在，不提供目录模型快照，由插件决定其发现行为；消费目录来源的插件必须对缺失快照报错，不能返回伪造的空成功。目录访问或解析失败仍向上传播，不触发隐藏回退。
+- channel 可通过 `default_models_source: "catalog"` 声明未指定来源时默认使用模型目录；未声明时保留插件自身的发现行为，宿主不以默认值覆盖已保存的来源。该声明只接受目录枚举值，不接受任意 URL，不表示其他 channel 不能选择目录。channel 另以 `consumes_catalog_models` 声明是否消费宿主注入的目录模型 scope；只有声明消费的 channel 才允许把目录作为默认来源，目录创建入口也只为这类 channel 保存 `catalog` 来源标记。宿主不按供应商 ID 猜测默认发现策略。
+- `base` 保留既有清单优先级：显式静态模型优先；原生 OpenAI、Anthropic、Google、Ollama、OpenRouter、xAI 的账户发现，以及 Claude Code、Vertex 的渠道精选清单，不被历史 `catalog` 来源标记覆盖。目录别名仍使用自己的目录范围，不能继承另一供应商的账户清单策略。该判定属于 guest，不移回 Core；`base` 的描述符按同一 provider 判定集合输出 `consumes_catalog_models`，专属插件一律声明不消费。
+- 发现操作与同步富化按 `catalog_id` 提供原始目录 scope，不再次套用目录的旧 channel 定义，且只在 channel 声明消费时才解析该 scope。只有 `ProviderNotFound` 表示可选目录条目不存在，不提供目录模型快照，由插件决定其发现行为；消费目录来源的插件必须对缺失快照报错，不能返回伪造的空成功。目录访问或解析失败仍向上传播，不触发隐藏回退。
 - 已保存的非 `catalog` 发现地址保留完整路径与查询参数，并使用所属供应商的发现认证策略；不能重新拼成推理基址的 `/models`，也不能把所有显式地址一律改为 Bearer。Google 官方原生目录使用 API-key 查询参数，自定义目录保留既有 Bearer 约定；标准 Anthropic 目录保留 `x-api-key` 与版本头。
 - `descriptor`、`select-protocol`、`execute` 的导出结构保持不变。首先提供 Rust 插件 SDK，以复用现有供应商实现；WIT 契约不限定插件必须使用 Rust，其他语言的实际工具链兼容性需要验证。
 - 发布产物为单个自包含 Wasm Component，携带锁定的 codec 依赖；不直接跨契约暴露 Gateway、数据库对象或 Rust trait 内存布局。

@@ -16,6 +16,20 @@ pub(crate) const CUSTOM_PROTOCOLS: &[(&str, &str)] = &[
     ("google-gemini", "Gemini"),
 ];
 
+/// Provider ids whose model discovery always resolves through a live account
+/// or channel-curated request; they never consume the host-injected
+/// `catalog_models` scope. `generic::explicit_discovery` applies the same
+/// carve-out when a legacy connection still carries the catalog marker.
+pub(crate) const ACCOUNT_DISCOVERY_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "ollama",
+    "openrouter",
+    "xai",
+    "google-vertex",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundledCatalogProfile {
     pub(crate) id: &'static str,
@@ -554,6 +568,7 @@ fn channel(
         protocols: Vec::new(),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source: None,
+        consumes_catalog_models: false,
         capabilities,
         model_capabilities: BTreeSet::new(),
         search_model_required: false,

@@ -15,8 +15,8 @@ use stravia_vendor_runtime::{
 };
 use stravia_vendor_sdk::{
     AllowanceRequest, AuthRequest, ConfigValidationRequest, DiscoverRequest, ErrorKind,
-    MediaImageRequest, ModelMetadata, Operation, OperationInput, OperationOutput, ProviderSnapshot,
-    SearchRequest,
+    MODELS_SOURCE_CATALOG, MediaImageRequest, ModelMetadata, Operation, OperationInput,
+    OperationOutput, ProviderSnapshot, SearchRequest,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -389,7 +389,21 @@ impl Gateway {
                     )
                 });
             let catalog_models = if kind == Operation::Discover
-                && effective_models_source == Some("catalog")
+                && effective_models_source == Some(MODELS_SOURCE_CATALOG)
+                // Only channels that consume the injected scope warrant a
+                // catalog fetch; account-discovery channels resolve the same
+                // marker into a live upstream request.
+                && connection
+                    .provider
+                    .channel
+                    .as_deref()
+                    .and_then(|channel| {
+                        descriptor
+                            .channels
+                            .iter()
+                            .find(|declared| declared.id == channel)
+                    })
+                    .is_some_and(|channel| channel.consumes_catalog_models)
                 && connection
                     .provider
                     .static_models

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use base64::Engine;
 use serde_json::{Value, json};
 use stravia_runtime_contract::protocol::{
     ids::OPEN_RESPONSES_2026_04_24,
@@ -10,6 +9,7 @@ use stravia_vendor_sdk::{
     GuestHost, ProviderSnapshot, SearchRequest, SearchResponse, SearchSource, WsMessage, WsRequest,
 };
 
+use super::auth::account_id_from_jwt;
 use super::{
     CLIENT_VERSION, configured_websocket_url, endpoint, ensure_success, invalid,
     require_codex_protocol, required_model, retryable, secret,
@@ -142,21 +142,6 @@ fn routing_hint(body: &Value) -> Result<String, stravia_vendor_sdk::PluginError>
 
 fn request_id(_body: &Value) -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-fn account_id_from_jwt(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&decoded).ok()?;
-    claims
-        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
-        .or_else(|| claims.get("https://api.openai.com/auth.chatgpt_account_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 pub(super) fn websocket_available(provider: &ProviderSnapshot) -> bool {

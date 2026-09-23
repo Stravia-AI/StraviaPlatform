@@ -116,7 +116,7 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
     assert_eq!(provider.base_url, "https://api.openai.com/v1");
     assert_eq!(provider.preset_key.as_deref(), Some("openai"));
     assert_eq!(provider.channel.as_deref(), Some("default"));
-    assert_eq!(provider.models_source.as_deref(), Some("catalog"));
+    assert!(provider.models_source.is_none());
     assert!(provider.api_key.is_empty());
     assert_eq!(provider.adapter_credentials, "{}");
 
@@ -1335,6 +1335,106 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
         .get_provider_model(&provider.id, "account-only-model")
         .await?;
     assert!(model.metadata.description.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_marker_on_a_live_channel_never_reaches_the_catalog() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await?;
+        let body = r#"{"data":[{"id":"account-only-model"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await?;
+        anyhow::Ok(())
+    });
+
+    // No seeded scope and no catalog remote: any catalog scope resolution
+    // fails deterministically.
+    let gw = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: test_data_dir(),
+            ..Default::default()
+        },
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await?;
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "legacy-catalog-openai".to_string(),
+            vendor: Some("openai".to_string()),
+            protocol: "open-responses".to_string(),
+            base_url: format!("http://{address}"),
+            preset_key: Some("openai".to_string()),
+            channel: Some("default".to_string()),
+            models_source: Some("catalog".to_string()),
+            static_models: None,
+            api_key: "sk-test".to_string(),
+            adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".to_string(),
+            use_proxy: false,
+        })
+        .await?;
+
+    // Pure discovery (no canonical enrichment) must not touch the Provider
+    // Catalog for a channel that does not declare catalog consumption.
+    let models = gw.admin().test_provider_models(&provider.id).await?;
+    assert_eq!(models, ["account-only-model"]);
+    timeout(Duration::from_secs(5), server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_marker_on_a_consuming_channel_still_propagates_catalog_failures()
+-> anyhow::Result<()> {
+    // No seeded scope and no catalog remote: resolving the scope fails, and
+    // a consuming channel must propagate that failure.
+    let gw = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: test_data_dir(),
+            ..Default::default()
+        },
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await?;
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "catalog-deepseek".to_string(),
+            vendor: Some("deepseek".to_string()),
+            protocol: "openai-compatible".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            preset_key: Some("deepseek".to_string()),
+            channel: Some("default".to_string()),
+            models_source: Some("catalog".to_string()),
+            static_models: None,
+            api_key: "sk-test".to_string(),
+            adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".to_string(),
+            use_proxy: false,
+        })
+        .await?;
+
+    let error = gw
+        .admin()
+        .test_provider_models(&provider.id)
+        .await
+        .expect_err("catalog-consuming discovery must propagate scope failures");
+    assert!(
+        format!("{error:#}").contains("scope refresh failed for deepseek"),
+        "unexpected error: {error:#}"
+    );
     Ok(())
 }
 

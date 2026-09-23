@@ -100,6 +100,18 @@ pub(crate) fn provider_set(catalog_profiles: Vec<ProviderDescriptor>) -> Vec<Pro
         crate::provider_descriptor(provider_id)
             .unwrap_or_else(|| panic!("base provider descriptor `{provider_id}` must exist"))
     }));
+    // Catalog consumption is a property of the resolved provider id — catalog
+    // profiles may be rewritten to storefront ids after borrowing an
+    // implementation descriptor — so it is stamped here from the same id set
+    // `generic::explicit_discovery` uses at runtime. This covers both the
+    // `descriptor` manifest and the `sync-catalog` overlay set.
+    for provider in &mut providers {
+        let consumes = !crate::metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS
+            .contains(&provider.provider_id.as_str());
+        for channel in &mut provider.channels {
+            channel.consumes_catalog_models = consumes;
+        }
+    }
     providers
 }
 

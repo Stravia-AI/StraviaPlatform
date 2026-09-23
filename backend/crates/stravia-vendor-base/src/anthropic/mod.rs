@@ -10,8 +10,8 @@ use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigValidationResponse,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError,
-    ProviderDescriptor, ProviderSnapshot, ValidationIssue,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "anthropic";
@@ -66,6 +66,7 @@ fn anthropic_descriptor() -> ProviderDescriptor {
                 protocols: Vec::new(),
                 default_base_url: Some("https://api.anthropic.com".into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: direct,
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
@@ -99,6 +100,7 @@ fn anthropic_descriptor() -> ProviderDescriptor {
                 protocols: Vec::new(),
                 default_base_url: Some("https://api.anthropic.com".into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: claude_code,
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
@@ -285,7 +287,7 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_owned)
         .unwrap_or_else(|| endpoint(&provider.base_url, "/v1/models"));
     if let Some(cursor) = request
