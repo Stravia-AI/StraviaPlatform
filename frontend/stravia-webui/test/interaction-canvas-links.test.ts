@@ -147,9 +147,19 @@ describe('canvas links', () => {
   test('keeps a diagnostic parent link inferred even when parent_interaction_id is set', () => {
     const source = interaction('source', null, 10)
     const child = interaction('child', 'source', 20, [inferred('source')])
+    child.generation_root_id = 'separate-generation-root'
     expect(visualParent(child, [source, child])).toEqual({ id: 'source', kind: 'inferred' })
     expect(canvasLinks([source, child])).toEqual([
       { id: 'inferred-source-child', source: 'source', target: 'child', kind: 'inferred' },
+    ])
+  })
+
+  test('keeps a confirmed generation parent solid when tail evidence independently matches it', () => {
+    const source = interaction('source', null, 10)
+    const child = interaction('child', 'source', 20, [inferred('source')])
+    child.generation_root_id = source.generation_root_id
+    expect(canvasLinks([source, child])).toEqual([
+      { id: 'confirmed-source-child', source: 'source', target: 'child', kind: 'confirmed' },
     ])
   })
 

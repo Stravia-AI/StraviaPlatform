@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Interaction canvases keep confirmed Generation Chain parent links solid when retained-tail diagnostics identify the same source; cross-root diagnostic links remain dashed.
 - The service picker again shows localized sign-in methods instead of internal capability names, omits capability badges, and prefers model-directory logos before falling back to bundled icons.
 - An empty hidden-round ledger no longer turns confirmed response usage into unknown usage. Streaming and buffered Responses preserve known zero values without inventing values for unreported usage.
 - Observation attribution reuses ancestor windows from the same Generation Chain traversal instead of repeatedly restoring overlapping histories for each retained-tail candidate. Confirmed-parent diagnostics, ambiguity checks, Principal isolation, and resource limits remain unchanged.
