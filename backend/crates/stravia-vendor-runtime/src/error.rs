@@ -71,6 +71,7 @@ impl RuntimeError {
             ErrorKind::Cancelled => "vendor operation was cancelled",
             ErrorKind::DeadlineExceeded => "vendor operation exceeded its deadline",
             ErrorKind::ResourceExhausted => "vendor plugin exceeded a resource limit",
+            ErrorKind::ProviderNotFound => "vendor provider profile is no longer available",
         };
         Self::Plugin {
             kind,

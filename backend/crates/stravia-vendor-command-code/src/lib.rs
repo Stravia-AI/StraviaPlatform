@@ -111,6 +111,7 @@ pub fn descriptor() -> VendorDescriptor {
                 description: Some("Command Code API key channel".into()),
                 auth: None,
                 protocol: Some("command-code".into()),
+                protocols: Vec::new(),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -118,6 +119,8 @@ pub fn descriptor() -> VendorDescriptor {
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: vec![
                 ConfigField {
                     key: "apiKey".into(),

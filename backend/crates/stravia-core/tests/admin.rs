@@ -6,9 +6,7 @@ use stravia_core::Gateway;
 use stravia_core::admin::{CopyProviderOptions, ProviderConfigurationPreviewInput};
 use stravia_core::config::GatewayConfig;
 use stravia_core::db::models::*;
-use stravia_core::provider_catalog::{
-    CatalogError, CatalogSource, CatalogVersion, ProviderCatalog,
-};
+use stravia_core::provider_catalog::{CatalogError, CatalogSource, CatalogVersion};
 use stravia_core::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelMetadata,
     ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
@@ -48,24 +46,34 @@ impl CatalogSource for TestCatalogSource {
         })
     }
 
-    async fn fetch_providers(&self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("global indexes are not used by this test catalog")
-    }
-
     async fn fetch_canonical_models(&self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("global indexes are not used by this test catalog")
-    }
-
-    async fn fetch_provider_scope(&self, provider_id: &str) -> anyhow::Result<Vec<u8>> {
-        match provider_id {
-            "openai" | "google" | "minimax" => Ok(OPENAI_SCOPE.to_vec()),
-            _ => anyhow::bail!("test catalog has no scope for {provider_id}"),
-        }
+        anyhow::bail!("canonical index is not used by this test catalog")
     }
 
     async fn fetch_logo(&self, _provider_id: &str) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("logos are not used by this test catalog")
     }
+
+    async fn fetch_favicon(&self, _origin: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("favicons are not used by this test catalog")
+    }
+}
+
+/// Provider scopes arrive through the base plugin's `sync-catalog` export and
+/// land in the on-disk cache; tests seed the bootstrap revision directly so
+/// scope reads stay offline.
+fn seed_provider_scope(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let path = stravia_core::data_paths::DataPaths::new(data_dir)
+        .catalog_root()
+        .join("catalog/scopes/bootstrap")
+        .join(format!("{provider_id}.json"));
+    std::fs::create_dir_all(path.parent().expect("scope path has a parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1335,8 +1343,12 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
         Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
     )
     .await?;
-    gw.provider_catalog =
-        ProviderCatalog::with_source(&gw.config.data_dir, Arc::new(TestCatalogSource))?;
+    gw.provider_catalog = gw
+        .provider_catalog
+        .with_source_override(Arc::new(TestCatalogSource));
+    for provider_id in ["openai", "google", "minimax"] {
+        seed_provider_scope(&gw.config.data_dir, provider_id, OPENAI_SCOPE)?;
+    }
     Ok(gw)
 }
 
@@ -1624,5 +1636,131 @@ async fn seed_oauth_credential(
             },
         )
         .await?;
+    Ok(())
+}
+
+// ── provider_icon: host-resolved catalog logo / website favicon ─────────────
+
+const ICON_TEST_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>"#;
+const ICON_TEST_PNG: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+fn seed_catalog_logo(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let path = stravia_core::data_paths::DataPaths::new(data_dir)
+        .catalog_root()
+        .join("catalog/logos")
+        .join(format!("{provider_id}.svg"));
+    std::fs::create_dir_all(path.parent().expect("logo path has a parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+fn seed_catalog_favicon(
+    data_dir: &std::path::Path,
+    origin_file_key: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let path = stravia_core::data_paths::DataPaths::new(data_dir)
+        .catalog_root()
+        .join("catalog/favicons")
+        .join(origin_file_key);
+    std::fs::create_dir_all(path.parent().expect("favicon path has a parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+async fn saved_openai_provider(gw: &Gateway, base_url: &str) -> anyhow::Result<Provider> {
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "Saved OpenAI".to_string(),
+            vendor: Some("openai".to_string()),
+            protocol: "openai-compatible".to_string(),
+            base_url: base_url.to_string(),
+            preset_key: Some("openai".to_string()),
+            channel: Some("default".to_string()),
+            models_source: None,
+            static_models: None,
+            api_key: "sk-test".to_string(),
+            adapter_credentials: "{}".to_string(),
+            vendor_options: "{}".to_string(),
+            auth_mode: "apikey".to_string(),
+            use_proxy: false,
+        })
+        .await?;
+    Ok(provider)
+}
+
+#[tokio::test]
+async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    seed_catalog_logo(&gw.config.data_dir, "deepseek", ICON_TEST_SVG)?;
+
+    let icon = gw.provider_icon("deepseek").await?;
+
+    assert_eq!(icon.content_type, "image/svg+xml");
+    assert_eq!(icon.body, ICON_TEST_SVG);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let provider = saved_openai_provider(&gw, "https://api.openai.com/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
+
+    let icon = gw.provider_icon(&provider.id).await?;
+
+    assert_eq!(icon.content_type, "image/svg+xml");
+    assert_eq!(icon.body, ICON_TEST_SVG);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_falls_back_to_the_connection_origin_favicon() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
+    // `https://icon-test.invalid` sanitizes to this cache file name; the logo
+    // fetch is unscripted and fails, so only the favicon cache can serve.
+    seed_catalog_favicon(
+        &gw.config.data_dir,
+        "https---icon-test.invalid",
+        ICON_TEST_PNG,
+    )?;
+
+    let icon = gw.provider_icon(&provider.id).await?;
+
+    assert_eq!(icon.content_type, "image/png");
+    assert_eq!(icon.body, ICON_TEST_PNG);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_prefers_the_catalog_logo_over_a_website_favicon() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+    let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
+    seed_catalog_favicon(
+        &gw.config.data_dir,
+        "https---icon-test.invalid",
+        ICON_TEST_PNG,
+    )?;
+
+    let icon = gw.provider_icon(&provider.id).await?;
+
+    assert_eq!(icon.content_type, "image/svg+xml");
+    assert_eq!(icon.body, ICON_TEST_SVG);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_errors_when_no_source_matches() -> anyhow::Result<()> {
+    let gw = build_gateway().await?;
+
+    assert!(gw.provider_icon("ghost-provider").await.is_err());
     Ok(())
 }

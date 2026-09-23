@@ -2923,6 +2923,10 @@ fn classify_vendor_kind(
             "vendor_resource_exhausted",
             "Vendor plugin exceeded a resource limit",
         ),
+        ErrorKind::ProviderNotFound => AttemptFailure::terminal(
+            "vendor_provider_not_found",
+            "Vendor provider profile is no longer available",
+        ),
     }
 }
 

@@ -636,7 +636,7 @@ async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Res
         .create_provider(CreateProvider {
             name: Some("Template Provider".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".to_string(),
+                vendor: "custom".to_string(),
                 channel: "default".to_string(),
                 protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
@@ -740,7 +740,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
         .create_provider(CreateProvider {
             name: Some("HTTP Provider Model".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".to_string(),
+                vendor: "custom".to_string(),
                 channel: "default".to_string(),
                 protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
@@ -815,7 +815,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
         .create_provider(CreateProvider {
             name: Some("Target Status Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".into(),
@@ -899,7 +899,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
         .create_provider(CreateProvider {
             name: Some("Route Bind Provider".to_string()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".to_string(),
+                vendor: "custom".to_string(),
                 channel: "default".to_string(),
                 protocol: Some("openai-compatible".into()),
                 base_url: "https://example.test/v1".to_string(),
@@ -1248,6 +1248,302 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     let missing_json: serde_json::Value = serde_json::from_slice(&missing_body)?;
     assert_eq!(missing_json["code"], "CATALOG_PROVIDER_NOT_FOUND");
     assert_eq!(missing_json["params"]["provider_id"], "gone-vendor");
+
+    Ok(())
+}
+
+// ── Provider Catalog parity over management HTTP ─────────────────────────
+//
+// The real base Wasm component fetches the catalog from an in-process
+// fixture through the production `sync-catalog` boundary; management HTTP
+// drives refresh, dynamic registration, provider creation, scoped models,
+// the logo endpoint, and catalog removal semantics. No request reaches the
+// production network — the catalog origin is injected at construction.
+
+const CATALOG_TEST_SVG: &[u8] =
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\"><rect width=\"4\" height=\"4\"/></svg>";
+
+#[derive(Clone)]
+struct FakeCatalog {
+    state: Arc<tokio::sync::RwLock<FakeCatalogState>>,
+    base_url: String,
+}
+
+struct FakeCatalogState {
+    revision: String,
+    index: serde_json::Value,
+    scopes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl FakeCatalog {
+    async fn start() -> anyhow::Result<Self> {
+        let state = Arc::new(tokio::sync::RwLock::new(FakeCatalogState {
+            revision: "rev-1".to_owned(),
+            index: serde_json::json!({
+                "fake-zen": {
+                    "id": "fake-zen",
+                    "name": "Fake Zen",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "http://upstream.invalid/v1"
+                },
+                "impossible": {
+                    "id": "impossible",
+                    "name": "Impossible",
+                    "npm": "@totally/unknown-sdk"
+                }
+            }),
+            scopes: std::collections::HashMap::from([(
+                "fake-zen".to_owned(),
+                serde_json::json!({
+                    "zen-1": {
+                        "id": "zen-1",
+                        "name": "Zen One",
+                        "tool_call": true,
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                        "limit": { "context": 200000, "output": 8192 },
+                        "cost": { "input": 1.0, "output": 2.0 }
+                    }
+                }),
+            )]),
+        }));
+        let app = axum::Router::new()
+            .route("/version.json", axum::routing::get(catalog_version))
+            .route("/providers.json", axum::routing::get(catalog_index))
+            .route("/models.json", axum::routing::get(canonical_models))
+            .route(
+                "/providers/{id}/models.json",
+                axum::routing::get(catalog_scope),
+            )
+            .route("/logos/{file}", axum::routing::get(catalog_logo))
+            .with_state(Arc::clone(&state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(Self { state, base_url })
+    }
+
+    async fn set_index(&self, revision: &str, index: serde_json::Value) {
+        let mut state = self.state.write().await;
+        state.revision = revision.to_owned();
+        state.index = index;
+    }
+}
+
+async fn catalog_version(
+    axum::extract::State(state): axum::extract::State<Arc<tokio::sync::RwLock<FakeCatalogState>>>,
+) -> impl axum::response::IntoResponse {
+    let state = state.read().await;
+    axum::Json(serde_json::json!({
+        "revision": state.revision,
+        "generated_at": "2025-01-01T00:00:00Z",
+    }))
+}
+
+async fn catalog_index(
+    axum::extract::State(state): axum::extract::State<Arc<tokio::sync::RwLock<FakeCatalogState>>>,
+) -> impl axum::response::IntoResponse {
+    let state = state.read().await;
+    axum::Json(state.index.clone())
+}
+
+async fn canonical_models() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "acme/m-1": { "id": "acme/m-1", "name": "Acme Model One" }
+    }))
+}
+
+async fn catalog_scope(
+    axum::extract::State(state): axum::extract::State<Arc<tokio::sync::RwLock<FakeCatalogState>>>,
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let state = state.read().await;
+    match state.scopes.get(&provider_id) {
+        Some(body) => axum::Json(body.clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn catalog_logo() -> impl axum::response::IntoResponse {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], CATALOG_TEST_SVG)
+}
+
+#[tokio::test]
+async fn catalog_parity_drives_dynamic_profiles_through_management_http() -> anyhow::Result<()> {
+    let catalog = FakeCatalog::start().await?;
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            catalog_base_url: Some(catalog.base_url.clone()),
+            ..Default::default()
+        },
+        Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+    )
+    .await?;
+    let app = create_unprotected_router(gateway);
+
+    // Remote refresh over management HTTP installs the confirmed snapshot.
+    let refreshed = app
+        .clone()
+        .oneshot(Request::post("/api/v1/catalog/refresh").body(Body::empty())?)
+        .await?;
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    let refreshed_body = to_bytes(refreshed.into_body(), usize::MAX).await?;
+    let refreshed_json: serde_json::Value = serde_json::from_slice(&refreshed_body)?;
+    assert_eq!(refreshed_json["revision"], "rev-1");
+
+    // Dynamic registration is visible through the catalog list endpoint; an
+    // entry with an unmapped npm never registers.
+    let providers = app
+        .clone()
+        .oneshot(Request::get("/api/v1/catalog/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(providers.status(), StatusCode::OK);
+    let providers_body = to_bytes(providers.into_body(), usize::MAX).await?;
+    let providers_json: serde_json::Value = serde_json::from_slice(&providers_body)?;
+    let zen = providers_json["providers"]
+        .as_array()
+        .expect("provider list")
+        .iter()
+        .find(|provider| provider["id"] == "fake-zen")
+        .cloned()
+        .expect("compatible catalog entry registers over HTTP");
+    assert!(
+        providers_json["providers"]
+            .as_array()
+            .expect("provider list")
+            .iter()
+            .all(|provider| provider["id"] != "impossible")
+    );
+    let fingerprint = zen["channels"]
+        .as_array()
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel["id"] == "default")
+                .and_then(|channel| channel["fingerprint"].as_str())
+        })
+        .expect("default channel fingerprint")
+        .to_owned();
+
+    // Provider creation goes through management HTTP, not an internal call.
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "Zen",
+                        "source": {
+                            "type": "catalog",
+                            "provider_id": "fake-zen",
+                            "channel_id": "default",
+                            "fingerprint": fingerprint,
+                        },
+                        "credential": { "type": "none" }
+                    }))
+                    .expect("serialize create provider request"),
+                ))
+                .expect("build create provider request"),
+        )
+        .await?;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = to_bytes(created.into_body(), usize::MAX).await?;
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body)?;
+    assert_eq!(created_json["data"]["vendor"], "fake-zen");
+
+    // Scoped models and the logo endpoint are management-HTTP visible.
+    let models = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/catalog/providers/fake-zen/channels/default/models")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(models.status(), StatusCode::OK);
+    let models_body = to_bytes(models.into_body(), usize::MAX).await?;
+    let models_json: serde_json::Value = serde_json::from_slice(&models_body)?;
+    assert!(
+        models_json["models"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|model| model["id"] == "zen-1"))
+    );
+
+    let logo = app
+        .clone()
+        .oneshot(Request::get("/api/v1/catalog/providers/fake-zen/logo").body(Body::empty())?)
+        .await?;
+    assert_eq!(logo.status(), StatusCode::OK);
+    assert_eq!(
+        logo.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/svg+xml")
+    );
+    let logo_body = to_bytes(logo.into_body(), usize::MAX).await?;
+    assert_eq!(logo_body, CATALOG_TEST_SVG);
+
+    // A confirmed refresh removing the entry blocks new creations with the
+    // typed catalog miss while the saved provider stays listed.
+    catalog
+        .set_index(
+            "rev-2",
+            serde_json::json!({
+                "other-zen": {
+                    "id": "other-zen",
+                    "name": "Other Zen",
+                    "npm": "@ai-sdk/openai-compatible"
+                }
+            }),
+        )
+        .await;
+    let refreshed = app
+        .clone()
+        .oneshot(Request::post("/api/v1/catalog/refresh").body(Body::empty())?)
+        .await?;
+    assert_eq!(refreshed.status(), StatusCode::OK);
+
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "Zen Two",
+                        "source": {
+                            "type": "catalog",
+                            "provider_id": "fake-zen",
+                            "channel_id": "default",
+                            "fingerprint": fingerprint,
+                        },
+                        "credential": { "type": "none" }
+                    }))
+                    .expect("serialize create provider request"),
+                ))
+                .expect("build create provider request"),
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+    let rejected_body = to_bytes(rejected.into_body(), usize::MAX).await?;
+    let rejected_json: serde_json::Value = serde_json::from_slice(&rejected_body)?;
+    assert_eq!(rejected_json["code"], "CATALOG_PROVIDER_NOT_FOUND");
+
+    let listed = app
+        .oneshot(Request::get("/api/v1/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_body = to_bytes(listed.into_body(), usize::MAX).await?;
+    let listed_json: serde_json::Value = serde_json::from_slice(&listed_body)?;
+    assert!(
+        listed_json["data"].as_array().is_some_and(|items| items
+            .iter()
+            .any(|provider| provider["vendor"] == "fake-zen")),
+        "the saved provider survives removal from the advertised catalog"
+    );
 
     Ok(())
 }

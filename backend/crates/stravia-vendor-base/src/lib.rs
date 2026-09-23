@@ -1,5 +1,6 @@
 mod allowance;
 mod anthropic;
+mod catalog;
 mod cloud;
 mod codec;
 mod generic;
@@ -15,20 +16,15 @@ use stravia_vendor_sdk::DefaultModelsSource;
 #[cfg(target_arch = "wasm32")]
 use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
-    Capability, ErrorKind, GuestHost, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
+    Capability, CatalogSyncOutcome, CatalogSyncRequest, ErrorKind, GuestHost, Operation,
+    OperationInput, OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot,
+    VendorDescriptor, VendorKind,
 };
 
-const INTERNAL_PROVIDER_IDS: &[&str] = &[
-    "custom",
-    "gateway",
-    "ollama",
-    "openai-compatible",
-    metadata::PROTOCOL_GEMINI,
-    metadata::PROTOCOL_OPENAI_CHAT,
-    metadata::PROTOCOL_OPEN_RESPONSES,
-    metadata::PROTOCOL_ANTHROPIC,
-];
+/// Profiles statically owned by this vendor — not catalog entries. `custom`
+/// is the merged profile covering every selectable egress protocol.
+pub(crate) const INTERNAL_PROVIDER_IDS: &[&str] =
+    &["custom", "gateway", "ollama", "openai-compatible"];
 
 fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
     let descriptor = match provider_id {
@@ -46,8 +42,26 @@ fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
     Some(add_allowance_capabilities(descriptor))
 }
 
-fn uses_catalog_implementation(provider_id: &str, npm: &str) -> bool {
-    metadata::bundled_catalog_profile(provider_id).is_some_and(|profile| profile.npm == npm)
+/// The npm implementation a connection's profile claims. Runtime-registered
+/// profiles carry it in the host-injected `vendor_profile`; bundled profiles
+/// fall back to the embedded catalog list.
+fn catalog_implementation(provider: &ProviderSnapshot) -> Option<String> {
+    runtime_profile(provider)
+        .and_then(|profile| profile.implementation)
+        .or_else(|| {
+            metadata::bundled_catalog_profile(&provider.provider_id)
+                .map(|profile| profile.npm.to_owned())
+        })
+}
+
+/// Host-injected effective Provider Profile for runtime-registered catalog
+/// entries that have no static descriptor slot.
+fn runtime_profile(provider: &ProviderSnapshot) -> Option<ProviderDescriptor> {
+    provider
+        .operation_metadata
+        .get("vendor_profile")
+        .and_then(|value| serde_json::from_value::<ProviderDescriptor>(value.clone()).ok())
+        .filter(|profile| profile.provider_id == provider.provider_id)
 }
 
 fn is_static_profile(provider_id: &str) -> bool {
@@ -66,56 +80,6 @@ fn is_static_profile(provider_id: &str) -> bool {
         || metadata::CATALOG_VENDOR_IDS.contains(&provider_id)
 }
 
-fn catalog_provider_descriptor(profile: &metadata::BundledCatalogProfile) -> ProviderDescriptor {
-    let descriptor = match profile.npm {
-        "@ai-sdk/gateway" => provider_descriptor("gateway"),
-        "@ai-sdk/vercel" => provider_descriptor("vercel"),
-        _ => provider_descriptor(profile.id),
-    }
-    .or_else(|| match profile.npm {
-        "@ai-sdk/openai" => provider_descriptor("openai"),
-        "@ai-sdk/anthropic" => provider_descriptor("anthropic"),
-        "@ai-sdk/azure" => provider_descriptor("azure"),
-        "@ai-sdk/openai-compatible" => Some(metadata::compatible_catalog_descriptor(
-            profile,
-            "openai-compatible",
-            None,
-        )),
-        _ => None,
-    })
-    .unwrap_or_else(|| {
-        panic!(
-            "bundled Catalog profile `{}` uses unsupported implementation `{}`",
-            profile.id, profile.npm
-        )
-    });
-
-    let mut descriptor = descriptor;
-    if profile.npm == "@ai-sdk/anthropic" && profile.id != "anthropic" {
-        descriptor
-            .channels
-            .retain(|channel| channel.id == "default");
-        descriptor.capabilities = descriptor.channels[0].capabilities.clone();
-        descriptor
-            .network
-            .extra_origins
-            .retain(|origin| origin.host != "claude.com" && origin.host != "platform.claude.com");
-    }
-    descriptor.provider_id = profile.id.to_owned();
-    descriptor.catalog_id = Some(profile.id.to_owned());
-    descriptor.display_name = profile.name.to_owned();
-    descriptor.description = Some(format!("Built-in {} vendor component", profile.name));
-    for channel in &mut descriptor.channels {
-        if channel.id != "default" {
-            continue;
-        }
-        if let Some(base_url) = profile.api {
-            channel.default_base_url = Some(base_url.to_owned());
-        }
-    }
-    descriptor
-}
-
 fn add_allowance_capabilities(mut descriptor: ProviderDescriptor) -> ProviderDescriptor {
     for channel in &mut descriptor.channels {
         if allowance::supports(&descriptor.provider_id, &channel.id) {
@@ -132,14 +96,25 @@ fn add_allowance_capabilities(mut descriptor: ProviderDescriptor) -> ProviderDes
 
 /// Returns the single fallback manifest exported by this component.
 pub fn descriptor() -> VendorDescriptor {
-    let mut providers = metadata::bundled_catalog_profiles()
-        .iter()
-        .map(catalog_provider_descriptor)
-        .collect::<Vec<_>>();
-    providers.extend(INTERNAL_PROVIDER_IDS.iter().map(|provider_id| {
-        provider_descriptor(provider_id)
-            .unwrap_or_else(|| panic!("base provider descriptor `{provider_id}` must exist"))
-    }));
+    let providers = catalog::provider_set(
+        metadata::bundled_catalog_profiles()
+            .iter()
+            .map(|profile| {
+                metadata::catalog_profile_descriptor(
+                    profile.id,
+                    profile.name,
+                    profile.npm,
+                    profile.api,
+                )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "bundled Catalog profile `{}` uses unsupported implementation `{}`",
+                        profile.id, profile.npm
+                    )
+                })
+            })
+            .collect(),
+    );
 
     VendorDescriptor {
         vendor_id: "base".into(),
@@ -163,40 +138,35 @@ pub fn select_protocol(
     provider: &ProviderSnapshot,
     request: &AiRequest,
 ) -> Result<String, PluginError> {
-    validate_target(&provider.provider_id, channel)?;
+    validate_target(provider, channel)?;
     match provider.provider_id.as_str() {
         "openai" => openai::select_protocol(operation, channel, provider, request),
         "azure" | "azure-cognitive-services"
             if operation == Operation::Infer && channel == "default" =>
         {
-            let endpoint = if request.embedding.is_some() {
-                stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1
-            } else {
-                stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-            };
-            Ok(endpoint.to_string())
+            Ok(azure_endpoint(request))
         }
-        "custom" | "openai-compatible" | metadata::PROTOCOL_OPENAI_CHAT => {
-            Ok(generic::select_protocol(provider, request))
-        }
+        "custom" | "openai-compatible" => Ok(generic::select_protocol(provider, request)),
         provider_id if is_static_profile(provider_id) => Ok(provider.protocol.clone()),
-        provider_id if uses_catalog_implementation(provider_id, "@ai-sdk/openai") => {
-            openai::select_protocol(operation, channel, provider, request)
-        }
-        provider_id
-            if uses_catalog_implementation(provider_id, "@ai-sdk/azure")
-                && operation == Operation::Infer
-                && channel == "default" =>
-        {
-            let endpoint = if request.embedding.is_some() {
-                stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1
-            } else {
-                stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-            };
-            Ok(endpoint.to_string())
-        }
-        _ => Ok(provider.protocol.clone()),
+        _ => match catalog_implementation(provider).as_deref() {
+            Some("@ai-sdk/openai") => {
+                openai::select_protocol(operation, channel, provider, request)
+            }
+            Some("@ai-sdk/azure") if operation == Operation::Infer && channel == "default" => {
+                Ok(azure_endpoint(request))
+            }
+            _ => Ok(provider.protocol.clone()),
+        },
     }
+}
+
+fn azure_endpoint(request: &AiRequest) -> String {
+    let endpoint = if request.embedding.is_some() {
+        stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1
+    } else {
+        stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
+    };
+    endpoint.to_string()
 }
 
 /// Dispatches an operation by the supplier profile embedded in the snapshot.
@@ -213,7 +183,7 @@ pub fn execute(
         ));
     }
     let provider_id = input.provider().provider_id.clone();
-    validate_target(&provider_id, channel)?;
+    validate_target(input.provider(), channel)?;
 
     if operation == Operation::Discover {
         let provider = input.provider();
@@ -256,20 +226,27 @@ pub fn execute(
         profile if is_static_profile(profile) => {
             generic::execute(&provider_id, host, operation, channel, input)
         }
-        profile if uses_catalog_implementation(profile, "@ai-sdk/openai") => {
-            openai::execute("openai", host, operation, channel, input)
-        }
-        profile if uses_catalog_implementation(profile, "@ai-sdk/anthropic") => {
-            anthropic::execute("anthropic", host, operation, channel, input)
-        }
-        profile if uses_catalog_implementation(profile, "@ai-sdk/azure") => {
-            cloud::execute("azure", host, operation, channel, input)
-        }
-        profile if uses_catalog_implementation(profile, "@ai-sdk/gateway") => {
-            generic::execute("gateway", host, operation, channel, input)
-        }
-        _ => generic::execute(&provider_id, host, operation, channel, input),
+        _ => match catalog_implementation(input.provider()).as_deref() {
+            Some("@ai-sdk/openai") => openai::execute("openai", host, operation, channel, input),
+            Some("@ai-sdk/anthropic") => {
+                anthropic::execute("anthropic", host, operation, channel, input)
+            }
+            Some("@ai-sdk/azure") => cloud::execute("azure", host, operation, channel, input),
+            Some("@ai-sdk/gateway") => generic::execute("gateway", host, operation, channel, input),
+            _ => generic::execute(&provider_id, host, operation, channel, input),
+        },
     }
+}
+
+/// `sync-catalog` export: fetch and derive the complete Provider Profile set
+/// owned by this vendor for the given snapshot.
+pub fn sync_catalog(
+    host: &GuestHost,
+    request: &CatalogSyncRequest,
+) -> Result<CatalogSyncOutcome, PluginError> {
+    let mut outcome = catalog::sync_catalog(host, request)?;
+    outcome.providers = catalog::provider_set(std::mem::take(&mut outcome.providers));
+    Ok(outcome)
 }
 
 pub(crate) fn encode_inference_request(
@@ -339,7 +316,8 @@ pub(crate) fn decode_inference(
     Ok(OperationOutput::Infer(Box::new(complete)))
 }
 
-fn validate_target(provider_id: &str, channel: &str) -> Result<(), PluginError> {
+fn validate_target(provider: &ProviderSnapshot, channel: &str) -> Result<(), PluginError> {
+    let provider_id = provider.provider_id.as_str();
     let declared = match (provider_id, channel) {
         ("anthropic", "default" | "claude-code") => true,
         ("google-vertex", "native" | "openai") => true,
@@ -347,6 +325,7 @@ fn validate_target(provider_id: &str, channel: &str) -> Result<(), PluginError> 
         (_, "default") => {
             is_static_profile(provider_id)
                 || metadata::bundled_catalog_profile(provider_id).is_some()
+                || runtime_profile(provider).is_some()
         }
         _ => false,
     };
@@ -392,6 +371,13 @@ impl VendorGuest for BaseVendor {
         input: OperationInput,
     ) -> Result<OperationOutput, PluginError> {
         execute(host, operation, channel, input)
+    }
+
+    fn sync_catalog(
+        host: &GuestHost,
+        request: CatalogSyncRequest,
+    ) -> Result<CatalogSyncOutcome, PluginError> {
+        sync_catalog(host, &request)
     }
 }
 

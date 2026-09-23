@@ -20,13 +20,13 @@ import type { CreateProvider, OAuthCandidateConfiguration, Provider, ProviderCon
 import ProviderConfigFields from '$lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
 import * as Alert from '$lib/components/ui/alert'
-import { Badge } from '$lib/components/ui/badge'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import * as Field from '$lib/components/ui/field'
 import * as Empty from '$lib/components/ui/empty'
 import * as InputGroup from '$lib/components/ui/input-group'
 import { Input } from '$lib/components/ui/input'
+import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
@@ -35,6 +35,7 @@ import * as Tabs from '$lib/components/ui/tabs'
 interface ProviderForm {
   name: string
   baseUrl: string
+  protocol: string
   useProxy: boolean
   values: Record<string, unknown>
 }
@@ -49,7 +50,7 @@ let step = $state<'select' | 'configure'>('select')
 let search = $state('')
 let focusedOptionKey = $state('')
 let selectedOptionKey = $state('')
-let form = $state<ProviderForm>({ name: '', baseUrl: '', useProxy: false, values: {} })
+let form = $state<ProviderForm>({ name: '', baseUrl: '', protocol: '', useProxy: false, values: {} })
 let oauthSessionId = $state<string>()
 let oauthReady = $state(false)
 let oauthAuthorization = $state<{
@@ -81,7 +82,7 @@ const globalIssues = $derived(previewIssues.filter((issue) => !issue.field))
 const previewAccepted = $derived(Boolean(preview) && previewIssues.length === 0)
 const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
   base_url: form.baseUrl.trim(),
-  protocol: selectedOption?.channel.protocol,
+  protocol: form.protocol || selectedOption?.channel.protocol || undefined,
   options: configurationValues(false),
   credentials: configurationValues(true),
 }))
@@ -90,7 +91,8 @@ const providerOptions = $derived.by(() => {
   const query = search.trim().toLocaleLowerCase(localeState.current)
   return options.filter((option) => {
     if (!query) return true
-    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${option.channel.name} ${option.channel.capabilities.join(' ')}`
+    const auth = option.channel.auth ? 'oauth account 账号' : 'api key'
+    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${option.channel.name} ${optionDescription(option, localeState.current)} ${auth}`
     return text.toLocaleLowerCase(localeState.current).includes(query)
   })
 })
@@ -124,7 +126,13 @@ async function chooseOption(option: ProviderOption): Promise<void> {
     else if (!field.secret && field.required && field.kind.type === 'bool') values[field.key] = false
   }
   selectedOptionKey = option.key
-  form = { name, baseUrl: option.channel.default_base_url ?? '', useProxy: form.useProxy, values }
+  form = {
+    name,
+    baseUrl: option.channel.default_base_url ?? '',
+    protocol: option.channel.protocol ?? option.channel.protocols?.[0]?.value ?? '',
+    useProxy: form.useProxy,
+    values,
+  }
   oauthSessionId = undefined
   oauthReady = false
   invalidatePreview()
@@ -226,7 +234,7 @@ async function saveProvider(): Promise<void> {
       type: 'custom',
       vendor: selectedOption.descriptor.provider_id,
       channel: selectedOption.channel.id,
-      protocol: selectedOption.channel.protocol ?? undefined,
+      protocol: form.protocol || selectedOption.channel.protocol || undefined,
       base_url: preview.base_url,
     },
     credential,
@@ -267,18 +275,16 @@ async function saveProvider(): Promise<void> {
     onkeydown={handleProviderOptionKeydown}
     onclick={() => void chooseOption(option)}>
     <div class="flex w-full items-start gap-3">
-      <ProviderMark icon={option.descriptor.catalog_id ?? option.descriptor.provider_id} name={optionLabel(option)} />
+      <ProviderMark
+        icon={option.descriptor.catalog_id ?? option.descriptor.provider_id}
+        name={optionLabel(option)}
+        logo={option.descriptor.catalog_id ?? option.descriptor.provider_id} />
       <div class="min-w-0 flex-1">
         <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option)}</p>
         <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-          {optionDescription(option)}
+          {optionDescription(option, localeState.current)}
         </p>
       </div>
-    </div>
-    <div class="mt-auto flex flex-wrap gap-1">
-      {#each option.channel.capabilities as capability (capability)}
-        <Badge variant="secondary" class="font-technical">{capability}</Badge>
-      {/each}
     </div>
   </button>
 {/snippet}
@@ -403,6 +409,30 @@ async function saveProvider(): Promise<void> {
                 required={!supportsConfigValidation}
                 oninput={configurationChanged} />
             </Field.Field>
+            {#if selectedOption.channel.protocols && selectedOption.channel.protocols.length > 1}
+              <Field.Field size="fill" class="sm:col-span-2">
+                <Field.Label for="provider-protocol">{m.common_protocol()}</Field.Label>
+                <Select.Root
+                  type="single"
+                  value={form.protocol}
+                  onValueChange={(value: string) => {
+                    form.protocol = value
+                    configurationChanged()
+                  }}>
+                  <Select.Trigger id="provider-protocol" class="w-full">
+                    {selectedOption.channel.protocols.find((option) => option.value === form.protocol)?.label ??
+                      form.protocol}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Group>
+                      {#each selectedOption.channel.protocols as option (option.value)}
+                        <Select.Item value={option.value}>{option.label}</Select.Item>
+                      {/each}
+                    </Select.Group>
+                  </Select.Content>
+                </Select.Root>
+              </Field.Field>
+            {/if}
             <ProviderConfigFields
               fields={configFields}
               bind:values={form.values}

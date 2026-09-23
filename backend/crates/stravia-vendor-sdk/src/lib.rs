@@ -3,11 +3,13 @@
 //! A plugin crate links this SDK, fills a [`VendorDescriptor`], implements
 //! [`VendorGuest`] for the capabilities it claims, and calls
 //! [`export_vendor!`] once. The generated component exposes the versioned
-//! `stravia:vendor@0.2.0` world; all model traffic flows through the canonical
+//! `stravia:vendor@0.3.0` world; all model traffic flows through the canonical
 //! contract in [`stravia_runtime_contract::protocol::ir`].
 //!
 //! The WIT contract lives in `wit/` of this crate and is the single source for
 //! both guest bindings (here) and host bindings (`stravia-vendor-runtime`).
+//! The Provider Catalog `npm` vocabulary in [`catalog`] is likewise shared by
+//! the base guest and the Core catalog parser.
 
 #[doc(hidden)]
 pub mod bindings {
@@ -19,6 +21,7 @@ pub mod bindings {
     });
 }
 
+pub mod catalog;
 mod descriptor;
 mod envelope;
 #[doc(hidden)]
@@ -36,12 +39,13 @@ pub use descriptor::{
 pub use envelope::{CANONICAL_FORMAT_VERSION, CanonicalEnvelope, decode_payload, encode_payload};
 pub use guest::{
     AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, AuthRequest, AuthResponse,
-    AuthStep, ConfigValidationRequest, ConfigValidationResponse, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, MediaArtifact, MediaImageAspectRatio, MediaImageRequest,
-    MediaImageResolution, MediaImageResponse, MediaReference, ModelAllowance, ModelErrorKind,
-    ModelMetadata, Operation, OperationInput, OperationOutput, PluginError, ProviderSnapshot,
-    SearchRequest, SearchResponse, SearchSource, TRANSPORT_PREFERENCE_METADATA_KEY,
-    TransportFailure, TransportPreference, UpstreamFailure, ValidationIssue, VendorGuest,
+    AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
+    ConfigValidationResponse, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
+    MediaArtifact, MediaImageAspectRatio, MediaImageRequest, MediaImageResolution,
+    MediaImageResponse, MediaReference, ModelAllowance, ModelErrorKind, ModelMetadata, Operation,
+    OperationInput, OperationOutput, PluginError, ProviderSnapshot, SearchRequest, SearchResponse,
+    SearchSource, TRANSPORT_PREFERENCE_METADATA_KEY, TransportFailure, TransportPreference,
+    UpstreamFailure, ValidationIssue, VendorGuest,
 };
 pub use host_api::{GuestHost, HttpResponse, WsConnection, WsMessage, read_http_body};
 pub use stravia_runtime_contract::protocol::ir::{

@@ -219,6 +219,8 @@ export interface VendorChannelDescriptor {
   auth?: VendorAuthDescriptor | null
   /** Optional host egress protocol; custom vendor wire protocols may omit it. */
   protocol?: string | null
+  /** Selectable egress protocols when the channel offers more than one wire protocol. */
+  protocols?: Array<{ value: string; label: string }>
   /** Initial connection URL proposed by the plugin; saving still requires preview. */
   default_base_url?: string | null
   /** Discovery source selected when a new connection does not provide one. */

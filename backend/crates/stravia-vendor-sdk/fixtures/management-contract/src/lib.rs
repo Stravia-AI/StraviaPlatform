@@ -134,6 +134,7 @@ impl VendorGuest for ManagementContractVendor {
                     }),
                 }),
                 protocol: Some("fixture-management".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -141,6 +142,8 @@ impl VendorGuest for ManagementContractVendor {
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: vec![ConfigField {
                 key: "workspace".into(),
                 label: "Workspace".into(),

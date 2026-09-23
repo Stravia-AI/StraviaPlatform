@@ -21,11 +21,28 @@
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = command-code`、channel `default`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
 
+### Provider 图标标识
+
+- 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。
+- 按选定 ID 获取目录图标失败后才进入网站图标回退；已经选择 `catalog_id` 时，不再追加一次 `provider_id` 目录图标尝试。网站图标来源优先使用插件明确声明的官网地址；没有官网声明时，使用已保存连接 `base_url` 的 origin。不得把文档地址自动视为官网，也不得猜测域名。官网一旦被选为来源，获取失败后不再请求连接 origin 的 favicon。
+- 插件只声明图标身份与网站来源；宿主统一获取目录 logo 与网站 favicon，保存在 Stravia 实例磁盘缓存中并供 UI 读取。Desktop 缓存在本机实例，独立 Server 缓存在服务器实例，二者都跨进程重启复用。浏览器不再直接请求外部 favicon，也不以浏览器缓存代替实例持久缓存。
+- 网站图标回退仅请求选定网站 origin 的 `/favicon.ico`，不请求或解析首页 HTML 寻找其他图标；接受仅通过 HTML 声明图标而未提供 `/favicon.ico` 的网站无法获取图标。宿主下载遵守既有网络访问限制，且不携带 Provider 凭据。
+- 目录 logo 与网站 favicon 统一使用 24 小时 TTL。有效缓存直接读取且不访问远端；缓存过期后在下次需要时按需更新，不新增定时刷新任务。每个已选来源更新失败且存在旧缓存时继续使用旧图标；没有缓存时才进入下一级回退。官网存在但获取失败不等同于没有官网声明。
+- 选定网站 favicon 获取失败且没有缓存时结束网络尝试；有对应内置 SVG 时显示该图标，否则 `custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。
+
 ## 已确认的供应商能力覆盖
 
 - 一个供应商 Profile 可以统一提供推理适配、自定义上游编解码、OAuth、自定义模型发现、额度获取与供应商特有计算，以及自定义 Provider 选项声明和校验；拆为五个包不缩减任何既有供应商能力。
 - `stravia-vendor-base` 承接 Codex、Grok、Command Code、Devin 之外的全部现有供应商接入，包括 Anthropic OAuth、云认证与云协议、模型发现、额度查询和供应商差异。它在单一 `base` Vendor 身份内按输入 `provider_id` 分派 Profile，不把 Profile 暴露为多个 Vendor。
-- 基础包在构建期从 `assets/providers.stravia.json` 生成完整的目录 Profile 静态表，不另维护一份品牌名单，也不在每次 guest 调用中解析整份注册表。兼容品牌复用对应的完整实现族，但不复制其他供应商的 OAuth channel 或认证 origin；运行时刷新目录不会隐式新增可执行身份。
+- `stravia-vendor-base` 的目标边界是在运行时消费 `https://models.stravia.cn/providers.json`，仅把能够映射到 base 已支持协议与认证实现的目录条目注册为 `ProviderDescriptor`。远端新增的兼容供应商无需更新 Stravia 或重新构建 base 即可添加；目录中存在但协议或认证方式尚未受支持的条目不得注册为可用 Profile。四个专属 Profile 继续由各自 dedicated Vendor 整体接管，不与 base 合并。
+- base 启动时优先使用本地最后一次成功供应商清单，没有缓存则使用插件内嵌供应商清单，随后尝试远端更新。首次离线仍可选择内嵌供应商，已有安装断网时仍可使用缓存供应商；内嵌清单只用于 bootstrap，不限制远端动态新增。缓存、内嵌和远端条目都必须按当前 base 已实现的协议与认证能力校验后才能注册。
+- 供应商模型目录属于对应 Provider Profile，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 是供应商接入身份，不是已保存连接 UUID。内嵌供应商清单不包含全部 provider-scoped 模型数据。Core 保留 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
+- 模型集合已经由上游发现或管理员添加，但供应商模型目录元数据获取超时、返回 HTTP 500 等失败时，允许用 Core Canonical Model 补充元数据。必须明确报告目录获取失败，不得把本次目录刷新标为成功，不得覆盖已有有效数据，也不得扩大模型集合。真正的上游账号级模型发现失败不适用该回退，不能用全局目录冒充成功。
+- base 的供应商目录与 Core 的全局 Canonical Model 目录独立刷新，不再跨模块等待或原子切换到同一 revision。base 新增兼容供应商不受 Core 下载失败阻塞，Core 刷新也不等待 base；接受两边短时 revision 不同。两边分别校验各自下载的一致性，失败不得标记成功，并保留已有有效数据。
+- 除上述已确认变更外，目录迁移遵循 [ADR-0073 定义的插件化迁移前原生基线](../adr/0073-register-runtime-catalog-profiles-through-base-vendor.md#迁移基线)，不得从插件化后的当前实现或 `ProviderDescriptor` 反推继承行为。继承的刷新节奏是启动后立即后台刷新、之后每小时刷新；失败明确记录并保留当前有效快照。
+- 成功刷新整体替换供应商目录。远端删除供应商后，不得再从该 Catalog 条目新建 Provider；已经保存的 Provider 记录不自动删除，普通推理不只因目录删项停用。已有 Provider 使用 Catalog 同步模型时，缺项仍明确报告 `ProviderNotFound`，不得冒充空 scope 成功；上文确认的 Core 元数据回退只在模型集合已由上游发现或管理员添加确定时补充元数据，不恢复被删条目的新建资格。
+- 元数据富化继承原生顺序：先精确匹配 provider scope 的 upstream model ID，再按完整 canonical ID 精确匹配，随后按最右段 ASCII 小写键做唯一匹配；多个候选不匹配，最后才使用 bare metadata。该顺序不扩大模型集合。动态新增 Profile 的持续注册方式、持久化 schema 与缓存目录属于实现设计，本轮不另设产品策略。
+- base 通过 `sync-catalog` 导出实现该所有权：宿主把 catalog base URL、上次成功快照与可选的 scope 供应商 ID 传给 guest；guest 取回 `providers.json` 与 `providers/{id}/models.json`，返回完整 Profile 集与原始 body，由宿主持久化为 last-good。base 的构建脚本仍从 Core 的 `assets/providers.stravia.json` 生成内嵌 bootstrap Profile 表——该表只服务首次离线启动，不替代远端清单。目录删项不进入删除路径：被删 Profile 保留为 retired 状态，存量连接继续准入执行，新建入口与展示列表不再提供。ADR-0018 的跨模块原子 revision 与 scoped 失败约束仅按 ADR-0073 修订，其他缓存和模型快照契约保留。
 - OpenAI-compatible（包括 embeddings）、Anthropic、Gemini、Open Responses 四类标准 codec 由共享库提供，作为可复用实现源码由五个 guest crate 按需引用。
 - DeepSeek Profile 位于 `base`，复用标准 codec 并保留必要的供应商差异与额度能力，不要求为复用标准协议单独维护一套 codec。
 - Codex、Grok、Command Code、Devin 使用独立专属插件。Devin 保留自定义 Connect-RPC / protobuf 编解码、OAuth、模型列表与相关元数据、AssignModel 辅助调用及额度获取；Command Code 的自定义 Provider 选项注册属于插件契约，不能依赖宿主的供应商专属前端或后端分支。
@@ -62,10 +79,17 @@
 - 宿主决定对外开放的客户端协议，仍可引用共享标准 codec 库；增加新的客户端协议需要宿主支持，不通过 Vendor Plugin 安装隐式开放。
 - 无法表示的任务语义必须显式拒绝，不允许绕过 canonical 契约直接透传客户端流量。
 
+### Custom Provider Profile 与协议选择
+
+- `stravia-vendor-base` 只注册一个 `custom` Provider Profile。管理员进入 Custom 后，从 base 明确声明支持的上游协议中选择；当前可选范围包括已经实现的 OpenAI-compatible、Open Responses、Anthropic Messages 与 Gemini。专属 Vendor 的私有协议不自动加入 Custom。
+- 管理面完全从插件声明生成协议选项，不维护硬编码清单，也不接受任意协议字符串。该 Profile 及其全部选择由 base 单独拥有，不从其他插件合并声明，见 [ADR-0074](../adr/0074-select-custom-protocols-through-one-base-profile.md)。
+- 现有 `protocol-openai-chat-completions`、`protocol-open-responses`、`protocol-anthropic-messages`、`protocol-gemini` 四个独立 Profile 入口并入 Custom。迁移已有连接时保留连接 UUID、凭据与 Route；具体选择标识、WIT 版本及迁移 SQL 是满足该迁移约束的实现选择，本轮不另设产品策略。
+- 该合并已实现：base 只注册一个 `custom` Profile，其 channel 通过 `protocols` 枚举声明可选协议；管理写入按该枚举校验，不接受任意协议字符串。存量 `protocol-*` 连接由迁移 `0059` 改写为 `custom`，保留 UUID、凭据、protocol 值与 Route。
+
 ## 已确认的技术栈与插件契约
 
 - 唯一目标技术栈为 Wasmtime + WebAssembly Component Model + WIT，不同时提供 Extism 或另一套自定义 Core Wasm ABI。
-- Wasmtime 负责加载、执行与资源限制；`stravia:vendor@0.2.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
+- Wasmtime 负责加载、执行与资源限制；`stravia:vendor@0.3.0` WIT 定义插件导出的供应商能力和导入的受控网络、凭据等宿主能力。
 - `VendorDescriptor` 包含 `vendor_id`、版本、展示元数据、canonical 格式版本、`kind` 与 `providers`；`kind` 为 `fallback` 或 `dedicated`。每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、channel、能力、配置、网络权限和数据兼容信息。
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
@@ -80,7 +104,7 @@
 
 ### 实现与验证入口
 
-- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.2.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
+- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.3.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/` 是五个随附 guest 实现来源。
 - `backend/crates/stravia-vendor-common/` 是只提供多个 guest 实际共用辅助代码的 `rlib`。标准 codec 由 guest 在 Rust 源码层链接 `stravia-protocol-codec` 并编入 Component，而非采用 Component composition；Command Code 与 Devin 私有 codec 留在各自 crate，Bedrock、Cohere、Gateway、WatsonX 等私有实现留在 `base`。

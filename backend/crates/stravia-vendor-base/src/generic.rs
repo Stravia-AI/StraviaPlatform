@@ -16,10 +16,6 @@ use stravia_vendor_sdk::{
     ProviderSnapshot, ValidationIssue, read_http_body,
 };
 
-use crate::metadata::{
-    PROTOCOL_ANTHROPIC, PROTOCOL_GEMINI, PROTOCOL_OPEN_RESPONSES, PROTOCOL_OPENAI_CHAT,
-};
-
 const MAX_JSON_BODY: usize = 8 * 1024 * 1024;
 const OPENAI_CHAT_PROTOCOL: &str = "openai-compatible/chat-completions/v1";
 const OPEN_RESPONSES_PROTOCOL: &str = "open-responses/responses/2026-04-24";
@@ -183,13 +179,9 @@ pub(crate) fn select_protocol(provider: &ProviderSnapshot, request: &AiRequest) 
 
 fn protocol_for(vendor_id: &str, provider: &ProviderSnapshot) -> Result<String, PluginError> {
     let fixed = match vendor_id {
-        PROTOCOL_GEMINI => Some(GEMINI_PROTOCOL),
-        PROTOCOL_OPENAI_CHAT => None,
-        PROTOCOL_OPEN_RESPONSES => Some(OPEN_RESPONSES_PROTOCOL),
-        PROTOCOL_ANTHROPIC
-        | "kimi-for-coding"
-        | "minimax-coding-plan"
-        | "minimax-cn-coding-plan" => Some(ANTHROPIC_PROTOCOL),
+        "kimi-for-coding" | "minimax-coding-plan" | "minimax-cn-coding-plan" => {
+            Some(ANTHROPIC_PROTOCOL)
+        }
         "github-copilot"
         | "nano-gpt"
         | "zai-coding-plan"
@@ -217,16 +209,14 @@ fn protocol_for(vendor_id: &str, provider: &ProviderSnapshot) -> Result<String, 
         _ => common::endpoint(selected)?,
     };
     let supported = match vendor_id {
-        PROTOCOL_GEMINI | "google" => endpoint == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-        PROTOCOL_OPENAI_CHAT | "openai-compatible" => matches!(
+        "google" => endpoint == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        "openai-compatible" => matches!(
             endpoint,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 | OPENAI_COMPATIBLE_EMBEDDINGS_V1
         ),
-        PROTOCOL_OPEN_RESPONSES => endpoint == OPEN_RESPONSES_2026_04_24,
-        PROTOCOL_ANTHROPIC
-        | "kimi-for-coding"
-        | "minimax-coding-plan"
-        | "minimax-cn-coding-plan" => endpoint == ANTHROPIC_MESSAGES_2023_06_01,
+        "kimi-for-coding" | "minimax-coding-plan" | "minimax-cn-coding-plan" => {
+            endpoint == ANTHROPIC_MESSAGES_2023_06_01
+        }
         "custom" => matches!(
             endpoint,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
@@ -324,7 +314,7 @@ fn inference_url(
     }
     let mut url = common::endpoint_url(&provider.base_url, path)?;
     if protocol == GEMINI_PROTOCOL
-        && matches!(vendor_id, "google" | PROTOCOL_GEMINI)
+        && matches!(vendor_id, "google" | "custom")
         && let Some(key) = setting(provider, "apiKey").filter(|key| !key.trim().is_empty())
     {
         url.push(if url.contains('?') { '&' } else { '?' });
@@ -346,7 +336,7 @@ fn apply_auth_headers(
     headers: &mut Vec<(String, String)>,
 ) -> Result<(), PluginError> {
     headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
-    if protocol == GEMINI_PROTOCOL && matches!(vendor_id, "google" | PROTOCOL_GEMINI) {
+    if protocol == GEMINI_PROTOCOL && matches!(vendor_id, "google" | "custom") {
         return Ok(());
     }
     if vendor_id == "cloudflare-ai-gateway" {
@@ -791,7 +781,7 @@ mod tests {
 
     fn provider(protocol: &str, api_key: &str) -> ProviderSnapshot {
         ProviderSnapshot {
-            provider_id: PROTOCOL_OPENAI_CHAT.into(),
+            provider_id: "custom".into(),
             channel: "default".into(),
             base_url: "https://upstream.test/v1".into(),
             protocol: protocol.into(),
@@ -845,10 +835,10 @@ mod tests {
     }
 
     #[test]
-    fn protocol_vendors_apply_their_declared_auth_shape() {
+    fn custom_vendor_applies_the_selected_protocol_auth_shape() {
         let mut openai_headers = Vec::new();
         apply_auth_headers(
-            PROTOCOL_OPENAI_CHAT,
+            "custom",
             &provider(OPENAI_CHAT_PROTOCOL, "sk-test"),
             OPENAI_CHAT_PROTOCOL,
             &mut openai_headers,
@@ -861,7 +851,7 @@ mod tests {
 
         let mut anthropic_headers = Vec::new();
         apply_auth_headers(
-            PROTOCOL_ANTHROPIC,
+            "custom",
             &provider(ANTHROPIC_PROTOCOL, "sk-ant"),
             ANTHROPIC_PROTOCOL,
             &mut anthropic_headers,
@@ -875,27 +865,6 @@ mod tests {
             ]
         );
 
-        let protocol_gemini = provider(GEMINI_PROTOCOL, "sk-protocol-gemini");
-        let mut protocol_gemini_headers = Vec::new();
-        apply_auth_headers(
-            PROTOCOL_GEMINI,
-            &protocol_gemini,
-            GEMINI_PROTOCOL,
-            &mut protocol_gemini_headers,
-        )
-        .unwrap();
-        assert!(protocol_gemini_headers.is_empty());
-        assert_eq!(
-            inference_url(
-                PROTOCOL_GEMINI,
-                &protocol_gemini,
-                GEMINI_PROTOCOL,
-                "/v1beta/models",
-            )
-            .unwrap(),
-            "https://upstream.test/v1/models?key=sk-protocol-gemini"
-        );
-
         let custom_gemini = provider(GEMINI_PROTOCOL, "sk-custom-gemini");
         let mut custom_gemini_headers = Vec::new();
         apply_auth_headers(
@@ -905,13 +874,10 @@ mod tests {
             &mut custom_gemini_headers,
         )
         .unwrap();
-        assert_eq!(
-            custom_gemini_headers,
-            vec![("authorization".into(), "Bearer sk-custom-gemini".into())]
-        );
+        assert!(custom_gemini_headers.is_empty());
         assert_eq!(
             inference_url("custom", &custom_gemini, GEMINI_PROTOCOL, "/v1beta/models").unwrap(),
-            "https://upstream.test/v1/models"
+            "https://upstream.test/v1/models?key=sk-custom-gemini"
         );
     }
 
@@ -924,14 +890,8 @@ mod tests {
         assert!(headers.is_empty());
 
         let anthropic = provider("anthropic-messages", "");
-        let anthropic_protocol = protocol_for(PROTOCOL_ANTHROPIC, &anthropic).unwrap();
-        apply_auth_headers(
-            PROTOCOL_ANTHROPIC,
-            &anthropic,
-            &anthropic_protocol,
-            &mut headers,
-        )
-        .unwrap();
+        let anthropic_protocol = protocol_for("custom", &anthropic).unwrap();
+        apply_auth_headers("custom", &anthropic, &anthropic_protocol, &mut headers).unwrap();
         assert_eq!(
             headers,
             vec![("anthropic-version".into(), "2023-06-01".into())]
@@ -974,14 +934,14 @@ mod tests {
         );
         assert_eq!(
             protocol_for(
-                PROTOCOL_OPENAI_CHAT,
+                "custom",
                 &provider(&OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string(), "")
             )
             .unwrap(),
             OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string()
         );
         assert_eq!(
-            protocol_for(PROTOCOL_GEMINI, &provider(OPENAI_CHAT_PROTOCOL, "")).unwrap(),
+            protocol_for("custom", &provider("google-gemini", "")).unwrap(),
             GEMINI_PROTOCOL
         );
         assert!(protocol_for("custom", &provider(COHERE_PROTOCOL, "")).is_err());
@@ -1099,7 +1059,7 @@ mod tests {
                 }
             ]),
         );
-        let catalog_models = explicit_discovery(PROTOCOL_OPENAI_CHAT, &catalog_provider)
+        let catalog_models = explicit_discovery("custom", &catalog_provider)
             .unwrap()
             .unwrap()
             .models;

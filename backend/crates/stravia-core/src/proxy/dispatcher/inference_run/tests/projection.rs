@@ -156,7 +156,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
             &gateway,
             model,
             &[format!("http://{address}/v1")],
-            "protocol-open-responses",
+            "custom",
             "open-responses",
         )
         .await;

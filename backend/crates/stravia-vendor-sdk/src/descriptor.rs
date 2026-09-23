@@ -159,6 +159,11 @@ pub struct ChannelDescriptor {
     /// it or reject it. `None` is valid for a custom vendor wire protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// Selectable wire protocols for multi-protocol channels (e.g. the single
+    /// base `custom` profile). When non-empty the admin UI renders a required
+    /// select and the host rejects protocol values outside this set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<EnumOption>,
     /// Vendor-declared initial base URL presented when creating a connection.
     /// Runtime authority still comes from the saved provider snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +341,17 @@ pub struct ProviderDescriptor {
     pub network: NetworkDeclaration,
     #[serde(default)]
     pub data_compat: DataCompatibility,
+    /// Official product site declared by the vendor. Host icon resolution may
+    /// fetch `/favicon.ico` from this origin when the catalog has no logo;
+    /// documentation URLs and guessed domains are not acceptable values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Guest-declared implementation family (e.g. the catalog `npm` value a
+    /// runtime-registered profile was derived from). The host echoes the
+    /// whole profile back in `operation_metadata.vendor_profile` so the guest
+    /// can dispatch dynamically registered profiles without catalog access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
 }
 
 /// The manifest a component returns from its `descriptor` export, serialized
@@ -501,6 +517,22 @@ impl ProviderDescriptor {
                     {
                         return Err(DescriptorError::InvalidAuthPolicy(ch.id.clone()));
                     }
+                }
+            }
+            if !ch.protocols.is_empty() {
+                let mut values = BTreeSet::new();
+                for option in &ch.protocols {
+                    if option.value.trim().is_empty()
+                        || option.label.trim().is_empty()
+                        || !values.insert(option.value.as_str())
+                    {
+                        return Err(DescriptorError::InvalidProtocols(ch.id.clone()));
+                    }
+                }
+                if let Some(protocol) = &ch.protocol
+                    && !values.contains(protocol.as_str())
+                {
+                    return Err(DescriptorError::InvalidProtocols(ch.id.clone()));
                 }
             }
         }
@@ -673,6 +705,8 @@ pub enum DescriptorError {
     EmptyEnum(String),
     #[error("enum field `{0}` declares a duplicate option value")]
     DuplicateEnumValue(String),
+    #[error("channel `{0}` declares an invalid selectable protocol set")]
+    InvalidProtocols(String),
 }
 
 #[cfg(test)]
@@ -692,6 +726,7 @@ mod tests {
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -699,6 +734,8 @@ mod tests {
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),

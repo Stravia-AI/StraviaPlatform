@@ -7,6 +7,7 @@ use crate::{
 mod builder;
 mod extensions;
 mod history_marker_executions;
+mod icon;
 mod lifecycle;
 mod runtime;
 #[cfg(test)]
@@ -64,6 +65,7 @@ pub struct Gateway {
     pub(crate) vendor_plugins: Arc<crate::plugin::manager::VendorPlugins>,
     pub(crate) vendor_websocket_pool: Arc<crate::plugin::network::VendorWebSocketPool>,
     pub provider_catalog: provider_catalog::ProviderCatalog,
+    pub catalog_sync: crate::plugin::catalog_sync::VendorCatalogSync,
     pub(crate) provider_allowance_state: admin::provider_allowance::ProviderAllowanceState,
     pub(crate) allowance_samples: admin::provider_allowance::AllowanceSampleStore,
     vendor_client_cache: Arc<tokio::sync::RwLock<[Option<VendorClientCache>; 2]>>,
@@ -115,6 +117,7 @@ impl Gateway {
             vendor_plugins: Arc::clone(&self.vendor_plugins),
             vendor_websocket_pool: Arc::clone(&self.vendor_websocket_pool),
             provider_catalog: self.provider_catalog.clone(),
+            catalog_sync: self.catalog_sync.clone(),
             provider_allowance_state: self.provider_allowance_state.clone(),
             allowance_samples: self.allowance_samples.clone(),
             vendor_client_cache: Arc::clone(&self.vendor_client_cache),

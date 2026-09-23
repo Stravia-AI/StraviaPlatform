@@ -106,6 +106,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                     }),
                 }),
                 protocol: Some("devin-connect".into()),
+                protocols: Vec::new(),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -113,6 +114,8 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: vec![ConfigField {
                 key: "apiKey".into(),
                 label: "Session token".into(),

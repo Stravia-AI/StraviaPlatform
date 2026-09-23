@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- The service picker again shows localized sign-in methods instead of internal capability names, omits capability badges, and prefers model-directory logos before falling back to bundled icons.
 - An empty hidden-round ledger no longer turns confirmed response usage into unknown usage. Streaming and buffered Responses preserve known zero values without inventing values for unreported usage.
 - Observation attribution reuses ancestor windows from the same Generation Chain traversal instead of repeatedly restoring overlapping histories for each retained-tail candidate. Confirmed-parent diagnostics, ambiguity checks, Principal isolation, and resource limits remain unchanged.
 - Attachment normalization preserves Artifact error categories: invalid input stays a client error, while storage failures return sanitized server errors. SQLite Artifact sweeping releases the database writer during object I/O and keeps its object lock until in-flight deletion settles, including caller cancellation; re-upload repairs expired objects before making them readable again.

@@ -4,32 +4,24 @@ import { icons } from '../../assets/icons'
 import { catalogLogoUrl } from '$lib/admin-client'
 
 interface Props {
+  /** Stable provider identity used for the built-in SVG and name fallback. */
   icon?: string | null
   name: string
-  catalog?: boolean
-  endpoint?: string | null
+  /**
+   * Host icon request key: a descriptor/catalog identity for unsaved options
+   * or the provider connection id for saved connections (the host resolves
+   * the catalog identity, website, and connection origin itself).
+   */
+  logo?: string | null
 }
 
-let { icon, name, catalog = false, endpoint }: Props = $props()
+let { icon, name, logo }: Props = $props()
 let failedSource = $state<string>()
 const isCustom = $derived(icon?.toLowerCase() === 'custom')
 const svg = $derived(icon && !isCustom ? icons[icon.toLowerCase()] : undefined)
 const svgSource = $derived(svg ? `data:image/svg+xml,${encodeURIComponent(svg)}` : undefined)
-const catalogSource = $derived(catalog && icon && !isCustom ? catalogLogoUrl(icon) : undefined)
-const endpointSource = $derived(isCustom ? endpointFaviconUrl(endpoint) : undefined)
-const usingFallback = $derived(Boolean(failedSource) || (!svgSource && !catalogSource && !endpointSource))
-
-function endpointFaviconUrl(endpoint: string | null | undefined): string | undefined {
-  if (!endpoint) return undefined
-
-  try {
-    const url = new URL(endpoint)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-    return new URL('/favicon.ico', url.origin).href
-  } catch {
-    return undefined
-  }
-}
+const remoteSource = $derived(logo ? catalogLogoUrl(logo) : undefined)
+const usingFallback = $derived(Boolean(failedSource) || (!svgSource && !remoteSource))
 </script>
 
 {#snippet fallback()}
@@ -47,8 +39,8 @@ function endpointFaviconUrl(endpoint: string | null | undefined): string | undef
 {/snippet}
 
 <span class="route-provider-mark" data-fallback={usingFallback ? 'true' : 'false'} aria-hidden="true">
-  {#if catalogSource}
-    {#await catalogSource}
+  {#if remoteSource}
+    {#await remoteSource}
       {@render fallback()}
     {:then source}
       {#if failedSource === source}
@@ -59,8 +51,6 @@ function endpointFaviconUrl(endpoint: string | null | undefined): string | undef
     {:catch}
       {@render fallback()}
     {/await}
-  {:else if endpointSource && failedSource !== endpointSource}
-    {@render remoteLogo(endpointSource)}
   {:else}
     {@render fallback()}
   {/if}

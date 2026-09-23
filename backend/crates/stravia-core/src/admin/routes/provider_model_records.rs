@@ -262,8 +262,8 @@ impl AdminService {
             .ok_or_else(|| anyhow::anyhow!("Provider Model has no Provider Catalog source"))?;
         let source = self
             .gw
-            .provider_catalog
-            .model_source(source_provider_id, &model_id)
+            .catalog_sync
+            .catalog_model_source(source_provider_id, &model_id)
             .await?;
         let metadata = ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
         super::RouteModule::new(self)
@@ -464,7 +464,7 @@ impl AdminService {
         if let Some(catalog_provider_id) = provider.preset_key.as_deref() {
             let scope = match self
                 .gw
-                .provider_catalog
+                .catalog_sync
                 .provider_scope(catalog_provider_id)
                 .await
             {

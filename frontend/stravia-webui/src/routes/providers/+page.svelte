@@ -294,8 +294,7 @@ async function copyProvider(): Promise<void> {
     <ProviderMark
       icon={providerIcon(provider)}
       name={provider.name}
-      catalog={Boolean(profileDescriptor(provider)?.catalog_id ?? provider.preset_key)}
-      endpoint={provider.base_url} />
+      logo={provider.id} />
     <div class="min-w-0">
       <p class="truncate font-medium">{provider.name}</p>
       {#if provider.vendor}
@@ -424,8 +423,7 @@ async function copyProvider(): Promise<void> {
                 <ProviderMark
                   icon={providerIcon(provider)}
                   name={provider.name}
-                  catalog={Boolean(profileDescriptor(provider)?.catalog_id ?? provider.preset_key)}
-                  endpoint={provider.base_url} />
+                  logo={provider.id} />
                 <div class="min-w-0">
                   <p class="truncate font-medium">{provider.name}</p>
                   <p class="mt-1 text-xs text-muted-foreground">
