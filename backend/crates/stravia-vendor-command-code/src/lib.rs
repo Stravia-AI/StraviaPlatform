@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
-use stravia_protocol_codec::transform::{ProtocolAdapter, ProtocolTransform, TextWireStreamParser};
+use stravia_protocol_codec::transform::{ProtocolTransform, TextWireStreamParser};
 use stravia_runtime_contract::protocol::ids::COMMAND_CODE_GENERATE_V1;
 use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest, AiStreamDelta};
 use stravia_vendor_common::{common, thinking};
@@ -335,29 +335,13 @@ fn infer(
     decode_inference(host, response)
 }
 
+/// The upstream always answers `/alpha/generate` with an NDJSON event stream,
+/// regardless of how it labels `Content-Type`, so the body is decoded as a
+/// stream unconditionally.
 fn decode_inference(
     host: &GuestHost,
     response: stravia_vendor_sdk::HttpResponse,
 ) -> Result<OperationOutput, PluginError> {
-    let headers = response.headers()?;
-    let streaming = headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("content-type")
-            && value.to_ascii_lowercase().contains("application/x-ndjson")
-    });
-    if !streaming {
-        let body = read_http_body(&response, MAX_BODY)?;
-        let value = serde_json::from_slice(&body).map_err(|err| {
-            model_error(format!(
-                "upstream returned invalid Command Code JSON: {err}"
-            ))
-        })?;
-        let complete = CommandCodeGenerateV1
-            .decode_response(value)
-            .map_err(|err| model_error(format!("invalid Command Code response: {err}")))?;
-        host.emit_completed(&complete)?;
-        return Ok(OperationOutput::Infer(Box::new(complete)));
-    }
-
     let mut parser = CommandCodeStreamParser::new();
     let mut accumulator = StreamResponseAccumulator::default();
     let mut pending_utf8 = Vec::new();

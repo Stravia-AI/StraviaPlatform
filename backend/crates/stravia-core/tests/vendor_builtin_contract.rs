@@ -1950,8 +1950,9 @@ async fn command_code_admin_option_reaches_initialization_and_inference_headers(
 -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(3, |request| {
         if request.path.contains("generate") {
+            // The real upstream labels its NDJSON stream `text/event-stream`.
             MockResponse::bytes(
-                "application/x-ndjson",
+                "text/event-stream",
                 b"{\"type\":\"reasoning-delta\",\"text\":\"because\"}\n{\"type\":\"text-delta\",\"text\":\"done\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":7,\"outputTokens\":3}}\n".to_vec(),
             )
         } else {
