@@ -52,6 +52,7 @@ impl VendorGuest for LifecycleContractVendor {
                             .unwrap_or("fixture-lifecycle")
                             .into(),
                     ),
+                    protocols: Vec::new(),
                     default_base_url: None,
                     default_models_source: None,
                     capabilities: capabilities.clone(),
@@ -59,6 +60,8 @@ impl VendorGuest for LifecycleContractVendor {
                     search_model_required: false,
                 }],
                 capabilities,
+                website: None,
+                implementation: None,
                 config_fields: vec![
                     ConfigField {
                         key: "mode".into(),

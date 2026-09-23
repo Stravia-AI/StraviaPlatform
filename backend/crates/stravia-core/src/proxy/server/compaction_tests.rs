@@ -139,7 +139,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let provider = admin.create_provider(CreateProvider {
             name: Some("local publication fault Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-open-responses".into(), channel: "default".into(),
+                vendor: "custom".into(), channel: "default".into(),
                 protocol: Some("open-responses".into()),
                 base_url: format!("http://{provider_address}/v1"),
                 models_source: None, static_models: None,
@@ -310,7 +310,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         let provider = admin.create_provider(CreateProvider {
             name: Some("local HTTP Responses provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-open-responses".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("open-responses".into()),
                 base_url: format!("http://{provider_address}/v1"),

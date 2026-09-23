@@ -143,8 +143,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
           <ProviderMark
             icon={descriptor?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'}
             name={provider.name}
-            catalog={Boolean(descriptor?.catalog_id ?? provider.preset_key)}
-            endpoint={provider.base_url} />
+            logo={provider.id} />
           {#if provider.protocol}<Badge variant="outline">{provider.protocol}</Badge>{/if}
           {#each channel?.capabilities ?? [] as capability (capability)}
             <Badge variant="secondary" class="font-technical">{capability}</Badge>

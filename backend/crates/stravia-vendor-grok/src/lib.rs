@@ -107,6 +107,7 @@ pub fn descriptor() -> VendorDescriptor {
                     manual_input: None,
                 }),
                 protocol: Some("open-responses".into()),
+                protocols: Vec::new(),
                 default_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -114,6 +115,8 @@ pub fn descriptor() -> VendorDescriptor {
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: Vec::new(),
             network: NetworkDeclaration {
                 base_url_field: None,

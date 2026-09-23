@@ -186,6 +186,8 @@ fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
     GatewayConfig {
         data_dir,
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
+        catalog_base_url: Some(stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned()),
+        catalog_background_refresh: true,
         ..Default::default()
     }
 }

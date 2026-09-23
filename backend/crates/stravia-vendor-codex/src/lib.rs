@@ -89,6 +89,7 @@ pub fn descriptor() -> VendorDescriptor {
                     }),
                 }),
                 protocol: Some("open-responses".into()),
+                protocols: Vec::new(),
                 default_base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -96,6 +97,8 @@ pub fn descriptor() -> VendorDescriptor {
                 search_model_required: true,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: vec![ConfigField {
                 key: "websocket_url".into(),
                 label: "Responses WebSocket URL".into(),

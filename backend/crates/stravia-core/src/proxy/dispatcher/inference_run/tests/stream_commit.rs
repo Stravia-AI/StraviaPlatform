@@ -410,7 +410,7 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         &gateway,
         "failing-live-protected-reasoning",
         &[upstream_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;
@@ -461,7 +461,7 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
         &gateway,
         "late-encrypted-summary",
         &[upstream_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;

@@ -128,7 +128,10 @@ impl Gateway {
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
-        let provider_catalog = provider_catalog::ProviderCatalog::new(paths.catalog_root())?;
+        let provider_catalog = provider_catalog::ProviderCatalog::new(
+            paths.catalog_root(),
+            config.catalog_base_url.clone(),
+        )?;
         let retention_days = match storage.settings().get("log_retention_days").await {
             Ok(value) => value
                 .and_then(|value| value.parse::<u32>().ok())
@@ -298,16 +301,24 @@ impl Gateway {
             crate::data_paths::DataPaths::new(&config.data_dir).plugins(),
         )
         .await?;
+        let catalog_base_url = config.catalog_base_url.clone();
         let mut gw = Self {
             config,
             storage,
             storage_kind,
             http_client,
-            vendor_http_client,
-            vendor_websocket_client,
-            vendor_plugins,
+            vendor_http_client: vendor_http_client.clone(),
+            vendor_websocket_client: vendor_websocket_client.clone(),
+            vendor_plugins: vendor_plugins.clone(),
             vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
-            provider_catalog,
+            provider_catalog: provider_catalog.clone(),
+            catalog_sync: crate::plugin::catalog_sync::VendorCatalogSync::new(
+                vendor_plugins.clone(),
+                provider_catalog,
+                catalog_base_url,
+                vendor_http_client.clone(),
+                vendor_websocket_client.clone(),
+            ),
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::default(),
             allowance_samples,
             vendor_client_cache: Arc::new(tokio::sync::RwLock::new([None, None])),
@@ -342,16 +353,19 @@ impl Gateway {
             lifecycle_owner: true,
         };
         gw.vendor_plugins.reconcile_bundled(&gw).await?;
+        if let Err(error) = gw.catalog_sync.bootstrap().await {
+            tracing::warn!(error = ?error, "provider catalog bootstrap sync failed");
+        }
         gw.install_model_turn();
         configure_gateway_extensions(&mut gw, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             .await?;
-        {
-            let catalog = gw.provider_catalog.clone();
+        if gw.config.catalog_background_refresh {
+            let catalog_sync = gw.catalog_sync.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
             gw.lifecycle.spawn(async move {
                 let initial_refresh = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    result = catalog.refresh() => result,
+                    result = catalog_sync.refresh() => result,
                 };
                 if let Err(error) = initial_refresh {
                     tracing::warn!(error = ?error, "provider catalog startup refresh failed");
@@ -369,7 +383,7 @@ impl Gateway {
                     }
                     let refresh = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = catalog.refresh() => result,
+                        result = catalog_sync.refresh() => result,
                     };
                     if let Err(error) = refresh {
                         tracing::warn!(error = ?error, "provider catalog refresh failed");

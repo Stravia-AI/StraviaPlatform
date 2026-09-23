@@ -302,7 +302,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         &gateway,
         "origin-replay",
         &[origin_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;
@@ -310,7 +310,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         &gateway,
         "foreign-responses-replay",
         &[foreign_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;
@@ -505,7 +505,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
             &gateway,
             "rejected-cipher-replay",
             &[format!("http://{address}/v1")],
-            "protocol-open-responses",
+            "custom",
             "open-responses",
         )
         .await;
@@ -646,7 +646,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
         &gateway,
         "signed-chat-replay",
         &[upstream_url],
-        "protocol-anthropic-messages",
+        "custom",
         "anthropic-messages",
     )
     .await;
@@ -1249,14 +1249,8 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     .await
     .expect("Gateway");
     let model = "thinking-level-model";
-    configure_route_with_protocol(
-        &gateway,
-        model,
-        &[base_url],
-        "protocol-openai-chat-completions",
-        "openai-compatible",
-    )
-    .await;
+    configure_route_with_protocol(&gateway, model, &[base_url], "custom", "openai-compatible")
+        .await;
     let headers = authorized_headers(&gateway).await;
 
     for level in [
@@ -1300,14 +1294,9 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
     .await
     .expect("Gateway");
     let model = "thinking-loss-model";
-    let route_id = configure_route_with_protocol(
-        &gateway,
-        model,
-        &[base_url],
-        "protocol-openai-chat-completions",
-        "openai-compatible",
-    )
-    .await;
+    let route_id =
+        configure_route_with_protocol(&gateway, model, &[base_url], "custom", "openai-compatible")
+            .await;
     let route = gateway
         .admin()
         .list_models()
@@ -1380,14 +1369,9 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
     .await
     .expect("Gateway");
     let model = "no-thinking-level-model";
-    let route_id = configure_route_with_protocol(
-        &gateway,
-        model,
-        &[base_url],
-        "protocol-openai-chat-completions",
-        "openai-compatible",
-    )
-    .await;
+    let route_id =
+        configure_route_with_protocol(&gateway, model, &[base_url], "custom", "openai-compatible")
+            .await;
     let route = gateway
         .admin()
         .list_models()
@@ -1463,7 +1447,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         &gateway,
         model,
         &[failed_url, fallback_url],
-        "protocol-openai-chat-completions",
+        "custom",
         "openai-compatible",
     )
     .await;

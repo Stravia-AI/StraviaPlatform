@@ -43,6 +43,7 @@ fn openai_descriptor() -> ProviderDescriptor {
             description: Some("OpenAI API-key channel.".into()),
             auth: None,
             protocol: Some("openai-compatible".into()),
+            protocols: Vec::new(),
             default_base_url: Some("https://api.openai.com/v1".into()),
             default_models_source: None,
             capabilities: capabilities.clone(),
@@ -50,6 +51,8 @@ fn openai_descriptor() -> ProviderDescriptor {
             search_model_required: false,
         }],
         capabilities,
+        website: None,
+        implementation: None,
         config_fields: vec![
             ConfigField {
                 key: "apiKey".into(),

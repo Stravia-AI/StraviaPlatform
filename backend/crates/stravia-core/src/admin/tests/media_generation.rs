@@ -87,7 +87,7 @@ impl GenerationRouteFixture {
             .providers()
             .create(CreateProviderRecord {
                 name: "Ordinary OpenAI-compatible Provider".into(),
-                vendor: Some("protocol-openai-chat-completions".into()),
+                vendor: Some("custom".into()),
                 protocol: "openai-compatible".into(),
                 base_url: upstream_url.clone(),
                 preset_key: None,

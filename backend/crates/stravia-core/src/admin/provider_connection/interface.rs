@@ -257,7 +257,7 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Custom Connection".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: "protocol-openai-chat-completions".into(),
+                    vendor: "custom".into(),
                     channel: "default".into(),
                     protocol: None,
                     base_url: "http://127.0.0.1:9/v1/".into(),

@@ -166,7 +166,7 @@ async fn protected_responses_router_with_base_url(
         .create_provider(CreateProvider {
             name: Some("Open Responses auth target".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-open-responses".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("open-responses".into()),
                 base_url: base_url.into(),
@@ -747,7 +747,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
         .create_provider(CreateProvider {
             name: Some("No tools".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: "https://example.invalid".into(),

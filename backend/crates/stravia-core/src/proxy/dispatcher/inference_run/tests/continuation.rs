@@ -1042,7 +1042,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         &gateway,
         model,
         &[first_url, second_url],
-        "protocol-openai-chat-completions",
+        "custom",
         "openai-compatible",
     )
     .await;

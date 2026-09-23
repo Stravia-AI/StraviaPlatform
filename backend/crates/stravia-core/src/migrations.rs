@@ -1382,6 +1382,68 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
     }
 
     #[tokio::test]
+    async fn protocol_vendor_merge_preserves_identity_credentials_and_protocol() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite");
+        migrate_sqlite_range(&pool, 1, 58).await;
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, vendor, preset_key, protocol, base_url, api_key,
+                vendor_options, auth_mode
+             ) VALUES
+                ('legacy-chat', 'Legacy Chat', 'protocol-openai-chat-completions', 'legacy-chat',
+                 'openai-compatible', 'https://chat.example.com/v1', 'chat-key', '{\"a\":1}', 'apikey'),
+                ('legacy-gemini', 'Legacy Gemini', 'protocol-gemini', 'legacy-gemini',
+                 'google-gemini', 'https://gemini.example.com', 'gemini-key', '{}', 'apikey'),
+                ('untouched', 'Untouched', 'openai', 'openai',
+                 'openai-compatible', 'https://api.openai.com/v1', 'other-key', '{}', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy protocol providers");
+
+        migrate_sqlite_range(&pool, 59, 59).await;
+
+        let merged = sqlx::query_as::<_, (Option<String>, Option<String>, String, String, String)>(
+            "SELECT vendor, preset_key, protocol, api_key, vendor_options
+             FROM providers WHERE id = 'legacy-chat'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("merged provider");
+        assert_eq!(
+            merged,
+            (
+                Some("custom".to_string()),
+                Some("legacy-chat".to_string()),
+                "openai-compatible".to_string(),
+                "chat-key".to_string(),
+                "{\"a\":1}".to_string()
+            )
+        );
+        let gemini_vendor = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT vendor FROM providers WHERE id = 'legacy-gemini'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("merged gemini provider");
+        assert_eq!(gemini_vendor.as_deref(), Some("custom"));
+        let untouched = sqlx::query_as::<_, (Option<String>, String)>(
+            "SELECT vendor, api_key FROM providers WHERE id = 'untouched'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("untouched provider");
+        assert_eq!(
+            untouched,
+            (Some("openai".to_string()), "other-key".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn media_generation_injection_defaults_false_for_existing_keys() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

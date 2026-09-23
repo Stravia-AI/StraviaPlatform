@@ -168,31 +168,38 @@ impl stravia_core::provider_catalog::CatalogSource for CloudCatalogSource {
         })
     }
 
-    async fn fetch_providers(&self) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("unexpected global catalog refresh")
-    }
-
     async fn fetch_canonical_models(&self) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("unexpected canonical catalog refresh")
-    }
-
-    async fn fetch_provider_scope(&self, provider_id: &str) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(
-            matches!(provider_id, "amazon-bedrock" | "watsonx" | "google-vertex"),
-            "unexpected cloud catalog provider"
-        );
-        Ok(serde_json::to_vec(&json!({
-            "catalog-only-model": {
-                "id": "catalog-only-model",
-                "name": "Catalog-only cloud model",
-                "modalities": {"input":["text"],"output":["text"]}
-            }
-        }))?)
     }
 
     async fn fetch_logo(&self, _provider_id: &str) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("unexpected catalog logo request")
     }
+
+    async fn fetch_favicon(&self, _origin: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("unexpected catalog favicon request")
+    }
+}
+
+/// Provider scopes arrive through the base plugin's `sync-catalog` export and
+/// land in the on-disk cache; tests seed the bootstrap revision directly so
+/// cloud catalog enrichment stays offline.
+fn seed_cloud_catalog_scopes(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let body = serde_json::to_vec(&json!({
+        "catalog-only-model": {
+            "id": "catalog-only-model",
+            "name": "Catalog-only cloud model",
+            "modalities": {"input":["text"],"output":["text"]}
+        }
+    }))?;
+    let directory = stravia_core::data_paths::DataPaths::new(data_dir)
+        .catalog_root()
+        .join("catalog/scopes/bootstrap");
+    for provider_id in ["amazon-bedrock", "watsonx", "google-vertex"] {
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join(format!("{provider_id}.json")), &body)?;
+    }
+    Ok(())
 }
 
 async fn provider_route_and_key(
@@ -419,10 +426,7 @@ async fn custom_and_standard_openai_profiles_use_the_embeddings_codec_over_wasm(
 -> anyhow::Result<()> {
     for (name, vendor) in [
         ("custom-embeddings", "custom"),
-        (
-            "standard-openai-embeddings",
-            "protocol-openai-chat-completions",
-        ),
+        ("standard-openai-embeddings", "openai-compatible"),
     ] {
         let (base_url, server) = local_upstream(1, |_| {
             MockResponse::json(json!({
@@ -844,12 +848,12 @@ async fn manually_installed_dedicated_packages_keep_complete_profiles() -> anyho
 }
 
 #[tokio::test]
-async fn four_builtin_standard_protocols_preserve_tools_thinking_usage_and_terminal_state()
+async fn custom_profile_standard_protocols_preserve_tools_thinking_usage_and_terminal_state()
 -> anyhow::Result<()> {
     let cases = [
         StandardCase {
             name: "openai-chat",
-            vendor: "protocol-openai-chat-completions",
+            vendor: "custom",
             protocol: "openai-compatible",
             response: json!({
                 "id": "chatcmpl-contract", "model": "upstream-model",
@@ -863,7 +867,7 @@ async fn four_builtin_standard_protocols_preserve_tools_thinking_usage_and_termi
         },
         StandardCase {
             name: "responses",
-            vendor: "protocol-open-responses",
+            vendor: "custom",
             protocol: "open-responses",
             response:
                 stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
@@ -882,7 +886,7 @@ async fn four_builtin_standard_protocols_preserve_tools_thinking_usage_and_termi
         },
         StandardCase {
             name: "anthropic",
-            vendor: "protocol-anthropic-messages",
+            vendor: "custom",
             protocol: "anthropic-messages",
             response: json!({
                 "id": "msg-contract", "model": "upstream-model", "role": "assistant",
@@ -897,7 +901,7 @@ async fn four_builtin_standard_protocols_preserve_tools_thinking_usage_and_termi
         },
         StandardCase {
             name: "gemini",
-            vendor: "protocol-gemini",
+            vendor: "custom",
             protocol: "google-gemini",
             response: json!({
                 "responseId": "gemini-contract", "modelVersion": "upstream-model",
@@ -916,11 +920,15 @@ async fn four_builtin_standard_protocols_preserve_tools_thinking_usage_and_termi
         let (base_url, server) =
             local_upstream(1, move |_| MockResponse::json(response_fixture.clone())).await?;
         let (_directory, gateway) = gateway().await?;
-        let metadata = gateway.admin().list_vendor_metadata().await?;
+        let profile = gateway.admin().vendor_metadata(case.vendor)?;
         assert!(
-            metadata
+            profile.channels[0]
+                .protocols
                 .iter()
-                .any(|descriptor| descriptor.provider_id == case.vendor)
+                .any(|option| option.value == case.protocol),
+            "{} must offer {} through the merged Custom profile",
+            case.vendor,
+            case.protocol
         );
         let (route, token) = provider_route_and_key(&gateway, case.name, ProviderSourceInput::Custom { vendor: case.vendor.to_string(), channel: "default".to_string(), protocol: Some(case.protocol.to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey {
             value: "test-standard-key".into(),
@@ -1076,12 +1084,7 @@ async fn base_owned_private_protocols_select_and_round_trip_inside_real_wasm() -
 #[tokio::test]
 async fn explicit_model_sources_keep_vendor_auth_through_real_wasm() -> anyhow::Result<()> {
     let (_directory, gateway) = gateway().await?;
-    for vendor in [
-        "azure",
-        "sap-ai-core",
-        "gitlab",
-        "protocol-anthropic-messages",
-    ] {
+    for vendor in ["azure", "sap-ai-core", "gitlab", "custom"] {
         let expected_calls = if matches!(vendor, "sap-ai-core" | "gitlab") {
             2
         } else {
@@ -1145,7 +1148,7 @@ async fn explicit_model_sources_keep_vendor_auth_through_real_wasm() -> anyhow::
                     vendor: vendor.into(),
                     channel: "default".into(),
                     protocol: Some(
-                        if vendor == "protocol-anthropic-messages" {
+                        if vendor == "custom" {
                             "anthropic-messages"
                         } else {
                             "openai-compatible"
@@ -1221,10 +1224,10 @@ async fn explicit_model_sources_keep_vendor_auth_through_real_wasm() -> anyhow::
 async fn vertex_curated_inventory_preserves_channel_model_ids_without_network() -> anyhow::Result<()>
 {
     let (directory, mut gateway) = gateway().await?;
-    gateway.provider_catalog = stravia_core::provider_catalog::ProviderCatalog::with_source(
-        directory.path().join("cloud-catalog"),
-        Arc::new(CloudCatalogSource),
-    )?;
+    gateway.provider_catalog = gateway
+        .provider_catalog
+        .with_source_override(Arc::new(CloudCatalogSource));
+    seed_cloud_catalog_scopes(directory.path())?;
     for (channel, protocol, expected) in [
         (
             "native",
@@ -1302,10 +1305,10 @@ async fn bedrock_and_watsonx_explicit_and_default_catalog_models_discover_throug
     ];
 
     let (directory, mut gateway) = gateway().await?;
-    gateway.provider_catalog = stravia_core::provider_catalog::ProviderCatalog::with_source(
-        directory.path().join("cloud-catalog"),
-        Arc::new(CloudCatalogSource),
-    )?;
+    gateway.provider_catalog = gateway
+        .provider_catalog
+        .with_source_override(Arc::new(CloudCatalogSource));
+    seed_cloud_catalog_scopes(directory.path())?;
     for case in cases {
         let profile = gateway.admin().vendor_metadata(case.vendor)?;
         assert!(profile.capabilities.contains(&Capability::Infer));
@@ -1735,7 +1738,7 @@ async fn standard_plugin_rejects_an_unrepresentable_hard_requirement_before_netw
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let (_directory, gateway) = gateway().await?;
-    let (route, token) = provider_route_and_key(&gateway, "gemini-lossy", ProviderSourceInput::Custom { vendor: "protocol-gemini".to_string(), channel: "default".to_string(), protocol: Some("google-gemini".to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey { value: "test-key".into() }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning": true, "tool_call": true}))
+    let (route, token) = provider_route_and_key(&gateway, "gemini-lossy", ProviderSourceInput::Custom { vendor: "custom".to_string(), channel: "default".to_string(), protocol: Some("google-gemini".to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey { value: "test-key".into() }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning": true, "tool_call": true}))
     .await?;
     let mut request = standard_client_request(&route);
     request["tools"][0]["function"]["strict"] = json!(true);

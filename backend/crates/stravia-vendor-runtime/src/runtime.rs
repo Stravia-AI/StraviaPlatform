@@ -92,6 +92,20 @@ impl LoadedPlugin {
     pub fn identity(&self) -> &str {
         &self.inner.identity
     }
+
+    /// Returns a handle to the same compiled component whose reported
+    /// descriptor is `descriptor`. Used to pin an effective profile set
+    /// produced by `sync-catalog` without recompiling or repinning the
+    /// component itself.
+    pub fn with_descriptor(&self, descriptor: VendorDescriptor) -> LoadedPlugin {
+        LoadedPlugin {
+            inner: Arc::new(LoadedVersion {
+                component: self.inner.component.clone(),
+                descriptor,
+                identity: self.inner.identity.clone(),
+            }),
+        }
+    }
 }
 
 pub struct OperationScope {
@@ -209,7 +223,7 @@ impl VendorRuntime {
             deadline,
             generation: 0,
         };
-        let mut store = self.new_store(scope, None);
+        let mut store = self.new_store(scope, None, false);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline;
@@ -297,7 +311,7 @@ impl VendorRuntime {
         if wire_input_size(&wit_input.provider, &wit_input.input) > limits.max_request_bytes {
             return Err(RuntimeError::ResourceExhausted);
         }
-        let mut store = self.new_store(scope, Some(operation));
+        let mut store = self.new_store(scope, Some(operation), false);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline;
@@ -357,12 +371,92 @@ impl VendorRuntime {
         OperationOutput::decode_for_host(operation, &bytes).map_err(|_| RuntimeError::InvalidOutput)
     }
 
+    /// Run the vendor-scoped `sync-catalog` export. The store admits only
+    /// `http-start` (the services implementation still enforces the catalog
+    /// origin allowlist) and `log`; connection state, event emission, and
+    /// WebSocket imports stay unavailable. The input/output payloads are the
+    /// serialized `CatalogSyncRequest`/`CatalogSyncOutcome` contract bodies.
+    pub async fn sync_catalog(
+        &self,
+        plugin: &LoadedPlugin,
+        input: Vec<u8>,
+        scope: OperationScope,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        if scope.cancellation.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if Instant::now() >= scope.deadline {
+            return Err(RuntimeError::DeadlineExceeded);
+        }
+        let limits = self.operation_limits(None);
+        if input.len() > limits.max_request_bytes {
+            return Err(RuntimeError::ResourceExhausted);
+        }
+        let wit_input = wit_types::CanonicalPayload {
+            format: CANONICAL_FORMAT_VERSION,
+            body: input,
+        };
+        let mut store = self.new_store(scope, None, true);
+        let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
+        let cancel = store.data().cancellation.clone();
+        let deadline = store.data().deadline;
+        let instantiate =
+            bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
+        let instance = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                return Err(RuntimeError::DeadlineExceeded);
+            }
+            result = instantiate => result.map_err(|error| classify_trap(&error))?,
+        };
+
+        let call = instance.call_sync_catalog(&mut store, &wit_input);
+        let raw = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                return Err(RuntimeError::DeadlineExceeded);
+            }
+            result = call => result,
+        };
+        let raw = match raw {
+            Ok(value) => value,
+            Err(error) => return Err(classify_trap(&error)),
+        };
+        let payload = match raw {
+            Ok(payload) => payload,
+            Err(failure) => {
+                if failure.message.len() > limits.max_event_bytes {
+                    return Err(RuntimeError::ResourceExhausted);
+                }
+                return Err(RuntimeError::from_guest(
+                    convert_error_kind(failure.kind),
+                    failure.message,
+                    failure.upstream_status,
+                ));
+            }
+        };
+        if payload.format != CANONICAL_FORMAT_VERSION
+            || payload.body.len() > limits.max_output_bytes
+        {
+            return Err(RuntimeError::InvalidOutput);
+        }
+        if cancel.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(RuntimeError::DeadlineExceeded);
+        }
+        Ok(payload.body)
+    }
+
     fn validate_imports(&self, component: &Component) -> Result<(), LoadError> {
         for (name, _) in component.component_type().imports(&self.engine) {
             if !matches!(
                 name,
-                "stravia:vendor/host@0.2.0"
-                    | "stravia:vendor/types@0.2.0"
+                "stravia:vendor/host@0.3.0"
+                    | "stravia:vendor/types@0.3.0"
                     // Rust 1.98's wasm32-wasip2 standard library is pinned to
                     // WASIp2 0.2.9. These exact interfaces provide closed
                     // stdio, empty environment, clocks, and entropy through
@@ -400,7 +494,7 @@ impl VendorRuntime {
             deadline: Instant::now() + Duration::from_secs(2),
             generation: 0,
         };
-        let mut store = self.new_store(scope, None);
+        let mut store = self.new_store(scope, None, false);
         let linker = self
             .new_linker()
             .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
@@ -444,7 +538,12 @@ impl VendorRuntime {
         }
     }
 
-    fn new_store(&self, scope: OperationScope, operation: Option<Operation>) -> Store<StoreState> {
+    fn new_store(
+        &self,
+        scope: OperationScope,
+        operation: Option<Operation>,
+        catalog_sync: bool,
+    ) -> Store<StoreState> {
         let runtime_limits = self.operation_limits(operation);
         let limits = StoreLimitsBuilder::new()
             .memory_size(runtime_limits.max_memory_bytes)
@@ -470,6 +569,7 @@ impl VendorRuntime {
                 generation: scope.generation,
                 runtime_limits: runtime_limits.clone(),
                 operation,
+                catalog_sync,
                 upstream_starts: 0,
                 host_io_bytes: 0,
                 emitted_bytes: 0,
@@ -496,6 +596,10 @@ struct StoreState {
     generation: u64,
     runtime_limits: RuntimeLimits,
     operation: Option<Operation>,
+    /// `sync-catalog` runs without an operation kind: `http-start` stays
+    /// admitted under the services' own origin checks while every
+    /// connection-scoped import remains rejected.
+    catalog_sync: bool,
     upstream_starts: usize,
     host_io_bytes: usize,
     emitted_bytes: usize,
@@ -538,6 +642,17 @@ impl StoreState {
         })
     }
 
+    fn network_active(&self) -> Result<(), HostFailure> {
+        self.active()?;
+        if self.operation.is_none() && !self.catalog_sync {
+            return Err(HostFailure::new(
+                ErrorKind::Trapped,
+                "host operation services are unavailable during a pure guest call",
+            ));
+        }
+        Ok(())
+    }
+
     fn account_host_io(&mut self, bytes: usize) -> Result<(), HostFailure> {
         self.host_io_bytes = self
             .host_io_bytes
@@ -570,7 +685,7 @@ impl wit_host::Host for StoreState {
         request: wit_types::HttpRequest,
     ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
     {
-        if let Err(error) = self.operation_active() {
+        if let Err(error) = self.network_active() {
             return Ok(Err(to_wit_failure(error)));
         }
         let request_bytes = request.body.len()
@@ -753,7 +868,7 @@ impl wit_host::HostHttpResponse for StoreState {
         &mut self,
         response: Resource<HttpResponseResource>,
     ) -> Result<Result<u16, wit_types::PluginError>, wasmtime::Error> {
-        if let Err(error) = self.operation_active() {
+        if let Err(error) = self.network_active() {
             return Ok(Err(to_wit_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
@@ -764,7 +879,7 @@ impl wit_host::HostHttpResponse for StoreState {
         &mut self,
         response: Resource<HttpResponseResource>,
     ) -> Result<Result<Vec<(String, String)>, wit_types::PluginError>, wasmtime::Error> {
-        if let Err(error) = self.operation_active() {
+        if let Err(error) = self.network_active() {
             return Ok(Err(to_wit_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
@@ -784,7 +899,7 @@ impl wit_host::HostHttpResponse for StoreState {
         &mut self,
         response: Resource<HttpResponseResource>,
     ) -> Result<Result<Option<Vec<u8>>, wit_types::PluginError>, wasmtime::Error> {
-        if let Err(error) = self.operation_active() {
+        if let Err(error) = self.network_active() {
             return Ok(Err(to_wit_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
@@ -1020,6 +1135,7 @@ fn convert_error_kind(value: wit_types::ErrorKind) -> ErrorKind {
         wit_types::ErrorKind::Cancelled => ErrorKind::Cancelled,
         wit_types::ErrorKind::DeadlineExceeded => ErrorKind::DeadlineExceeded,
         wit_types::ErrorKind::ResourceExhausted => ErrorKind::ResourceExhausted,
+        wit_types::ErrorKind::ProviderNotFound => ErrorKind::ProviderNotFound,
     }
 }
 
@@ -1072,6 +1188,7 @@ fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
         ErrorKind::Cancelled => wit_types::ErrorKind::Cancelled,
         ErrorKind::DeadlineExceeded => wit_types::ErrorKind::DeadlineExceeded,
         ErrorKind::ResourceExhausted => wit_types::ErrorKind::ResourceExhausted,
+        ErrorKind::ProviderNotFound => wit_types::ErrorKind::ProviderNotFound,
     };
     wit_types::PluginError {
         kind,
@@ -1291,6 +1408,7 @@ mod profile_admission_tests {
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
                 capabilities: capabilities.clone(),
@@ -1301,6 +1419,8 @@ mod profile_admission_tests {
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),
+            website: None,
+            implementation: None,
         }
     }
 

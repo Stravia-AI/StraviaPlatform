@@ -896,7 +896,7 @@ async fn create_test_provider_with_model(
         .create_provider(CreateProvider {
             name: Some(name.into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url,
@@ -1258,13 +1258,7 @@ async fn serve_media_model(
 async fn configure_route(gateway: &Gateway, model: &str, base_urls: &[String]) {
     // Generic fixtures speak Chat Completions over HTTP. Keep them off the
     // OpenAI-direct Responses WebSocket path; dedicated transport tests opt in.
-    configure_route_with_vendor(
-        gateway,
-        model,
-        base_urls,
-        "protocol-openai-chat-completions",
-    )
-    .await;
+    configure_route_with_vendor(gateway, model, base_urls, "custom").await;
 }
 
 async fn configure_route_with_vendor(

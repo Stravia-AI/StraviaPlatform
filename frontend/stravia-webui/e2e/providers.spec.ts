@@ -7,6 +7,46 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test('service cards localize sign-in methods and prefer catalog logos with local fallback', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
+  let failLogo = false
+  let logoRequests = 0
+  await page.route('**/api/v1/catalog/providers/openai/logo', async (route) => {
+    logoRequests += 1
+    if (failLogo) {
+      await route.fulfill({ status: 404, body: '' })
+    } else {
+      await route.fulfill({
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><path d="M0 0h1v1H0z"/></svg>',
+      })
+    }
+  })
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /连接.*服务/ }).click()
+  const grid = page.locator('[data-provider-grid]')
+  const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥$/ })
+  await expect(openAi).toBeVisible()
+  await expect(grid.getByRole('button', { name: /Codex · OAuth 账号/ })).toBeVisible()
+  await expect(grid).not.toContainText(/\binfer\b|model_discovery|config_validation/)
+  await expect(openAi.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai\/logo$/)
+  await expect.poll(() => logoRequests).toBeGreaterThan(0)
+  await expect.poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
+
+  const search = page.locator('[data-provider-toolbar] input')
+  await search.fill('账号')
+  await expect(grid.getByRole('button')).toHaveCount(2)
+  await search.fill('API 密钥')
+  await expect(openAi).toBeVisible()
+  await expect(grid.getByRole('button', { name: /OAuth 账号/ })).toHaveCount(0)
+
+  failLogo = true
+  await page.reload()
+  await page.getByRole('button', { name: /连接.*服务/ }).click()
+  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  await expect.poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
+})
+
 test('model ID suggestions preserve arbitrary text, composition, and form focus', async ({ page }) => {
   await page.goto('/models/new')
   const modelId = page.locator('#route-model-id')
@@ -157,20 +197,20 @@ test('provider editor selects a service before validating its configuration', as
 
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toHaveCount(0)
-  const searchInput = page.getByRole('textbox', { name: 'Search services, channels, or capabilities' })
+  const searchInput = page.locator('[data-provider-toolbar] input')
   await expect(searchInput).toBeVisible()
   const refreshButton = page.getByRole('button', { name: 'Reload model services' })
   await expect(refreshButton).toBeVisible()
   await refreshButton.click()
-  await expect(page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /OpenAI.*API key/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI Compatible / })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
 
   await searchInput.fill('OpenAI')
-  await expect(page.getByRole('button', { name: /OpenAI.*API key/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Choose service' })).toHaveAttribute('aria-selected', 'true')
-  const openAiOption = page.getByRole('button', { name: /OpenAI.*API key/ })
+  const openAiOption = page.getByRole('button', { name: /^OpenAI API key$/ })
   const codexOption = page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })
   await openAiOption.focus()
   await openAiOption.press('ArrowRight')
@@ -181,7 +221,7 @@ test('provider editor selects a service before validating its configuration', as
   await page.getByRole('button', { name: 'Clear search' }).click()
   await expect(page.getByText('No matching services', { exact: true })).toHaveCount(0)
 
-  const compatibleOption = page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ })
+  const compatibleOption = page.getByRole('button', { name: /^OpenAI Compatible / })
   await compatibleOption.click()
 
   await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
@@ -206,7 +246,7 @@ test('provider editor selects a service before validating its configuration', as
   await expect(apiKey).toHaveValue('fixture-only-provider-secret-corrected')
 
   await page.getByRole('tab', { name: 'Choose service' }).click()
-  await page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ }).click()
+  await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
   await expect(apiKey).toHaveAttribute('type', 'password')
   await expect(apiKey).toHaveValue('')
 })
@@ -244,7 +284,7 @@ for (const mode of ['create', 'edit'] as const) {
     } else {
       await page.goto('/providers')
       await page.getByRole('button', { name: /Connect (first )?service/ }).click()
-      await page.getByRole('button', { name: /OpenAI.*API key/ }).click()
+      await page.getByRole('button', { name: /^OpenAI API key$/ }).click()
       await page.getByLabel('Base URL').fill(provider.base_url)
       await page.getByLabel('API key', { exact: true }).fill('fixture-only-review-secret')
     }
@@ -1920,7 +1960,7 @@ test('creating a Provider opens its saved detail and recovers automatic model sy
 
   await page.goto('/providers')
   await page.getByRole('button', { name: /Connect (first )?service/ }).click()
-  await page.getByRole('button', { name: /OpenAI Compatible.*Bring your own endpoint/ }).click()
+  await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
   await page.getByLabel('Connection name').fill(createdProvider.name)
   await page.getByLabel('Base URL').fill(createdProvider.base_url)
   await page.getByLabel('API key', { exact: true }).fill('fixture-only-provider-secret')

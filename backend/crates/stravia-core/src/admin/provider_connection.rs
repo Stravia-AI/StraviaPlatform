@@ -104,6 +104,12 @@ impl AdminService {
         input: ProviderConfigurationPreviewInput,
     ) -> anyhow::Result<ProviderConfigurationPreview> {
         let descriptor = require_descriptor(&self.gw.vendor_plugins, &input.vendor_id)?;
+        anyhow::ensure!(
+            input.provider_id.is_some()
+                || !self.gw.vendor_plugins.is_retired_profile(&input.vendor_id),
+            "Vendor `{}` is no longer available for new providers",
+            input.vendor_id
+        );
         let channel = descriptor
             .channels
             .iter()
@@ -237,6 +243,15 @@ impl AdminService {
         stravia_vendor_sdk::AuthDescriptor,
     )> {
         let descriptor = require_descriptor(&self.gw.vendor_plugins, &candidate.vendor_id)?;
+        anyhow::ensure!(
+            candidate.provider_id.is_some()
+                || !self
+                    .gw
+                    .vendor_plugins
+                    .is_retired_profile(&candidate.vendor_id),
+            "Vendor `{}` is no longer available for new providers",
+            candidate.vendor_id
+        );
         let channel_id = candidate.channel.as_str();
         let mut credentials = candidate.credentials.clone();
         let channel = descriptor
@@ -616,6 +631,10 @@ impl AdminService {
                 let vendor = vendor.trim().to_owned();
                 anyhow::ensure!(!vendor.is_empty(), "provider vendor is required");
                 let descriptor = require_descriptor(&self.gw.vendor_plugins, &vendor)?;
+                anyhow::ensure!(
+                    !self.gw.vendor_plugins.is_retired_profile(&vendor),
+                    "Vendor `{vendor}` is no longer available for new providers"
+                );
                 let channel = descriptor
                     .channels
                     .iter()
@@ -683,6 +702,19 @@ impl AdminService {
                     .map(str::to_owned)
                     .or_else(|| channel.protocol.clone())
                     .unwrap_or_default();
+                // Merged profiles (e.g. `custom`) advertise every selectable
+                // egress protocol in `protocols`; other vendors keep their
+                // stored wire-protocol key without membership checks.
+                if !channel.protocols.is_empty() {
+                    anyhow::ensure!(
+                        channel
+                            .protocols
+                            .iter()
+                            .any(|option| option.value == protocol),
+                        "Vendor `{vendor}` channel `{}` does not support protocol `{protocol}`",
+                        channel.id
+                    );
+                }
                 Ok((
                     CreateProviderRecord {
                         name,

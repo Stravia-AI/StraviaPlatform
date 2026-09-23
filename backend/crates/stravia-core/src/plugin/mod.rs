@@ -5,6 +5,7 @@
 
 mod artifacts;
 mod builtin;
+pub mod catalog_sync;
 pub(crate) mod execution;
 mod lifecycle;
 pub(crate) mod manager;

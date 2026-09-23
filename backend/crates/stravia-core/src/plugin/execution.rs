@@ -403,7 +403,7 @@ impl Gateway {
                     .filter(|value| !value.trim().is_empty())
                     .or(descriptor.catalog_id.as_deref())
                     .unwrap_or(vendor_id);
-                match self.provider_catalog.provider_scope(catalog_id).await {
+                match self.catalog_sync.provider_scope(catalog_id).await {
                     Ok(scope) => Some(
                         scope
                             .models
@@ -486,6 +486,7 @@ impl Gateway {
                     | "models_source"
                     | "static_models"
                     | "catalog_models"
+                    | "vendor_profile"
             ) {
                 prepared
                     .provider
@@ -851,9 +852,22 @@ fn provider_snapshot(
     }
 
     let mut operation_metadata = context.metadata.clone();
-    for key in ["models_source", "static_models", "catalog_models"] {
+    for key in [
+        "models_source",
+        "static_models",
+        "catalog_models",
+        "vendor_profile",
+    ] {
         operation_metadata.remove(key);
     }
+    // Profiles registered at runtime are not in the guest's compiled
+    // descriptor; echo the acquired profile back so pure admission paths can
+    // accept them without catalog access.
+    operation_metadata.insert(
+        "vendor_profile".into(),
+        serde_json::to_value(descriptor)
+            .map_err(|_| anyhow::anyhow!("vendor profile descriptor is not serializable"))?,
+    );
     if kind == Operation::Discover {
         if let Some(source) = discovery_source {
             operation_metadata.insert("models_source".into(), Value::String(source.to_owned()));

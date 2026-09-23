@@ -141,7 +141,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .create_provider(CreateProvider {
             name: Some("Text Parent".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: parent_url,
@@ -186,7 +186,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .create_provider(CreateProvider {
             name: Some("Visual Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: media_url,

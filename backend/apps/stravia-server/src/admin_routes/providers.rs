@@ -58,7 +58,7 @@ pub(super) async fn catalog_models_handler(
     Path((provider_id, channel_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    match gw.provider_catalog.models(&provider_id, &channel_id).await {
+    match gw.catalog_sync.catalog_models(&provider_id, &channel_id).await {
         Ok(catalog) => catalog_json_response(&headers, &catalog.revision, &catalog),
         Err(error)
             if matches!(
@@ -87,7 +87,7 @@ pub(super) async fn catalog_models_handler(
 }
 
 pub(super) async fn catalog_refresh_handler(State(gw): State<Gateway>) -> axum::response::Response {
-    match gw.provider_catalog.refresh().await {
+    match gw.catalog_sync.refresh().await {
         Ok(summary) => Json(summary).into_response(),
         Err(error) => {
             tracing::warn!(error = %error, "manual provider catalog refresh failed");
@@ -107,13 +107,12 @@ pub(super) async fn catalog_logo_handler(
     State(gw): State<Gateway>,
     Path(provider_id): Path<String>,
 ) -> axum::response::Response {
-    match gw.provider_catalog.logo(&provider_id).await {
-        Ok(body) => {
+    match gw.provider_icon(&provider_id).await {
+        Ok(icon) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("image/svg+xml; charset=utf-8"),
-            );
+            if let Ok(value) = HeaderValue::from_str(icon.content_type) {
+                headers.insert(header::CONTENT_TYPE, value);
+            }
             headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("private, max-age=86400"),
@@ -122,7 +121,7 @@ pub(super) async fn catalog_logo_handler(
                 header::CONTENT_SECURITY_POLICY,
                 HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'"),
             );
-            (headers, body).into_response()
+            (headers, icon.body).into_response()
         }
         Err(_) => (
             StatusCode::NOT_FOUND,

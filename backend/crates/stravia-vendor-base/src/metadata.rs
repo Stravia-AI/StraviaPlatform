@@ -7,10 +7,14 @@ use stravia_vendor_sdk::{
     MODEL_CAPABILITY_THINKING_TOGGLE, NetworkDeclaration, OriginDeclaration, ProviderDescriptor,
 };
 
-pub(crate) const PROTOCOL_GEMINI: &str = "protocol-gemini";
-pub(crate) const PROTOCOL_OPENAI_CHAT: &str = "protocol-openai-chat-completions";
-pub(crate) const PROTOCOL_OPEN_RESPONSES: &str = "protocol-open-responses";
-pub(crate) const PROTOCOL_ANTHROPIC: &str = "protocol-anthropic-messages";
+/// Selectable egress protocols merged into the `custom` profile. Values are
+/// protocol aliases, not endpoint IDs; `common::endpoint` resolves them.
+pub(crate) const CUSTOM_PROTOCOLS: &[(&str, &str)] = &[
+    ("openai-compatible", "OpenAI-Compatible"),
+    ("open-responses", "Open Responses"),
+    ("anthropic-messages", "Anthropic Messages"),
+    ("google-gemini", "Gemini"),
+];
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundledCatalogProfile {
@@ -86,10 +90,6 @@ pub const CATALOG_VENDOR_IDS: &[&str] = &[
 
 pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
     let (display_name, mut channels, fields, network) = match vendor_id {
-        PROTOCOL_GEMINI => protocol_vendor("Gemini Protocol", "google-gemini"),
-        PROTOCOL_OPENAI_CHAT => protocol_vendor("OpenAI-Compatible Protocol", "openai-compatible"),
-        PROTOCOL_OPEN_RESPONSES => protocol_vendor("Open Responses Protocol", "open-responses"),
-        PROTOCOL_ANTHROPIC => protocol_vendor("Anthropic Messages Protocol", "anthropic-messages"),
         "alibaba" => standard(
             "Alibaba",
             Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
@@ -327,14 +327,79 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         description: Some(format!("Built-in {display_name} vendor component")),
         channels,
         capabilities,
+        website: None,
+        implementation: None,
         config_fields: fields,
         network,
         data_compat: DataCompatibility::default(),
     })
 }
 
+/// Derives a Provider Profile from a Provider Catalog index entry. Entries
+/// are candidates, not capability declarations: only entries mapping to an
+/// implemented protocol/auth shape produce a profile; anything else returns
+/// `None` so the caller can drop the entry.
+pub(crate) fn catalog_profile_descriptor(
+    id: &str,
+    name: &str,
+    npm: &str,
+    api: Option<&str>,
+) -> Option<ProviderDescriptor> {
+    let mut descriptor = match npm {
+        "@ai-sdk/gateway" => crate::provider_descriptor("gateway"),
+        "@ai-sdk/vercel" => crate::provider_descriptor("vercel"),
+        // A branded id may only borrow an internal profile when the package is
+        // one the contract's shared catalog table maps; an unmapped `npm` must
+        // not smuggle a profile the host cannot resolve to a catalog adapter.
+        _ if stravia_vendor_sdk::catalog::adapter_id_for_package(npm).is_some() => {
+            crate::provider_descriptor(id)
+        }
+        _ => None,
+    }
+    .or_else(|| match npm {
+        "@ai-sdk/openai" => crate::provider_descriptor("openai"),
+        "@ai-sdk/anthropic" => crate::provider_descriptor("anthropic"),
+        "@ai-sdk/azure" => crate::provider_descriptor("azure"),
+        "@ai-sdk/openai-compatible" => Some(compatible_catalog_descriptor(
+            id,
+            name,
+            api,
+            "openai-compatible",
+            None,
+        )),
+        _ => None,
+    })?;
+
+    if npm == "@ai-sdk/anthropic" && id != "anthropic" {
+        descriptor
+            .channels
+            .retain(|channel| channel.id == "default");
+        descriptor.capabilities = descriptor.channels[0].capabilities.clone();
+        descriptor
+            .network
+            .extra_origins
+            .retain(|origin| origin.host != "claude.com" && origin.host != "platform.claude.com");
+    }
+    descriptor.provider_id = id.to_owned();
+    descriptor.catalog_id = Some(id.to_owned());
+    descriptor.display_name = name.to_owned();
+    descriptor.description = Some(format!("Built-in {name} vendor component"));
+    descriptor.implementation = Some(npm.to_owned());
+    for channel in &mut descriptor.channels {
+        if channel.id != "default" {
+            continue;
+        }
+        if let Some(base_url) = api {
+            channel.default_base_url = Some(base_url.to_owned());
+        }
+    }
+    Some(descriptor)
+}
+
 pub(crate) fn compatible_catalog_descriptor(
-    profile: &BundledCatalogProfile,
+    id: &str,
+    name: &str,
+    api: Option<&str>,
     protocol: &str,
     fallback_base_url: Option<&str>,
 ) -> ProviderDescriptor {
@@ -346,24 +411,26 @@ pub(crate) fn compatible_catalog_descriptor(
         "default",
         "Default",
         Some(protocol),
-        profile.api.or(fallback_base_url),
+        api.or(fallback_base_url),
         capabilities.clone(),
     )];
-    if thinking::supports_all_models(profile.id) {
+    if thinking::supports_all_models(id) {
         channels[0]
             .model_capabilities
             .insert(MODEL_CAPABILITY_THINKING_TOGGLE.to_owned());
     }
     ProviderDescriptor {
-        provider_id: profile.id.to_owned(),
-        catalog_id: Some(profile.id.to_owned()),
-        display_name: profile.name.to_owned(),
-        description: Some(format!("Built-in {} vendor component", profile.name)),
+        provider_id: id.to_owned(),
+        catalog_id: Some(id.to_owned()),
+        display_name: name.to_owned(),
+        description: Some(format!("Built-in {name} vendor component")),
         channels,
         capabilities,
         config_fields: vec![optional_api_key()],
         network: NetworkDeclaration::default(),
         data_compat: DataCompatibility::default(),
+        website: None,
+        implementation: None,
     }
 }
 
@@ -398,22 +465,6 @@ fn monitored_vendor(
     )
 }
 
-fn protocol_vendor(
-    display_name: &'static str,
-    protocol: &'static str,
-) -> (
-    &'static str,
-    Vec<ChannelDescriptor>,
-    Vec<ConfigField>,
-    NetworkDeclaration,
-) {
-    let mut descriptor = codec_vendor(display_name, protocol, None, vec![optional_api_key()]);
-    if protocol == "open-responses" {
-        descriptor.1[0].capabilities.insert(Capability::Compact);
-    }
-    descriptor
-}
-
 fn custom_standard() -> (
     &'static str,
     Vec<ChannelDescriptor>,
@@ -422,6 +473,15 @@ fn custom_standard() -> (
 ) {
     let mut descriptor = standard("Custom", None);
     descriptor.1[0].capabilities.insert(Capability::Compact);
+    // The merged Custom profile owns the four selectable egress protocols the
+    // retired `protocol-*` vendors used to expose as separate profiles.
+    descriptor.1[0].protocols = CUSTOM_PROTOCOLS
+        .iter()
+        .map(|(value, label)| stravia_vendor_sdk::EnumOption {
+            value: value.to_string(),
+            label: label.to_string(),
+        })
+        .collect();
     descriptor
 }
 
@@ -491,6 +551,7 @@ fn channel(
         description: None,
         auth: None,
         protocol: protocol.map(str::to_owned),
+        protocols: Vec::new(),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source: None,
         capabilities,
@@ -608,19 +669,30 @@ mod tests {
 
     #[test]
     fn generic_profiles_declare_native_compaction_only_when_open_responses_is_selectable() {
-        for vendor_id in ["custom", PROTOCOL_OPEN_RESPONSES] {
-            let descriptor = crate::provider_descriptor(vendor_id).unwrap();
-            assert!(descriptor.capabilities.contains(&Capability::Compact));
-            assert!(
-                descriptor.channels[0]
-                    .capabilities
-                    .contains(&Capability::Compact)
-            );
-        }
-        for vendor_id in [PROTOCOL_OPENAI_CHAT, PROTOCOL_ANTHROPIC, PROTOCOL_GEMINI] {
-            let descriptor = crate::provider_descriptor(vendor_id).unwrap();
-            assert!(!descriptor.capabilities.contains(&Capability::Compact));
-        }
+        let descriptor = crate::provider_descriptor("custom").unwrap();
+        assert!(descriptor.capabilities.contains(&Capability::Compact));
+        assert!(
+            descriptor.channels[0]
+                .capabilities
+                .contains(&Capability::Compact)
+        );
+        assert_eq!(
+            descriptor.channels[0]
+                .protocols
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            CUSTOM_PROTOCOLS
+                .iter()
+                .map(|(value, _)| *value)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !crate::provider_descriptor("openai-compatible")
+                .unwrap()
+                .capabilities
+                .contains(&Capability::Compact)
+        );
     }
 
     #[test]

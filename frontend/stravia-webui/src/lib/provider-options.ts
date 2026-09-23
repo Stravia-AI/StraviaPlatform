@@ -1,3 +1,5 @@
+import * as m from '$lib/paraglide/messages.js'
+import type { Locale } from '$lib/localization.svelte'
 import type { ProviderDescriptor, VendorChannelDescriptor } from '$lib/types'
 
 export interface ProviderOption {
@@ -16,9 +18,13 @@ export function optionLabel(option: ProviderOption): string {
   return option.descriptor.display_name
 }
 
-export function optionDescription(option: ProviderOption): string {
-  const details = option.channel.description || option.channel.capabilities.join(' · ')
-  return option.descriptor.channels.length > 1 ? `${option.channel.name} · ${details}` : details
+export function optionDescription(option: ProviderOption, locale: Locale): string {
+  const auth = option.channel.auth
+    ? m.common_oauth_account({}, { locale })
+    : option.descriptor.config_fields.some((field) => field.secret && field.key === 'setup_token')
+      ? m.provider_options_setup_token({}, { locale })
+      : m.provider_options_api_key({}, { locale })
+  return option.channel.id === 'default' ? auth : `${option.channel.name} · ${auth}`
 }
 
 export function defaultProviderName(option: ProviderOption): string {

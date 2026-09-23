@@ -55,7 +55,7 @@ mod tests {
             .providers()
             .create(crate::db::models::CreateProviderRecord {
                 name: "Tool-capable Provider".into(),
-                vendor: Some("protocol-openai-chat-completions".into()),
+                vendor: Some("custom".into()),
                 protocol: "openai-compatible".into(),
                 base_url: "https://example.com/v1".into(),
                 preset_key: None,

@@ -138,6 +138,23 @@ impl TestHarness {
     }
 }
 
+/// Provider scopes arrive through the base plugin's `sync-catalog` export and
+/// land in the on-disk cache; tests seed the bootstrap revision directly so
+/// scope reads stay offline.
+fn seed_provider_scope(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let path = stravia_core::data_paths::DataPaths::new(data_dir)
+        .catalog_root()
+        .join("catalog/scopes/bootstrap")
+        .join(format!("{provider_id}.json"));
+    std::fs::create_dir_all(path.parent().expect("scope path has a parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 struct LocalUpstream {
     url: String,
     state: Arc<UpstreamState>,
@@ -2680,6 +2697,21 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
             },
         )
         .await?;
+    seed_provider_scope(
+        &harness.gateway.config.data_dir,
+        "openai",
+        br#"{
+          "gpt-5.4": {
+            "id": "gpt-5.4",
+            "name": "GPT-5.4",
+            "tool_call": true,
+            "temperature": true,
+            "modalities": { "input": ["text"], "output": ["text"] },
+            "limit": { "context": 272000, "output": 128000 },
+            "cost": { "input": 2.5, "output": 15.0 }
+          }
+        }"#,
+    )?;
     harness
         .gateway
         .admin()

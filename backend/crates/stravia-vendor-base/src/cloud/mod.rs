@@ -1607,6 +1607,8 @@ fn descriptor_base(
         config_fields,
         network,
         data_compat: DataCompatibility::default(),
+        website: None,
+        implementation: None,
     }
 }
 
@@ -1624,6 +1626,7 @@ fn channel(
         description: None,
         auth: None,
         protocol: Some(protocol.into()),
+        protocols: Vec::new(),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source,
         capabilities: capabilities.iter().copied().collect::<BTreeSet<_>>(),
