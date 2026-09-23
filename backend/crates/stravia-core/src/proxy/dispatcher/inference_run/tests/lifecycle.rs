@@ -73,16 +73,14 @@ async fn responses_preserve_usage_certainty_without_hidden_rounds() {
             assert!(resource["usage"].is_null(), "{resource}");
         }
     }
+    close_test_gateway(gateway, directory).await;
 }
 
 #[tokio::test]
 async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
-    let data_dir = std::env::temp_dir().join(format!(
-        "stravia-protected-history-test-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir,
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = crate::Gateway::new(config.clone())
@@ -144,7 +142,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     assert_ne!(references[0], references[1], "{projected}");
     assert!(!projected.contains("opaque-signature"), "{projected}");
     let edited = projected.replace("provider reasoning", "client-edited reasoning");
-    drop(gateway);
+    shutdown_test_gateway(gateway).await;
     let gateway = crate::Gateway::new(config)
         .await
         .expect("gateway reconstruction");
@@ -172,7 +170,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
 
     let second = execute(RunInput {
-        gateway,
+        gateway: gateway.clone(),
         executor: std::sync::Arc::new(executor.clone()),
         headers,
         envelope: RawEnvelope::new(
@@ -229,6 +227,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
             .any(|item| item.thinking_ref() == Some(("client-edited reasoning", None))),
         "client edits must not replace the authoritative protected block"
     );
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -358,7 +357,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         assert!(!wire.contains("origin-opaque-cipher"), "{wire}");
         assert!(!wire.contains("__stravia_thinking_source"), "{wire}");
     }
-    drop(gateway);
+    shutdown_test_gateway(gateway).await;
     let gateway = Gateway::new(config).await.expect("gateway reconstruction");
     let request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(
@@ -368,7 +367,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         .expect("Chat protocol")
         .decode_request(json!({"model": "origin-replay", "messages": messages}))
         .expect("return to original Target");
-    let response = execute_non_stream_request_with_headers(gateway, headers, request).await;
+    let response = execute_non_stream_request_with_headers(gateway.clone(), headers, request).await;
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -394,6 +393,8 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
     assert_eq!(origin_calls.load(Ordering::SeqCst), 2);
     assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
     assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+    drop(requests);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -525,7 +526,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
             }))
             .unwrap();
         let response = execute_request_with_headers(
-            gateway,
+            gateway.clone(),
             headers,
             request,
             OPEN_RESPONSES_2026_04_24,
@@ -552,6 +553,8 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
             assert_ne!(status, StatusCode::OK);
         }
         server.abort();
+        drop(requests);
+        close_test_gateway(gateway, data_dir).await;
     }
 }
 
@@ -718,7 +721,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
     );
     second_request.stream.enabled = true;
     let second = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         second_request,
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -735,6 +738,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
     .expect("UTF-8 second response");
     assert!(second_body.contains("second answer"), "{second_body}");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -781,11 +785,9 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         openai_responses_sse("finished"),
     ])
     .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-protected-tool-history-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
@@ -936,7 +938,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     third_request.stream.enabled = true;
     third_request.tools = Some(tools);
     let third = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         third_request,
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -991,6 +993,8 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
             "call_i", "call_j", "call_k", "call_l", "call_m", "call_n"
         ]
     );
+    drop(requests);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1008,7 +1012,7 @@ async fn unary_completion_fills_canonical_response_defaults() {
     let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "canonical-defaults", &[upstream_url]).await;
 
-    let response = execute_non_stream(gateway, "canonical-defaults").await;
+    let response = execute_non_stream(gateway.clone(), "canonical-defaults").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1023,6 +1027,7 @@ async fn unary_completion_fills_canonical_response_defaults() {
     );
     assert_eq!(body["model"], "provider-model", "{body}");
     assert_eq!(body["choices"][0]["finish_reason"], "stop", "{body}");
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1037,7 +1042,7 @@ async fn open_responses_owns_response_identity_and_logical_model() {
     configure_route(&gateway, "logical-model", &[upstream_url]).await;
 
     let response = execute_protocol_request(
-        gateway,
+        gateway.clone(),
         "logical-model",
         OPEN_RESPONSES_2026_04_24,
         "/v1/responses",
@@ -1058,6 +1063,7 @@ async fn open_responses_owns_response_identity_and_logical_model() {
     );
     assert_eq!(body["model"], "logical-model", "{body}");
     assert!(body.get("output_text").is_none(), "{body}");
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1127,10 +1133,12 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
         .await
         .expect("create model route");
 
-    let response = execute_non_stream(gateway, "gpt-5.4").await;
+    let response = execute_non_stream(gateway.clone(), "gpt-5.4").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    drop(response);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1175,11 +1183,9 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
     let (base_url, provider_calls, provider_requests) =
         serve_openai_sequence_with_requests(vec![tool_round, openai_response("final response")])
             .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-hidden-round-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1194,7 +1200,7 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         .expect("gateway init");
     configure_route(&gateway, "hidden-round-route", &[base_url]).await;
 
-    let response = execute_non_stream(gateway, "hidden-round-route").await;
+    let response = execute_non_stream(gateway.clone(), "hidden-round-route").await;
 
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1231,6 +1237,8 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         "{}",
         provider_requests[1]
     );
+    drop(provider_requests);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1281,6 +1289,8 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     assert!(requests[0].contains("\"reasoning_effort\":\"high\""));
     assert!(!requests[1].contains("reasoning_effort"));
     assert!(requests[2].contains("\"reasoning_effort\":\"none\""));
+    drop(requests);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1356,6 +1366,8 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
     .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(response);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1427,6 +1439,8 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(response);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1516,4 +1530,6 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
     let fallback_requests = fallback_requests.lock();
     assert!(fallback_requests[0].contains("\"reasoning_effort\":\"high\""));
+    drop(fallback_requests);
+    close_test_gateway(gateway, data_dir).await;
 }

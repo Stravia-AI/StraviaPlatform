@@ -54,7 +54,7 @@ async fn delivered_root_hook_response_is_continuable_without_a_target() {
         None,
     );
     let response = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         continuation,
         OPEN_RESPONSES_2026_04_24,
@@ -68,17 +68,16 @@ async fn delivered_root_hook_response_is_continuable_without_a_target() {
     let continued: serde_json::Value = serde_json::from_slice(&body).expect("continued response");
     assert_ne!(continued["id"].as_str(), Some(root_id.as_str()));
     assert!(String::from_utf8_lossy(&body).contains("handled by lifecycle Hook"));
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn cancelled_run_stops_before_provider_io() {
     let (base_url, provider_calls) =
         serve_openai_response(200, openai_response("must not be called")).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-cancellation-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::new(config).await.expect("gateway init");
@@ -114,6 +113,7 @@ async fn cancelled_run_stops_before_provider_io() {
         .expect("cancellation response body");
     assert_eq!(status, 499, "{}", String::from_utf8_lossy(&body));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -140,7 +140,7 @@ async fn automatic_parent_discovery_failure_falls_back_to_a_chat_root() {
     second.role = stravia_runtime_contract::protocol::ir::Role::User;
 
     let response = execute_non_stream_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         AiRequest::new(model, vec![first, second]),
     )
@@ -148,6 +148,8 @@ async fn automatic_parent_discovery_failure_falls_back_to_a_chat_root() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(response);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -198,7 +200,7 @@ async fn embeddings_skip_generation_chain_begin() {
     });
 
     let response = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         request,
         OPENAI_COMPATIBLE_EMBEDDINGS_V1,
@@ -209,6 +211,8 @@ async fn embeddings_skip_generation_chain_begin() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(discovery_attempts.load(Ordering::SeqCst), 0);
+    drop(response);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -291,6 +295,7 @@ async fn delivered_terminal_publishes_response_chain() {
         .expect("continuation stream body");
     assert!(String::from_utf8_lossy(&continuation_body).contains("continued output"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -387,7 +392,7 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
         let headers = headers.clone();
         async move {
             execute_request_with_headers(
-                gateway,
+                gateway.clone(),
                 headers,
                 second,
                 OPEN_RESPONSES_2026_04_24,
@@ -450,6 +455,9 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
         Some(parent_run.id.as_str())
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    drop(events);
+    drop(barrier);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -516,7 +524,7 @@ async fn unavailable_observation_writer_never_holds_generation_progress() {
         stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
     );
     let second = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         second,
         OPEN_RESPONSES_2026_04_24,
@@ -528,6 +536,7 @@ async fn unavailable_observation_writer_never_holds_generation_progress() {
         .expect("second response body");
     assert!(String::from_utf8_lossy(&second_body).contains("second output"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -603,7 +612,7 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
         ),
     );
     let continuation_response = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         continuation,
         OPEN_RESPONSES_2026_04_24,
@@ -616,4 +625,5 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
         .expect("continuation response body");
     assert!(String::from_utf8_lossy(&continuation_body).contains("continued output"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    close_test_gateway(gateway, data_dir).await;
 }

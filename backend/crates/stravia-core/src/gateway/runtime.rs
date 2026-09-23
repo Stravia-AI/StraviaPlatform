@@ -796,6 +796,35 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {
+        let data_dir = tempfile::tempdir()?;
+        let gateway = Gateway::new(GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await?;
+        let health = gateway.storage.bootstrap().health().await?;
+        assert!(
+            health.can_connect,
+            "SQLite health check should report can_connect"
+        );
+        assert!(
+            health.schema_compatible,
+            "SQLite health check should report schema_compatible after migration"
+        );
+        gateway.shutdown().await;
+        gateway
+            ._sqlite_pool
+            .as_ref()
+            .expect("Gateway SQLite pool")
+            .close()
+            .await;
+        drop(gateway);
+        data_dir.close()?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn proxied_http_requests_reuse_connections_across_vendor_snapshots() -> anyhow::Result<()>
     {
         use axum::extract::{ConnectInfo, State};

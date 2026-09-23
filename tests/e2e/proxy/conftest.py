@@ -312,45 +312,44 @@ def stravia_proxy_base(
     replay_models: dict[str, list[str]],
 ) -> Iterator[dict[str, object]]:
     server_port = find_free_port()
-    data_dir = tempfile.TemporaryDirectory(prefix="stravia-proxy-e2e-")
-    proc, logs = start_stravia_server(
-        stravia_binary=stravia_binary,
-        args=[
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(server_port),
-            "--data-dir",
-            data_dir.name,
-        ],
-    )
-    base = f"http://127.0.0.1:{server_port}"
-    admin_base = base
-    try:
-        wait_until_ready(f"{admin_base}/api/v1/auth/state")
-        setup_token = wait_for_setup_token(logs, proc)
-        session = initialize_server(
-            admin_base,
-            setup_token,
-            {"backend": "sqlite"},
+    with tempfile.TemporaryDirectory(prefix="stravia-proxy-e2e-") as data_dir:
+        proc, logs = start_stravia_server(
+            stravia_binary=stravia_binary,
+            args=[
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(server_port),
+                "--data-dir",
+                data_dir,
+            ],
         )
-        api_key, route_ids = _configure_proxy_routes(
-            admin_base, session.auth_headers(), replay_cluster, replay_models
-        )
-        status, body = http_request(
-            "PUT",
-            f"{admin_base}/api/v1/observations/debug",
-            payload={"enabled": True, "confirmed": True},
-            headers=session.auth_headers(),
-        )
-        assert status == 200, f"enable replay Debug capture failed: {status} {body}"
-        wait_until_ready(f"{base}/v1/chat/completions")
-        yield {
-            "base": base,
-            "api_key": api_key,
-            "admin_headers": session.auth_headers(),
-            "route_ids": route_ids,
-        }
-    finally:
-        stop_stravia_server(proc, logs)
-        data_dir.cleanup()
+        base = f"http://127.0.0.1:{server_port}"
+        admin_base = base
+        try:
+            wait_until_ready(f"{admin_base}/api/v1/auth/state")
+            setup_token = wait_for_setup_token(logs, proc)
+            session = initialize_server(
+                admin_base,
+                setup_token,
+                {"backend": "sqlite"},
+            )
+            api_key, route_ids = _configure_proxy_routes(
+                admin_base, session.auth_headers(), replay_cluster, replay_models
+            )
+            status, body = http_request(
+                "PUT",
+                f"{admin_base}/api/v1/observations/debug",
+                payload={"enabled": True, "confirmed": True},
+                headers=session.auth_headers(),
+            )
+            assert status == 200, f"enable replay Debug capture failed: {status} {body}"
+            wait_until_ready(f"{base}/v1/chat/completions")
+            yield {
+                "base": base,
+                "api_key": api_key,
+                "admin_headers": session.auth_headers(),
+                "route_ids": route_ids,
+            }
+        finally:
+            stop_stravia_server(proc, logs)

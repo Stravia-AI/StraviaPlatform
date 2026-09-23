@@ -2,11 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn request_hook_response_bypasses_route_lookup_through_lifecycle_interface() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-hook-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = crate::Gateway::builder(config)
@@ -40,15 +38,14 @@ async fn request_hook_response_bypasses_route_lookup_through_lifecycle_interface
         .await
         .expect("hook response body");
     assert!(String::from_utf8_lossy(&body).contains("handled by lifecycle Hook"));
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn request_hook_rejection_bypasses_route_lookup_and_model_authorization() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-hook-reject-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = crate::Gateway::builder(config)
@@ -87,15 +84,14 @@ async fn request_hook_rejection_bypasses_route_lookup_and_model_authorization() 
         body.contains("request rejected by lifecycle Hook"),
         "{body}"
     );
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-auth-ordering-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let initial_model = "initial-before-hook";
@@ -176,13 +172,15 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
         "authentication failed: expired_api_key"
     );
     assert!(body["error"].get("request_id").is_none());
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn untrusted_credential_is_rejected_before_hook_model_rewrite() {
     let initial_model = "invalid-before-hook";
     let final_model = "invalid-after-hook";
-    let gateway = gateway_rewriting_model("invalid-rewrite-test", final_model).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = gateway_rewriting_model(&data_dir, final_model).await;
     let dummy_provider = "http://127.0.0.1:9/v1".to_string();
     configure_route(
         &gateway,
@@ -214,13 +212,15 @@ async fn untrusted_credential_is_rejected_before_hook_model_rewrite() {
         );
         assert!(body["error"].get("request_id").is_none());
     }
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn hook_rewrite_checks_the_final_model_binding() {
     let initial_model = "bound-before-hook";
     let final_model = "unbound-after-hook";
-    let gateway = gateway_rewriting_model("binding-rewrite-test", final_model).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = gateway_rewriting_model(&data_dir, final_model).await;
     let dummy_provider = "http://127.0.0.1:9/v1".to_string();
     let initial_model_id = configure_route_with_id(
         &gateway,
@@ -247,7 +247,7 @@ async fn hook_rewrite_checks_the_final_model_binding() {
         .expect("API key");
 
     let response = execute_non_stream_request_with_headers(
-        gateway,
+        gateway.clone(),
         bearer_headers(&key.token),
         AiRequest::new(initial_model, Vec::new()),
     )
@@ -266,6 +266,7 @@ async fn hook_rewrite_checks_the_final_model_binding() {
         "api key not allowed for this model"
     );
     assert!(body["error"].get("request_id").is_none());
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -384,7 +385,7 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
         ),
     );
     let third_response = execute_request_with_headers(
-        gateway,
+        gateway.clone(),
         headers,
         third_request,
         OPEN_RESPONSES_2026_04_24,
@@ -403,4 +404,8 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
     let requests = requests.lock();
     assert!(requests[1].get("previous_response_id").is_none());
     assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(5));
+    drop(requests);
+    drop(observed);
+    drop(third_response);
+    close_test_gateway(gateway, data_dir).await;
 }

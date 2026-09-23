@@ -63,13 +63,17 @@ def _start_initialized(
             str(data_dir),
         ],
     )
-    base = f"http://127.0.0.1:{port}"
-    wait_until_ready(f"{base}/api/v1/auth/state")
-    session = initialize_server(
-        base,
-        wait_for_setup_token(logs, process),
-        {"backend": "sqlite"},
-    )
+    try:
+        base = f"http://127.0.0.1:{port}"
+        wait_until_ready(f"{base}/api/v1/auth/state")
+        session = initialize_server(
+            base,
+            wait_for_setup_token(logs, process),
+            {"backend": "sqlite"},
+        )
+    except BaseException:
+        stop_stravia_server(process, logs)
+        raise
     return (
         {
             "admin": base,
