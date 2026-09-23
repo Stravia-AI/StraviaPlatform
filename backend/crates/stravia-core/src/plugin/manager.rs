@@ -92,9 +92,13 @@ impl VendorPlugins {
                     if digest == record.digest {
                         Ok(Bytes::from_static(bundle.component))
                     } else {
-                        Err(anyhow::anyhow!(
-                            "bundled plugin digest differs from installed version"
-                        ))
+                        // 记录标为 builtin，但安装的是旧发行版内嵌字节或同版本
+                        // 不同构建；artifact 按 digest 校验完整性，回退读取即可，
+                        // 不能因与当前内嵌字节不同就判为不可用。
+                        match &artifacts {
+                            Some(artifacts) => artifacts.read(&record.digest).await,
+                            None => Ok(record.component.clone()),
+                        }
                     }
                 }
                 None => match &artifacts {

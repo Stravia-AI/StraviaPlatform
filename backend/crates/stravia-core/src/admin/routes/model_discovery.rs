@@ -63,14 +63,14 @@ pub(super) async fn discover_provider_models(
     provider_id: &str,
 ) -> Result<DiscoveredModels, RouteModelDiscoveryError> {
     let cancellation = stravia_runtime_contract::CancellationToken::new();
-    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let deadline = stravia_runtime_contract::Deadline::fixed(Instant::now() + DISCOVERY_TIMEOUT);
     let prepared = admin
         .gw
         .prepare_vendor_execution(
             provider_id,
             None,
             stravia_vendor_sdk::Operation::Discover,
-            &VendorCallContext::new(cancellation.clone(), deadline),
+            &VendorCallContext::new(cancellation.clone(), deadline.clone()),
         )
         .await
         .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
@@ -109,7 +109,7 @@ pub(super) async fn discover_provider_models(
                 VendorRequest::Discover(stravia_vendor_sdk::DiscoverRequest {
                     cursor: cursor.clone(),
                 }),
-                VendorCallContext::new(cancellation.clone(), deadline),
+                VendorCallContext::new(cancellation.clone(), deadline.clone()),
             )
             .await
             .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;

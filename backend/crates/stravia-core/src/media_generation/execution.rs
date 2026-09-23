@@ -203,7 +203,10 @@ async fn generate_image(
     deadline: Instant,
     observer: crate::interaction_observation::RunObserver,
 ) -> Result<(Value, tokio::sync::OwnedRwLockReadGuard<()>), GenerationError> {
-    let mut context = VendorCallContext::new(cancellation.clone(), deadline);
+    let mut context = VendorCallContext::new(
+        cancellation.clone(),
+        stravia_runtime_contract::Deadline::fixed(deadline),
+    );
     context.observer = Some(observer);
     let execution = gateway
         .execute_vendor_route(

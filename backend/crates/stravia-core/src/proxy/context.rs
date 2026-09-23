@@ -4,7 +4,8 @@
 //! and propagated through all layers via `axum::Extension`.  It carries:
 //!
 //! - **Identity** – a stable platform `request_id` for log correlation.
-//! - **Deadline** – an `Instant` after which any new I/O should abort.
+//! - **Deadline** – a shared, renewable `Deadline`; vendor activity renews it
+//!   so an operation dies only after `ttl` of cross-boundary silence.
 //! - **Cancellation** – a shared flag; set when the client disconnects or the
 //!   deadline fires.
 //! - **Outcome** – a write-once cell recording the final `RequestOutcome`;
@@ -25,49 +26,9 @@ use futures::Stream;
 use parking_lot::Mutex;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 
-// ── Deadline ──────────────────────────────────────────────────────────────────
+// ── Deadline / Cancellation ───────────────────────────────────────────────────
 
-/// A hard deadline for a request.  Anything that starts new I/O SHOULD check
-/// `deadline.is_exceeded()` before proceeding.
-#[derive(Clone, Debug)]
-pub struct Deadline {
-    at: Instant,
-}
-
-impl Deadline {
-    /// Create a deadline `ttl` from now.
-    pub fn from_now(ttl: Duration) -> Self {
-        Self {
-            at: Instant::now() + ttl,
-        }
-    }
-
-    /// A deadline that never fires (useful for unit tests / health probes).
-    pub fn never() -> Self {
-        Self {
-            at: Instant::now() + Duration::from_secs(86400 * 365 * 100),
-        }
-    }
-
-    /// Returns `true` if the deadline has already passed.
-    pub fn is_exceeded(&self) -> bool {
-        Instant::now() > self.at
-    }
-
-    /// How much time remains.  Returns zero if already exceeded.
-    pub fn remaining(&self) -> Duration {
-        self.at.saturating_duration_since(Instant::now())
-    }
-
-    /// The absolute `Instant` the deadline fires.
-    pub fn at(&self) -> Instant {
-        self.at
-    }
-}
-
-// ── Cancellation ─────────────────────────────────────────────────────────────
-
-use stravia_runtime_contract::CancellationToken;
+pub use stravia_runtime_contract::{CancellationToken, Deadline};
 
 // ── Outcome ───────────────────────────────────────────────────────────────────
 
@@ -232,7 +193,8 @@ pub struct RequestContext {
     pub request_id: String,
     /// When this request entered the gateway.
     pub started_at: Instant,
-    /// Hard cut-off; any new I/O past this point should abort.
+    /// Idle cut-off; vendor boundary activity renews it, so an operation dies
+    /// only after the TTL elapses with no traffic.
     pub deadline: Deadline,
     /// Shared cancellation flag; set on client disconnect or deadline.
     pub cancellation: CancellationToken,

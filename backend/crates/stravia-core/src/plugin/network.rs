@@ -30,7 +30,6 @@ use super::lifecycle::VendorOperation;
 const MAX_REDIRECTS: usize = 10;
 const MAX_IDLE_WEBSOCKETS: usize = 64;
 const MAX_WEBSOCKET_AGE: Duration = Duration::from_secs(60 * 60);
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Host-owned WebSocket transports retained between plugin operations. A guest
 /// task is never retained: checked-in entries are inert sockets and every
@@ -535,8 +534,8 @@ impl VendorNetwork {
                     .upgrade()
                     .web_socket_config(
                         tungstenite::protocol::WebSocketConfig::default()
-                            .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
-                            .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES)),
+                            .max_message_size(None)
+                            .max_frame_size(None),
                     )
                     .protocols(protocols.clone())
                     .send() => result.map_err(websocket_transport_failure)?,
@@ -595,13 +594,6 @@ impl VendorNetwork {
                         })?,
                     };
                     let Some(chunk) = chunk else { break };
-                    let next = body
-                        .len()
-                        .checked_add(chunk.len())
-                        .ok_or_else(resource_failure)?;
-                    if next > MAX_WEBSOCKET_MESSAGE_BYTES {
-                        return Err(resource_failure());
-                    }
                     body.extend_from_slice(&chunk);
                 }
                 self.wire(
@@ -1161,13 +1153,6 @@ fn cancelled() -> HostFailure {
 fn invalid(message: &'static str) -> HostFailure {
     // 此处检查 guest 生成的传输请求与上游响应，不应归责为客户端 canonical 输入错误。
     HostFailure::new(ErrorKind::Trapped, message)
-}
-
-fn resource_failure() -> HostFailure {
-    HostFailure::new(
-        ErrorKind::ResourceExhausted,
-        "vendor transport resource limit exceeded",
-    )
 }
 
 fn kind_without_body(status: u16) -> AiErrorKind {

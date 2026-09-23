@@ -560,7 +560,9 @@ async fn seed_ready_session(
     let (_, operation, _) = admin.gw.vendor_plugins.acquire(&session.driver_key)?;
     let publication = operation.publication_fence(
         runtime.cancellation.clone(),
-        std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+        stravia_runtime_contract::Deadline::fixed(
+            std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+        ),
     );
     drop(operation);
     *runtime.publication.lock().await = Some(publication);

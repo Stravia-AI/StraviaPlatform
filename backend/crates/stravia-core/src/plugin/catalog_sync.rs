@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use async_trait::async_trait;
-use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LogLevel,
     OperationScope, RuntimeError, RuntimeEvent,
@@ -219,7 +219,7 @@ impl VendorCatalogSync {
     async fn run(&self, request: CatalogSyncRequest) -> anyhow::Result<CatalogSyncOutcome> {
         let (plugin, operation, _epoch) = self.plugins.acquire_package("base")?;
         let cancellation = CancellationToken::new();
-        let deadline = Instant::now() + SYNC_DEADLINE;
+        let deadline = Deadline::fixed(Instant::now() + SYNC_DEADLINE);
         let origins = self
             .catalog_base_url
             .iter()

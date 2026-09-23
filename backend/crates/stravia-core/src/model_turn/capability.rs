@@ -535,7 +535,7 @@ fn clone_request(request: &VendorRequest) -> VendorRequest {
 }
 
 fn clone_context(context: &VendorCallContext) -> VendorCallContext {
-    let mut cloned = VendorCallContext::new(context.cancellation.clone(), context.deadline);
+    let mut cloned = VendorCallContext::new(context.cancellation.clone(), context.deadline.clone());
     cloned.observer = context.observer.clone();
     cloned.model_turn_id = context.model_turn_id.clone();
     cloned.attempt_id = context.attempt_id.clone();
@@ -569,7 +569,7 @@ async fn wait_for_retry(
         biased;
         _ = context.cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
         _ = any_vendor_cancelled(vendor_leases) => Err(RuntimeError::Cancelled.into()),
-        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(context.deadline)) => {
+        () = context.deadline.wait() => {
             Err(RuntimeError::DeadlineExceeded.into())
         }
         _ = tokio::time::sleep(delay) => Ok(()),

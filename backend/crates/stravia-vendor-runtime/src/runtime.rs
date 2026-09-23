@@ -1,14 +1,14 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_sdk::{
     AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationInput, OperationOutput,
     ProviderSnapshot, VendorDescriptor,
 };
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
@@ -18,58 +18,6 @@ use crate::host::{
     HostFailure, HostServices, HttpRequest, HttpResponseResource, LogLevel, RuntimeEvent,
     WebSocketMessage, WebSocketResource,
 };
-
-const PRIVATE_STATE_LIMIT: usize = 256 * 1024;
-
-#[derive(Debug, Clone)]
-pub struct RuntimeLimits {
-    pub max_artifact_bytes: usize,
-    pub max_memory_bytes: usize,
-    pub fuel_per_operation: u64,
-    pub max_handles: usize,
-    pub max_request_bytes: usize,
-    pub max_host_io_bytes: usize,
-    pub max_event_bytes: usize,
-    pub max_output_bytes: usize,
-}
-
-impl Default for RuntimeLimits {
-    fn default() -> Self {
-        Self {
-            max_artifact_bytes: 64 * 1024 * 1024,
-            max_memory_bytes: 64 * 1024 * 1024,
-            fuel_per_operation: 50_000_000,
-            max_handles: 128,
-            max_request_bytes: 16 * 1024 * 1024,
-            max_host_io_bytes: 64 * 1024 * 1024,
-            max_event_bytes: 2 * 1024 * 1024,
-            max_output_bytes: 64 * 1024 * 1024,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeConfig {
-    pub limits: RuntimeLimits,
-    pub media_image_limits: RuntimeLimits,
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            limits: RuntimeLimits::default(),
-            // 五张 32 MiB 参考图的 base64 为 223,696,220 字节。
-            // 请求、响应和 Guest 中的解码/重编码分别有界，不降低产品图像限制。
-            media_image_limits: RuntimeLimits {
-                max_memory_bytes: 1536 * 1024 * 1024,
-                fuel_per_operation: 50_000_000_000,
-                max_request_bytes: 256 * 1024 * 1024,
-                max_host_io_bytes: 384 * 1024 * 1024,
-                ..RuntimeLimits::default()
-            },
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct LoadedPlugin {
@@ -111,7 +59,7 @@ impl LoadedPlugin {
 pub struct OperationScope {
     pub services: Arc<dyn HostServices>,
     pub cancellation: CancellationToken,
-    pub deadline: Instant,
+    pub deadline: Deadline,
     pub generation: u64,
 }
 
@@ -119,7 +67,7 @@ impl OperationScope {
     pub fn new(
         services: Arc<dyn HostServices>,
         cancellation: CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
         generation: u64,
     ) -> Self {
         Self {
@@ -134,26 +82,22 @@ impl OperationScope {
 #[derive(Clone)]
 pub struct VendorRuntime {
     engine: Engine,
-    config: RuntimeConfig,
 }
 
 impl VendorRuntime {
-    pub fn new(config: RuntimeConfig) -> Result<Self, LoadError> {
+    pub fn new() -> Result<Self, LoadError> {
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true);
         engine_config.consume_fuel(true);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
-        Ok(Self { engine, config })
+        Ok(Self { engine })
     }
 
     /// Compile, import-check, instantiate, and validate a component without
     /// mutating any installed version. The returned `LoadedPlugin` owns an Arc
     /// to this exact compiled component, so active operations remain pinned.
     pub async fn load(&self, bytes: &[u8]) -> Result<LoadedPlugin, LoadError> {
-        if bytes.len() > self.config.limits.max_artifact_bytes {
-            return Err(LoadError::ArtifactTooLarge);
-        }
         let identity = stravia_runtime_contract::identifier::encode_digest(
             &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes),
         );
@@ -189,7 +133,7 @@ impl VendorRuntime {
         provider: &ProviderSnapshot,
         request: &AiRequest,
         cancellation: CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
     ) -> Result<String, RuntimeError> {
         if !matches!(operation, Operation::Infer | Operation::Compact) {
             return Err(RuntimeError::from_guest(
@@ -202,7 +146,7 @@ impl VendorRuntime {
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
 
@@ -212,10 +156,6 @@ impl VendorRuntime {
         let wit_operation = convert_operation(operation.into());
         let wit_provider = convert_provider(sdk_provider);
         let wit_request = convert_payload(sdk_request);
-        let limits = self.operation_limits(Some(operation));
-        if wire_input_size(&wit_provider, &wit_request) > limits.max_request_bytes {
-            return Err(RuntimeError::ResourceExhausted);
-        }
 
         let scope = OperationScope {
             services: Arc::new(DenyServices),
@@ -226,13 +166,13 @@ impl VendorRuntime {
         let mut store = self.new_store(scope, None, false);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate =
             bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
@@ -248,7 +188,7 @@ impl VendorRuntime {
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = call => result,
@@ -260,9 +200,6 @@ impl VendorRuntime {
         let protocol = match raw {
             Ok(protocol) => protocol,
             Err(failure) => {
-                if failure.message.len() > limits.max_event_bytes {
-                    return Err(RuntimeError::ResourceExhausted);
-                }
                 return Err(RuntimeError::from_guest(
                     convert_error_kind(failure.kind),
                     failure.message,
@@ -270,13 +207,10 @@ impl VendorRuntime {
                 ));
             }
         };
-        if protocol.len() > limits.max_output_bytes {
-            return Err(RuntimeError::ResourceExhausted);
-        }
         if cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
         Ok(protocol)
@@ -294,7 +228,7 @@ impl VendorRuntime {
         if scope.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= scope.deadline {
+        if scope.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
         if !scope.services.generation_is_current(scope.generation) {
@@ -307,20 +241,16 @@ impl VendorRuntime {
         drop(input);
         let wit_operation = convert_operation(sdk_operation);
         let wit_input = convert_input(sdk_input);
-        let limits = self.operation_limits(Some(operation));
-        if wire_input_size(&wit_input.provider, &wit_input.input) > limits.max_request_bytes {
-            return Err(RuntimeError::ResourceExhausted);
-        }
         let mut store = self.new_store(scope, Some(operation), false);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate =
             bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
@@ -330,7 +260,7 @@ impl VendorRuntime {
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = call => result,
@@ -349,9 +279,6 @@ impl VendorRuntime {
         let bytes = match raw {
             Ok(bytes) => bytes,
             Err(failure) => {
-                if failure.message.len() > limits.max_event_bytes {
-                    return Err(RuntimeError::ResourceExhausted);
-                }
                 store.data().services.log(LogLevel::Warn, &failure.message);
                 return Err(RuntimeError::from_guest(
                     convert_error_kind(failure.kind),
@@ -364,9 +291,6 @@ impl VendorRuntime {
             && store.data().upstream_starts != 1
         {
             return Err(RuntimeError::InvalidOutput);
-        }
-        if bytes.len() > limits.max_output_bytes {
-            return Err(RuntimeError::ResourceExhausted);
         }
         OperationOutput::decode_for_host(operation, &bytes).map_err(|_| RuntimeError::InvalidOutput)
     }
@@ -385,12 +309,8 @@ impl VendorRuntime {
         if scope.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= scope.deadline {
+        if scope.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
-        }
-        let limits = self.operation_limits(None);
-        if input.len() > limits.max_request_bytes {
-            return Err(RuntimeError::ResourceExhausted);
         }
         let wit_input = wit_types::CanonicalPayload {
             format: CANONICAL_FORMAT_VERSION,
@@ -399,13 +319,13 @@ impl VendorRuntime {
         let mut store = self.new_store(scope, None, true);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate =
             bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
@@ -415,7 +335,7 @@ impl VendorRuntime {
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
             result = call => result,
@@ -427,9 +347,6 @@ impl VendorRuntime {
         let payload = match raw {
             Ok(payload) => payload,
             Err(failure) => {
-                if failure.message.len() > limits.max_event_bytes {
-                    return Err(RuntimeError::ResourceExhausted);
-                }
                 return Err(RuntimeError::from_guest(
                     convert_error_kind(failure.kind),
                     failure.message,
@@ -437,15 +354,13 @@ impl VendorRuntime {
                 ));
             }
         };
-        if payload.format != CANONICAL_FORMAT_VERSION
-            || payload.body.len() > limits.max_output_bytes
-        {
+        if payload.format != CANONICAL_FORMAT_VERSION {
             return Err(RuntimeError::InvalidOutput);
         }
         if cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
         Ok(payload.body)
@@ -491,18 +406,18 @@ impl VendorRuntime {
         let scope = OperationScope {
             services: Arc::new(DenyServices),
             cancellation: CancellationToken::new(),
-            deadline: Instant::now() + Duration::from_secs(2),
+            deadline: Deadline::from_now(Duration::from_secs(2)),
             generation: 0,
         };
         let mut store = self.new_store(scope, None, false);
         let linker = self
             .new_linker()
             .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
-        let deadline = store.data().deadline;
+        let deadline = store.data().deadline.clone();
         let instantiate = bindings::Vendor::instantiate_async(&mut store, component, &linker);
         let instance = tokio::select! {
             result = instantiate => result,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(LoadError::DescriptorExecution("descriptor deadline elapsed".into()));
             }
         }
@@ -510,16 +425,11 @@ impl VendorRuntime {
         let descriptor_call = instance.call_descriptor(&mut store);
         let descriptor = tokio::select! {
             result = descriptor_call => result,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            () = deadline.wait() => {
                 return Err(LoadError::DescriptorExecution("descriptor deadline elapsed".into()));
             }
         }
         .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
-        if descriptor.len() > self.config.limits.max_event_bytes {
-            return Err(LoadError::DescriptorInvalid(
-                "descriptor exceeds size limit".into(),
-            ));
-        }
         serde_json::from_str(&descriptor).map_err(LoadError::DescriptorJson)
     }
 
@@ -530,54 +440,33 @@ impl VendorRuntime {
         Ok(linker)
     }
 
-    fn operation_limits(&self, operation: Option<Operation>) -> &RuntimeLimits {
-        if operation == Some(Operation::MediaImage) {
-            &self.config.media_image_limits
-        } else {
-            &self.config.limits
-        }
-    }
-
     fn new_store(
         &self,
         scope: OperationScope,
         operation: Option<Operation>,
         catalog_sync: bool,
     ) -> Store<StoreState> {
-        let runtime_limits = self.operation_limits(operation);
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(runtime_limits.max_memory_bytes)
-            .instances(16)
-            .tables(16)
-            .memories(1)
-            .table_elements(100_000)
-            .trap_on_grow_failure(true)
-            .build();
-        let mut table = ResourceTable::new();
-        table.set_max_capacity(runtime_limits.max_handles);
         let mut wasi = WasiCtx::builder();
         wasi.max_random_size(64 * 1024);
         let mut store = Store::new(
             &self.engine,
             StoreState {
                 wasi: wasi.build(),
-                table,
-                limits,
+                table: ResourceTable::new(),
                 services: scope.services,
                 cancellation: scope.cancellation,
                 deadline: scope.deadline,
                 generation: scope.generation,
-                runtime_limits: runtime_limits.clone(),
                 operation,
                 catalog_sync,
                 upstream_starts: 0,
-                host_io_bytes: 0,
-                emitted_bytes: 0,
             },
         );
-        store.limiter(|state| &mut state.limits);
+        // Fuel stays enabled only so the async yield interval can preempt
+        // CPU-bound guest work for cancellation and deadlines; the budget
+        // itself is unlimited.
         store
-            .set_fuel(runtime_limits.fuel_per_operation)
+            .set_fuel(u64::MAX)
             .expect("fuel consumption is enabled for vendor runtime");
         store
             .fuel_async_yield_interval(Some(10_000))
@@ -589,20 +478,16 @@ impl VendorRuntime {
 struct StoreState {
     wasi: WasiCtx,
     table: ResourceTable,
-    limits: StoreLimits,
     services: Arc<dyn HostServices>,
     cancellation: CancellationToken,
-    deadline: Instant,
+    deadline: Deadline,
     generation: u64,
-    runtime_limits: RuntimeLimits,
     operation: Option<Operation>,
     /// `sync-catalog` runs without an operation kind: `http-start` stays
     /// admitted under the services' own origin checks while every
     /// connection-scoped import remains rejected.
     catalog_sync: bool,
     upstream_starts: usize,
-    host_io_bytes: usize,
-    emitted_bytes: usize,
 }
 
 impl WasiView for StoreState {
@@ -623,12 +508,15 @@ impl StoreState {
                 "operation is no longer active",
             ));
         }
-        if Instant::now() >= self.deadline {
+        if self.deadline.is_exceeded() {
             return Err(HostFailure::new(
                 ErrorKind::DeadlineExceeded,
                 "operation deadline elapsed",
             ));
         }
+        // Every guest↔host boundary call is activity: renew the shared deadline
+        // so a streaming operation stays alive while data keeps flowing.
+        self.deadline.renew();
         Ok(())
     }
 
@@ -652,31 +540,6 @@ impl StoreState {
         }
         Ok(())
     }
-
-    fn account_host_io(&mut self, bytes: usize) -> Result<(), HostFailure> {
-        self.host_io_bytes = self
-            .host_io_bytes
-            .checked_add(bytes)
-            .ok_or_else(resource_failure)?;
-        if self.host_io_bytes > self.runtime_limits.max_host_io_bytes {
-            return Err(resource_failure());
-        }
-        Ok(())
-    }
-
-    fn account_event(&mut self, bytes: usize) -> Result<(), HostFailure> {
-        if bytes > self.runtime_limits.max_event_bytes {
-            return Err(resource_failure());
-        }
-        self.emitted_bytes = self
-            .emitted_bytes
-            .checked_add(bytes)
-            .ok_or_else(resource_failure)?;
-        if self.emitted_bytes > self.runtime_limits.max_output_bytes {
-            return Err(resource_failure());
-        }
-        Ok(())
-    }
 }
 
 impl wit_host::Host for StoreState {
@@ -686,20 +549,6 @@ impl wit_host::Host for StoreState {
     ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
     {
         if let Err(error) = self.network_active() {
-            return Ok(Err(to_wit_failure(error)));
-        }
-        let request_bytes = request.body.len()
-            + request.url.len()
-            + request.method.len()
-            + request
-                .headers
-                .iter()
-                .map(|(a, b)| a.len() + b.len())
-                .sum::<usize>();
-        if request_bytes > self.runtime_limits.max_request_bytes {
-            return Ok(Err(to_wit_failure(resource_failure())));
-        }
-        if let Err(error) = self.account_host_io(request_bytes) {
             return Ok(Err(to_wit_failure(error)));
         }
         let request = HttpRequest {
@@ -725,19 +574,6 @@ impl wit_host::Host for StoreState {
         if let Err(error) = self.operation_active() {
             return Ok(Err(to_wit_failure(error)));
         }
-        let request_bytes = request.url.len()
-            + request.protocols.iter().map(String::len).sum::<usize>()
-            + request
-                .headers
-                .iter()
-                .map(|(a, b)| a.len() + b.len())
-                .sum::<usize>();
-        if request_bytes > self.runtime_limits.max_request_bytes {
-            return Ok(Err(to_wit_failure(resource_failure())));
-        }
-        if let Err(error) = self.account_host_io(request_bytes) {
-            return Ok(Err(to_wit_failure(error)));
-        }
         match self
             .services
             .ws_connect(request.url, request.headers, request.protocols)
@@ -759,15 +595,7 @@ impl wit_host::Host for StoreState {
             return Ok(Err(to_wit_failure(error)));
         }
         match self.services.read_private_state().await {
-            Ok(Some(bytes)) if bytes.len() > PRIVATE_STATE_LIMIT => {
-                Ok(Err(to_wit_failure(resource_failure())))
-            }
-            Ok(Some(bytes)) => {
-                if let Err(error) = self.account_host_io(bytes.len()) {
-                    return Ok(Err(to_wit_failure(error)));
-                }
-                Ok(Ok(Some(bytes)))
-            }
+            Ok(Some(bytes)) => Ok(Ok(Some(bytes))),
             Ok(None) => Ok(Ok(None)),
             Err(error) => Ok(Err(to_wit_failure(error))),
         }
@@ -778,12 +606,6 @@ impl wit_host::Host for StoreState {
         bytes: Vec<u8>,
     ) -> Result<Result<(), wit_types::PluginError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
-            return Ok(Err(to_wit_failure(error)));
-        }
-        if bytes.len() > PRIVATE_STATE_LIMIT {
-            return Ok(Err(to_wit_failure(resource_failure())));
-        }
-        if let Err(error) = self.account_host_io(bytes.len()) {
             return Ok(Err(to_wit_failure(error)));
         }
         match self.services.write_private_state(bytes).await {
@@ -804,9 +626,6 @@ impl wit_host::Host for StoreState {
                 ErrorKind::Trapped,
                 "inference and compaction may start only one model request",
             ))));
-        }
-        if self.upstream_starts >= self.runtime_limits.max_handles {
-            return Ok(Err(to_wit_failure(resource_failure())));
         }
         match self
             .services
@@ -829,18 +648,12 @@ impl wit_host::Host for StoreState {
             return Ok(Err(to_wit_failure(error)));
         }
         if let wit_types::CanonicalEvent::Failed(failure) = &event {
-            if failure.message.len() > self.runtime_limits.max_event_bytes {
-                return Ok(Err(to_wit_failure(resource_failure())));
-            }
             self.services.log(LogLevel::Warn, &failure.message);
         }
-        let (event, bytes) = match decode_event(event) {
+        let event = match decode_event(event) {
             Ok(value) => value,
             Err(error) => return Ok(Err(to_wit_failure(error))),
         };
-        if let Err(error) = self.account_event(bytes) {
-            return Ok(Err(to_wit_failure(error)));
-        }
         match self.services.emit_event(event).await {
             Ok(()) => Ok(Ok(())),
             Err(error) => Ok(Err(to_wit_failure(error))),
@@ -848,7 +661,7 @@ impl wit_host::Host for StoreState {
     }
 
     async fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
-        if self.active().is_ok() && message.len() <= self.runtime_limits.max_event_bytes {
+        if self.active().is_ok() {
             self.services.log(
                 match level {
                     wit_host::LogLevel::Debug => LogLevel::Debug,
@@ -884,13 +697,7 @@ impl wit_host::HostHttpResponse for StoreState {
         }
         let response = self.table.get(&response)?.0.clone();
         match response.headers().await {
-            Ok(headers) => {
-                let bytes = headers.iter().map(|(a, b)| a.len() + b.len()).sum();
-                if let Err(error) = self.account_host_io(bytes) {
-                    return Ok(Err(to_wit_failure(error)));
-                }
-                Ok(Ok(headers))
-            }
+            Ok(headers) => Ok(Ok(headers)),
             Err(error) => Ok(Err(to_wit_failure(error))),
         }
     }
@@ -904,15 +711,7 @@ impl wit_host::HostHttpResponse for StoreState {
         }
         let response = self.table.get(&response)?.0.clone();
         match response.read_body().await {
-            Ok(Some(chunk)) => {
-                if chunk.len() > self.runtime_limits.max_event_bytes {
-                    return Ok(Err(to_wit_failure(resource_failure())));
-                }
-                if let Err(error) = self.account_host_io(chunk.len()) {
-                    return Ok(Err(to_wit_failure(error)));
-                }
-                Ok(Ok(Some(chunk)))
-            }
+            Ok(Some(chunk)) => Ok(Ok(Some(chunk))),
             Ok(None) => Ok(Ok(None)),
             Err(error) => Ok(Err(to_wit_failure(error))),
         }
@@ -934,13 +733,6 @@ impl wit_host::HostWsConnection for StoreState {
             return Ok(Err(to_wit_failure(error)));
         }
         let message = convert_ws_from_wit(message);
-        let bytes = ws_message_size(&message);
-        if bytes > self.runtime_limits.max_event_bytes {
-            return Ok(Err(to_wit_failure(resource_failure())));
-        }
-        if let Err(error) = self.account_host_io(bytes) {
-            return Ok(Err(to_wit_failure(error)));
-        }
         let socket = self.table.get(&socket)?.0.clone();
         Ok(socket.send(message).await.map_err(to_wit_failure))
     }
@@ -954,13 +746,7 @@ impl wit_host::HostWsConnection for StoreState {
         }
         let socket = self.table.get(&socket)?.0.clone();
         match socket.next().await {
-            Ok(Some(message)) => {
-                let bytes = ws_message_size(&message);
-                if let Err(error) = self.account_host_io(bytes) {
-                    return Ok(Err(to_wit_failure(error)));
-                }
-                Ok(Ok(Some(convert_ws_to_wit(message))))
-            }
+            Ok(Some(message)) => Ok(Ok(Some(convert_ws_to_wit(message)))),
             Ok(None) => Ok(Ok(None)),
             Err(error) => Ok(Err(to_wit_failure(error))),
         }
@@ -1091,32 +877,6 @@ fn convert_payload(
     }
 }
 
-fn wire_input_size(
-    provider: &wit_types::ProviderSnapshot,
-    payload: &wit_types::CanonicalPayload,
-) -> usize {
-    [
-        payload.body.len(),
-        provider.provider_id.len(),
-        provider.channel.len(),
-        provider.base_url.len(),
-        provider.protocol.len(),
-        provider.options.len(),
-        provider.secrets.len(),
-        provider.model.as_ref().map_or(0, String::len),
-        provider.model_metadata.as_ref().map_or(0, Vec::len),
-        provider.operation_metadata.len(),
-    ]
-    .into_iter()
-    .chain(
-        provider
-            .client_headers
-            .iter()
-            .map(|(name, value)| name.len().saturating_add(value.len())),
-    )
-    .fold(0usize, usize::saturating_add)
-}
-
 fn convert_error_kind(value: wit_types::ErrorKind) -> ErrorKind {
     match value {
         wit_types::ErrorKind::Unsupported => ErrorKind::Unsupported,
@@ -1226,47 +986,38 @@ fn to_wit_transport_failure(
     }
 }
 
-fn decode_event(value: wit_types::CanonicalEvent) -> Result<(RuntimeEvent, usize), HostFailure> {
+fn decode_event(value: wit_types::CanonicalEvent) -> Result<RuntimeEvent, HostFailure> {
     match value {
         wit_types::CanonicalEvent::Delta(payload) => {
             ensure_format(payload.format)?;
-            let bytes = payload.body.len();
             let delta = serde_json::from_slice(&payload.body).map_err(|_| {
                 HostFailure::new(ErrorKind::Trapped, "invalid canonical stream delta")
             })?;
-            Ok((RuntimeEvent::Delta(delta), bytes))
+            Ok(RuntimeEvent::Delta(delta))
         }
         wit_types::CanonicalEvent::Completed(payload) => {
             ensure_format(payload.format)?;
-            let bytes = payload.body.len();
             serde_json::from_slice::<stravia_runtime_contract::protocol::ir::AiResponse>(
                 &payload.body,
             )
             .map_err(|_| HostFailure::new(ErrorKind::Trapped, "invalid canonical response"))?;
-            Ok((RuntimeEvent::Completed, bytes))
+            Ok(RuntimeEvent::Completed)
         }
         wit_types::CanonicalEvent::Compacted(payload) => {
             ensure_format(payload.format)?;
-            let bytes = payload.body.len();
             serde_json::from_slice::<
                 stravia_runtime_contract::protocol::ir::NativeCompactionResponse,
             >(&payload.body)
             .map_err(|_| {
                 HostFailure::new(ErrorKind::Trapped, "invalid canonical compaction response")
             })?;
-            Ok((RuntimeEvent::Compacted, bytes))
+            Ok(RuntimeEvent::Compacted)
         }
-        wit_types::CanonicalEvent::Failed(failure) => {
-            let bytes = failure.message.len();
-            Ok((
-                RuntimeEvent::Failed {
-                    kind: convert_error_kind(failure.kind),
-                    message: failure.message,
-                    upstream_status: failure.upstream_status,
-                },
-                bytes,
-            ))
-        }
+        wit_types::CanonicalEvent::Failed(failure) => Ok(RuntimeEvent::Failed {
+            kind: convert_error_kind(failure.kind),
+            message: failure.message,
+            upstream_status: failure.upstream_status,
+        }),
     }
 }
 
@@ -1279,13 +1030,6 @@ fn ensure_format(format: u32) -> Result<(), HostFailure> {
             "unsupported canonical format",
         ))
     }
-}
-
-fn resource_failure() -> HostFailure {
-    HostFailure::new(
-        ErrorKind::ResourceExhausted,
-        "operation resource limit exceeded",
-    )
 }
 
 fn classify_trap(error: &wasmtime::Error) -> RuntimeError {
@@ -1316,17 +1060,6 @@ fn convert_ws_to_wit(value: WebSocketMessage) -> wit_types::WsMessage {
         WebSocketMessage::Ping(value) => wit_types::WsMessage::Ping(value),
         WebSocketMessage::Pong(value) => wit_types::WsMessage::Pong(value),
         WebSocketMessage::Close(value) => wit_types::WsMessage::Close(value),
-    }
-}
-
-fn ws_message_size(value: &WebSocketMessage) -> usize {
-    match value {
-        WebSocketMessage::Text(value) => value.len(),
-        WebSocketMessage::Binary(value)
-        | WebSocketMessage::Ping(value)
-        | WebSocketMessage::Pong(value) => value.len(),
-        WebSocketMessage::Close(Some((_, reason))) => reason.len(),
-        WebSocketMessage::Close(None) => 0,
     }
 }
 
@@ -1381,6 +1114,61 @@ impl HostServices for DenyServices {
 
     fn generation_is_current(&self, _generation: u64) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn state(deadline: Deadline) -> StoreState {
+        StoreState {
+            wasi: WasiCtx::builder().build(),
+            table: ResourceTable::new(),
+            services: Arc::new(DenyServices),
+            cancellation: CancellationToken::new(),
+            deadline,
+            generation: 0,
+            operation: None,
+            upstream_starts: 0,
+            catalog_sync: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn host_boundary_activity_renews_shared_deadline() {
+        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let state = state(deadline.clone());
+        let original = deadline.at();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        state.active().expect("boundary call before expiry");
+        // The renewal pushed the shared instant out, so a clone held by an
+        // outer layer observes the extension too.
+        assert!(deadline.at() > original);
+        assert!(!deadline.is_exceeded());
+    }
+
+    #[tokio::test]
+    async fn silent_operation_expires_at_deadline() {
+        let deadline = Deadline::from_now(Duration::from_millis(30));
+        let state = state(deadline);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let error = state.active().expect_err("silence must expire");
+        assert!(matches!(error.kind, ErrorKind::DeadlineExceeded));
+    }
+
+    #[tokio::test]
+    async fn cancelled_operation_fails_without_renewing() {
+        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let state = state(deadline.clone());
+        state.cancellation.cancel();
+        let at = deadline.at();
+        let error = state.active().expect_err("cancelled operation");
+        assert!(matches!(error.kind, ErrorKind::Cancelled));
+        // Cancellation returns before the renewal step, so the shared instant
+        // stays untouched.
+        assert_eq!(deadline.at(), at);
     }
 }
 

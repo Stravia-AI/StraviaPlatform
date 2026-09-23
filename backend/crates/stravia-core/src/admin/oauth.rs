@@ -258,7 +258,9 @@ impl AdminService {
                         }),
                         crate::plugin::VendorCallContext::new(
                             stravia_runtime_contract::CancellationToken::new(),
-                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            stravia_runtime_contract::Deadline::fixed(
+                                std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            ),
                         ),
                     )
                     .await?;
@@ -286,7 +288,9 @@ impl AdminService {
             .ok_or_else(|| anyhow::anyhow!("authentication session runtime is unavailable"))?;
         let mut context = crate::plugin::VendorCallContext::new(
             runtime.cancellation.clone(),
-            std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+            ),
         );
         context
             .metadata
@@ -828,7 +832,9 @@ impl AdminService {
         let (_, operation, _) = self.gw.vendor_plugins.acquire(&driver_key)?;
         let publication = operation.publication_fence(
             stravia_runtime_contract::CancellationToken::new(),
-            std::time::Instant::now() + std::time::Duration::from_secs(120),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(120),
+            ),
         );
         drop(operation);
         let write_fence = publication.write_fence().await?;
