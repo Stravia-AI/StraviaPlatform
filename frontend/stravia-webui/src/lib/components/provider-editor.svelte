@@ -59,11 +59,10 @@ let oauthAuthorization = $state<{
   updateProxy: (useProxy: boolean) => Promise<void>
 }>()
 let saving = $state(false)
-let reviewing = $state(false)
-let reviewRequestId = 0
+let saveGeneration = 0
 let refreshingServices = $state(false)
 let preview = $state<ProviderConfigurationPreview>()
-let previewFailure = $state('')
+let saveError = $state('')
 
 const queryClient = useQueryClient()
 const providerDescriptorsQuery = createQuery(() => ({
@@ -78,8 +77,6 @@ const oauthSessionSecretFields = $derived(
 )
 const supportsConfigValidation = $derived(selectedOption?.channel.capabilities.includes('config_validation') ?? false)
 const previewIssues = $derived(preview?.issues ?? [])
-const globalIssues = $derived(previewIssues.filter((issue) => !issue.field))
-const previewAccepted = $derived(Boolean(preview) && previewIssues.length === 0)
 const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
   base_url: form.baseUrl.trim(),
   protocol: form.protocol || selectedOption?.channel.protocol || undefined,
@@ -103,10 +100,9 @@ function handleOpenChange(nextOpen: boolean): void {
 }
 
 function invalidatePreview(): void {
-  reviewRequestId += 1
-  reviewing = false
+  saveGeneration += 1
   preview = undefined
-  previewFailure = ''
+  saveError = ''
 }
 
 function configurationChanged(): void {
@@ -194,56 +190,49 @@ function configurationValues(secret: boolean): Record<string, unknown> {
   )
 }
 
-async function reviewConfiguration(): Promise<void> {
-  if (!selectedOption || (!form.baseUrl.trim() && !supportsConfigValidation)) return
-  reviewRequestId += 1
-  const requestId = reviewRequestId
-  reviewing = true
-  previewFailure = ''
-  preview = undefined
-  try {
-    const result = await admin.providers.previewConfiguration({
-      vendor_id: selectedOption.descriptor.provider_id,
-      channel: selectedOption.channel.id,
-      base_url: form.baseUrl.trim(),
-      options: configurationValues(false),
-      credentials: configurationValues(true),
-    })
-    if (requestId !== reviewRequestId) return
-    preview = result
-    if (result.issues.length === 0) form.baseUrl = result.base_url
-  } catch (error) {
-    if (requestId === reviewRequestId) previewFailure = localizeBackendErrorMessage(error)
-  } finally {
-    if (requestId === reviewRequestId) reviewing = false
-  }
-}
-
 async function saveProvider(): Promise<void> {
-  if (!selectedOption || !previewAccepted || !preview) return
-  if (!form.name.trim() || (oauthProvider && !oauthReady)) return
-  const credentials = configurationValues(true)
-  const credential: CreateProvider['credential'] = oauthProvider
-    ? { type: 'none' }
-    : Object.keys(credentials).length > 0
-      ? { type: 'fields', values: credentials }
-      : { type: 'none' }
-  const input: CreateProvider = {
-    name: form.name.trim(),
-    source: {
-      type: 'custom',
-      vendor: selectedOption.descriptor.provider_id,
-      channel: selectedOption.channel.id,
-      protocol: form.protocol || selectedOption.channel.protocol || undefined,
-      base_url: preview.base_url,
-    },
-    credential,
-    vendor_options: configurationValues(false),
-    use_proxy: form.useProxy,
-  }
-
+  if (saving || !selectedOption || !form.name.trim()) return
+  const generation = saveGeneration
   saving = true
+  saveError = ''
   try {
+    let baseUrl = form.baseUrl.trim()
+    if (supportsConfigValidation || baseUrl) {
+      const result = await admin.providers.previewConfiguration({
+        vendor_id: selectedOption.descriptor.provider_id,
+        channel: selectedOption.channel.id,
+        base_url: baseUrl,
+        options: configurationValues(false),
+        credentials: configurationValues(true),
+      })
+      if (generation !== saveGeneration) return
+      preview = result
+      if (result.issues.length > 0) {
+        const globalMessages = result.issues.filter((issue) => !issue.field).map((issue) => issue.message)
+        saveError = globalMessages.join(' ') || m.provider_config_fix_issues_before_save()
+        return
+      }
+      baseUrl = result.base_url
+    }
+    const credentials = configurationValues(true)
+    const credential: CreateProvider['credential'] = oauthProvider
+      ? { type: 'none' }
+      : Object.keys(credentials).length > 0
+        ? { type: 'fields', values: credentials }
+        : { type: 'none' }
+    const input: CreateProvider = {
+      name: form.name.trim(),
+      source: {
+        type: 'custom',
+        vendor: selectedOption.descriptor.provider_id,
+        channel: selectedOption.channel.id,
+        protocol: form.protocol || selectedOption.channel.protocol || undefined,
+        base_url: baseUrl,
+      },
+      credential,
+      vendor_options: configurationValues(false),
+      use_proxy: form.useProxy,
+    }
     const savedProvider =
       oauthProvider && oauthSessionId
         ? await admin.providers.createOAuth(oauthSessionId, input)
@@ -457,6 +446,7 @@ async function saveProvider(): Promise<void> {
                 oauthSessionId = sessionId
                 oauthReady = ready
                 invalidatePreview()
+                if (sessionId && ready) void saveProvider()
               }} />
           {/if}
 
@@ -478,65 +468,7 @@ async function saveProvider(): Promise<void> {
               }} />
           </Field.Field>
 
-          <section class="mt-6 rounded-xl border p-4" aria-labelledby="new-provider-network-review-title">
-            <div class="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h3 id="new-provider-network-review-title" class="font-medium">{m.provider_config_review_title()}</h3>
-                <p class="mt-1 text-sm text-muted-foreground">{m.provider_config_review_help()}</p>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={reviewing || (!form.baseUrl.trim() && !supportsConfigValidation)}
-                onclick={() => void reviewConfiguration()}>
-                {#if reviewing}<Spinner data-icon="inline-start" />{/if}
-                {m.provider_config_review_action()}
-              </Button>
-            </div>
-            {#if preview}
-              <dl class="mt-4 flex flex-col gap-3">
-                <div>
-                  <dt class="text-xs text-muted-foreground">{m.provider_config_saved_base_url()}</dt>
-                  <dd class="font-technical mt-1 break-all text-sm">{preview.base_url}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">{m.provider_config_authorized_origins()}</dt>
-                  <dd class="mt-1">
-                    {#if preview.network_permissions.length > 0}
-                      <ul class="flex flex-col gap-1">
-                        {#each preview.network_permissions as permission (`${permission.origin}:${permission.configuration_field ?? ''}:${permission.connection_scoped}`)}
-                          <li class="font-technical break-all text-sm">
-                            {permission.origin}
-                            {#if permission.configuration_field}
-                              <span class="font-sans text-xs text-muted-foreground">
-                                · {m.provider_config_origin_from_field({ field: permission.configuration_field })}
-                              </span>
-                            {:else if permission.connection_scoped}
-                              <span class="font-sans text-xs text-muted-foreground">
-                                · {m.provider_config_connection_scoped_origin()}
-                              </span>
-                            {/if}
-                          </li>
-                        {/each}
-                      </ul>
-                    {:else}
-                      <span class="text-sm text-muted-foreground">{m.provider_config_no_origins()}</span>
-                    {/if}
-                  </dd>
-                </div>
-              </dl>
-              {#if globalIssues.length > 0}
-                <ul class="mt-4 flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
-                  {#each globalIssues as issue (`${issue.code}:${issue.message}`)}<li>{issue.message}</li>{/each}
-                </ul>
-              {:else if previewAccepted}
-                <p class="mt-4 text-sm text-success">{m.provider_config_review_ready()}</p>
-              {/if}
-            {:else}
-              <p class="mt-4 text-sm text-muted-foreground">{m.provider_config_review_required()}</p>
-            {/if}
-            {#if previewFailure}<p class="mt-3 text-sm text-destructive">{previewFailure}</p>{/if}
-          </section>
+          {#if saveError}<p class="mt-6 text-sm text-destructive">{saveError}</p>{/if}
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">
@@ -548,9 +480,7 @@ async function saveProvider(): Promise<void> {
               onclick={() => void oauthAuthorization?.cancel()}>
               {m.common_cancel()}
             </Sheet.Close>
-            <Button
-              type="submit"
-              disabled={saving || !form.name.trim() || !previewAccepted || (oauthProvider && !oauthReady)}>
+            <Button type="submit" disabled={saving || !form.name.trim()}>
               {#if saving}<Spinner data-icon="inline-start" />{/if}
               {m.provider_editor_connect()}
             </Button>
