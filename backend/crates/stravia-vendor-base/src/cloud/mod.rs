@@ -16,9 +16,9 @@ use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AuthResponse, AuthStep, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigValidationResponse, DataCompatibility, DefaultModelsSource, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
-    ValidationIssue, read_http_body,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ProviderSnapshot, ValidationIssue, read_http_body,
 };
 use url::Url;
 
@@ -1146,7 +1146,7 @@ fn models_url(provider: &ProviderSnapshot) -> Result<String, PluginError> {
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
     {
         return Ok(source.to_owned());
     }
@@ -1626,6 +1626,7 @@ fn channel(
         protocol: Some(protocol.into()),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source,
+        consumes_catalog_models: false,
         capabilities: capabilities.iter().copied().collect::<BTreeSet<_>>(),
         model_capabilities: BTreeSet::new(),
         search_model_required: false,

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use stravia_vendor_sdk::{Capability, OriginDeclaration, ProviderDescriptor};
+use stravia_vendor_sdk::{
+    Capability, MODELS_SOURCE_CATALOG, OriginDeclaration, ProviderDescriptor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NetworkGrant {
@@ -62,7 +64,7 @@ pub(crate) fn resolve_permissions(
         && static_models.is_none_or(|models| models.trim().is_empty())
         && let Some(source) = models_source
             .map(str::trim)
-            .filter(|source| !source.is_empty() && *source != "catalog")
+            .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
     {
         grants.push(NetworkGrant {
             origin: exact_origin(source)?,

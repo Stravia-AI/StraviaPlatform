@@ -15,9 +15,9 @@ use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
-    TransportPreference, ValidationIssue, VendorDescriptor, VendorKind,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ProviderSnapshot, TransportPreference, ValidationIssue, VendorDescriptor, VendorKind,
 };
 
 const VENDOR_ID: &str = "openai-codex";
@@ -91,6 +91,7 @@ pub fn descriptor() -> VendorDescriptor {
                 protocol: Some("open-responses".into()),
                 default_base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: true,
@@ -382,11 +383,12 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_owned)
         .unwrap_or_else(|| endpoint(&provider.base_url, "/models"));
     url.push(if url.contains('?') { '&' } else { '?' });
-    url.push_str("client_version=0.153.0");
+    url.push_str("client_version=");
+    url.push_str(codex::CLIENT_VERSION);
     let mut headers = vec![("accept".into(), "application/json".into())];
     codex::append_identity_headers(&provider, &mut headers)?;
     let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {

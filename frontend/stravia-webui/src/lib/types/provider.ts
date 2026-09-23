@@ -223,6 +223,8 @@ export interface VendorChannelDescriptor {
   default_base_url?: string | null
   /** Discovery source selected when a new connection does not provide one. */
   default_models_source?: 'catalog' | null
+  /** Whether catalog-sourced discovery consumes the host-injected catalog scope. */
+  consumes_catalog_models?: boolean
   capabilities: VendorCapability[]
   model_capabilities?: string[]
   search_model_required: boolean

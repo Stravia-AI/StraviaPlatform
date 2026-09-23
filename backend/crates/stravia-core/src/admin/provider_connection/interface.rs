@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(provider.vendor.as_deref(), Some("openai"));
         assert_eq!(provider.protocol, "openai-compatible");
         assert_eq!(provider.base_url, "https://proxy.example/v1");
-        assert_eq!(provider.models_source.as_deref(), Some("catalog"));
+        assert!(provider.models_source.is_none());
         Ok(())
     }
 

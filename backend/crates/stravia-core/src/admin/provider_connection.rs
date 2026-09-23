@@ -490,10 +490,11 @@ impl AdminService {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Provider profile `{}` is not installed", provider.id)
                     })?;
-                let declared_models_source = descriptor
+                let declared_channel = descriptor
                     .channels
                     .iter()
-                    .find(|declared| declared.id == channel.id)
+                    .find(|declared| declared.id == channel.id);
+                let declared_models_source = declared_channel
                     .and_then(|declared| declared.default_models_source)
                     .map(|source| source.as_str().to_owned());
                 let uses_catalog_scope = match provider.catalog_id.as_deref() {
@@ -502,9 +503,14 @@ impl AdminService {
                     }
                     None => false,
                 };
-                let models_source = uses_catalog_scope
-                    .then(|| "catalog".to_owned())
-                    .or(declared_models_source);
+                // Persisting the catalog marker is only meaningful for
+                // channels that consume the injected scope; account-discovery
+                // channels resolve it back into a live upstream request, so
+                // storing it would misreport the model source.
+                let models_source = (uses_catalog_scope
+                    && declared_channel.is_some_and(|declared| declared.consumes_catalog_models))
+                .then(|| stravia_vendor_sdk::MODELS_SOURCE_CATALOG.to_owned())
+                .or(declared_models_source);
                 let name =
                     normalize_name(name.as_deref().unwrap_or(&provider.name), "provider name")?;
                 let (credentials, auth_mode) = match (channel.auth_mode, credential) {

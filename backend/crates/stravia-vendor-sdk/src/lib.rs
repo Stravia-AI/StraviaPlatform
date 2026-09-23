@@ -31,7 +31,8 @@ pub use descriptor::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, DataCompatibility,
     DefaultModelsSource, EnumOption, FieldCondition, MODEL_CAPABILITY_THINKING_TOGGLE,
-    NetworkDeclaration, OriginDeclaration, ProviderDescriptor, VendorDescriptor, VendorKind,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, OriginDeclaration, ProviderDescriptor,
+    VendorDescriptor, VendorKind,
 };
 pub use envelope::{CANONICAL_FORMAT_VERSION, CanonicalEnvelope, decode_payload, encode_payload};
 pub use guest::{

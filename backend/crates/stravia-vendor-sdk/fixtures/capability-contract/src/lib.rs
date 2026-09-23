@@ -129,6 +129,7 @@ impl VendorGuest for CapabilityContractVendor {
                 protocol: (profile == Profile::BaseOlder).then(|| "openai-compatible".into()),
                 default_base_url: None,
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,

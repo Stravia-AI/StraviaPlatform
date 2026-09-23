@@ -141,6 +141,18 @@ pub fn descriptor() -> VendorDescriptor {
             .unwrap_or_else(|| panic!("base provider descriptor `{provider_id}` must exist"))
     }));
 
+    // Catalog consumption is a property of the resolved provider id — catalog
+    // profiles may be rewritten to storefront ids after borrowing an
+    // implementation descriptor — so it is stamped here from the same id set
+    // `generic::explicit_discovery` uses at runtime.
+    for provider in &mut providers {
+        let consumes =
+            !metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS.contains(&provider.provider_id.as_str());
+        for channel in &mut provider.channels {
+            channel.consumes_catalog_models = consumes;
+        }
+    }
+
     VendorDescriptor {
         vendor_id: "base".into(),
         version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -424,23 +436,39 @@ mod tests {
             assert_eq!(profile.catalog_id.as_deref(), Some(provider_id));
         }
         for provider_id in ["amazon-bedrock", "watsonx"] {
+            let channel = &descriptor
+                .provider(provider_id)
+                .expect("cloud profile")
+                .channels[0];
             assert_eq!(
-                descriptor
-                    .provider(provider_id)
-                    .expect("cloud profile")
-                    .channels[0]
-                    .default_models_source,
+                channel.default_models_source,
                 Some(DefaultModelsSource::Catalog)
             );
+            assert!(channel.consumes_catalog_models);
         }
         for provider_id in ["openai", "google", "minimax", "azure-cognitive-services"] {
-            assert_eq!(
+            let channel = &descriptor
+                .provider(provider_id)
+                .expect("live profile")
+                .channels[0];
+            assert_eq!(channel.default_models_source, None);
+        }
+        for provider_id in ["minimax", "azure-cognitive-services"] {
+            assert!(
                 descriptor
                     .provider(provider_id)
-                    .expect("live profile")
+                    .expect("catalog-consuming profile")
                     .channels[0]
-                    .default_models_source,
-                None
+                    .consumes_catalog_models
+            );
+        }
+        for provider_id in ["openai", "google", "ollama", "google-vertex"] {
+            assert!(
+                !descriptor
+                    .provider(provider_id)
+                    .expect("account-discovery profile")
+                    .channels[0]
+                    .consumes_catalog_models
             );
         }
         for dedicated in ["openai-codex", "xai-grok", "command-code", "devin"] {

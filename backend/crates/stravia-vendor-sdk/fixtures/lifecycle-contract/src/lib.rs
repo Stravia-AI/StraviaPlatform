@@ -54,6 +54,7 @@ impl VendorGuest for LifecycleContractVendor {
                     ),
                     default_base_url: None,
                     default_models_source: None,
+                    consumes_catalog_models: false,
                     capabilities: capabilities.clone(),
                     model_capabilities: BTreeSet::new(),
                     search_model_required: false,

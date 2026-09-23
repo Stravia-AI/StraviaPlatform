@@ -12,12 +12,13 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
     ConfigValidationResponse, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, HttpRequest, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderSnapshot, ValidationIssue, read_http_body,
+    GuestHost, HttpRequest, MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput,
+    PluginError, ProviderSnapshot, ValidationIssue, read_http_body,
 };
 
 use crate::metadata::{
-    PROTOCOL_ANTHROPIC, PROTOCOL_GEMINI, PROTOCOL_OPEN_RESPONSES, PROTOCOL_OPENAI_CHAT,
+    ACCOUNT_DISCOVERY_PROVIDER_IDS, PROTOCOL_ANTHROPIC, PROTOCOL_GEMINI, PROTOCOL_OPEN_RESPONSES,
+    PROTOCOL_OPENAI_CHAT,
 };
 
 const MAX_JSON_BODY: usize = 8 * 1024 * 1024;
@@ -421,15 +422,10 @@ pub(crate) fn explicit_discovery(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        == Some("catalog");
+        == Some(MODELS_SOURCE_CATALOG);
     // 历史原生连接也保存 catalog 来源标记，但账户清单或渠道静态清单
     // 仍决定可调用范围。目录别名不能继承另一供应商的账户发现策略。
-    if !catalog_selected
-        || matches!(
-            vendor_id,
-            "openai" | "anthropic" | "google" | "ollama" | "openrouter" | "xai" | "google-vertex"
-        )
-    {
+    if !catalog_selected || ACCOUNT_DISCOVERY_PROVIDER_IDS.contains(&vendor_id) {
         return Ok(None);
     }
     let sources = provider
@@ -482,7 +478,7 @@ fn model_discovery_request(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog");
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG);
     let protocol = protocol_for(vendor_id, provider)?;
     let google = protocol == GEMINI_PROTOCOL;
     let mut native_google_models = google && configured_source.is_none();
@@ -1084,7 +1080,7 @@ mod tests {
         let mut catalog_provider = provider(OPENAI_CHAT_PROTOCOL, "sk-test");
         catalog_provider
             .operation_metadata
-            .insert("models_source".into(), json!("catalog"));
+            .insert("models_source".into(), json!(MODELS_SOURCE_CATALOG));
         catalog_provider.operation_metadata.insert(
             "catalog_models".into(),
             json!([

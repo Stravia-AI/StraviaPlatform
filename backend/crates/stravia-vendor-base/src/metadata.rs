@@ -12,6 +12,20 @@ pub(crate) const PROTOCOL_OPENAI_CHAT: &str = "protocol-openai-chat-completions"
 pub(crate) const PROTOCOL_OPEN_RESPONSES: &str = "protocol-open-responses";
 pub(crate) const PROTOCOL_ANTHROPIC: &str = "protocol-anthropic-messages";
 
+/// Provider ids whose model discovery always resolves through a live account
+/// or channel-curated request; they never consume the host-injected
+/// `catalog_models` scope. `generic::explicit_discovery` applies the same
+/// carve-out when a legacy connection still carries the catalog marker.
+pub(crate) const ACCOUNT_DISCOVERY_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "ollama",
+    "openrouter",
+    "xai",
+    "google-vertex",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundledCatalogProfile {
     pub(crate) id: &'static str,
@@ -493,6 +507,7 @@ fn channel(
         protocol: protocol.map(str::to_owned),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source: None,
+        consumes_catalog_models: false,
         capabilities,
         model_capabilities: BTreeSet::new(),
         search_model_required: false,

@@ -17,9 +17,9 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigValidationResponse, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
-    PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue, VendorDescriptor,
-    VendorKind, read_http_body,
+    GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
+    ValidationIssue, VendorDescriptor, VendorKind, read_http_body,
 };
 
 use crate::codec::{CommandCodeGenerateV1, CommandCodeStreamParser, DEFAULT_WORKING_DIR};
@@ -113,6 +113,7 @@ pub fn descriptor() -> VendorDescriptor {
                 protocol: Some("command-code".into()),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
@@ -445,7 +446,7 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog")
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_string)
         .unwrap_or_else(|| format!("{}/provider/v1/models", base_url(provider)));
     let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {

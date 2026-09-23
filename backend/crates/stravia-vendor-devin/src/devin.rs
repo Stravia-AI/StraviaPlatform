@@ -108,6 +108,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                 protocol: Some("devin-connect".into()),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
