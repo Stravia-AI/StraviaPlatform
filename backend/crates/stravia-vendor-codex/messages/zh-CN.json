@@ -1,0 +1,10 @@
+{
+  "channel_codex": "Codex",
+  "channel_description": "使用 Open Responses、托管搜索和图像生成的 ChatGPT OAuth 通道。",
+  "callback_url": "回调 URL",
+  "callback_description": "完成授权后粘贴完整的回调 URL。",
+  "advanced": "高级设置",
+  "websocket_url": "Responses WebSocket URL",
+  "websocket_description": "自定义基础 URL 时，可填写完整的 ws:// 或 wss:// Responses 端点。",
+  "invalid_websocket_url": "Responses WebSocket URL 必须是绝对路径的 ws:// 或 wss:// URL。"
+}

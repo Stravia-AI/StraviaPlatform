@@ -1,4 +1,7 @@
 mod allowance;
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -99,7 +102,7 @@ pub fn descriptor() -> VendorDescriptor {
             description: Some("Grok OAuth access through the xAI CLI service".into()),
             channels: vec![ChannelDescriptor {
                 id: CHANNEL_ID.into(),
-                name: "Grok OAuth".into(),
+                name: crate::messages::channel_grok_oauth(),
                 description: None,
                 auth: Some(AuthDescriptor {
                     flow: AuthFlow::DeviceCode,
@@ -118,6 +121,7 @@ pub fn descriptor() -> VendorDescriptor {
             capabilities,
             website: None,
             implementation: None,
+            config_groups: Vec::new(),
             config_fields: Vec::new(),
             network: NetworkDeclaration {
                 base_url_field: None,

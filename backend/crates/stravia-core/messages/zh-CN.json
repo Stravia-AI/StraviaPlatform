@@ -1,0 +1,14 @@
+{
+  "config_required": "配置字段 `{field}` 为必填项",
+  "config_boolean": "配置字段 `{field}` 必须是布尔值",
+  "config_string": "配置字段 `{field}` 必须是字符串",
+  "config_max_length": "配置字段 `{field}` 不能超过 {limit} 个字符",
+  "config_invalid_pattern": "配置字段 `{field}` 声明了无效的匹配规则",
+  "config_pattern": "配置字段 `{field}` 不符合要求的格式",
+  "config_integer": "配置字段 `{field}` 必须是整数",
+  "config_decimal": "配置字段 `{field}` 必须是有限数值",
+  "config_enum_type": "配置字段 `{field}` 必须是字符串枚举值",
+  "config_enum_value": "配置字段 `{field}` 包含不支持的选项值",
+  "config_minimum": "配置字段 `{field}` 不得小于 {limit}",
+  "config_maximum": "配置字段 `{field}` 不得大于 {limit}"
+}

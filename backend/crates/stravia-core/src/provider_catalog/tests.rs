@@ -95,7 +95,7 @@ fn descriptor_with_catalog(
         "description": null,
         "channels": [{
             "id": channel_id,
-            "name": channel_id,
+            "name": {"en-US": channel_id},
             "description": null,
             "auth": null,
             "protocol": protocol,
@@ -104,6 +104,7 @@ fn descriptor_with_catalog(
             "search_model_required": false
         }],
         "capabilities": ["infer"],
+        "config_groups": [],
         "config_fields": [],
         "network": {
             "base_url_field": null,

@@ -1,0 +1,9 @@
+{
+  "channel_devin": "Devin",
+  "channel_description": "Devin CLI OAuth and Connect-RPC API",
+  "manual_token": "Devin token",
+  "manual_token_description": "Paste the token returned by the Devin CLI authorization flow.",
+  "authentication": "Authentication",
+  "session_token": "Session token",
+  "session_token_description": "OAuth-created Devin session token or a manually pasted Windsurf token"
+}

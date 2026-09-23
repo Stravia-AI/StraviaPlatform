@@ -35,6 +35,26 @@ struct Entry {
     retired_profiles: BTreeSet<String>,
 }
 
+// 数据兼容性只依赖持久化身份和格式代际，不依赖某一版表单展示契约能否解码。
+#[derive(serde::Deserialize)]
+struct RecordedDataManifest {
+    providers: Vec<RecordedDataProfile>,
+}
+
+#[derive(serde::Deserialize)]
+struct RecordedDataProfile {
+    provider_id: String,
+    data_compat: stravia_vendor_sdk::DataCompatibility,
+    config_fields: Vec<RecordedDataField>,
+}
+
+#[derive(serde::Deserialize)]
+struct RecordedDataField {
+    key: String,
+    #[serde(default)]
+    secret: bool,
+}
+
 struct Pending {
     preview: PluginPreview,
     record: InstalledPlugin,
@@ -370,7 +390,32 @@ impl VendorPlugins {
             .get(&descriptor.vendor_id)
             .map(|entry| entry.record.clone());
         let old_descriptor = old.as_ref().and_then(recorded_descriptor);
-        let scope_ids = self.scope_ids(descriptor, old_descriptor.as_ref());
+        let mut scope_ids = self.scope_ids(descriptor, old_descriptor.as_ref());
+        let recorded_data = {
+            let entries = self.entries.read();
+            let mut profiles = BTreeMap::new();
+            for entry in entries.values() {
+                let manifest = match serde_json::from_str::<RecordedDataManifest>(
+                    &entry.record.descriptor,
+                ) {
+                    Ok(manifest) => manifest,
+                    Err(_) => {
+                        tracing::warn!(vendor_id = %entry.record.vendor_id, "stored vendor data compatibility metadata is invalid");
+                        continue;
+                    }
+                };
+                for profile in manifest.providers {
+                    let owner = resolved_entry(&entries, &profile.provider_id);
+                    if owner.is_some_and(|owner| owner.record.vendor_id == entry.record.vendor_id) {
+                        if entry.record.vendor_id == descriptor.vendor_id {
+                            scope_ids.insert(profile.provider_id.clone());
+                        }
+                        profiles.insert(profile.provider_id.clone(), profile);
+                    }
+                }
+            }
+            profiles
+        };
         let resolution_fingerprint = self.resolution_fingerprint(&scope_ids)?;
         let (previous_profiles, previous_owners, previous_epoch) = {
             let entries = self.entries.read();
@@ -415,7 +460,7 @@ impl VendorPlugins {
         let data_incompatible = scope_ids.iter().any(|id| {
             previous_owners.contains(id)
                 && descriptor.provider(id).is_some_and(|next| {
-                    previous_profiles.get(id).map_or_else(
+                    recorded_data.get(id).map_or_else(
                         || {
                             providers
                                 .iter()
@@ -440,7 +485,7 @@ impl VendorPlugins {
                 // 删除 profile 使绑定不可用，不构成删除其持久化数据的授权。
                 continue;
             };
-            let previous = previous_profiles.get(vendor_id);
+            let previous = recorded_data.get(vendor_id);
             let mut retained: BTreeMap<String, serde_json::Value> =
                 serde_json::from_str(&provider.adapter_credentials)?;
             let secret_keys: BTreeSet<_> = previous

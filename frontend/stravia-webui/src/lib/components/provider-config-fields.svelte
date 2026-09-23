@@ -1,8 +1,9 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { SvelteMap } from 'svelte/reactivity'
-
-import type { ProviderValidationIssue, VendorConfigField } from '$lib/types'
+import { localeState } from '$lib/localization.svelte'
+import { resolvePluginText } from '$lib/plugin-text'
+import type { ProviderValidationIssue, VendorConfigField, LocalizedText } from '$lib/types'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import SecretInput from '$lib/components/secret-input.svelte'
@@ -13,6 +14,7 @@ import { Textarea } from '$lib/components/ui/textarea'
 
 interface Props {
   fields: VendorConfigField[]
+  configGroups?: Array<{ id: string; label: LocalizedText }>
   values?: Record<string, unknown>
   configuredSecretFields?: string[]
   satisfiedSecretFields?: string[]
@@ -23,6 +25,7 @@ interface Props {
 
 let {
   fields,
+  configGroups = [],
   values = $bindable({}),
   configuredSecretFields = [],
   satisfiedSecretFields = [],
@@ -32,6 +35,7 @@ let {
 }: Props = $props()
 
 const availableSecretFields = $derived(new Set([...configuredSecretFields, ...satisfiedSecretFields]))
+const groupLabels = $derived(new Map(configGroups.map((group) => [group.id, group.label])))
 const visibleFields = $derived(
   fields.filter((field) => {
     const condition = field.visible_when
@@ -48,7 +52,7 @@ const unmatchedIssues = $derived(
 const groups = $derived.by(() => {
   const entries = new SvelteMap<string, VendorConfigField[]>()
   for (const field of visibleFields) {
-    const group = field.group?.trim() || ''
+    const group = field.group ?? ''
     const current = entries.get(group)
     if (current) current.push(field)
     else entries.set(group, [field])
@@ -93,7 +97,7 @@ function setText(field: VendorConfigField, value: string): void {
 
 {#each groups as [group, groupFields] (group)}
   <Field.Set class="sm:col-span-2">
-    {#if group}<Field.Legend>{group}</Field.Legend>{/if}
+    {#if group}<Field.Legend>{resolvePluginText(groupLabels.get(group)!, localeState.current)}</Field.Legend>{/if}
     <Field.Group class="grid gap-4 sm:grid-cols-2">
       {#each groupFields as field (field.key)}
         {@const controlId = `${idPrefix}-${field.key}`}
@@ -105,7 +109,10 @@ function setText(field: VendorConfigField, value: string): void {
             class="min-h-10 justify-between rounded-lg border px-3 py-2 sm:col-span-2"
             data-invalid={invalid || undefined}>
             <div>
-              <Field.Label for={controlId} hint={field.description ?? undefined}>{field.label}</Field.Label>
+              <Field.Label
+                for={controlId}
+                hint={field.description ? resolvePluginText(field.description, localeState.current) : undefined}
+                >{resolvePluginText(field.label, localeState.current)}</Field.Label>
               {#if field.required}<Field.Description>{m.provider_config_required()}</Field.Description>{/if}
             </div>
             <Switch
@@ -113,13 +120,16 @@ function setText(field: VendorConfigField, value: string): void {
               checked={fieldValue(field) === true}
               aria-invalid={invalid || undefined}
               onCheckedChange={(checked: boolean) => setValue(field, checked)} />
-            {#each currentIssues as issue (`${issue.code}:${issue.message}`)}
-              <Field.Error>{issue.message}</Field.Error>
+            {#each currentIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
+              <Field.Error>{resolvePluginText(issue.message, localeState.current)}</Field.Error>
             {/each}
           </Field.Field>
         {:else}
           <Field.Field size="fill" class="sm:col-span-2" data-invalid={invalid || undefined}>
-            <Field.Label for={controlId} hint={field.description ?? undefined}>{field.label}</Field.Label>
+            <Field.Label
+              for={controlId}
+              hint={field.description ? resolvePluginText(field.description, localeState.current) : undefined}
+              >{resolvePluginText(field.label, localeState.current)}</Field.Label>
             {#if field.kind.type === 'bool'}
               <Select.Root
                 type="single"
@@ -142,6 +152,7 @@ function setText(field: VendorConfigField, value: string): void {
                 </Select.Content>
               </Select.Root>
             {:else if field.kind.type === 'enum'}
+              {@const selectedEnumOption = field.kind.options.find((option) => option.value === stringValue(field))}
               <Select.Root
                 type="single"
                 value={stringValue(field)}
@@ -149,13 +160,15 @@ function setText(field: VendorConfigField, value: string): void {
                 <Select.Trigger id={controlId} class="w-full" aria-invalid={invalid || undefined}>
                   {field.secret && availableSecretFields.has(field.key) && !stringValue(field)
                     ? m.provider_config_secret_configured_placeholder()
-                    : (field.kind.options.find((option) => option.value === stringValue(field))?.label ??
-                      m.provider_config_choose_value())}
+                    : selectedEnumOption
+                      ? resolvePluginText(selectedEnumOption.label, localeState.current)
+                      : m.provider_config_choose_value()}
                 </Select.Trigger>
                 <Select.Content>
                   <Select.Group>
                     {#each field.kind.options as option (option.value)}
-                      <Select.Item value={option.value}>{option.label}</Select.Item>
+                      <Select.Item value={option.value}
+                        >{resolvePluginText(option.label, localeState.current)}</Select.Item>
                     {/each}
                   </Select.Group>
                 </Select.Content>
@@ -219,8 +232,8 @@ function setText(field: VendorConfigField, value: string): void {
             {#if field.secret && availableSecretFields.has(field.key)}
               <Field.Description>{m.provider_config_secret_configured()}</Field.Description>
             {/if}
-            {#each currentIssues as issue (`${issue.code}:${issue.message}`)}
-              <Field.Error>{issue.message}</Field.Error>
+            {#each currentIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
+              <Field.Error>{resolvePluginText(issue.message, localeState.current)}</Field.Error>
             {/each}
           </Field.Field>
         {/if}
@@ -231,8 +244,8 @@ function setText(field: VendorConfigField, value: string): void {
 
 {#if unmatchedIssues.length > 0}
   <ul class="sm:col-span-2 flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
-    {#each unmatchedIssues as issue (`${issue.code}:${issue.message}`)}
-      <li>{issue.message}</li>
+    {#each unmatchedIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
+      <li>{resolvePluginText(issue.message, localeState.current)}</li>
     {/each}
   </ul>
 {/if}

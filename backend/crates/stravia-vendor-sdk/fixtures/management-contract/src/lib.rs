@@ -1,3 +1,7 @@
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
@@ -6,9 +10,10 @@ use stravia_vendor_sdk::{
     AiResponse, AllowanceAmount, AllowanceItem, AllowanceResponse, AuthCallback, AuthCallbackPort,
     AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse, AuthStep,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, HttpRequest,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError, ProviderDescriptor,
-    ProviderSnapshot, VendorDescriptor, VendorGuest, VendorKind, read_http_body,
+    ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
+    HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
+    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorGuest, VendorKind,
+    read_http_body,
 };
 
 struct ManagementContractVendor;
@@ -113,65 +118,69 @@ impl VendorGuest for ManagementContractVendor {
                 display_name: "Management Lifecycle Fixture".into(),
                 description: None,
                 channels: vec![ChannelDescriptor {
-                id: "default".into(),
-                name: "Default".into(),
-                description: None,
-                auth: Some(AuthDescriptor {
-                    flow: AuthFlow::AuthorizationCode,
-                    callback: Some(AuthCallback {
-                        bind_host: "127.0.0.1".into(),
-                        redirect_host: "127.0.0.1".into(),
-                        path: "/callback".into(),
-                        port: AuthCallbackPort::Dynamic,
-                        manual_redirect_uri: Some("http://127.0.0.1:18765/callback".into()),
-                        cancel_path: None,
+                    id: "default".into(),
+                    name: crate::messages::channel_default(),
+                    description: None,
+                    auth: Some(AuthDescriptor {
+                        flow: AuthFlow::AuthorizationCode,
+                        callback: Some(AuthCallback {
+                            bind_host: "127.0.0.1".into(),
+                            redirect_host: "127.0.0.1".into(),
+                            path: "/callback".into(),
+                            port: AuthCallbackPort::Dynamic,
+                            manual_redirect_uri: Some("http://127.0.0.1:18765/callback".into()),
+                            cancel_path: None,
+                        }),
+                        manual_input: Some(AuthManualInput {
+                            input_type: AuthManualInputType::CallbackUrl,
+                            label: crate::messages::authorization_callback(),
+                            description: None,
+                            secret: false,
+                        }),
                     }),
-                    manual_input: Some(AuthManualInput {
-                        input_type: AuthManualInputType::CallbackUrl,
-                        label: "Authorization callback".into(),
-                        description: None,
-                        secret: false,
-                    }),
-                }),
-                protocol: Some("fixture-management".into()),
-                protocols: Vec::new(),
-                default_base_url: None,
-                default_models_source: None,
-                consumes_catalog_models: false,
-                capabilities: capabilities.clone(),
-                model_capabilities: BTreeSet::new(),
-                search_model_required: false,
+                    protocol: Some("fixture-management".into()),
+                    protocols: Vec::new(),
+                    default_base_url: None,
+                    default_models_source: None,
+                    consumes_catalog_models: false,
+                    capabilities: capabilities.clone(),
+                    model_capabilities: BTreeSet::new(),
+                    search_model_required: false,
+                }],
+                capabilities,
+                website: None,
+                implementation: None,
+                config_groups: vec![ConfigGroup {
+                    id: "connection".into(),
+                    label: crate::messages::connection(),
+                }],
+                config_fields: vec![ConfigField {
+                    key: "workspace".into(),
+                    label: crate::messages::workspace(),
+                    description: Some(crate::messages::workspace_description()),
+                    kind: ConfigFieldKind::String { multiline: false },
+                    required: true,
+                    default_json: None,
+                    group: Some("connection".into()),
+                    secret: false,
+                    min: None,
+                    max: None,
+                    max_length: Some(128),
+                    pattern: None,
+                    visible_when: None,
+                }],
+                network: NetworkDeclaration {
+                    base_url_field: None,
+                    extra_origins: Vec::new(),
+                    field_origins: Vec::new(),
+                },
+                data_compat: DataCompatibility {
+                    config_fields_format: profile.data_format(),
+                    private_state_format: profile.data_format(),
+                    credentials_format: profile.data_format(),
+                    model_metadata_format: profile.data_format(),
+                },
             }],
-            capabilities,
-            website: None,
-            implementation: None,
-            config_fields: vec![ConfigField {
-                key: "workspace".into(),
-                label: "Workspace".into(),
-                description: Some("Required connection configuration owned by the fixture".into()),
-                kind: ConfigFieldKind::String { multiline: false },
-                required: true,
-                default_json: None,
-                group: Some("Connection".into()),
-                secret: false,
-                min: None,
-                max: None,
-                max_length: Some(128),
-                pattern: None,
-                visible_when: None,
-            }],
-            network: NetworkDeclaration {
-                base_url_field: None,
-                extra_origins: Vec::new(),
-                field_origins: Vec::new(),
-            },
-            data_compat: DataCompatibility {
-                config_fields_format: profile.data_format(),
-                private_state_format: profile.data_format(),
-                credentials_format: profile.data_format(),
-                model_metadata_format: profile.data_format(),
-            },
-        }],
         }
     }
 

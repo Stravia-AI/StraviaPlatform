@@ -1,3 +1,5 @@
+import type { VendorAuthManualInput } from './provider'
+
 export type OAuthCallbackMode = 'auto' | 'manual'
 
 export interface OAuthCandidateConfiguration {
@@ -6,13 +8,6 @@ export interface OAuthCandidateConfiguration {
   protocol?: string | null
   options: Record<string, unknown>
   credentials: Record<string, unknown>
-}
-
-export interface OAuthManualInput {
-  type: 'text' | 'callback_url'
-  label: string
-  description?: string | null
-  secret: boolean
 }
 
 export interface OAuthSessionInitData {
@@ -30,7 +25,7 @@ export interface OAuthSessionInitData {
   fallback_reason?: string | null
   expires_in: number
   interval: number
-  manual_input?: OAuthManualInput | null
+  manual_input?: VendorAuthManualInput | null
 }
 
 export type OAuthSessionStatusData =
@@ -47,7 +42,7 @@ export type OAuthSessionStatusData =
       last_error?: string | null
       expires_in: number
       interval: number
-      manual_input?: OAuthManualInput | null
+      manual_input?: VendorAuthManualInput | null
     }
   | { status: 'exchanging'; expires_in: number }
   | { status: 'ready'; expires_in: number; resource_url?: string | null }

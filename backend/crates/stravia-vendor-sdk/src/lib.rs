@@ -3,7 +3,7 @@
 //! A plugin crate links this SDK, fills a [`VendorDescriptor`], implements
 //! [`VendorGuest`] for the capabilities it claims, and calls
 //! [`export_vendor!`] once. The generated component exposes the versioned
-//! `stravia:vendor@0.3.0` world; all model traffic flows through the canonical
+//! `stravia:vendor@0.4.0` world; all model traffic flows through the canonical
 //! contract in [`stravia_runtime_contract::protocol::ir`].
 //!
 //! The WIT contract lives in `wit/` of this crate and is the single source for
@@ -27,15 +27,21 @@ mod envelope;
 #[doc(hidden)]
 pub mod guest;
 mod host_api;
+mod language_tag;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../build-support/messages.rs"]
+mod message_build_support;
 
 pub use crate::bindings::stravia::vendor::host::LogLevel;
 pub use crate::bindings::stravia::vendor::types::{HttpRequest, WsRequest};
 pub use descriptor::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
-    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, DataCompatibility,
-    DefaultModelsSource, EnumOption, FieldCondition, MODEL_CAPABILITY_THINKING_TOGGLE,
-    MODELS_SOURCE_CATALOG, NetworkDeclaration, OriginDeclaration, ProviderDescriptor,
-    VendorDescriptor, VendorKind,
+    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, DataCompatibility,
+    DefaultModelsSource, EnumOption, FieldCondition, LocalizedText,
+    MODEL_CAPABILITY_THINKING_TOGGLE, MODELS_SOURCE_CATALOG, NetworkDeclaration, OriginDeclaration,
+    ProviderDescriptor, VendorDescriptor, VendorKind,
 };
 pub use envelope::{CANONICAL_FORMAT_VERSION, CanonicalEnvelope, decode_payload, encode_payload};
 pub use guest::{

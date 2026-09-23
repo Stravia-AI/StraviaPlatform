@@ -1,0 +1,7 @@
+{
+  "channel_default": "Default",
+  "authorization_callback": "Authorization callback",
+  "connection": "Connection",
+  "workspace": "Workspace",
+  "workspace_description": "Required connection configuration owned by the fixture"
+}

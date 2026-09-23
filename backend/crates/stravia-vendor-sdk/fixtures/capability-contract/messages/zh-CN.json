@@ -1,0 +1,7 @@
+{
+  "dedicated_search": "专用搜索",
+  "channel_default": "默认",
+  "authentication": "身份验证",
+  "api_key": "API 密钥",
+  "api_key_description": "兼容 OpenAI 的测试凭据"
+}

@@ -8,10 +8,11 @@ use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
-    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigValidationResponse,
-    DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
-    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
+    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
+    ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    ProviderSnapshot, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "anthropic";
@@ -59,8 +60,8 @@ fn anthropic_descriptor() -> ProviderDescriptor {
         channels: vec![
             ChannelDescriptor {
                 id: DEFAULT_CHANNEL.into(),
-                name: "Anthropic API".into(),
-                description: Some("Anthropic Messages API-key channel.".into()),
+                name: crate::messages::anthropic_api_channel(),
+                description: Some(crate::messages::anthropic_api_channel_description()),
                 auth: None,
                 protocol: Some("anthropic-messages".into()),
                 protocols: Vec::new(),
@@ -73,8 +74,8 @@ fn anthropic_descriptor() -> ProviderDescriptor {
             },
             ChannelDescriptor {
                 id: CLAUDE_CODE_CHANNEL.into(),
-                name: "Claude Code".into(),
-                description: Some("Claude subscription OAuth channel.".into()),
+                name: crate::messages::claude_code_channel(),
+                description: Some(crate::messages::claude_code_channel_description()),
                 auth: Some(AuthDescriptor {
                     flow: AuthFlow::AuthorizationCode,
                     callback: Some(AuthCallback {
@@ -89,10 +90,8 @@ fn anthropic_descriptor() -> ProviderDescriptor {
                     }),
                     manual_input: Some(AuthManualInput {
                         input_type: AuthManualInputType::CallbackUrl,
-                        label: "Callback URL".into(),
-                        description: Some(
-                            "Paste the full callback URL after completing authorization.".into(),
-                        ),
+                        label: crate::messages::callback_url(),
+                        description: Some(crate::messages::callback_url_description()),
                         secret: false,
                     }),
                 }),
@@ -109,14 +108,18 @@ fn anthropic_descriptor() -> ProviderDescriptor {
         capabilities,
         website: None,
         implementation: None,
+        config_groups: vec![ConfigGroup {
+            id: "authentication".into(),
+            label: crate::messages::authentication_group(),
+        }],
         config_fields: vec![ConfigField {
             key: "apiKey".into(),
-            label: "API key".into(),
-            description: Some("Anthropic API key for the default channel.".into()),
+            label: crate::messages::api_key(),
+            description: Some(crate::messages::anthropic_api_key_description()),
             kind: ConfigFieldKind::String { multiline: false },
             required: false,
             default_json: None,
-            group: Some("Authentication".into()),
+            group: Some("authentication".into()),
             secret: true,
             min: None,
             max: None,
@@ -386,7 +389,7 @@ fn validate_config(options: &BTreeMap<String, Value>, claude_code: bool) -> Vec<
         vec![ValidationIssue {
             field: Some("apiKey".into()),
             code: "secret_in_options".into(),
-            message: "API keys must be stored as credentials, not options.".into(),
+            message: crate::messages::secret_in_options(),
         }]
     }
 }

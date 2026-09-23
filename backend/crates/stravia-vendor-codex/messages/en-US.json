@@ -1,0 +1,10 @@
+{
+  "channel_codex": "Codex",
+  "channel_description": "ChatGPT OAuth channel using Open Responses, hosted search, and image generation.",
+  "callback_url": "Callback URL",
+  "callback_description": "Paste the full callback URL after completing authorization.",
+  "advanced": "Advanced",
+  "websocket_url": "Responses WebSocket URL",
+  "websocket_description": "Optional full ws:// or wss:// Responses endpoint for a custom base URL.",
+  "invalid_websocket_url": "Responses WebSocket URL must be an absolute ws:// or wss:// URL."
+}

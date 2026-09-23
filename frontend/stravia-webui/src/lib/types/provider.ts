@@ -202,10 +202,12 @@ export interface VendorAuthCallback {
   cancel_path?: string | null
 }
 
+export type LocalizedText = { 'en-US': string; [locale: string]: string }
+
 export interface VendorAuthManualInput {
   type: 'text' | 'callback_url'
-  label: string
-  description?: string | null
+  label: LocalizedText
+  description?: LocalizedText | null
   secret: boolean
 }
 
@@ -217,13 +219,13 @@ export interface VendorAuthDescriptor {
 
 export interface VendorChannelDescriptor {
   id: string
-  name: string
-  description?: string | null
+  name: LocalizedText
+  description?: LocalizedText | null
   auth?: VendorAuthDescriptor | null
   /** Optional host egress protocol; custom vendor wire protocols may omit it. */
   protocol?: string | null
   /** Selectable egress protocols when the channel offers more than one wire protocol. */
-  protocols?: Array<{ value: string; label: string }>
+  protocols?: Array<{ value: string; label: LocalizedText }>
   /** Initial connection URL proposed by the plugin; saving still requires preview. */
   default_base_url?: string | null
   /** Discovery source selected when a new connection does not provide one. */
@@ -240,12 +242,12 @@ export type VendorConfigFieldKind =
   | { type: 'string'; multiline: boolean }
   | { type: 'int' }
   | { type: 'decimal' }
-  | { type: 'enum'; options: Array<{ value: string; label: string }> }
+  | { type: 'enum'; options: Array<{ value: string; label: LocalizedText }> }
 
 export interface VendorConfigField {
   key: string
-  label: string
-  description?: string | null
+  label: LocalizedText
+  description?: LocalizedText | null
   kind: VendorConfigFieldKind
   required: boolean
   default_json?: unknown
@@ -281,6 +283,7 @@ export interface ProviderDescriptor {
   channels: VendorChannelDescriptor[]
   capabilities: VendorCapability[]
   config_fields: VendorConfigField[]
+  config_groups: Array<{ id: string; label: LocalizedText }>
   network: VendorNetworkDeclaration
   data_compat: VendorDataCompatibility
 }
@@ -299,7 +302,7 @@ export interface ProviderConfigurationPreviewInput {
 export interface ProviderValidationIssue {
   field: string | null
   code: string
-  message: string
+  message: LocalizedText
 }
 
 export interface ProviderNetworkPermission {

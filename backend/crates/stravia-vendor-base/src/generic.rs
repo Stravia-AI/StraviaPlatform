@@ -259,14 +259,20 @@ fn validate_cloudflare_config(
     };
     let mut issues = Vec::new();
     for (field, message) in [
-        ("accountId", "Cloudflare account ID is required"),
-        ("gatewayId", "Cloudflare gateway ID is required"),
+        (
+            "accountId",
+            crate::messages::cloudflare_account_id_required(),
+        ),
+        (
+            "gatewayId",
+            crate::messages::cloudflare_gateway_id_required(),
+        ),
     ] {
         if merged(field).is_none() {
             issues.push(ValidationIssue {
                 field: Some(field.to_owned()),
                 code: "required".to_owned(),
-                message: message.to_owned(),
+                message,
             });
         }
     }
@@ -979,9 +985,20 @@ mod tests {
         provider.options.remove("gatewayId");
         let validation = validate_cloudflare_config(&provider, &BTreeMap::new());
         assert_eq!(validation.proposed_base_url, None);
-        assert!(validation.issues.iter().any(|issue| {
-            issue.field.as_deref() == Some("gatewayId") && issue.code == "required"
-        }));
+        let issue = validation
+            .issues
+            .iter()
+            .find(|issue| issue.field.as_deref() == Some("gatewayId") && issue.code == "required")
+            .expect("missing gateway has a stable field and code");
+        let message = serde_json::to_value(&issue.message).unwrap();
+        for locale in ["en-US", "zh-CN"] {
+            assert!(
+                message
+                    .get(locale)
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+            );
+        }
     }
 
     #[test]

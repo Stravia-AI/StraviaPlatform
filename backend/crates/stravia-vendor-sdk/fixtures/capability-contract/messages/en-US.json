@@ -1,0 +1,7 @@
+{
+  "dedicated_search": "Dedicated Search",
+  "channel_default": "Default",
+  "authentication": "Authentication",
+  "api_key": "API key",
+  "api_key_description": "OpenAI-compatible test credential"
+}

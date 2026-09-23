@@ -1,0 +1,12 @@
+{
+  "channel_default": "默认",
+  "channel_description": "Command Code API 密钥通道",
+  "authentication": "身份验证",
+  "privacy": "隐私",
+  "api_key": "API 密钥",
+  "api_key_description": "Command Code API 密钥",
+  "zdr": "零数据保留",
+  "zdr_description": "在初始化和推理请求中发送 x-cmd-zdr: 1",
+  "invalid_zdr_type": "零数据保留必须是布尔值",
+  "invalid_api_key": "Command Code API 密钥必须是非空字符串"
+}

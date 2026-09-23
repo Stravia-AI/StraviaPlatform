@@ -370,8 +370,8 @@ impl VendorRuntime {
         for (name, _) in component.component_type().imports(&self.engine) {
             if !matches!(
                 name,
-                "stravia:vendor/host@0.3.0"
-                    | "stravia:vendor/types@0.3.0"
+                "stravia:vendor/host@0.4.0"
+                    | "stravia:vendor/types@0.4.0"
                     // Rust 1.98's wasm32-wasip2 standard library is pinned to
                     // WASIp2 0.2.9. These exact interfaces provide closed
                     // stdio, empty environment, clocks, and entropy through
@@ -1192,7 +1192,7 @@ mod profile_admission_tests {
             description: None,
             channels: vec![ChannelDescriptor {
                 id: "default".into(),
-                name: "Default".into(),
+                name: stravia_vendor_sdk::LocalizedText::english("Default"),
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
@@ -1205,6 +1205,7 @@ mod profile_admission_tests {
                 search_model_required: false,
             }],
             capabilities,
+            config_groups: Vec::new(),
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),

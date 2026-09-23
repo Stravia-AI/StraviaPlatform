@@ -8,6 +8,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { localeState } from '$lib/localization.svelte'
+import { resolvePluginText } from '$lib/plugin-text'
 import {
   buildProviderOptions,
   defaultProviderName,
@@ -77,6 +78,12 @@ const oauthSessionSecretFields = $derived(
 )
 const supportsConfigValidation = $derived(selectedOption?.channel.capabilities.includes('config_validation') ?? false)
 const previewIssues = $derived(preview?.issues ?? [])
+const previewIssueError = $derived(
+  previewIssues
+    .filter((issue) => !issue.field)
+    .map((issue) => resolvePluginText(issue.message, localeState.current))
+    .join(' ') || (previewIssues.length > 0 ? m.provider_config_fix_issues_before_save() : ''),
+)
 const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
   base_url: form.baseUrl.trim(),
   protocol: form.protocol || selectedOption?.channel.protocol || undefined,
@@ -89,7 +96,7 @@ const providerOptions = $derived.by(() => {
   return options.filter((option) => {
     if (!query) return true
     const auth = option.channel.auth ? 'oauth account 账号' : 'api key'
-    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${option.channel.name} ${optionDescription(option, localeState.current)} ${auth}`
+    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${resolvePluginText(option.channel.name, localeState.current)} ${optionDescription(option, localeState.current)} ${auth}`
     return text.toLocaleLowerCase(localeState.current).includes(query)
   })
 })
@@ -208,8 +215,6 @@ async function saveProvider(): Promise<void> {
       if (generation !== saveGeneration) return
       preview = result
       if (result.issues.length > 0) {
-        const globalMessages = result.issues.filter((issue) => !issue.field).map((issue) => issue.message)
-        saveError = globalMessages.join(' ') || m.provider_config_fix_issues_before_save()
         return
       }
       baseUrl = result.base_url
@@ -399,6 +404,9 @@ async function saveProvider(): Promise<void> {
                 oninput={configurationChanged} />
             </Field.Field>
             {#if selectedOption.channel.protocols && selectedOption.channel.protocols.length > 1}
+              {@const selectedProtocol = selectedOption.channel.protocols.find(
+                (option) => option.value === form.protocol,
+              )}
               <Field.Field size="fill" class="sm:col-span-2">
                 <Field.Label for="provider-protocol">{m.common_protocol()}</Field.Label>
                 <Select.Root
@@ -409,13 +417,13 @@ async function saveProvider(): Promise<void> {
                     configurationChanged()
                   }}>
                   <Select.Trigger id="provider-protocol" class="w-full">
-                    {selectedOption.channel.protocols.find((option) => option.value === form.protocol)?.label ??
-                      form.protocol}
+                    {selectedProtocol ? resolvePluginText(selectedProtocol.label, localeState.current) : form.protocol}
                   </Select.Trigger>
                   <Select.Content>
                     <Select.Group>
                       {#each selectedOption.channel.protocols as option (option.value)}
-                        <Select.Item value={option.value}>{option.label}</Select.Item>
+                        <Select.Item value={option.value}
+                          >{resolvePluginText(option.label, localeState.current)}</Select.Item>
                       {/each}
                     </Select.Group>
                   </Select.Content>
@@ -424,6 +432,7 @@ async function saveProvider(): Promise<void> {
             {/if}
             <ProviderConfigFields
               fields={configFields}
+              configGroups={selectedOption.descriptor.config_groups}
               bind:values={form.values}
               satisfiedSecretFields={oauthSessionSecretFields}
               issues={previewIssues}
@@ -468,7 +477,9 @@ async function saveProvider(): Promise<void> {
               }} />
           </Field.Field>
 
-          {#if saveError}<p class="mt-6 text-sm text-destructive">{saveError}</p>{/if}
+          {#if saveError || previewIssueError}
+            <p class="mt-6 text-sm text-destructive">{saveError || previewIssueError}</p>
+          {/if}
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">

@@ -1,0 +1,14 @@
+{
+  "config_required": "Configuration field `{field}` is required",
+  "config_boolean": "Configuration field `{field}` must be a boolean",
+  "config_string": "Configuration field `{field}` must be a string",
+  "config_max_length": "Configuration field `{field}` exceeds its maximum length of {limit}",
+  "config_invalid_pattern": "Configuration field `{field}` declares an invalid pattern",
+  "config_pattern": "Configuration field `{field}` does not match the required pattern",
+  "config_integer": "Configuration field `{field}` must be an integer",
+  "config_decimal": "Configuration field `{field}` must be a decimal",
+  "config_enum_type": "Configuration field `{field}` must be a string enum value",
+  "config_enum_value": "Configuration field `{field}` has an unsupported enum value",
+  "config_minimum": "Configuration field `{field}` must be at least {limit}",
+  "config_maximum": "Configuration field `{field}` must be at most {limit}"
+}

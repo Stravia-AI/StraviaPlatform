@@ -13,4 +13,8 @@ serde = "1"
 serde_json = "1"
 stravia-vendor-sdk = { path = "../.." }
 
+[build-dependencies]
+serde = "1"
+serde_json = "1"
+
 [workspace]

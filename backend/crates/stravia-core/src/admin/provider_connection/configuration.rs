@@ -2,9 +2,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use stravia_vendor_sdk::{ConfigField, ConfigFieldKind, ProviderDescriptor, ValidationIssue};
+use stravia_vendor_sdk::{
+    ConfigField, ConfigFieldKind, LocalizedText, ProviderDescriptor, ValidationIssue,
+};
 
 use crate::plugin::permissions::resolve_permissions;
+
+mod messages {
+    include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderNetworkPermission {
@@ -120,7 +126,7 @@ pub(super) fn validate_configuration_fields(
             issues.push(ValidationIssue {
                 field: Some(field.key.clone()),
                 code: "required".into(),
-                message: format!("Configuration field `{}` is required", field.key),
+                message: messages::config_required(&field.key),
             });
             continue;
         }
@@ -130,7 +136,7 @@ pub(super) fn validate_configuration_fields(
             issues.push(ValidationIssue {
                 field: Some(field.key.clone()),
                 code: "invalid_value".into(),
-                message: error.to_string(),
+                message: error,
             });
         }
     }
@@ -176,88 +182,68 @@ fn empty_value(value: &Value) -> bool {
     value.as_str().is_some_and(|value| value.trim().is_empty())
 }
 
-fn validate_field_value(field: &ConfigField, value: &Value) -> anyhow::Result<()> {
+fn validate_field_value(field: &ConfigField, value: &Value) -> Result<(), LocalizedText> {
     let number = match &field.kind {
         ConfigFieldKind::Bool => {
-            anyhow::ensure!(
-                value.is_boolean(),
-                "Configuration field `{}` must be a boolean",
-                field.key
-            );
+            if !value.is_boolean() {
+                return Err(messages::config_boolean(&field.key));
+            }
             None
         }
         ConfigFieldKind::String { .. } => {
-            let value = value.as_str().ok_or_else(|| {
-                anyhow::anyhow!("Configuration field `{}` must be a string", field.key)
-            })?;
-            if let Some(max_length) = field.max_length {
-                anyhow::ensure!(
-                    value.chars().count() <= max_length as usize,
-                    "Configuration field `{}` exceeds its maximum length of {max_length}",
-                    field.key
-                );
+            let value = value
+                .as_str()
+                .ok_or_else(|| messages::config_string(&field.key))?;
+            if let Some(max_length) = field.max_length
+                && value.chars().count() > max_length as usize
+            {
+                return Err(messages::config_max_length(
+                    &field.key,
+                    &max_length.to_string(),
+                ));
             }
             if let Some(pattern) = &field.pattern {
-                let regex = regex::Regex::new(pattern).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Configuration field `{}` declares an invalid pattern",
-                        field.key
-                    )
-                })?;
-                anyhow::ensure!(
-                    regex.is_match(value),
-                    "Configuration field `{}` does not match the required pattern",
-                    field.key
-                );
+                let regex = regex::Regex::new(pattern)
+                    .map_err(|_| messages::config_invalid_pattern(&field.key))?;
+                if !regex.is_match(value) {
+                    return Err(messages::config_pattern(&field.key));
+                }
             }
             None
         }
         ConfigFieldKind::Int => {
-            anyhow::ensure!(
-                value.as_i64().is_some() || value.as_u64().is_some(),
-                "Configuration field `{}` must be an integer",
-                field.key
-            );
+            if value.as_i64().is_none() && value.as_u64().is_none() {
+                return Err(messages::config_integer(&field.key));
+            }
             value.as_f64()
         }
         ConfigFieldKind::Decimal => {
             let number = value
                 .as_f64()
                 .filter(|value| value.is_finite())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Configuration field `{}` must be a decimal", field.key)
-                })?;
+                .ok_or_else(|| messages::config_decimal(&field.key))?;
             Some(number)
         }
         ConfigFieldKind::Enum { options } => {
-            let value = value.as_str().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Configuration field `{}` must be a string enum value",
-                    field.key
-                )
-            })?;
-            anyhow::ensure!(
-                options.iter().any(|option| option.value == value),
-                "Configuration field `{}` has an unsupported enum value",
-                field.key
-            );
+            let value = value
+                .as_str()
+                .ok_or_else(|| messages::config_enum_type(&field.key))?;
+            if !options.iter().any(|option| option.value == value) {
+                return Err(messages::config_enum_value(&field.key));
+            }
             None
         }
     };
     if let Some(number) = number {
-        if let Some(min) = field.min {
-            anyhow::ensure!(
-                number >= min,
-                "Configuration field `{}` must be at least {min}",
-                field.key
-            );
+        if let Some(min) = field.min
+            && number < min
+        {
+            return Err(messages::config_minimum(&field.key, &min.to_string()));
         }
-        if let Some(max) = field.max {
-            anyhow::ensure!(
-                number <= max,
-                "Configuration field `{}` must be at most {max}",
-                field.key
-            );
+        if let Some(max) = field.max
+            && number > max
+        {
+            return Err(messages::config_maximum(&field.key, &max.to_string()));
         }
     }
     Ok(())

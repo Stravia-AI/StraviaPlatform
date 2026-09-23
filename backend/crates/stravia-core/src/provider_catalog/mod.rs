@@ -569,7 +569,7 @@ fn bind_catalog_provider(
             channel(
                 &descriptor.provider_id,
                 &definition.id,
-                &definition.name,
+                definition.name.english_text(),
                 &protocol,
                 &base_url,
                 auth_mode,
@@ -606,7 +606,7 @@ fn provider_from_descriptor(
             channel(
                 &descriptor.provider_id,
                 &definition.id,
-                &definition.name,
+                definition.name.english_text(),
                 definition.protocol.as_deref().unwrap_or_default(),
                 definition.default_base_url.as_deref().unwrap_or_default(),
                 descriptor_auth_mode(definition).unwrap_or(CatalogAuthMode::OptionalApiKey),

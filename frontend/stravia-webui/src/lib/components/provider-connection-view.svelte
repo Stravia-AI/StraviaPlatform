@@ -7,6 +7,8 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatDuration } from '$lib/format'
+import { localeState } from '$lib/localization.svelte'
+import { resolvePluginText } from '$lib/plugin-text'
 import type { OAuthCandidateConfiguration, Provider, ProviderConfigurationPreview, UpdateProvider } from '$lib/types'
 import ProviderConfigFields from '$lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
@@ -63,6 +65,12 @@ const unknownOptionKeys = $derived(
   ),
 )
 const previewIssues = $derived(preview?.issues ?? [])
+const previewIssueError = $derived(
+  previewIssues
+    .filter((issue) => !issue.field)
+    .map((issue) => resolvePluginText(issue.message, localeState.current))
+    .join(' ') || (previewIssues.length > 0 ? m.provider_config_fix_issues_before_save() : ''),
+)
 const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
   provider_id: provider.id,
   base_url: form.baseUrl.trim(),
@@ -151,8 +159,6 @@ async function save(): Promise<void> {
       if (generation !== saveGeneration) return
       preview = result
       if (result.issues.length > 0) {
-        const globalMessages = result.issues.filter((issue) => !issue.field).map((issue) => issue.message)
-        connectionError = globalMessages.join(' ') || m.provider_config_fix_issues_before_save()
         return
       }
       baseUrl = result.base_url
@@ -254,6 +260,7 @@ async function save(): Promise<void> {
         </Field.Field>
         <ProviderConfigFields
           fields={configFields}
+          configGroups={descriptor.config_groups}
           bind:values={form.values}
           {configuredSecretFields}
           issues={previewIssues}
@@ -306,7 +313,9 @@ async function save(): Promise<void> {
         }} />
     </Field.Field>
 
-    {#if connectionError}<p class="text-sm text-destructive">{connectionError}</p>{/if}
+    {#if connectionError || previewIssueError}
+      <p class="text-sm text-destructive">{connectionError || previewIssueError}</p>
+    {/if}
     <div class="flex flex-wrap justify-end gap-2 border-t pt-4">
       {#if supportsInference}
         <Button type="button" variant="outline" onclick={() => void testConnection()} disabled={testing || saving}>
