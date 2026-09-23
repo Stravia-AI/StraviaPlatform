@@ -11,12 +11,11 @@ use stravia_vendor_sdk::{
 };
 
 use super::{
-    configured_websocket_url, endpoint, ensure_success, invalid, require_codex_protocol,
-    required_model, retryable, secret,
+    CLIENT_VERSION, configured_websocket_url, endpoint, ensure_success, invalid,
+    require_codex_protocol, required_model, retryable, secret,
 };
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const CLIENT_VERSION: &str = "0.153.0";
 const ORIGINATOR: &str = "codex_cli_rs";
 
 pub(super) fn prepare_body(body: &mut Value) -> Result<(), stravia_vendor_sdk::PluginError> {

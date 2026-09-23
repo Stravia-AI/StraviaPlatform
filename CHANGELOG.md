@@ -49,6 +49,7 @@
 - Responses streams now close indexed reasoning items on their authoritative `ItemDone`, preserving late signatures and preventing already-completed thinking from being replayed after subsequent tool calls by OMP. Terminal responses retain the same items without duplicate completion events.
 - Devin multi-turn tool continuations preserve signed thinking without separating tool calls from their matching results, fixing `invalid_argument` failures with OMP Responses history. Historical user images and images returned by client tools remain attached to their original messages instead of being replaced or silently discarded.
 - Devin request encoding groups Responses assistant text, signed reasoning, and parallel tool calls into native prompts without combining independent historical signatures. Within one Devin response, interleaved text, thinking, and signature deltas retain their response-wide identity; replay omits response `output_id` from native history prompts, matching the native CLI. Top-level tool descriptions use numbered sentences and list items while preserving fenced code and JSON paragraphs, followed by XML escaping.
+- Codex OAuth now presents client version `0.156.1` on model discovery and generation requests, unhiding version-gated models such as `gpt-6-sol` and `gpt-6-luna` that the `0.153.0` pin silently omitted.
 
 ## [0.3.0] - 2026-09-19
 
