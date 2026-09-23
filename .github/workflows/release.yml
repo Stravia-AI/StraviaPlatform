@@ -210,12 +210,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Install NASM for BoringSSL
         if: runner.os == 'Windows' && runner.arch == 'X64'
         run: |
@@ -255,7 +249,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev golang python3 pkg-config libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config
 
       - name: Build server
         run: task build:server
@@ -322,12 +316,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Install NASM for BoringSSL
         if: runner.os == 'Windows' && runner.arch == 'X64'
         run: |
@@ -361,7 +349,7 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            xdg-utils cmake clang libclang-dev golang python3 libfontconfig1-dev \
+            xdg-utils cmake clang libclang-dev python3 \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \

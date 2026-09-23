@@ -66,10 +66,6 @@ impl<'a> DataPaths<'a> {
         self.root.join("cache")
     }
 
-    pub fn web_access_profile(&self) -> PathBuf {
-        self.root.join("state/web-access/browser-profile")
-    }
-
     pub fn desktop_port(&self) -> PathBuf {
         self.root.join("state/desktop-port.json")
     }

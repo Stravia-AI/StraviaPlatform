@@ -2,10 +2,6 @@
 
 ARG BUN_VERSION=1.4.2
 ARG RUST_VERSION=1.98.1
-ARG GO_VERSION=1.26
-
-FROM golang:${GO_VERSION}-bookworm AS go-toolchain
-
 FROM oven/bun:${BUN_VERSION}-debian AS web-builder
 WORKDIR /src
 
@@ -20,11 +16,8 @@ RUN bun run build:web
 
 FROM rust:${RUST_VERSION}-bookworm AS rust-builder
 WORKDIR /src
-COPY --from=go-toolchain /usr/local/go /usr/local/go
-ENV PATH="/usr/local/go/bin:${PATH}"
-
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake libclang-dev python3 pkg-config libfontconfig1-dev \
+    && apt-get install -y --no-install-recommends cmake libclang-dev python3 pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add wasm32-wasip2
@@ -51,7 +44,7 @@ LABEL org.opencontainers.image.source="https://github.com/Stravia-AI/StraviaPlat
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl fonts-liberation libfontconfig1 \
+        ca-certificates chromium chromium-sandbox curl fonts-liberation libfontconfig1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 65532 nonroot \
     && useradd --uid 65532 --gid nonroot --create-home --shell /usr/sbin/nologin nonroot
@@ -60,6 +53,7 @@ COPY --from=rust-builder /out/stravia-server /usr/local/bin/stravia-server
 COPY --from=rust-builder --chown=nonroot:nonroot --chmod=0750 /out/data /data
 
 ENV HOME=/home/nonroot \
+    STRAVIA_CHROME_PATH=/usr/bin/chromium \
     STRAVIA_HOST=0.0.0.0 \
     STRAVIA_PORT=23471 \
     STRAVIA_DATA_DIR=/data

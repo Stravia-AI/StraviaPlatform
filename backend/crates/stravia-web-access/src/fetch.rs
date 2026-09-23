@@ -161,11 +161,15 @@ pub(crate) async fn fetch_with_runtime(
     web: &LocalWeb,
     value: &str,
 ) -> Result<FetchedPage, FetchError> {
+    web.browser()
+        .require_available()
+        .await
+        .map_err(|error| FetchError::unavailable(error.to_string()))?;
     fetch_with(
         value,
         &NetworkBackend::from_local_web(web),
-        &MoliBackend {
-            browser: web.fetch_browser(),
+        &ChromeBackend {
+            browser: web.browser(),
         },
     )
     .await
@@ -206,11 +210,11 @@ struct RenderedResponse {
     html: String,
 }
 
-struct MoliBackend {
+struct ChromeBackend {
     browser: BrowserRuntime,
 }
 
-impl RenderBackend for MoliBackend {
+impl RenderBackend for ChromeBackend {
     fn render<'a>(
         &'a self,
         url: &'a Url,

@@ -124,6 +124,24 @@ pub(super) async fn test_web_provider_handler(
     }
 }
 
+pub(super) async fn get_web_access_browser_handler(State(gw): State<Gateway>) -> impl IntoResponse {
+    Json(serde_json::json!({ "data": gw.admin().get_web_access_browser().await }))
+}
+
+pub(super) async fn update_web_access_browser_handler(
+    State(gw): State<Gateway>,
+    Json(input): Json<stravia_core::admin::BrowserSettingsUpdate>,
+) -> impl IntoResponse {
+    match gw.admin().update_web_access_browser(input).await {
+        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub(super) async fn get_web_access_settings_handler(
     State(gw): State<Gateway>,
 ) -> impl IntoResponse {
@@ -139,7 +157,23 @@ pub(super) async fn update_web_access_settings_handler(
 ) -> impl IntoResponse {
     match gw.admin().update_web_access_settings(input).await {
         Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
-        Err(error) => err(error),
+        Err(error) => {
+            let message = error.to_string();
+            if let Ok(coded) = serde_json::from_str::<serde_json::Value>(&message)
+                && coded["code"] == "WEB_ACCESS_BROWSER_REQUIRED"
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "code": "WEB_ACCESS_BROWSER_REQUIRED",
+                        "error": coded["message"],
+                        "params": coded["params"],
+                    })),
+                )
+                    .into_response();
+            }
+            err(error)
+        }
     }
 }
 

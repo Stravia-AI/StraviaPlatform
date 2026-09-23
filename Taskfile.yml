@@ -175,9 +175,9 @@ tasks:
       - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
 
   test:browser:
-    desc: Run the embedded Moli Web Access regression tests.
+    desc: Run the real headless Chrome Web Access regression tests.
     cmds:
-      - bun tests/common/run-in-tempdir.ts cargo test --locked -p stravia-web-access browser::tests
+      - bun tests/common/run-in-tempdir.ts cargo test --locked -p stravia-web-access browser::tests -- --ignored
 
   test:e2e:admin:
     desc: Run the Admin service E2E tests.

@@ -1768,6 +1768,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await expect(page.getByText(/1 configured model will continue using the same service model ID/)).toBeVisible()
   await expect(page.getByRole('link', { name: /client-model.*retired-model/ })).toBeVisible()
   await page.getByRole('alertdialog', { name: 'Delete Retired Model?' }).getByRole('button', { name: 'Cancel' }).click()
+  await expect(page.getByRole('alertdialog', { name: 'Delete Retired Model?' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
 
   await page.getByRole('link', { name: 'Used by models' }).click()

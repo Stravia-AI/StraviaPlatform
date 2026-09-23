@@ -1,8 +1,8 @@
-use crate::http_client::Request;
 use base64::Engine;
 use rand::RngExt;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, SearchQuery},
@@ -11,8 +11,15 @@ use crate::search::{
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<Request> {
     let cvid = generate_cvid();
-    // 显式 Cookie 会覆盖共享 jar；保留搜索参数，让服务端分配的身份自动随请求发送。
-    Ok(http::Request::get(search_url(search, &cvid).as_str()).body(Vec::new())?)
+    let mut request = Request::new(
+        wreq::Method::GET,
+        search_url(search, &cvid).as_str().parse()?,
+    );
+    request.headers_mut().insert(
+        wreq::header::COOKIE,
+        format!("SRCHHPGUSR=IG={cvid}").parse()?,
+    );
+    Ok(request)
 }
 
 fn search_url(search: &SearchQuery, cvid: &str) -> Url {

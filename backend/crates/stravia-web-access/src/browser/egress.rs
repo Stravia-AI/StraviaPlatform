@@ -1,4 +1,4 @@
-//! 内嵌 Moli 保留端到端 TLS；这里只校验目标并转发原始字节。
+//! Chrome 通过此出站代理校验目标并转发原始字节，保留端到端 TLS。
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
@@ -45,7 +45,11 @@ impl EgressProxy {
                     accepted = listener.accept() => match accepted {
                         Ok((stream, _)) => {
                             let snapshot = snapshot.clone();
-                            connections.spawn(async move { let _ = serve(stream, &snapshot).await; });
+                            connections.spawn(async move {
+                                if let Err(error) = serve(stream, &snapshot).await {
+                                    tracing::debug!(%error, "Chrome proxy connection ended with error");
+                                }
+                            });
                         }
                         Err(_) => break,
                     },
@@ -275,13 +279,18 @@ async fn serve(client: TcpStream, snapshot: &ResolvedProxy) -> Result<()> {
         Ok(Ok(value)) => value,
         _ => {
             // 固定错误响应不包含目标、代理凭据或解析器错误信息。
-            let _ = timeout(
+            match timeout(
                 Duration::from_secs(1),
                 client.write_all(
                     b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 ),
             )
-            .await;
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::debug!(%error, "Chrome proxy denial response failed"),
+                Err(error) => tracing::debug!(%error, "Chrome proxy denial response timed out"),
+            }
             return Ok(());
         }
     };

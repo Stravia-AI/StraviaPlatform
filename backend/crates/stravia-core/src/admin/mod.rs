@@ -17,6 +17,7 @@ use crate::storage::traits::ProviderTestResult;
 
 mod api_keys;
 mod auth_data;
+pub(crate) mod browser;
 mod credential_protection;
 mod extensions;
 pub mod identity;
@@ -42,6 +43,7 @@ pub use crate::interaction_observation::{
     ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
     RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
 };
+pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use provider_connection::{
     ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderNetworkPermission,
 };

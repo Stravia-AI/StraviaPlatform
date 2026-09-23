@@ -221,6 +221,7 @@ struct FakeSearchProvider {
 struct FakeAdapterFactory {
     adapters: std::collections::HashMap<String, Arc<dyn WebProviderAdapter>>,
     outbounds: parking_lot::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
+    browser_paths: parking_lot::Mutex<Vec<(String, Option<std::path::PathBuf>)>>,
 }
 
 impl AdapterFactory for FakeAdapterFactory {
@@ -228,8 +229,13 @@ impl AdapterFactory for FakeAdapterFactory {
         &self,
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
+        browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         self.outbounds.lock().push((provider.id.clone(), outbound));
+        self.browser_paths.lock().push((
+            provider.id.clone(),
+            browser_path.map(std::path::Path::to_owned),
+        ));
         self.adapters.get(&provider.id).cloned().ok_or_else(|| {
             WebAccessError::from_code(
                 WebAccessErrorCode::Unavailable,
@@ -276,6 +282,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
     })
     .await
     .expect("gateway");
+    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -363,6 +370,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .into_iter()
         .collect(),
         outbounds: parking_lot::Mutex::new(vec![]),
+        browser_paths: parking_lot::Mutex::new(vec![]),
     });
     let old_service = WebAccessService::with_adapter_factory(gateway.clone(), old_factory.clone());
     assert_eq!(
@@ -393,6 +401,13 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .await
         .expect("Exa rescues Local hard failure");
     assert_eq!(rescued.results[0].url, "https://docs.rs/");
+    assert_eq!(
+        old_factory.browser_paths.lock().as_slice(),
+        [
+            (local.id.clone(), Some(std::env::current_exe().unwrap())),
+            (exa.id.clone(), Some(std::env::current_exe().unwrap())),
+        ]
+    );
     assert_eq!(
         old_factory.outbounds.lock().as_slice(),
         [
@@ -437,6 +452,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .into_iter()
         .collect(),
         outbounds: parking_lot::Mutex::new(vec![]),
+        browser_paths: parking_lot::Mutex::new(vec![]),
     });
     let new_service = WebAccessService::with_adapter_factory(gateway, new_factory.clone());
     new_service
@@ -586,7 +602,7 @@ async fn search_strictly_filters_sources_outside_allowed_domains() {
     assert_eq!(response.results[1].url, "https://docs.rs/");
 }
 #[tokio::test]
-async fn embedded_local_runtime_is_available_and_remains_optional() {
+async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: directory.path().to_owned(),
@@ -594,6 +610,7 @@ async fn embedded_local_runtime_is_available_and_remains_optional() {
     })
     .await
     .unwrap();
+    gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
     let service = gateway.web_access();
     let store = gateway.storage.web_providers().unwrap();
     let local = store
@@ -637,12 +654,21 @@ async fn embedded_local_runtime_is_available_and_remains_optional() {
         .unwrap();
     assert_eq!(
         service
+            .capture_run_snapshot("missing-local", &key.id)
+            .await
+            .unwrap(),
+        WebAccessAvailability::default()
+    );
+    assert!(service.run_snapshot("missing-local", &key.id).is_err());
+    gateway.set_browser_path(Some(std::env::current_exe().unwrap()));
+    assert_eq!(
+        service
             .capture_run_snapshot("embedded-local", &key.id)
             .await
             .unwrap(),
         WebAccessAvailability {
             search: true,
-            fetch: true,
+            fetch: true
         }
     );
     service.run_snapshot("embedded-local", &key.id).unwrap();
@@ -868,6 +894,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
     })
     .await
     .expect("gateway");
+    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -927,6 +954,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         .into_iter()
         .collect(),
         outbounds: parking_lot::Mutex::new(vec![]),
+        browser_paths: parking_lot::Mutex::new(vec![]),
     });
     let service = WebAccessService::with_adapter_factory(gateway, factory);
     assert_eq!(

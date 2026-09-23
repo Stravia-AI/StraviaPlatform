@@ -53,7 +53,7 @@ Agent behavior is defined and versioned by the platform — Stravia is not a use
 ## Why Stravia
 
 - **Drop-in endpoint for AI coding clients** — point Claude Code, Codex CLI, Gemini CLI, or OpenCode at `127.0.0.1:23471` and keep working. Each client keeps its own protocol; Stravia handles translation, routing, and failover.
-- **Tools that run for you** — built-in web search (embedded [Moli](https://github.com/Stravia-AI/moli-stealth) engine with V8 rendering — no Chrome install, no sidecar) and image understanding execute inside Stravia and hand results back to the model. Expose them over MCP or add them automatically to compatible requests.
+- **Tools that run for you** — built-in web search (local search uses an installed Chrome/Chromium browser; the container includes Chromium) and image understanding execute inside Stravia and hand results back to the model. Expose them over MCP or add them automatically to compatible requests.
 - **Keys, spend, and request history in one place** — give each app its own key with model and concurrency limits, see the usage providers actually report, watch every request live, and download a full debug bundle when something goes wrong.
 - **Local-first, one Rust core** — a desktop app or a headless server binary; SQLite by default, PostgreSQL for teams; local or S3 file storage. No cloud dependency.
 
@@ -118,7 +118,7 @@ When an upstream service is temporarily unavailable, Stravia retries or switches
 ### Platform tools and built-in agent runtime
 
 - `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
-- **Web Search** — use the Local agent loop with Moli, Exa, or Zhipu sources, or bind an External Route whose Vendor plugin returns a complete cited report.
+- **Web Search** — use the Local agent loop with a browser-backed Local source, Exa, or Zhipu, or bind an External Route whose Vendor plugin returns a complete cited report.
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
 - **Media Generation** — generate or edit an image through a saved Route backed by a capable Vendor plugin, then reuse its Artifact Reference in later tools.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
@@ -192,7 +192,7 @@ Project JavaScript development, build, and test commands use Bun. Rust and Pytho
 ## License
 
 Stravia is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
-Separately licensed components retain their own terms: `stravia-web-access` is `CC0-1.0 AND MIT` ([Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)), and the embedded [Moli engine](https://github.com/Stravia-AI/moli-stealth) is a separate repository under its own license. Bundled fonts retain their respective licenses.
+Separately licensed components retain their own terms: `stravia-web-access` is `CC0-1.0 AND MIT` ([Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)); its browser stealth scripts retain their [MIT license](backend/crates/stravia-web-access/src/browser/stealth/LICENSE). Bundled fonts retain their respective licenses.
 
 ## Star History
 

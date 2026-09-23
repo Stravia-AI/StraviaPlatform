@@ -302,6 +302,8 @@ impl Gateway {
         )
         .await?;
         let catalog_base_url = config.catalog_base_url.clone();
+        let (browser_preferences, browser_path) =
+            admin::browser::BrowserPreferences::load(&config.data_dir);
         let mut gw = Self {
             config,
             storage,
@@ -342,6 +344,8 @@ impl Gateway {
             compaction,
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
+            browser_path: Arc::new(std::sync::RwLock::new(browser_path)),
+            browser_preferences: Arc::new(browser_preferences),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
             update_service,
@@ -583,6 +587,15 @@ impl Gateway {
 
     pub fn admin(&self) -> admin::AdminService {
         admin::AdminService::new(self.clone())
+    }
+
+    /// Change the browser path for this Gateway and its clones; active runs retain their snapshot.
+    /// Does not persist or validate the path. Admin updates use the persistent API instead.
+    pub fn set_browser_path(&self, path: Option<std::path::PathBuf>) {
+        *self
+            .browser_path
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
     /// ADR-0073 收口：把一条上游凭据拒绝证据按条件写落库。代际已变（凭据

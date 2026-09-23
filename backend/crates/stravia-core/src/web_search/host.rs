@@ -268,17 +268,22 @@ impl SearchAdminHost for SearchHost {
             return Ok(None);
         };
         let settings = store.load_settings().await.map_err(|_| ())?;
-        let providers = store
-            .list()
-            .await
-            .map_err(|_| ())?
+        let records = store.list().await.map_err(|_| ())?;
+        let uses_local = records.iter().any(|provider| {
+            provider.kind == "local"
+                && (settings.search_provider_ids.contains(&provider.id)
+                    || settings.fetch_provider_ids.contains(&provider.id))
+        });
+        let local_available = !uses_local || self.0.web_access().local_browser_available().await;
+        let providers = records
             .into_iter()
             .map(|provider| {
                 let capabilities = provider.capabilities();
+                let available = provider.kind != "local" || local_available;
                 SearchSourceProvider {
                     id: provider.id,
-                    search: capabilities.as_ref().is_some_and(|value| value.search),
-                    fetch: capabilities.as_ref().is_some_and(|value| value.fetch),
+                    search: available && capabilities.as_ref().is_some_and(|value| value.search),
+                    fetch: available && capabilities.as_ref().is_some_and(|value| value.fetch),
                 }
             })
             .collect();

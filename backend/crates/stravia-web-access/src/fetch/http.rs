@@ -85,9 +85,12 @@ impl HttpBackend for NetworkBackend {
 }
 
 async fn send_get(client: HttpClient, url: &Url) -> Result<HttpResponse, FetchError> {
-    let request = http::Request::get(url.as_str())
-        .body(Vec::new())
-        .map_err(|_| FetchError::invalid_url(url.as_str()))?;
+    let request = wreq::Request::new(
+        wreq::Method::GET,
+        url.as_str()
+            .parse()
+            .map_err(|_| FetchError::invalid_url(url.as_str()))?,
+    );
     let (response, body) = client.fetch_once(request).await.map_err(|error| {
         if error.downcast_ref::<ResponseTooLarge>().is_some() {
             response_too_large()

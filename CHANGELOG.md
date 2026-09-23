@@ -10,6 +10,7 @@
 
 ### Changed
 
+- Local Web Search and Fetch again use `wreq` for ordinary HTTP requests and an installed Chrome/Chromium for browser rendering. The Local editor restores browser-path selection (`STRAVIA_CHROME_PATH` or automatic detection when unset); the container bundles Chromium. Existing Moli browser-profile and search-cookie files remain untouched but are no longer used, so local search identity does not persist across restarts.
 - JavaScript tooling now uses Bun 1.4.2 across development, builds, checks, and tests. CLI entry points and dependency installation explicitly use Bun rather than selecting the installed Node.js runtime; Rust and Python test runners are unchanged.
 - CI test workflows avoid duplicate pinned/stable Rust execution when compiler releases match, reuse the production WebUI build for Playwright, and report per-case SQLite/PostgreSQL storage timings. Authentication fixtures now use a deterministic local upstream with temporary resources cleaned up; Rust tests continue to use cargo test.
 - Web Search, Media, and Web Provider rule coverage now avoids six redundant full Gateway initializations while retaining persistence and error contracts; token activity layout coverage reuses one page navigation across all granularities.

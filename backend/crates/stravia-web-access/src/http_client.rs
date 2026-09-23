@@ -1,105 +1,36 @@
-use std::{
-    collections::HashMap,
-    fmt, io,
-    net::SocketAddr,
-    path::PathBuf,
-    pin::Pin,
-    sync::{Arc, LazyLock, Weak},
-    time::Duration,
-};
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
-use http::{header, Method};
-use moli_cookie_jar::{BrowserCookieStore, NetworkCookieRequestContext};
-use moli_stealth_net::{Transport, TransportConfig, TransportFingerprint, TransportRequest};
-use parking_lot::Mutex;
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
-use tokio_util::io::StreamReader;
+use http_body_util::BodyExt;
 use url::Url;
+use wreq::{header, Client, Method, Request, Response};
 
 use crate::outbound::ResolvedProxy;
 
 const MAX_REDIRECTS: usize = 10;
 
-/// 可重放的 HTTP 请求语义，不包含连接策略。
-pub type Request = http::Request<Vec<u8>>;
-/// 响应元数据包含最终 URL；解压后的正文单独返回。
-pub type Response = http::Response<Url>;
-
 #[derive(Debug, thiserror::Error)]
 #[error("response exceeded configured limit of {limit} bytes for {url}")]
+/// 响应声明长度或解压后的实际正文超过客户端配置的上限。
 pub struct ResponseTooLarge {
     pub limit: usize,
     pub url: Url,
 }
 
-/// 克隆共享 Moli 连接、搜索 Cookie 和构造期出站快照。
 #[derive(Clone)]
+/// 原生 wreq 请求传输；克隆共享连接池、搜索 Cookie 和构造期出站快照。
 pub struct HttpClient {
     inner: Arc<HttpClientInner>,
 }
 
 struct HttpClientInner {
-    transport: Transport,
+    direct: Client,
+    http: Client,
+    https: Client,
     snapshot: ResolvedProxy,
     timeout: Duration,
     response_limit: Option<usize>,
-    cookies: Option<Arc<Mutex<SearchCookies>>>,
-    pin: Option<(String, Vec<SocketAddr>)>,
-}
-
-#[derive(Default)]
-struct SearchCookies {
-    jar: BrowserCookieStore,
-    path: Option<PathBuf>,
-    // 锁文件独立于 Cookie 数据文件，原子替换数据时仍保持进程间互斥。
-    _file_lock: Option<std::fs::File>,
-}
-
-impl SearchCookies {
-    fn persistent(path: PathBuf) -> Result<Arc<Mutex<Self>>> {
-        static STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<SearchCookies>>>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
-        let parent = path
-            .parent()
-            .context("Cookie cache requires a parent directory")?;
-        std::fs::create_dir_all(parent).context("failed to create Cookie cache directory")?;
-        let path = parent
-            .canonicalize()?
-            .join(path.file_name().context("missing Cookie cache filename")?);
-        let mut stores = STORES.lock();
-        stores.retain(|_, store| store.strong_count() > 0);
-        if let Some(store) = stores.get(&path).and_then(Weak::upgrade) {
-            return Ok(store);
-        }
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.with_extension("lock"))?;
-        lock.try_lock()
-            .context("search Cookie cache is in use by another process")?;
-        let mut jar = BrowserCookieStore::default();
-        for cookie in moli_cookie_cache::load_cookie_cache(&path)? {
-            jar.upsert_with_request_url_report(cookie, None, moli_cookie_jar::CookieSource::Cdp);
-        }
-        let store = Arc::new(Mutex::new(Self {
-            jar,
-            path: Some(path.clone()),
-            _file_lock: Some(lock),
-        }));
-        stores.insert(path, Arc::downgrade(&store));
-        Ok(store)
-    }
-
-    fn persist(&mut self) -> Result<()> {
-        if let Some(path) = &self.path {
-            moli_cookie_cache::save_cookie_cache(path, self.jar.cookies())?;
-        }
-        Ok(())
-    }
+    cookies: bool,
 }
 
 impl HttpClient {
@@ -112,20 +43,7 @@ impl HttpClient {
         Self::build(snapshot, timeout, cookies, response_limit, None)
     }
 
-    pub(crate) fn with_cookie_cache(
-        snapshot: ResolvedProxy,
-        timeout: Duration,
-        path: PathBuf,
-    ) -> Result<Self> {
-        let cookies = SearchCookies::persistent(path)?;
-        let mut client = Self::build(snapshot, timeout, false, None, None)?;
-        Arc::get_mut(&mut client.inner)
-            .expect("new HTTP client is uniquely owned")
-            .cookies = Some(cookies);
-        Ok(client)
-    }
-
-    /// 固定策略层校验通过的地址，连接时不再解析源站。
+    /// 固定策略层已验证的全部地址，不允许连接时再次解析目标域名。
     pub(crate) fn pinned(
         hostname: &str,
         addresses: Vec<SocketAddr>,
@@ -144,7 +62,7 @@ impl HttpClient {
             timeout,
             false,
             Some(response_limit),
-            Some((hostname.to_owned(), addresses)),
+            Some((hostname, addresses)),
         )
     }
 
@@ -153,29 +71,59 @@ impl HttpClient {
         timeout: Duration,
         cookies: bool,
         response_limit: Option<usize>,
-        pin: Option<(String, Vec<SocketAddr>)>,
+        pin: Option<(&str, Vec<SocketAddr>)>,
     ) -> Result<Self> {
-        let transport = Transport::new(TransportConfig {
-            fingerprint: TransportFingerprint::chrome(),
-            ..TransportConfig::default()
-        })?;
+        let jar = Arc::new(wreq::cookie::Jar::default());
+        let make_client = |proxy: Option<&Url>| -> Result<Client> {
+            let mut builder = Client::builder()
+                .emulation(wreq_util::Profile::Chrome149)
+                .no_proxy()
+                .retry(wreq::retry::Policy::never())
+                .redirect(wreq::redirect::Policy::none())
+                .timeout(timeout);
+            if cookies {
+                builder = builder.cookie_provider(Arc::clone(&jar));
+            }
+            if let Some(proxy) = proxy {
+                if !proxy.username().is_empty() || proxy.password().is_some() {
+                    bail!("proxy URL must not include credentials");
+                }
+                builder = builder.proxy(wreq::Proxy::all(proxy.as_str())?);
+            }
+            if let Some((hostname, addresses)) = &pin {
+                builder = builder.resolve_to_addrs((*hostname).to_owned(), addresses.clone());
+            }
+            Ok(builder.build()?)
+        };
+        let direct = make_client(None)?;
+        let http = snapshot
+            .http
+            .as_ref()
+            .map_or_else(|| Ok(direct.clone()), |proxy| make_client(Some(proxy)))?;
+        let https = snapshot
+            .https
+            .as_ref()
+            .map_or_else(|| Ok(direct.clone()), |proxy| make_client(Some(proxy)))?;
         Ok(Self {
             inner: Arc::new(HttpClientInner {
-                transport,
+                direct,
+                http,
+                https,
                 snapshot,
                 timeout,
                 response_limit,
-                pin,
-                cookies: cookies.then(|| Arc::new(Mutex::new(SearchCookies::default()))),
+                cookies,
             }),
         })
     }
 
+    /// 总预算覆盖重定向、响应头和解压后正文；取消 future 会直接丢弃在途传输。
+    /// 原生响应保留状态、最终 URI 和响应头，已读尽的正文由元组第二项唯一持有。
     pub async fn fetch(&self, request: Request) -> Result<(Response, Vec<u8>)> {
         self.fetch_with_redirects(request, true).await
     }
 
-    /// 只执行一跳，让 Fetch 逐跳校验重定向并固定 DNS 结果。
+    /// 只执行当前跳，供 Fetch 策略逐跳检查目标和 Google 结果跳转使用。
     pub async fn fetch_once(&self, request: Request) -> Result<(Response, Vec<u8>)> {
         self.fetch_with_redirects(request, false).await
     }
@@ -185,13 +133,13 @@ impl HttpClient {
         request: Request,
         follow: bool,
     ) -> Result<(Response, Vec<u8>)> {
-        // 丢弃 future 或响应正文会取消 Moli 的在途传输。
         tokio::time::timeout(self.inner.timeout, self.fetch_inner(request, follow))
             .await
             .context("HTTP request timed out")?
     }
 
     async fn fetch_inner(&self, mut request: Request, follow: bool) -> Result<(Response, Vec<u8>)> {
+        // 请求只携带 HTTP 语义，不能覆盖出站代理、Cookie、解压或超时策略。
         request.extensions_mut().clear();
         for count in 0..=MAX_REDIRECTS {
             let from = Url::parse(&request.uri().to_string())?;
@@ -201,124 +149,45 @@ impl HttpClient {
             {
                 bail!("HTTP transport requires an HTTP(S) URL without credentials");
             }
-            let mut outgoing = TransportRequest::new(from.clone(), request.method().as_str());
-            // 显式空值阻止 Moli 回读可变的进程代理环境。
-            let proxy = if self.inner.snapshot.pins_origin(&from) {
-                None
+            if !self.inner.cookies {
+                request.headers_mut().remove(header::COOKIE);
+            }
+            let next_request = if follow { request.try_clone() } else { None };
+            let client = if self.inner.snapshot.pins_origin(&from) {
+                &self.inner.direct
             } else if from.scheme() == "https" {
-                self.inner.snapshot.https.as_ref()
+                &self.inner.https
             } else {
-                self.inner.snapshot.http.as_ref()
+                &self.inner.http
             };
-            outgoing.connection.proxy = Some(proxy.map_or_else(String::new, ToString::to_string));
-            outgoing.connection.no_proxy = Some(String::new());
-            outgoing.connection.connect_timeout = Some(self.inner.timeout);
-            if let Some((hostname, addresses)) = &self.inner.pin {
-                if from.host_str() != Some(hostname.as_str())
-                    || addresses
-                        .iter()
-                        .any(|address| Some(address.port()) != from.port_or_known_default())
-                {
-                    bail!("pinned HTTP client cannot request a different origin");
-                }
-                outgoing.connection.resolved_addresses = Some(addresses.clone());
-            }
-            for (name, value) in request.headers() {
-                if name == header::COOKIE && self.inner.cookies.is_none() {
-                    continue;
-                }
-                outgoing
-                    .headers
-                    .push((name.as_str().to_owned(), value.to_str()?.to_owned()));
-            }
-            if !request.headers().contains_key(header::USER_AGENT) {
-                outgoing.headers.push(("user-agent".into(),
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36".into()));
-            }
-            if !request.headers().contains_key(header::ACCEPT_ENCODING) {
-                outgoing
-                    .headers
-                    .push(("accept-encoding".into(), "gzip, deflate, br, zstd".into()));
-            }
-            if let Some(jar) = &self.inner.cookies {
-                if !request.headers().contains_key(header::COOKIE) {
-                    let report = jar.lock().jar.cookie_access_report_for_request(
-                        &from,
-                        NetworkCookieRequestContext::top_level_navigation(
-                            request.method().as_str(),
-                        ),
-                    );
-                    let mut value = String::new();
-                    for entry in report.included_cookies {
-                        if !value.is_empty() {
-                            value.push_str("; ");
-                        }
-                        value.push_str(&entry.cookie.name);
-                        value.push('=');
-                        value.push_str(&entry.cookie.value);
-                    }
-                    if !value.is_empty() {
-                        outgoing.headers.push(("cookie".into(), value));
-                    }
-                }
-            }
-            if !request.body().is_empty() {
-                outgoing.body = Some(if follow {
-                    request.body().clone()
+            // 禁止调用方覆盖逐跳重定向策略；每跳必须重新选择对应协议的代理。
+            let outgoing = wreq::RequestBuilder::from_parts(client.clone(), request)
+                .redirect(wreq::redirect::Policy::none())
+                .build()?;
+            let mut response = client.execute(outgoing).await?;
+            let target =
+                if follow && matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                    response
+                        .headers()
+                        .get(header::LOCATION)
+                        .map(|value| -> Result<Url> { Ok(from.join(value.to_str()?.trim())?) })
+                        .transpose()?
                 } else {
-                    std::mem::take(request.body_mut())
-                });
-            }
-            let response = self.inner.transport.execute(outgoing).await?;
-            if let Some(jar) = &self.inner.cookies {
-                if response
-                    .headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
-                {
-                    let mut cookies = jar.lock();
-                    cookies.jar.store_response_headers_with_context_reports(
-                        &from,
-                        &response.headers,
-                        &NetworkCookieRequestContext::top_level_navigation(
-                            request.method().as_str(),
-                        ),
-                    );
-                    cookies
-                        .persist()
-                        .context("failed to persist search Cookies")?;
-                }
-            }
-            let mut metadata = http::Response::builder()
-                .status(response.status)
-                .version(response.version)
-                .body(from.clone())?;
-            for (name, value) in &response.headers {
-                metadata.headers_mut().append(
-                    http::header::HeaderName::from_bytes(name.as_bytes())?,
-                    value.parse()?,
-                );
-            }
-            let target = if follow && matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                metadata
-                    .headers()
-                    .get(header::LOCATION)
-                    .map(|value| -> Result<Url> { Ok(from.join(value.to_str()?.trim())?) })
-                    .transpose()?
-            } else {
-                None
-            };
+                    None
+                };
             if let Some(to) = target {
                 if count == MAX_REDIRECTS {
                     bail!("redirect limit exceeded for {from}");
                 }
-                if (matches!(response.status, 301 | 302) && request.method() == Method::POST)
-                    || (response.status == 303
+                request = next_request.context("redirect requires a replayable request body")?;
+                let status = response.status().as_u16();
+                if (matches!(status, 301 | 302) && request.method() == Method::POST)
+                    || (status == 303
                         && request.method() != Method::GET
                         && request.method() != Method::HEAD)
                 {
                     *request.method_mut() = Method::GET;
-                    request.body_mut().clear();
+                    *request.body_mut() = None;
                     for name in [
                         header::CONTENT_LENGTH,
                         header::CONTENT_TYPE,
@@ -344,83 +213,32 @@ impl HttpClient {
                     request.headers_mut().remove(header::REFERER);
                 }
                 *request.uri_mut() = to.as_str().parse()?;
-                // Moli 丢弃未读完的 H1 连接；H2 则只重置当前 stream。
-                drop(response);
+                // 未读取的重定向正文不得占用连接池或后台继续下载。
+                response.forbid_recycle();
                 continue;
             }
-            if request.method() == Method::HEAD || matches!(response.status, 204 | 304) {
-                return Ok((metadata, Vec::new()));
-            }
-            let encodings = metadata
-                .headers()
-                .get_all(header::CONTENT_ENCODING)
-                .iter()
-                .map(|value| value.to_str())
-                .collect::<std::result::Result<Vec<_>, _>>()?
-                .join(",");
-            let compressed = encodings
-                .split(',')
-                .any(|value| !matches!(value.trim(), "" | "identity"));
-            if !compressed {
-                if let Some(limit) = self.inner.response_limit {
-                    if metadata
-                        .headers()
-                        .get(header::CONTENT_LENGTH)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .is_some_and(|length| length > limit as u64)
-                    {
-                        return Err(ResponseTooLarge { limit, url: from }.into());
-                    }
-                }
-            }
-            let stream = futures::stream::try_unfold(response.body, |mut body| async move {
-                body.chunk()
-                    .await
-                    .map(|chunk| chunk.map(|chunk| (chunk, body)))
-                    .map_err(io::Error::other)
-            });
-            let mut reader: Pin<Box<dyn AsyncRead + Send>> =
-                Box::pin(StreamReader::new(Box::pin(stream)));
-            for encoding in encodings.split(',').rev().map(str::trim) {
-                reader = match encoding {
-                    "" | "identity" => reader,
-                    "gzip" | "x-gzip" => {
-                        let mut decoder = GzipDecoder::new(BufReader::new(reader));
-                        decoder.multiple_members(true);
-                        Box::pin(decoder)
-                    }
-                    "deflate" => Box::pin(ZlibDecoder::new(BufReader::new(reader))),
-                    "br" => Box::pin(BrotliDecoder::new(BufReader::new(reader))),
-                    "zstd" => Box::pin(ZstdDecoder::new(BufReader::new(reader))),
-                    _ => bail!("unsupported HTTP content encoding: {encoding}"),
-                };
-            }
-            if compressed {
-                metadata.headers_mut().remove(header::CONTENT_LENGTH);
-                metadata.headers_mut().remove(header::CONTENT_ENCODING);
-            }
             let mut body = Vec::new();
-            let mut buffer = [0; 16 * 1024];
-            loop {
-                let capacity = self.inner.response_limit.map_or(buffer.len(), |limit| {
-                    limit
-                        .saturating_sub(body.len())
-                        .saturating_add(1)
-                        .min(buffer.len())
-                });
-                let count = reader.read(&mut buffer[..capacity]).await?;
-                if count == 0 {
-                    break;
+            if let Some(limit) = self.inner.response_limit {
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > limit as u64)
+                {
+                    response.forbid_recycle();
+                    return Err(ResponseTooLarge { limit, url: from }.into());
                 }
-                if let Some(limit) = self.inner.response_limit {
-                    if body.len().saturating_add(count) > limit {
-                        return Err(ResponseTooLarge { limit, url: from }.into());
-                    }
-                }
-                body.extend_from_slice(&buffer[..count]);
             }
-            return Ok((metadata, body));
+            while let Some(frame) = response.frame().await {
+                if let Ok(data) = frame?.into_data() {
+                    if let Some(limit) = self.inner.response_limit {
+                        if body.len().saturating_add(data.len()) > limit {
+                            response.forbid_recycle();
+                            return Err(ResponseTooLarge { limit, url: from }.into());
+                        }
+                    }
+                    body.extend_from_slice(&data);
+                }
+            }
+            return Ok((response, body));
         }
         unreachable!("bounded redirect loop always returns")
     }
@@ -430,7 +248,7 @@ impl fmt::Debug for HttpClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("HttpClient")
-            .field("cookies", &self.inner.cookies.is_some())
+            .field("cookies", &self.inner.cookies)
             .finish_non_exhaustive()
     }
 }
@@ -525,7 +343,6 @@ mod tests {
                     body.len()
                 );
                 stream.write_all(headers.as_bytes()).unwrap();
-                // The client may intentionally cancel when the decoded limit is reached.
                 let _ = stream.write_all(body);
                 return;
             }
@@ -535,8 +352,7 @@ mod tests {
             Reply::EchoCredentials => {
                 let leaked = request.lines().any(|line| {
                     line.split_once(':').is_some_and(|(name, _)| {
-                        name.eq_ignore_ascii_case("authorization")
-                            || name.eq_ignore_ascii_case("cookie")
+                        name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("cookie")
                     })
                 });
                 ok(if leaked { "leaked" } else { "clean" })
@@ -584,7 +400,7 @@ mod tests {
     }
 
     fn get(url: &str) -> Request {
-        http::Request::get(url).body(Vec::new()).unwrap()
+        Request::new(Method::GET, url.parse().unwrap())
     }
 
     #[tokio::test]
@@ -615,71 +431,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_cookies_survive_runtime_rebuild_without_entering_fetch() {
-        struct Directory(PathBuf);
-        impl Drop for Directory {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let directory = Directory(std::env::temp_dir().join(format!(
-            "stravia-search-cookies-{}-{:016x}",
-            std::process::id(),
-            rand::random::<u64>(),
-        )));
-        let profile = directory.0.join("browser-profile");
+    async fn rebuilt_runtime_does_not_reuse_search_identity_or_share_it_with_fetch() {
         let server = spawn_server(vec![
             Reply::Fixed(
-                "HTTP/1.1 200 OK\r\nSet-Cookie: sid=anonymous; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nSet-Cookie: sid=temporary; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
             Reply::EchoCookie,
-            Reply::EchoCookie,
-            Reply::Fixed(
-                "HTTP/1.1 200 OK\r\nSet-Cookie: sid=fetch-only; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            ),
             Reply::EchoCookie,
             Reply::EchoCookie,
         ]);
-        let first =
-            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile.clone())
-                .unwrap();
-        let simultaneous =
-            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile.clone())
-                .unwrap();
+        let first = crate::LocalWeb::new(crate::OutboundProxyMode::Direct).unwrap();
         first
             .http_client()
             .fetch(get(&server.base_url))
             .await
             .unwrap();
         assert_eq!(
-            simultaneous
+            first
                 .http_client()
                 .fetch(get(&server.base_url))
                 .await
                 .unwrap()
                 .1,
-            b"sid=anonymous",
+            b"sid=temporary"
         );
         drop(first);
-        drop(simultaneous);
-        let rebuilt =
-            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile).unwrap();
-        let mut bing = crate::search::engines::search::bing::request(&rebuilt.search_query("Rust"))
-            .await
-            .unwrap();
-        // 使用真实引擎请求，只将目标换成本地 Cookie 回显服务。
-        *bing.uri_mut() = server.base_url.parse().unwrap();
-        assert_eq!(
-            rebuilt.http_client().fetch(bing).await.unwrap().1,
-            b"sid=anonymous",
-        );
-        let fetch = rebuilt.fetch_proxied_client();
-        fetch.fetch_once(get(&server.base_url)).await.unwrap();
-        let mut request = get(&server.base_url);
-        request
-            .headers_mut()
-            .insert(header::COOKIE, "sid=explicit".parse().unwrap());
-        assert_eq!(fetch.fetch_once(request).await.unwrap().1, b"none");
+        let rebuilt = crate::LocalWeb::new(crate::OutboundProxyMode::Direct).unwrap();
         assert_eq!(
             rebuilt
                 .http_client()
@@ -687,7 +464,20 @@ mod tests {
                 .await
                 .unwrap()
                 .1,
-            b"sid=anonymous",
+            b"none"
+        );
+        let mut explicit = get(&server.base_url);
+        explicit
+            .headers_mut()
+            .insert(header::COOKIE, "sid=explicit".parse().unwrap());
+        assert_eq!(
+            rebuilt
+                .fetch_proxied_client()
+                .fetch_once(explicit)
+                .await
+                .unwrap()
+                .1,
+            b"none"
         );
     }
 
@@ -718,7 +508,9 @@ mod tests {
             Reply::Fixed(
                 "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
-            Reply::Fixed("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal"),
+            Reply::Fixed(
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal",
+            ),
         ]);
         let client = client(None, true);
         let manual = client
@@ -733,7 +525,7 @@ mod tests {
             .unwrap();
         assert_eq!(followed.0.status(), 200);
         assert_eq!(followed.1, b"final");
-        assert!(followed.0.body().path().ends_with("/final"));
+        assert!(followed.0.uri().path().ends_with("/final"));
     }
 
     #[tokio::test]
@@ -751,7 +543,7 @@ mod tests {
         let response = client.fetch(request).await.unwrap();
         assert_eq!(response.1, b"clean");
         assert_eq!(
-            response.0.body().to_string(),
+            response.0.uri().to_string(),
             format!("{}/", destination.base_url)
         );
     }
@@ -778,26 +570,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compressed_content_length_does_not_reject_a_body_at_the_decoded_limit() {
-        let server = spawn_server(vec![Reply::Gzip(&[
+    async fn compressed_body_is_limited_after_decompression() {
+        let small = spawn_server(vec![Reply::Gzip(&[
             31, 139, 8, 0, 0, 0, 0, 0, 2, 10, 203, 72, 205, 201, 201, 7, 0, 134, 166, 16, 54, 5, 0,
             0, 0,
         ])]);
-        let response = client(Some(5), false)
-            .fetch(get(&server.base_url))
-            .await
-            .unwrap();
-        assert_eq!(response.1, b"hello");
-    }
-
-    #[tokio::test]
-    async fn compressed_body_cannot_bypass_the_decoded_response_limit() {
-        let server = spawn_server(vec![Reply::Gzip(&[
+        assert_eq!(
+            client(Some(5), false)
+                .fetch(get(&small.base_url))
+                .await
+                .unwrap()
+                .1,
+            b"hello"
+        );
+        let inflated = spawn_server(vec![Reply::Gzip(&[
             31, 139, 8, 0, 0, 0, 0, 0, 2, 10, 171, 168, 160, 12, 0, 0, 18, 172, 210, 58, 64, 0, 0,
             0,
         ])]);
         let error = client(Some(32), false)
-            .fetch(get(&server.base_url))
+            .fetch(get(&inflated.base_url))
             .await
             .unwrap_err();
         assert!(error.is::<ResponseTooLarge>());
@@ -835,7 +626,12 @@ mod tests {
             .fetch(get(&format!("http://{address}/")))
             .await
             .unwrap_err();
-        assert!(error.is::<tokio::time::error::Elapsed>());
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<wreq::Error>()
+                .is_some_and(wreq::Error::is_timeout)),
+            "{error:#}"
+        );
         let remaining = tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .unwrap()

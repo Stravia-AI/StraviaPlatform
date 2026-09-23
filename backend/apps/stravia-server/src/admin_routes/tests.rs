@@ -957,7 +957,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
 }
 
 #[tokio::test]
-async fn web_access_http_enables_embedded_local_without_host_configuration() -> anyhow::Result<()> {
+async fn web_access_browser_http_controls_local_selection() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.path().to_owned(),
@@ -976,6 +976,41 @@ async fn web_access_http_enables_embedded_local_without_host_configuration() -> 
         search_provider_ids: vec![local.id.clone()],
         fetch_provider_ids: vec![local.id],
     };
+    gateway
+        .admin()
+        .update_web_access_settings(stravia_core::db::models::WebAccessSettings::default())
+        .await?;
+    let missing = directory.path().join("missing-chrome.exe");
+    gateway.set_browser_path(Some(missing));
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/web-access/settings")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&settings)?))?,
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let rejected_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rejected.into_body(), usize::MAX).await?)?;
+    assert_eq!(rejected_body["code"], "WEB_ACCESS_BROWSER_REQUIRED");
+    let executable = std::env::current_exe()?.to_string_lossy().into_owned();
+    let configured = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/web-access/browser")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(
+                    &serde_json::json!({ "path": executable }),
+                )?))?,
+        )
+        .await?;
+    assert_eq!(configured.status(), StatusCode::OK);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(configured.into_body(), usize::MAX).await?)?;
+    assert_eq!(payload["data"]["configuredPath"], executable);
+    assert_eq!(payload["data"]["source"], "manual");
+    assert_eq!(payload["data"]["available"], true);
     let response = app
         .clone()
         .oneshot(
@@ -986,6 +1021,7 @@ async fn web_access_http_enables_embedded_local_without_host_configuration() -> 
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let response = app
+        .clone()
         .oneshot(Request::get("/api/v1/web-access/settings").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -993,6 +1029,95 @@ async fn web_access_http_enables_embedded_local_without_host_configuration() -> 
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     assert_eq!(body["data"], serde_json::to_value(&settings)?);
     assert_eq!(gateway.admin().get_web_access_settings().await?, settings);
+    let state = app
+        .clone()
+        .oneshot(Request::get("/api/v1/web-access/browser").body(Body::empty())?)
+        .await?;
+    assert_eq!(state.status(), StatusCode::OK);
+    let state: serde_json::Value =
+        serde_json::from_slice(&to_bytes(state.into_body(), usize::MAX).await?)?;
+    assert_eq!(state["data"]["resolvedPath"], executable);
+    let restarted = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(
+        restarted
+            .admin()
+            .get_web_access_browser()
+            .await
+            .configured_path
+            .as_deref(),
+        Some(executable.as_str())
+    );
+    let invalid = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/web-access/browser")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"path":"missing-chrome.exe"}"#))?,
+        )
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        gateway
+            .admin()
+            .get_web_access_browser()
+            .await
+            .configured_path
+            .as_deref(),
+        Some(executable.as_str())
+    );
+    let reset = app
+        .oneshot(
+            Request::put("/api/v1/web-access/browser")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"path":null}"#))?,
+        )
+        .await?;
+    assert_eq!(reset.status(), StatusCode::OK);
+    let reset: serde_json::Value =
+        serde_json::from_slice(&to_bytes(reset.into_body(), usize::MAX).await?)?;
+    assert!(reset["data"]["configuredPath"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn browser_settings_routes_require_admin_auth() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway,
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+    for method in ["GET", "PUT"] {
+        let request = Request::builder()
+            .method(method)
+            .uri("/api/v1/web-access/browser")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"path":null}"#))?;
+        let denied = app.clone().oneshot(request).await?;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    let tokens = auth.login_native().await?;
+    let allowed = app
+        .oneshot(
+            Request::get("/api/v1/web-access/browser")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
     Ok(())
 }
 

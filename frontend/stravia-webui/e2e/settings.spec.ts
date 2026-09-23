@@ -603,9 +603,10 @@ test('External Route search activation does not depend on Local sources', async 
   await expect(searchSwitch).toBeChecked()
 })
 
-test('source load recovery allows embedded Local sources to enable search', async ({ page }) => {
+test('source load recovery requires a configured browser before Local sources can enable search', async ({ page }) => {
   let settingsUnavailable = true
   let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
+  let browserPath: string | null = null
   const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
   let config = {
     revision: 1,
@@ -626,6 +627,21 @@ test('source load recovery allows embedded Local sources to enable search', asyn
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
   )
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
+  await page.route('**/api/v1/web-providers/source-local', (route) => route.fulfill({ json: { data: localSource } }))
+  await page.route('**/api/v1/web-access/browser', async (route) => {
+    if (route.request().method() === 'PUT') browserPath = route.request().postDataJSON().path
+    await route.fulfill({
+      json: {
+        data: {
+          configuredPath: browserPath,
+          resolvedPath: browserPath,
+          source: browserPath ? 'manual' : 'automatic',
+          available: browserPath !== null,
+          error: null,
+        },
+      },
+    })
+  })
   await page.route('**/api/v1/web-access/settings', async (route) => {
     if (settingsUnavailable) {
       await route.fulfill({ status: 503, json: { error: 'Fixture source settings unavailable' } })
@@ -644,9 +660,14 @@ test('source load recovery allows embedded Local sources to enable search', asyn
   await sources.getByRole('button', { name: 'Retry', exact: true }).click()
   const searchCheckbox = page.locator('#web-access-search-source-local')
   const fetchCheckbox = page.locator('#web-access-fetch-source-local')
-  await expect(searchCheckbox).toBeEnabled()
-  await expect(fetchCheckbox).toBeEnabled()
+  await expect(searchCheckbox).toBeDisabled()
+  await expect(fetchCheckbox).toBeDisabled()
   await expect(searchSwitch).toBeDisabled()
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  await page.locator('#web-provider-browser-path').fill('C:\\Browser\\chrome.exe')
+  await page.getByRole('dialog').getByRole('button', { name: 'Save service', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(searchCheckbox).toBeEnabled()
   await searchCheckbox.click()
   await expect(searchCheckbox).toBeChecked()
   await expect(searchSwitch).toBeDisabled()
@@ -657,7 +678,171 @@ test('source load recovery allows embedded Local sources to enable search', asyn
   await expect(searchSwitch).toBeEnabled()
   await searchSwitch.click()
   await expect(searchSwitch).toBeChecked()
+  browserPath = null
+  await page.reload()
+  await expect(searchCheckbox).toBeChecked()
+  await expect(searchCheckbox).toBeEnabled()
+  await searchCheckbox.click()
+  await expect(searchCheckbox).not.toBeChecked()
+  await expect(fetchCheckbox).toBeEnabled()
+  await fetchCheckbox.click()
+  await expect(fetchCheckbox).not.toBeChecked()
 })
+
+test('remote sources remain usable while a selected Local browser is unavailable', async ({ page }) => {
+  const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
+  let saved: WebAccessSettings = {
+    search_provider_ids: [localSource.id, searchSource.id],
+    fetch_provider_ids: [localSource.id, searchSource.id],
+  }
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource, searchSource] } }))
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.route('**/api/v1/web-access/browser', (route) =>
+    route.fulfill({ status: 503, json: { error: 'Fixture browser load unavailable' } }),
+  )
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch', { name: 'Enable web search' })
+  await expect(page.locator('#web-search-sources')).toContainText('Browser configuration could not be loaded')
+  await expect(searchSwitch).toBeEnabled()
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
+  const localCheckbox = page.locator('#web-access-search-source-local')
+  await expect(localCheckbox).toBeEnabled()
+  await localCheckbox.click()
+  await expect(localCheckbox).not.toBeChecked()
+  expect(saved.search_provider_ids).toEqual([searchSource.id])
+})
+
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`Local browser editor retains drafts, reports partial saves, and resets to automatic (${locale})`, async ({ page }) => {
+    const zh = locale === 'zh-CN'
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
+    let browserLoadFails = true
+    let browserSaveFails = true
+    let serviceSaveFails = true
+    let browserPath: string | null = null
+    const browserSaves: Array<string | null> = []
+    let serviceSaves = 0
+    await page.route('**/api/v1/web-search/config', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            revision: 1,
+            enabled: false,
+            backend: { kind: 'local', model_id: 'model-search' },
+            max_turns: 6,
+            total_time_seconds: 180,
+            updated_at: '2026-09-01T00:00:00Z',
+            limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+          },
+        },
+      }),
+    )
+    await page.route('**/api/v1/web-search/eligible-models', (route) =>
+      route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+    )
+    await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
+    await page.route('**/api/v1/web-providers/source-local', async (route) => {
+      if (route.request().method() === 'PUT') {
+        serviceSaves++
+        if (serviceSaveFails) {
+          await route.fulfill({ status: 503, json: { error: 'Fixture service save unavailable' } })
+          return
+        }
+      }
+      await route.fulfill({ json: { data: localSource } })
+    })
+    await page.route('**/api/v1/web-access/settings', (route) =>
+      route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
+    )
+    await page.route('**/api/v1/web-access/browser', async (route) => {
+      if (route.request().method() === 'GET' && browserLoadFails) {
+        await route.fulfill({ status: 503, json: { error: 'Fixture browser load unavailable' } })
+        return
+      }
+      if (route.request().method() === 'PUT') {
+        if (browserSaveFails) {
+          await route.fulfill({ status: 400, json: { error: 'Fixture invalid browser path' } })
+          return
+        }
+        browserPath = route.request().postDataJSON().path
+        browserSaves.push(browserPath)
+      }
+      await route.fulfill({
+        json: {
+          data: {
+            configuredPath: browserPath,
+            resolvedPath: browserPath,
+            source: browserPath ? 'manual' : 'automatic',
+            available: browserPath !== null,
+            error: null,
+          },
+        },
+      })
+    })
+    await page.goto('/web-search')
+    const sources = page.locator('#web-search-sources')
+    const searchCheckbox = page.locator('#web-access-search-source-local')
+    await expect(searchCheckbox).toBeDisabled()
+    await expect(sources).toContainText(zh ? '无法加载浏览器配置' : 'Browser configuration could not be loaded')
+    browserLoadFails = false
+    await sources.getByRole('button', { name: zh ? '重试' : 'Retry', exact: true }).click()
+    await expect(sources).toContainText(zh ? '请先在 Local 服务编辑窗口' : 'Configure a Chrome or Chromium executable')
+    await sources.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true }).click()
+    const dialog = page.getByRole('dialog')
+    const path = dialog.locator('#web-provider-browser-path')
+    const save = dialog.getByRole('button', { name: zh ? '保存服务' : 'Save service', exact: true })
+    await path.fill('C:\\Browser\\chrome.exe')
+    await save.click()
+    await expect(dialog.getByRole('alert')).toContainText('Fixture invalid browser path')
+    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
+    expect(serviceSaves).toBe(0)
+    browserSaveFails = false
+    await save.click()
+    await expect(dialog.getByRole('alert')).toContainText(
+      zh ? '浏览器路径已保存，但服务设置保存失败' : 'The browser path was saved, but the service settings could not be saved',
+    )
+    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
+    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe'])
+    expect(serviceSaves).toBe(1)
+    serviceSaveFails = false
+    await save.click()
+    await expect(dialog).toHaveCount(0)
+    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe'])
+    await expect(searchCheckbox).toBeEnabled()
+    await page.reload()
+    await expect(searchCheckbox).toBeEnabled()
+    await sources.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true }).click()
+    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
+    await path.fill('')
+    await save.click()
+    await expect(dialog).toHaveCount(0)
+    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe', null])
+    await expect(searchCheckbox).toBeDisabled()
+  })
+}
 
 test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {
   const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'

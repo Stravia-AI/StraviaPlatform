@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_local_sources_satisfy_search_requirements() {
+    async fn missing_browser_excludes_local_sources_without_blocking_remote_search() {
         let _directory = tempfile::tempdir().expect("temporary directory");
         let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: _directory.path().to_path_buf(),
@@ -166,6 +166,7 @@ mod tests {
         })
         .await
         .expect("Gateway");
+        gateway.set_browser_path(Some(std::env::current_exe().unwrap()));
         let admin = gateway.admin();
         let store = admin.gw.storage.web_providers().unwrap();
         let local = store
@@ -185,9 +186,39 @@ mod tests {
             .unwrap();
         admin.search_admin().validate_local_sources().await.unwrap();
         admin
+            .gw
+            .set_browser_path(Some(_directory.path().join("missing-chrome.exe")));
+        assert_eq!(
+            admin
+                .search_admin()
+                .validate_local_sources()
+                .await
+                .unwrap_err()
+                .code,
+            "WEB_SEARCH_SOURCES_UNAVAILABLE"
+        );
+        let remote = admin
+            .create_web_provider(crate::db::models::CreateWebProvider {
+                name: "Remote sources".into(),
+                kind: "exa".into(),
+                api_key: Some("secret".into()),
+                use_proxy: false,
+                local_engines: None,
+            })
+            .await
+            .unwrap();
+        admin
             .update_web_access_settings(crate::db::models::WebAccessSettings {
+                search_provider_ids: vec![remote.id.clone()],
+                fetch_provider_ids: vec![remote.id.clone()],
+            })
+            .await
+            .unwrap();
+        admin.search_admin().validate_local_sources().await.unwrap();
+        admin
+            .update_web_access_settings(crate::db::models::WebAccessSettings {
+                search_provider_ids: vec![remote.id],
                 fetch_provider_ids: vec![],
-                ..settings
             })
             .await
             .unwrap();

@@ -8,13 +8,13 @@ use std::{
     time::Instant,
 };
 
-use crate::http_client::Request;
 use futures::future::join_all;
 use maud::PreEscaped;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::{Host, Url};
+use wreq::Request;
 
 #[cfg(test)]
 use crate::outbound::{direct_browser, direct_http_client};
@@ -302,13 +302,13 @@ impl From<Vec<String>> for RequestAutocompleteResponse {
 }
 
 pub struct HttpResponse {
-    pub res: crate::http_client::Response,
+    pub res: wreq::Response,
     pub body: String,
     pub config: Arc<Config>,
 }
 
 impl HttpResponse {
-    fn new((res, bytes): (crate::http_client::Response, Vec<u8>), config: Arc<Config>) -> Self {
+    fn new((res, bytes): (wreq::Response, Vec<u8>), config: Arc<Config>) -> Self {
         let body = String::from_utf8(bytes)
             .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
         Self { res, body, config }
@@ -458,6 +458,11 @@ async fn make_requests(
                         };
 
                     let response = match match engine {
+                        Engine::Google
+                            if search::google::requires_browser_render(&http_response.body) =>
+                        {
+                            search::google::render_response(query).await
+                        }
                         Engine::GoogleScholar
                             if search::google_scholar::requires_browser_render(
                                 http_response.res.status().as_u16(),
