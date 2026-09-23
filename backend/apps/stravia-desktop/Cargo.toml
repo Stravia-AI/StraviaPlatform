@@ -25,6 +25,7 @@ stravia-web-search = { workspace = true }
 stravia-server = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-autostart = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

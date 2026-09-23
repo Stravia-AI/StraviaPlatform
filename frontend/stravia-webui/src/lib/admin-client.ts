@@ -60,6 +60,7 @@ import type {
   ProviderConfigurationPreview,
   ProviderConfigurationPreviewInput,
   WebAccessSettings,
+  WebAccessBrowserState,
   WebProvider,
   WebSearchConfigView,
   UpdateWebSearchConfig,
@@ -217,6 +218,10 @@ export const admin = {
     settings: {
       get: () => request<WebAccessSettings>('GET', '/web-access/settings'),
       update: (input: WebAccessSettings) => request<WebAccessSettings>('PUT', '/web-access/settings', input),
+    },
+    browser: {
+      get: () => request<WebAccessBrowserState>('GET', '/web-access/browser'),
+      set: (path: string | null) => request<WebAccessBrowserState>('PUT', '/web-access/browser', { path }),
     },
   },
   webSearch: {

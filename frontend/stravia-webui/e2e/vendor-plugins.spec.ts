@@ -51,8 +51,9 @@ test('an unavailable bundled plugin can be restored without importing a replacem
   await restore.click()
   const previewDialog = page.getByRole('dialog', { name: 'Review plugin change' })
   await expect(previewDialog).toBeVisible()
-  await expect(previewDialog.getByText('No authorization sessions will be cancelled.')).toBeVisible()
-  await expect(previewDialog.getByText(/incomplete sign-ins must be started again/i)).toHaveCount(0)
+  const risks = previewDialog.locator('section[aria-labelledby="preview-risks-title"]')
+  await expect(risks).toHaveCount(0)
+
   expect(applied).toBe(false)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(restore).toBeVisible()
@@ -60,8 +61,8 @@ test('an unavailable bundled plugin can be restored without importing a replacem
 
   preview = { ...preview, cancels_active_operations: true, active_operations: 1 }
   await restore.click()
-  await expect(previewDialog.getByText(/incomplete sign-ins must be started again/i)).toBeVisible()
-  await expect(previewDialog.getByText('No authorization sessions will be cancelled.')).toHaveCount(0)
+  await expect(previewDialog).toBeVisible()
+  await expect(risks.getByRole('listitem')).toHaveCount(2)
   await page.getByRole('button', { name: 'Apply plugin change' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByText('Ready', { exact: true })).toBeVisible()

@@ -4,6 +4,7 @@ use futures::future::join_all;
 use regex::Regex;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -26,7 +27,7 @@ static LOCATION_REPLACE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    let request = http::Request::get(search_url(search).as_str()).body(Vec::new())?;
+    let request = Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?);
     let response = search.http.fetch(request).await?;
     let body = String::from_utf8_lossy(&response.1);
     let parsed = if requires_browser_render(&body) {
@@ -137,10 +138,10 @@ async fn resolve_link_url(
     }
 
     // 不解密 m= 令牌；读 /link 返回页里的 location.replace，和搜狗微信同一类。
-    let mut request = http::Request::get(url.as_str()).body(Vec::new())?;
+    let mut request = Request::new(wreq::Method::GET, (url.as_str()).parse()?);
     request
         .headers_mut()
-        .insert(http::header::REFERER, SO_SEARCH_URL.parse()?);
+        .insert(wreq::header::REFERER, SO_SEARCH_URL.parse()?);
     let response = client.fetch(request).await?;
     let body = String::from_utf8_lossy(&response.1);
     result.url = extract_so_link_destination(&body)

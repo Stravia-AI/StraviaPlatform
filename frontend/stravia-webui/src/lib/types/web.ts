@@ -42,6 +42,14 @@ export interface WebAccessSettings {
   fetch_provider_ids: string[]
 }
 
+export interface WebAccessBrowserState {
+  configuredPath: string | null
+  resolvedPath: string | null
+  source: 'manual' | 'environment' | 'automatic'
+  available: boolean
+  error: string | null
+}
+
 export type WebSearchBackend =
   { kind: 'local'; model_id?: string | null } | { kind: 'external'; route_id?: string | null }
 

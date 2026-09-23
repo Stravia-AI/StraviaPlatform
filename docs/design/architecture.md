@@ -233,17 +233,17 @@ graph TD
 
 **Local Web Access 运行边界：**
 
-`stravia-web-access` 内嵌 `Stravia-AI/moli-stealth`，依赖固定到 Git revision `65b76086fe98b890bbd4755899698c71bdcef1d7`（合并上游 v1.1.5，移植网络能力并保留隐身传输）。HTTP Search/Fetch 使用 `moli-stealth-net` 和 Chrome 传输指纹，动态渲染使用 `moli-core` 的 Rust Interface 与 V8，不启动外部浏览器或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；生产 adapter 从 `GatewayConfig.data_dir` 经 `DataPaths` 派生 `state/web-access/browser-profile`，通过 `LocalWeb::with_profile` 启用浏览器持久存储。HTTP Search 的 `moli-cookie-jar` 使用上游 `moli-cookie-cache` 单独读写 `state/web-access/search-cookies.json`；相同路径在进程内共享 Cookie owner，独立锁文件防止跨进程写入冲突，收到 Set-Cookie 后原子保存，读写失败显式返回错误。HTTP 与浏览器搜索不互相导入 Cookie。Fetch 使用禁用 Cookie 的 HTTP 客户端及独立临时浏览器，不访问搜索 profile。`LocalWeb::new` 保持临时存储，供隔离示例与测试使用。HTTP 适配器负责逐跳重定向、跨 origin 凭据清理和解压后流式大小限制，直连 Fetch 使用策略层验证后的固定地址。
+`stravia-web-access` 的 HTTP Search/Fetch 使用固定版本的 `wreq` 与 `wreq-util`，动态页面通过 CDP 控制已安装的 Chrome/Chromium，不内嵌浏览器引擎或下载浏览器。`LocalWeb` 在构造时固定代理快照；HTTP Search 使用共享内存 Cookie jar，HTTP Fetch 禁用 Cookie，浏览器使用临时 profile，身份不跨进程重启持久化。现有 Moli profile 和 search-cookie 文件保留在磁盘上，但不读取、迁移或删除。HTTP 适配器逐跳检查重定向与目标地址、清除跨 origin 凭据，并对解压后的正文实施大小和总时限限制；直连 Fetch 使用策略层验证后的固定地址。
 
-Moli 的 Browser 所有者具有线程亲和性，由专用线程上的 current-thread Tokio runtime 与 LocalSet 创建、使用和释放；调用方只通过有界消息通道提交渲染请求。持久 profile 按规范化路径串行使用，每条命令完成、超时或取消后，先销毁 Browser、刷新分区并关闭出口，再释放 profile gate，避免旧、新代理快照同时占用同一 profile。临时浏览器继续在运行时内复用。预访问根据目标 URL 的有效网络 Cookie 决定，包含 HttpOnly，并遵循过期、domain、path、Secure、SameSite 与分区规则；没有可用 Cookie 才执行 preflight，与目标导航共用页面以保留本次 sessionStorage。页面求值使用隔离世界，JavaScript 导航后重新绑定就绪判定。排队、初始化、导航和提取共用绝对 deadline；接收端取消会取消在途操作，页面句柄释放触发回收，正常完成显式等待关闭。
+Chrome 按需启动，运行时持有浏览器 context，最后一个所有者释放时回收 target、进程和临时 profile。CDP 自动附加页面、iframe 和 worker：导航前注入含 UA metadata 的隐身补丁，worker 恢复前完成初始化；页面提取在隔离世界执行。脚本固定移植自 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 并保留 MIT 许可，指纹缓解不构成“不可检测”的承诺。下载拒绝；Chrome 保持操作系统沙箱，不使用 `--no-sandbox`。
 
-浏览器 HTTP 与 WebSocket 出站经过既有 EgressProxy；Moli 显式配置出口代理并清空 bypass，避免进程环境绕过固定快照。Moli 私网阻断和出口 URL/IP 策略共同生效，直连按已验证公网 IP 建连，不进行 TLS 中间人解密。显式上游代理仍负责其远端 DNS 解析。内嵌 Browser 不具备原 Chrome 子进程的操作系统沙箱边界；这不是网络策略失效时的替代防线，部署需使用最小权限与适当的宿主机隔离。
+浏览器 HTTP 与 WebSocket 出站经过同一 EgressProxy；Search、静态 Fetch、渲染及子资源共用构造期代理快照。出口策略检查公共地址、直连 DNS 地址固定和上游代理转发，不进行 TLS 中间人解密；显式代理保持远端 DNS 语义。页面、重定向、iframe 和 worker 均不能绕过出口。
 
-Desktop 与 Server 不再提供浏览器路径输入、探测或 `/api/v1/web-access/browser` 管理接口。`STRAVIA_CHROME_PATH` 不再读取；既有 `web-access-browser.json` 与 `desktop-browser.json` 不再读写或迁移，但不主动删除用户文件。Local 来源选择与执行不再受外部浏览器安装门槛约束。Web Access 仍只管理来源与优先级，公开联网搜索仍由唯一的 Web Search 总开关控制；模型与来源完整性校验、API Key 权限以及远程 Exa/Zhipu 行为不变。
+Desktop 与 Server 在 Local 服务编辑器提供浏览器路径配置；Desktop 使用系统文件选择器，Server 输入服务器本机路径。手动设置优先于 `STRAVIA_CHROME_PATH`，后者优先于自动探测；显式无效路径不回退。管理认证保护 `GET/PUT /api/v1/web-access/browser`：GET 只检查路径而不启动浏览器，PUT 接受 `{path: string|null}`，先校验并原子保存，再激活；`null` 清除手动设置。配置保存在 `web-access-browser.json`，缺失时迁移旧 `desktop-browser.json`；读盘损坏显式报告。缺少浏览器时不得新增 Local 来源，已保存 Local 可移除或保持，执行时跳过 Local 并保留远程来源。Web Access 仍只管理来源与优先级，公开联网搜索仍由唯一的 Web Search 总开关控制；远程 Exa/Zhipu 不依赖本地浏览器。
 
-Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。Google 主搜索直接使用浏览器，缺少有效 Cookie 时先导航 `https://www.google.com/`，后续请求与重启后复用 profile 中的匿名身份，不再先发送独立 HTTP 搜索请求。Bing 不再手工设置覆盖 jar 的临时 Cookie，改为自动发送持久 jar 中的匹配 Cookie。旧 CDP 控制与 OMP 隐身脚本已删除，浏览器身份和运行能力由内嵌 Moli 提供；指纹缓解不构成“不可检测”的承诺。
+Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。搜索优先 HTTP，在需要时回退 Chrome；Google 和 Bing 保留各自的请求策略。Google 的浏览器 preflight 与目标导航共用页面，在隔离世界先检测拦截，再检测结果就绪；命中异常流量挑战立即返回明确错误，而不是等待完整 deadline。
 
-Google 渲染请求提供程序内定义的失败判定表达式，与就绪检查在同一隔离世界执行，适用于 preflight 与目标导航。等待循环先识别实际 DOM 中的验证码、异常流量提示或 `/sorry/` 路径，再判断结果就绪；命中后关闭页面并返回明确的拦截错误，不消耗剩余 deadline。正常结果标题与无结果提示优先排除误报；其他来源与 Fetch 不启用 Google 判定。
+正常结果标题与无结果提示优先排除 Google 拦截误报；其他来源与 Fetch 不启用该判定。
 
 **stravia-core 顶层 `pub mod`（以 lib.rs 为准）：**
 

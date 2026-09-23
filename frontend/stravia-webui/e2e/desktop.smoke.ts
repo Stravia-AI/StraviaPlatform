@@ -104,6 +104,31 @@ describe('Stravia desktop smoke', () => {
     await $('a[href="/vendor-plugins"]').waitForExist({ timeout: 180_000 })
   })
 
+  it('shows the native browser chooser and retains an invalid path draft without saving it', async () => {
+    await browser.execute(() => {
+      localStorage.setItem('stravia-locale', 'en-US')
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    })
+    await browser.refresh()
+    await browser.tauri.switchWindow('main')
+    await $('a[href="/web-search"]').click()
+    const localRow = await $('//*[@id="web-search-sources"]//div[contains(@class,"grid")][.//p[normalize-space()="Local"]]')
+    await localRow.$('button=Edit').click()
+    const chooser = await $('#web-provider-browser-choose')
+    await expect(chooser).toBeDisplayed()
+    const path = await $('#web-provider-browser-path')
+    const savedPath = await path.getValue()
+    const invalidPath = resolve(process.cwd(), 'missing-stravia-chrome-executable')
+    await path.setValue(invalidPath)
+    await $('[role="dialog"]').$('button=Save service').click()
+    await expect($('[role="dialog"] [role="alert"]')).toBeDisplayed()
+    await expect(path).toHaveValue(invalidPath)
+    await $('[role="dialog"]').$('button=Cancel').click()
+    await localRow.$('button=Edit').click()
+    await expect($('#web-provider-browser-path')).toHaveValue(savedPath)
+    await $('[role="dialog"]').$('button=Cancel').click()
+  })
+
   it('imports a local Wasm component through native-authenticated desktop management', async () => {
     await browser.execute(() => {
       localStorage.setItem('stravia-locale', 'en-US')

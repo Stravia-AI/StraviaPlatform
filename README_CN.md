@@ -53,7 +53,7 @@ Agent 行为由平台实现定义并进行版本管理 —— Stravia 不是用�
 ## 为什么选择 Stravia
 
 - **AI 编程客户端的即插即用端点** —— 把 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 指向 `127.0.0.1:23471` 就能继续工作。客户端协议不变，协议转换、选路和故障切换由 Stravia 处理。
-- **工具替你跑** —— 内置联网搜索（内嵌 [Moli](https://github.com/Stravia-AI/moli-stealth) 引擎，V8 渲染动态页面，无需 Chrome、无需 sidecar）与图片理解在 Stravia 内执行，结果直接送回模型。可通过 MCP 提供，也可自动加入兼容请求。
+- **工具替你跑** —— 内置联网搜索（本地搜索使用已安装的 Chrome/Chromium 浏览器；容器已内置 Chromium）与图片理解在 Stravia 内执行，结果直接送回模型。可通过 MCP 提供，也可自动加入兼容请求。
 - **密钥、花费和请求记录都在一处** —— 每个应用一把 Key，各自限制可用模型与并发；看到服务商上报的真实用量；实时查看每个请求，出问题时下载完整调试包。
 - **本地优先，一个 Rust 内核** —— 桌面应用或无头服务端二进制；默认 SQLite，团队可用 PostgreSQL；文件存本地或 S3。不依赖云。
 
@@ -118,7 +118,7 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 ### 平台工具与内置 Agent 运行时
 
 - `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
-- **联网搜索** —— 可使用 Local Agent 循环配合内嵌 Moli、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
+- **联网搜索** —— 可使用 Local Agent 循环配合需要浏览器的 Local 来源、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
 - **媒体生成** —— 通过由具备能力的 Vendor 插件支持的已保存 Route 生成或编辑图片，再用 Artifact Reference 在后续工具中复用。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
@@ -192,7 +192,7 @@ Rust `1.98.1` · Bun `1.4.2` · Task `3.52.0` · Python E2E 需要 uv。
 ## 许可证
 
 Stravia 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
-单独许可的组件继续适用各自条款：`stravia-web-access` 采用 `CC0-1.0 AND MIT`（见 [Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)）；内嵌的 [Moli 引擎](https://github.com/Stravia-AI/moli-stealth)是独立仓库，适用其自身许可。内置字体采用各自许可证。
+单独许可的组件继续适用各自条款：`stravia-web-access` 采用 `CC0-1.0 AND MIT`（见 [Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)）；其浏览器隐身脚本保留 [MIT 许可](backend/crates/stravia-web-access/src/browser/stealth/LICENSE)。内置字体采用各自许可证。
 
 ## Star History
 

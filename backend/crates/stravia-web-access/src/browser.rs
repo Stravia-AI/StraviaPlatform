@@ -1,32 +1,20 @@
 use anyhow::Context;
-use moli_core::runtime::{Browser, BrowserConfig, RenderedDomWaitUntil};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Weak},
-    time::Duration,
-};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use serde_json::{json, Value};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::sync::{Mutex, Notify};
 
+mod cdp;
 mod egress;
+mod process;
+mod stealth;
+
+use cdp::Cdp;
+pub use process::{resolve_browser_executable, validate_browser_executable};
 
 #[derive(Debug, Clone)]
-pub(crate) struct BrowserLaunchConfig {
+pub(crate) struct ChromeLaunchConfig {
     pub proxy: crate::outbound::ResolvedProxy,
-    pub profile_dir: Option<PathBuf>,
-}
-
-async fn profile_gate(path: &std::path::Path) -> Arc<Mutex<()>> {
-    static GATES: std::sync::LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
-        std::sync::LazyLock::new(Default::default);
-    let mut gates = GATES.lock().await;
-    gates.retain(|_, gate| gate.strong_count() > 0);
-    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
-        return gate;
-    }
-    let gate = Arc::new(Mutex::new(()));
-    gates.insert(path.to_owned(), Arc::downgrade(&gate));
-    gate
+    pub browser_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -35,48 +23,78 @@ pub(crate) struct BrowserRuntime {
 }
 
 struct BrowserRuntimeInner {
-    config: BrowserLaunchConfig,
-    owner: Mutex<Option<mpsc::Sender<RenderCommand>>>,
+    config: ChromeLaunchConfig,
+    browser: Mutex<Option<Arc<Chrome>>>,
 }
 
-struct RenderCommand {
-    url: String,
-    preflight_url: Option<String>,
-    ready_selector: String,
-    failure_expression: Option<&'static str>,
-    deadline: tokio::time::Instant,
-    response: oneshot::Sender<anyhow::Result<RenderedPage>>,
+struct Chrome {
+    cdp: Cdp,
+    context: String,
+    targets: Arc<Targets>,
+    events: tokio::task::AbortHandle,
+    process: Option<process::Process>,
+}
+
+#[derive(Default)]
+struct Targets {
+    sessions: parking_lot::Mutex<HashMap<String, Result<String, String>>>,
+    documents: parking_lot::Mutex<HashMap<(String, String), Document>>,
+    changed: Notify,
+}
+
+struct Document {
+    loader: String,
+    ready: bool,
+}
+
+impl Drop for Chrome {
+    fn drop(&mut self) {
+        self.events.abort();
+        if let Some(process) = self.process.take() {
+            let cdp = self.cdp.clone();
+            self.cdp.cleanup(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    cdp.call(None, "Browser.close", json!({})),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::debug!(%error, "Chrome CDP close failed"),
+                    Err(error) => tracing::warn!(%error, "Chrome CDP close timed out"),
+                }
+                drop(process);
+            });
+        }
+    }
 }
 
 impl BrowserRuntime {
-    pub(crate) fn new(config: BrowserLaunchConfig) -> Self {
+    pub(crate) fn new(config: ChromeLaunchConfig) -> Self {
         Self {
             inner: Arc::new(BrowserRuntimeInner {
                 config,
-                owner: Mutex::new(None),
+                browser: Mutex::new(None),
             }),
         }
     }
 
-    async fn owner(&self) -> anyhow::Result<mpsc::Sender<RenderCommand>> {
-        let mut owner = self.inner.owner.lock().await;
-        if let Some(sender) = owner.as_ref().filter(|sender| !sender.is_closed()) {
-            return Ok(sender.clone());
+    pub(crate) async fn require_available(&self) -> anyhow::Result<()> {
+        resolve_browser_executable(self.inner.config.browser_path.as_deref()).await?;
+        Ok(())
+    }
+
+    async fn browser(&self) -> anyhow::Result<Arc<Chrome>> {
+        let mut slot = self.inner.browser.lock().await;
+        if let Some(browser) = slot.as_ref() {
+            if !browser.cdp.is_closed() {
+                return Ok(browser.clone());
+            }
         }
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let (sender, receiver) = mpsc::channel(16);
-        let config = self.inner.config.clone();
-        // Browser 的 Rc 所有者具有线程亲和性，创建、使用和销毁必须在同一线程。
-        std::thread::Builder::new()
-            .name("stravia-moli".into())
-            .spawn(move || {
-                let local = tokio::task::LocalSet::new();
-                runtime.block_on(local.run_until(serve(config, receiver)));
-            })?;
-        *owner = Some(sender.clone());
-        Ok(sender)
+        *slot = None;
+        let browser = Arc::new(Chrome::launch(self.inner.config.clone()).await?);
+        *slot = Some(browser.clone());
+        Ok(browser)
     }
 
     pub(crate) async fn render(&self, request: RenderRequest<'_>) -> anyhow::Result<RenderedPage> {
@@ -84,8 +102,7 @@ impl BrowserRuntime {
         if let Some(url) = request.preflight_url {
             validate_navigation(url)?;
         }
-        let deadline = tokio::time::Instant::now() + request.timeout;
-        tokio::time::timeout_at(deadline, async {
+        tokio::time::timeout(request.timeout, async {
             if let Some(guard) = request.request_guard {
                 let url = request.url.to_owned();
                 let preflight = request.preflight_url.map(str::to_owned);
@@ -93,228 +110,545 @@ impl BrowserRuntime {
                     guard(&url) && preflight.as_deref().is_none_or(guard)
                 })
                 .await?;
-                anyhow::ensure!(allowed, "Moli renderer rejected a non-public URL");
+                anyhow::ensure!(allowed, "Chrome renderer rejected a non-public URL");
             }
-            let (response, result) = oneshot::channel();
-            self.owner()
-                .await?
-                .send(RenderCommand {
-                    url: request.url.to_owned(),
-                    preflight_url: request.preflight_url.map(str::to_owned),
-                    ready_selector: request.ready_selector.to_owned(),
-                    failure_expression: request.failure_expression,
-                    deadline,
-                    response,
-                })
+            let browser = self.browser().await?;
+            browser
+                .render_page(
+                    request.url,
+                    request.ready_selector,
+                    request.preflight_url,
+                    request.failure_expression,
+                )
                 .await
-                .context("Moli owner stopped")?;
-            // 丢弃接收端也会取消所有者线程上的在途操作。
-            result.await.context("Moli owner stopped")?
         })
         .await
-        .context("Moli rendering timed out")?
-    }
-}
-
-async fn serve(config: BrowserLaunchConfig, mut commands: mpsc::Receiver<RenderCommand>) {
-    let mut state = None;
-    while let Some(mut command) = commands.recv().await {
-        if command.response.is_closed() {
-            continue;
-        }
-        let mut profile_guard = None;
-        let operation = async {
-            if let Some(path) = config.profile_dir.as_ref() {
-                std::fs::create_dir_all(path).context("creating Moli profile directory")?;
-                let path =
-                    std::fs::canonicalize(path).context("resolving Moli profile directory")?;
-                profile_guard = Some(profile_gate(&path).await.lock_owned().await);
-            }
-            if state.is_none() {
-                // 内嵌 API 不执行 Moli CLI 的进程级初始化，必须显式选择同一传输指纹。
-                moli_stealth_net::initialize_process_fingerprint(
-                    moli_stealth_net::TransportFingerprint::chrome(),
-                )?;
-                let proxy = egress::EgressProxy::start(config.proxy.clone()).await?;
-                let profile_dir = config.profile_dir.clone();
-                let mut config = BrowserConfig::default();
-                config.set_profile_dir(profile_dir);
-                config.set_subframe_loading_enabled(true);
-                config
-                    .set_optional_resource_fetch_mask(moli_core::OptionalResourceFetchMask::all());
-                let fetch = config.fetch_mut();
-                fetch.set_http_proxy(Some(format!("http://{}", proxy.address())));
-                // 空字符串禁用所有绕过项，包括继承的 NO_PROXY 环境变量。
-                fetch.set_http_no_proxy(Some(String::new()));
-                fetch.set_network_blocking(true, Vec::new());
-                fetch.set_obey_robots(false);
-                state = Some((Browser::new(config)?, proxy));
-            }
-            let (browser, _) = state.as_ref().expect("initialized Moli browser");
-            render_page(
-                browser,
-                &command.url,
-                command.preflight_url.as_deref(),
-                &command.ready_selector,
-                command.failure_expression,
-                command.deadline,
-            )
-            .await
-        };
-        let result = tokio::select! {
-            biased;
-            _ = command.response.closed() => Err(anyhow::anyhow!("Moli rendering cancelled")),
-            result = tokio::time::timeout_at(command.deadline, operation) => {
-                result.context("Moli rendering timed out").and_then(|result| result)
-            }
-        };
-        // 持久分区只有一个写入者；取消也必须先结束生产者并 flush，再交给下一请求。
-        // 不把 profile 锁绑到 adapter 生命周期，旧代理快照仍可与新快照交替使用。
-        if config.profile_dir.is_some() {
-            if let Some((browser, proxy)) = state.take() {
-                drop(browser);
-                proxy.shutdown().await;
-            }
-        }
-        drop(profile_guard);
-        let _ = command.response.send(result);
-    }
-    // 先停止渲染生产者、回收资源所有者并刷新私有存储分区，再关闭出口监听。
-    if let Some((browser, proxy)) = state {
-        drop(browser);
-        proxy.shutdown().await;
-    }
-}
-
-async fn render_page(
-    browser: &Browser,
-    url: &str,
-    preflight: Option<&str>,
-    selector: &str,
-    failure_expression: Option<&str>,
-    deadline: tokio::time::Instant,
-) -> anyhow::Result<RenderedPage> {
-    let preflight = if preflight.is_some() {
-        let target = url::Url::parse(url)?;
-        let mut cookies = moli_cookie_jar::BrowserCookieStore::default();
-        for cookie in browser.cookies()? {
-            if !cookie.is_expired() && cookie.matches(&target) {
-                cookies.upsert_with_request_url_report(
-                    cookie,
-                    None,
-                    moli_cookie_jar::CookieSource::Cdp,
-                );
-            }
-        }
-        // 查询网络 Cookie 而非 document.cookie：HttpOnly 有效，分区与 SameSite 仍由上游判定。
-        let context = moli_cookie_jar::NetworkCookieRequestContext::top_level_navigation("GET")
-            .with_initiator_url(&target, &target);
-        let has_cookie = !cookies
-            .observe_cookie_access_report_for_request(&target, context)
-            .included_cookies
-            .is_empty();
-        if has_cookie {
-            None
-        } else {
-            preflight
-        }
-    } else {
-        None
-    };
-    let mut page = browser
-        .fetch_allow_http_error_with_wait_until(
-            preflight.unwrap_or(url),
-            RenderedDomWaitUntil::DomContentLoaded,
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
-        .await?;
-    let result = async {
-        if preflight.is_some() {
-            wait_for_document(&mut page, "body", failure_expression)
-                .await
-                .context("preflight navigation failed")?;
-            let context = page.create_isolated_world_async("stravia", false).await?;
-            let navigation = page
-                .evaluate_runtime_expression_in_execution_context_with_await_async(
-                    context,
-                    &format!("location.assign({})", serde_json::to_string(url)?),
-                    false,
-                )
-                .await?;
-            anyhow::ensure!(
-                navigation.get("exception").is_none(),
-                "Moli navigation failed: {}",
-                navigation
-            );
-        }
-        wait_for_document(&mut page, selector, failure_expression).await
-    }
-    .await;
-    let closed = page.close_async().await;
-    let rendered = result?;
-    closed?;
-    Ok(rendered)
-}
-
-async fn wait_for_document(
-    page: &mut moli_core::page::Page,
-    selector: &str,
-    failure_expression: Option<&str>,
-) -> anyhow::Result<RenderedPage> {
-    // 在隔离世界判定就绪并序列化，避免页面覆盖 document/JSON；导航后重新绑定。
-    // 终止条件先于就绪条件，已被拦截的页面不必等待结果节点或文档加载完成。
-    let expression = format!(
-        "(() => {{ const failure = ({}); if (failure) return JSON.stringify({{failure}}); if (document.readyState === 'loading' || !document.querySelector({})) return null; return JSON.stringify({{html: (document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML, url: location.href}}); }})()",
-        failure_expression.unwrap_or("null"),
-        serde_json::to_string(selector)?,
-    );
-    loop {
-        // 先由高层 Interface 跟随待处理的 JS 导航，旧文档不能满足新页面的就绪条件。
-        page.evaluate_runtime_expression_async("void 0").await?;
-        let context = page.create_isolated_world_async("stravia", false).await?;
-        let evaluated = page.evaluate_runtime_expression_in_execution_context_without_navigation_follow_with_await_async(
-                context, &expression, false,
-            ).await;
-        if page.has_pending_location_navigation().await?
-            || !page
-                .has_isolated_execution_context_id_async(context)
-                .await?
-        {
-            continue;
-        }
-        let evaluated = evaluated?;
-        anyhow::ensure!(
-            evaluated.get("exception").is_none(),
-            "Moli JavaScript evaluation failed: {}",
-            evaluated
-        );
-        if let Some(serialized) = evaluated["value"].as_str() {
-            let value: serde_json::Value = serde_json::from_str(serialized)?;
-            if let Some(failure) = value["failure"].as_str() {
-                anyhow::bail!("{failure}");
-            }
-            let url = value["url"].as_str().context("missing rendered URL")?;
-            validate_navigation(url)?;
-            return Ok(RenderedPage {
-                html: value["html"]
-                    .as_str()
-                    .context("missing rendered HTML")?
-                    .to_owned(),
-                url: url.to_owned(),
-                ready: true,
-            });
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        .context("Chrome rendering timed out")?
     }
 }
 
 fn validate_navigation(url: &str) -> anyhow::Result<()> {
+    // about:blank 只用于无网络的初始页面，其余导航共用 HTTP SSRF 策略。
     if url == "about:blank" {
         return Ok(());
     }
     crate::fetch::policy::validate_url(url)
         .map(|_| ())
         .map_err(Into::into)
+}
+
+fn allowed_request(value: &str) -> bool {
+    let Ok(mut url) = url::Url::parse(value) else {
+        return false;
+    };
+    match url.scheme() {
+        "data" | "blob" => return true,
+        "ws" => {
+            let _ = url.set_scheme("http");
+        }
+        "wss" => {
+            let _ = url.set_scheme("https");
+        }
+        _ => {}
+    }
+    validate_navigation(url.as_str()).is_ok()
+}
+
+fn auto_attach() -> Value {
+    json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true, "filter": [{"type": "browser", "exclude": true}, {"type": "tab", "exclude": true}, {}]})
+}
+
+impl Chrome {
+    async fn launch(config: ChromeLaunchConfig) -> anyhow::Result<Self> {
+        let proxy = egress::EgressProxy::start(config.proxy).await?;
+        let process = process::Process::launch(proxy, config.browser_path.as_deref()).await?;
+        let (cdp, mut receiver) = Cdp::connect(&process.endpoint).await?;
+        let version = cdp.call(None, "Browser.getVersion", json!({})).await?;
+        let ua = stealth::user_agent_override(
+            version["product"].as_str().unwrap_or_default(),
+            version["userAgent"].as_str().unwrap_or_default(),
+        );
+        // 显式持有会话上下文，让浏览器 Cookie 的寿命跟随运行时而非临时标签页。
+        let context = cdp
+            .call(
+                None,
+                "Target.createBrowserContext",
+                json!({"disposeOnDetach": true}),
+            )
+            .await?;
+        let context = context["browserContextId"]
+            .as_str()
+            .context("Chrome did not return browserContextId")?
+            .to_owned();
+        let targets = Arc::new(Targets::default());
+        let event_cdp = cdp.clone();
+        let event_targets = targets.clone();
+        // 事件泵不等待 CDP 响应；独立任务处理初始化与拦截，JoinSet 随泵取消。
+        let events = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    event = receiver.recv() => {
+                        let Some(event) = event else { break };
+                        match event["method"].as_str().unwrap_or_default() {
+                            "Target.attachedToTarget" => {
+                                let cdp = event_cdp.clone();
+                                let targets = event_targets.clone();
+                                let ua = ua.clone();
+                                handlers.spawn(async move {
+                                    let params = &event["params"];
+                                    let Some(session) = params["sessionId"].as_str() else { return };
+                                    let Some(target) = params["targetInfo"]["targetId"].as_str() else { return };
+                                    let kind = params["targetInfo"]["type"].as_str().unwrap_or_default();
+                                    let result = initialize_target(&cdp, session, kind, &ua).await.map(|()| session.to_owned()).map_err(|error| error.to_string());
+                                    if result.is_err() {
+                                        if let Err(error) = cdp.call(None, "Target.closeTarget", json!({"targetId": target})).await {
+                                            tracing::debug!(%error, %target, "closing failed Chrome target failed");
+                                        }
+                                    }
+                                    targets.sessions.lock().insert(target.to_owned(), result);
+                                    targets.changed.notify_waiters();
+                                });
+                            }
+                            "Target.detachedFromTarget" => {
+                                if let Some(session) = event["params"]["sessionId"].as_str() {
+                                    event_targets.sessions.lock().retain(|_, value| value.as_ref().is_ok_and(|id| id != session));
+                                    event_targets.documents.lock().retain(|(id, _), _| id != session);
+                                    event_targets.changed.notify_waiters();
+                                }
+                            }
+                            "Page.lifecycleEvent" => {
+                                let params = &event["params"];
+                                if matches!(params["name"].as_str(), Some("init" | "DOMContentLoaded" | "load")) {
+                                    if let (Some(session), Some(frame), Some(loader)) = (
+                                        event["sessionId"].as_str(),
+                                        params["frameId"].as_str(),
+                                        params["loaderId"].as_str(),
+                                    ) {
+                                        let mut documents = event_targets.documents.lock();
+                                        let document = documents.entry((session.to_owned(), frame.to_owned()))
+                                            .or_insert_with(|| Document { loader: loader.to_owned(), ready: false });
+                                        if params["name"] == "init" {
+                                            document.loader.clear();
+                                            document.loader.push_str(loader);
+                                            document.ready = false;
+                                        } else if document.loader == loader {
+                                            document.ready = true;
+                                        }
+                                        drop(documents);
+                                        event_targets.changed.notify_waiters();
+                                    }
+                                }
+                            }
+                            "Fetch.requestPaused" => {
+                                let cdp = event_cdp.clone();
+                                handlers.spawn(async move {
+                                    let url = event["params"]["request"]["url"].as_str().unwrap_or_default();
+                                    let allowed = allowed_request(url);
+                                    let method = if allowed { "Fetch.continueRequest" } else { "Fetch.failRequest" };
+                                    let mut params = json!({"requestId": event["params"]["requestId"]});
+                                    if !allowed { params["errorReason"] = "BlockedByClient".into(); }
+                                    if let Err(error) = cdp.call(event["sessionId"].as_str(), method, params).await {
+                                        tracing::debug!(%error, %method, "Chrome request interception failed");
+                                    }
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = handlers.join_next(), if !handlers.is_empty() => {}
+                }
+            }
+        });
+        let browser = Self {
+            cdp,
+            context,
+            targets,
+            events: events.abort_handle(),
+            process: Some(process),
+        };
+        browser
+            .cdp
+            .call(None, "Target.setAutoAttach", auto_attach())
+            .await?;
+        Ok(browser)
+    }
+
+    async fn page(&self) -> anyhow::Result<Page> {
+        let cdp = self.cdp.clone();
+        let context = self.context.clone();
+        let targets = self.targets.clone();
+        let (mut send, receive) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = async {
+                let created = cdp
+                    .call(
+                        None,
+                        "Target.createTarget",
+                        json!({"url": "about:blank", "browserContextId": context}),
+                    )
+                    .await?;
+                let target = created["targetId"]
+                    .as_str()
+                    .context("Chrome did not return targetId")?
+                    .to_owned();
+                let mut page = Page {
+                    cdp,
+                    target,
+                    session: String::new(),
+                    targets: targets.clone(),
+                };
+                loop {
+                    let changed = targets.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    let result = targets.sessions.lock().get(&page.target).cloned();
+                    if let Some(result) = result {
+                        page.session = result.map_err(anyhow::Error::msg)?;
+                        return Ok::<_, anyhow::Error>(page);
+                    }
+                    tokio::select! {
+                        _ = changed => {},
+                        _ = send.closed() => anyhow::bail!("Chrome page creation canceled"),
+                    }
+                }
+            }
+            .await;
+            // 接收端取消时 send 返回的 Page 会立即 Drop 并关闭 target。
+            let _ = send.send(result);
+        });
+        receive.await?
+    }
+
+    async fn render_page(
+        &self,
+        url: &str,
+        selector: &str,
+        preflight: Option<&str>,
+        failure_expression: Option<&str>,
+    ) -> anyhow::Result<RenderedPage> {
+        let page = self.page().await?;
+        let result = async {
+            if let Some(url) = preflight {
+                page.navigate_and_render(url, "body", failure_expression)
+                    .await
+                    .context("preflight navigation failed")?;
+            }
+            page.navigate_and_render(url, selector, failure_expression)
+                .await
+        }
+        .await;
+        let closed = page.close().await;
+        match result {
+            Err(error) => {
+                if let Err(close_error) = closed {
+                    tracing::debug!(%close_error, "closing failed Chrome render target failed");
+                }
+                Err(error)
+            }
+            Ok(page) => {
+                closed.context("closing Chrome render target failed")?;
+                Ok(page)
+            }
+        }
+    }
+}
+
+async fn initialize_target(cdp: &Cdp, session: &str, kind: &str, ua: &Value) -> anyhow::Result<()> {
+    let page = matches!(kind, "page" | "iframe" | "webview");
+    let worker = matches!(kind, "worker" | "shared_worker" | "service_worker");
+    if page || worker || kind == "background_page" {
+        cdp.call(Some(session), "Network.enable", json!({})).await?;
+        cdp.call(Some(session), "Network.setUserAgentOverride", ua.clone())
+            .await?;
+        // Worker 的 CDP 域没有 Emulation；Network 覆盖仍然先于脚本恢复。
+        if !worker {
+            cdp.call(Some(session), "Emulation.setUserAgentOverride", ua.clone())
+                .await?;
+        }
+        // Worker 没有 Fetch 域；其网络仍强制经过同一个校验出口。
+        if page {
+            cdp.call(
+                Some(session),
+                "Fetch.enable",
+                json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+            )
+            .await?;
+        }
+        cdp.call(Some(session), "Target.setAutoAttach", auto_attach())
+            .await?;
+    }
+    if page {
+        cdp.call(Some(session), "Page.enable", json!({})).await?;
+        cdp.call(
+            Some(session),
+            "Page.setLifecycleEventsEnabled",
+            json!({"enabled": true}),
+        )
+        .await?;
+        // 子 frame 继承顶层 viewport；下载策略与设备尺寸命令仅支持顶层 target。
+        if kind != "iframe" {
+            cdp.call(
+                Some(session),
+                "Page.setDownloadBehavior",
+                json!({"behavior": "deny"}),
+            )
+            .await?;
+            cdp.call(
+                Some(session),
+                "Emulation.setDeviceMetricsOverride",
+                json!({"width": 1365, "height": 768, "deviceScaleFactor": 1.25, "mobile": false}),
+            )
+            .await?;
+        }
+        cdp.call(
+            Some(session),
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": stealth::script(), "runImmediately": true}),
+        )
+        .await?;
+    }
+    if worker {
+        // 拉取 worker 默认上下文，不启用 Runtime 事件，也不添加 sourceURL。
+        let global = cdp.call(Some(session), "Runtime.evaluate", json!({"expression": "globalThis", "serializationOptions": {"serialization": "idOnly"}})).await?;
+        if let Some(object) = global["result"]["objectId"].as_str() {
+            cdp.call(
+                Some(session),
+                "Runtime.releaseObject",
+                json!({"objectId": object}),
+            )
+            .await?;
+        }
+    }
+    cdp.call(Some(session), "Runtime.runIfWaitingForDebugger", json!({}))
+        .await?;
+    Ok(())
+}
+
+struct Page {
+    cdp: Cdp,
+    target: String,
+    session: String,
+    targets: Arc<Targets>,
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        if self.target.is_empty() {
+            return;
+        }
+        let cdp = self.cdp.clone();
+        let target = std::mem::take(&mut self.target);
+        self.cdp.cleanup(async move {
+            if let Err(error) = cdp
+                .call(None, "Target.closeTarget", json!({"targetId": target}))
+                .await
+            {
+                tracing::debug!(%error, "dropped Chrome target cleanup failed");
+            }
+        });
+    }
+}
+
+impl Page {
+    async fn close(mut self) -> anyhow::Result<()> {
+        self.cdp
+            .call(None, "Target.closeTarget", json!({"targetId": self.target}))
+            .await?;
+        self.target.clear();
+        Ok(())
+    }
+
+    async fn evaluate(
+        &self,
+        frame: &str,
+        expression: &str,
+        main_world: bool,
+    ) -> anyhow::Result<Value> {
+        // 每次按需拉取，避免导航期间取得的上下文缓存失效；同进程子 frame 同样按 frameId 选择。
+        let isolated = self
+            .cdp
+            .call(
+                Some(&self.session),
+                "Page.createIsolatedWorld",
+                json!({"frameId": frame, "worldName": "stravia", "grantUniveralAccess": false}),
+            )
+            .await?;
+        let mut context = isolated["executionContextId"]
+            .as_i64()
+            .context("missing isolated context")?;
+        if main_world {
+            let document = self.cdp.call(Some(&self.session), "Runtime.evaluate", json!({"expression": "document", "contextId": context, "serializationOptions": {"serialization": "idOnly"}})).await?;
+            let object = document["result"]["objectId"]
+                .as_str()
+                .context("missing frame document")?;
+            let node = self
+                .cdp
+                .call(
+                    Some(&self.session),
+                    "DOM.describeNode",
+                    json!({"objectId": object}),
+                )
+                .await?;
+            let resolved = self
+                .cdp
+                .call(
+                    Some(&self.session),
+                    "DOM.resolveNode",
+                    json!({"backendNodeId": node["node"]["backendNodeId"]}),
+                )
+                .await?;
+            let main_object = resolved["object"]["objectId"]
+                .as_str()
+                .context("missing main document")?;
+            context = main_object
+                .split('.')
+                .nth(1)
+                .context("invalid main context object")?
+                .parse()?;
+            self.cdp
+                .call(
+                    Some(&self.session),
+                    "Runtime.releaseObject",
+                    json!({"objectId": object}),
+                )
+                .await?;
+            self.cdp
+                .call(
+                    Some(&self.session),
+                    "Runtime.releaseObject",
+                    json!({"objectId": main_object}),
+                )
+                .await?;
+        }
+        let result = self.cdp.call(Some(&self.session), "Runtime.evaluate", json!({"expression": expression, "contextId": context, "returnByValue": true, "awaitPromise": true})).await?;
+        anyhow::ensure!(
+            result.get("exceptionDetails").is_none(),
+            "JavaScript evaluation failed: {}",
+            result["exceptionDetails"]
+        );
+        Ok(result["result"]["value"].clone())
+    }
+
+    async fn navigate_and_render(
+        &self,
+        url: &str,
+        selector: &str,
+        failure_expression: Option<&str>,
+    ) -> anyhow::Result<RenderedPage> {
+        let previous = self
+            .cdp
+            .call(Some(&self.session), "Page.getFrameTree", json!({}))
+            .await?;
+        let previous_loader = previous["frameTree"]["frame"]["loaderId"].as_str();
+        let navigation = self
+            .cdp
+            .call(Some(&self.session), "Page.navigate", json!({"url": url}))
+            .await?;
+        anyhow::ensure!(
+            navigation.get("errorText").is_none(),
+            "Chrome navigation failed: {}",
+            navigation["errorText"]
+        );
+        let frame = navigation["frameId"]
+            .as_str()
+            .context("missing navigation frame")?;
+        let key = (self.session.clone(), frame.to_owned());
+        // 与导航监听器一致，以当前文档相对导航前的变化为准；JS 跳转可能替换 navigate 返回的 loader。
+        let expression = format!(
+            r#"new Promise((resolve, reject) => {{
+            const observer = new MutationObserver(check);
+            function check() {{
+                try {{
+                    const failure = ({failure});
+                    if (failure) {{
+                        observer.disconnect();
+                        document.removeEventListener('DOMContentLoaded', check);
+                        resolve({{failure}});
+                        return;
+                    }}
+                    if (document.readyState === 'loading' || !document.querySelector({selector})) return;
+                    observer.disconnect();
+                    document.removeEventListener('DOMContentLoaded', check);
+                    resolve({{
+                        html: (document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\n' : '') + document.documentElement.outerHTML,
+                        url: location.href
+                    }});
+                }} catch (error) {{ observer.disconnect(); reject(error); }}
+            }}
+            observer.observe(document, {{childList: true, subtree: true, attributes: true}});
+            document.addEventListener('DOMContentLoaded', check, {{once: true}});
+            check();
+        }})"#,
+            selector = serde_json::to_string(selector)?,
+            failure = failure_expression.unwrap_or("null"),
+        );
+        let value = 'document: loop {
+            let changed = self.targets.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let loader = self
+                .targets
+                .documents
+                .lock()
+                .get(&key)
+                .filter(|document| {
+                    document.ready
+                        && (navigation.get("loaderId").is_none()
+                            || Some(document.loader.as_str()) != previous_loader)
+                })
+                .map(|document| document.loader.clone());
+            let Some(loader) = loader else {
+                changed.await;
+                continue;
+            };
+            let evaluation = self.evaluate(frame, &expression, false);
+            tokio::pin!(evaluation);
+            loop {
+                let changed = self.targets.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if !self
+                    .targets
+                    .documents
+                    .lock()
+                    .get(&key)
+                    .is_some_and(|document| document.ready && document.loader == loader)
+                {
+                    continue 'document;
+                }
+                tokio::select! {
+                    _ = changed => {},
+                    result = &mut evaluation => match result {
+                        Ok(value) => break 'document value,
+                        Err(error) => {
+                            // 上下文失效响应可能先于生命周期事件抵达；只在确认换文档后重新绑定。
+                            let current = self.cdp.call(Some(&self.session), "Page.getFrameTree", json!({})).await;
+                            if current.as_ref().is_ok_and(|tree|
+                                tree["frameTree"]["frame"]["loaderId"].as_str().is_some_and(|id| id != loader))
+                            {
+                                continue 'document;
+                            }
+                            return Err(error);
+                        }
+                    },
+                }
+            }
+        };
+        if let Some(failure) = value["failure"].as_str() {
+            anyhow::bail!("{failure}");
+        }
+        let url = value["url"].as_str().context("missing rendered URL")?;
+        validate_navigation(url)?;
+        Ok(RenderedPage {
+            html: value["html"]
+                .as_str()
+                .context("missing rendered HTML")?
+                .to_owned(),
+            url: url.to_owned(),
+            ready: true,
+        })
+    }
 }
 
 pub(crate) struct RenderRequest<'a> {
@@ -338,9 +672,26 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    pub(super) async fn configure_http_fixture_profile(
+        profile: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        // 纯 HTTP fixture 不提供 CONNECT/TLS；只豁免这两个测试 host，保持 HTTPS-first 与网络策略启用。
+        let directory = profile.join("Default");
+        tokio::fs::create_dir(&directory).await?;
+        let preferences = json!({
+            "https_only_mode_enabled": true,
+            "https_upgrades": {"policy": {"http_allowlist": ["93.184.216.34", "93.184.216.35"]}}
+        });
+        tokio::fs::write(
+            directory.join("Preferences"),
+            serde_json::to_vec(&preferences)?,
+        )
+        .await?;
+        Ok(())
+    }
+
     struct Fixture {
-        config: BrowserLaunchConfig,
-        requests: Arc<Mutex<Vec<String>>>,
+        config: ChromeLaunchConfig,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -355,15 +706,12 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy =
                 url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let recorded = requests.clone();
             let task = tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
                 loop {
                     tokio::select! {
                         accepted = listener.accept() => {
                             let (mut stream, _) = accepted.unwrap();
-                            let recorded = recorded.clone();
                             connections.spawn(async move {
                                 let mut request = Vec::new();
                                 while !request.ends_with(b"\r\n\r\n") && request.len() < 32768 {
@@ -373,25 +721,16 @@ mod tests {
                                 let request = String::from_utf8_lossy(&request);
                                 let raw_url = request.split_whitespace().nth(1).unwrap_or_default();
                                 let Ok(url) = url::Url::parse(raw_url) else { return };
-                                recorded.lock().await.push(url.as_str().to_owned());
                                 if url.path() == "/pending.js" {
                                     std::future::pending::<()>().await;
                                 }
                                 let (content_type, cookie, body) = match url.path() {
-                                    "/identity-home" => ("text/html", "Set-Cookie: identity=retained; Path=/; HttpOnly; Max-Age=3600\r\n", "<html><body><script>fetch('/identity-observed')</script>identity ready</body></html>".to_owned()),
-                                    "/identity-expire" => ("text/html", "Set-Cookie: identity=retained; Path=/; HttpOnly; Max-Age=1\r\n", "<html><body>expires shortly</body></html>".to_owned()),
-                                    "/identity-path" => ("text/html", "Set-Cookie: identity=retained; Path=/other; HttpOnly; Max-Age=3600\r\n", "<html><body>unrelated path</body></html>".to_owned()),
-                                    "/identity-secure" => ("text/html", "Set-Cookie: identity=retained; Path=/; Secure; HttpOnly; Max-Age=3600\r\n", "<html><body>secure only</body></html>".to_owned()),
-                                    "/identity-results" => {
-                                        let cookie = request.to_ascii_lowercase().contains("cookie: identity=retained");
-                                        ("text/html", "", format!("<html><body data-cookie=\"{cookie}\">results</body></html>"))
-                                    }
                                     "/challenge" => ("text/html", "", "<html><body><script>setTimeout(()=>{document.body.innerHTML='<p>Our systems have detected unusual traffic from your computer network.</p><div class=\"g-recaptcha\"></div>'},30)</script></body></html>".to_owned()),
                                     "/challenge-redirect" => ("text/html", "", "<html><body><script>location.replace('/challenge')</script></body></html>".to_owned()),
                                     "/challenge-preflight" => ("text/html", "", "<html><body>Our systems have detected unusual traffic from your computer network.</body></html>".to_owned()),
                                     "/traffic-results" => ("text/html", "", "<html><body><a href='https://example.com/sorry/'><h3>Understanding unusual traffic and g-recaptcha</h3></a></body></html>".to_owned()),
                                     "/redirect" => ("text/html", "", "<html><body><script>location.replace('/worlds')</script><script defer src='/pending.js'></script></body></html>".to_owned()),
-                                    "/preflight" => ("text/html", "Set-Cookie: gate=passed; Path=/\r\n", "<html><body><script>sessionStorage.setItem('gate','passed')</script>cookie ready</body></html>".to_owned()),
+                                    "/preflight" => ("text/html", "Set-Cookie: gate=passed; Path=/\r\n", "<html><body>cookie ready</body></html>".to_owned()),
                                     "/worlds" => ("text/html", "", "<html><body><script>globalThis.frameMarker='top';const probe=new Error();Object.defineProperty(probe,'stack',{get(){document.body.dataset.stackRead='true';return 'probe'}});console.debug(probe)</script><iframe src='/frame' onload=\"document.body.id='ready'\"></iframe></body></html>".to_owned()),
                                     "/worker.js" => ("text/javascript", "", "postMessage({ua:navigator.userAgent, language:navigator.language});".to_owned()),
                                     "/frame" => ("text/html", "", "<html><body><script>globalThis.frameMarker='frame';parent.postMessage({frame:true,ua:navigator.userAgent,webdriver:navigator.webdriver},'*')</script></body></html>".to_owned()),
@@ -399,7 +738,6 @@ mod tests {
                                         let cookie = request.to_ascii_lowercase().contains("cookie: gate=passed");
                                         ("text/html", "", format!(r#"<!doctype html><html><body data-cookie="{cookie}"><script>
                                             globalThis.pageMarker='main';
-                                            document.body.dataset.session=String(sessionStorage.getItem('gate'));
                                             let frames=0,worker=false,blocked=false;
                                             function ready(){{if(frames===2&&worker&&blocked)document.body.id='ready'}}
                                             addEventListener('message',e=>{{if(e.data.frame){{if(e.data.webdriver||e.data.ua.includes('Headless'))throw Error('frame fingerprint');frames++;ready()}}}});
@@ -419,15 +757,18 @@ mod tests {
                 }
             });
             Self {
-                config: BrowserLaunchConfig {
-                    profile_dir: None,
+                config: ChromeLaunchConfig {
+                    browser_path: Some(
+                        process::resolve_browser_executable(None)
+                            .await
+                            .expect("installed Chrome/Chromium"),
+                    ),
                     proxy: crate::outbound::ResolvedProxy {
                         http: Some(proxy.clone()),
                         https: Some(proxy),
                         no_proxy: Default::default(),
                     },
                 },
-                requests,
                 task,
             }
         }
@@ -444,138 +785,23 @@ mod tests {
         }
     }
 
-    struct TempProfile(PathBuf);
-
-    impl TempProfile {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!(
-                "stravia-browser-{}-{:016x}",
-                std::process::id(),
-                rand::random::<u64>()
-            )))
-        }
-    }
-
-    impl Drop for TempProfile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    async fn identity_search(runtime: &BrowserRuntime) -> RenderedPage {
-        let mut input = request("http://93.184.216.34/identity-results", "body");
-        input.preflight_url = Some("http://93.184.216.34/identity-home");
-        runtime.render(input).await.unwrap()
-    }
-
-    async fn home_visits(fixture: &Fixture) -> usize {
-        fixture
-            .requests
-            .lock()
-            .await
-            .iter()
-            .filter(|url| url.as_str() == "http://93.184.216.34/identity-home")
-            .count()
-    }
-
     #[tokio::test]
-    async fn moli_preflight_reuses_httponly_cookie_after_profile_rebuild() {
-        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
-        let profile = TempProfile::new();
-        let mut config = fixture.config.clone();
-        config.profile_dir = Some(profile.0.clone());
-        let runtime = BrowserRuntime::new(config.clone());
-        assert!(identity_search(&runtime)
-            .await
-            .html
-            .contains("data-cookie=\"true\""));
-        assert_eq!(home_visits(&fixture).await, 1);
-        assert!(identity_search(&runtime)
-            .await
-            .html
-            .contains("data-cookie=\"true\""));
-        assert_eq!(home_visits(&fixture).await, 1);
-        drop(runtime);
-        let rebuilt = BrowserRuntime::new(config);
-        assert!(identity_search(&rebuilt)
-            .await
-            .html
-            .contains("data-cookie=\"true\""));
-        assert_eq!(home_visits(&fixture).await, 1);
-
-        // Fetch 的临时分区不能看见搜索身份，即使访问完全相同的 URL。
-        let fetch = BrowserRuntime::new(fixture.config.clone());
-        let fetched = fetch
-            .render(request("http://93.184.216.34/identity-results", "body"))
+    #[ignore = "requires installed Chrome/Chromium; set STRAVIA_CHROME_PATH when not on a standard path"]
+    async fn chrome_javascript_redirect_rebinds_readiness() {
+        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fixture = Fixture::start(private.local_addr().unwrap()).await;
+        let runtime = BrowserRuntime::new(fixture.config.clone());
+        let page = runtime
+            .render(request("http://93.184.216.34/redirect", "body#ready"))
             .await
             .unwrap();
-        assert!(fetched.html.contains("data-cookie=\"false\""));
+        assert_eq!(page.url, "http://93.184.216.34/worlds");
+        assert!(page.html.contains("id=\"ready\""));
     }
 
     #[tokio::test]
-    async fn moli_preflight_ignores_expired_and_nonmatching_cookies() {
-        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
-        for seed in [
-            "http://93.184.216.34/identity-expire",
-            "http://93.184.216.34/identity-path",
-            "http://93.184.216.35/identity-home",
-            "http://93.184.216.34/identity-secure",
-        ] {
-            let runtime = BrowserRuntime::new(fixture.config.clone());
-            runtime.render(request(seed, "body")).await.unwrap();
-            if seed.ends_with("identity-expire") {
-                tokio::time::sleep(Duration::from_millis(1100)).await;
-            }
-            let before = home_visits(&fixture).await;
-            assert!(
-                identity_search(&runtime)
-                    .await
-                    .html
-                    .contains("data-cookie=\"true\""),
-                "{seed}"
-            );
-            assert_eq!(home_visits(&fixture).await, before + 1, "{seed}");
-        }
-    }
-
-    #[tokio::test]
-    async fn moli_profile_cancellation_flushes_before_next_owner() {
-        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
-        let profile = TempProfile::new();
-        let mut config = fixture.config.clone();
-        config.profile_dir = Some(profile.0.clone());
-        let runtime = BrowserRuntime::new(config.clone());
-        let pending = tokio::spawn(async move {
-            runtime
-                .render(request("http://93.184.216.34/identity-home", "#never"))
-                .await
-        });
-        // 等页面消费设置 Cookie 的响应后再取消，避免只测到启动前取消。
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !fixture
-                .requests
-                .lock()
-                .await
-                .iter()
-                .any(|url| url.ends_with("/identity-observed"))
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-        pending.abort();
-        let _ = pending.await;
-        let next = BrowserRuntime::new(config);
-        assert!(identity_search(&next)
-            .await
-            .html
-            .contains("data-cookie=\"true\""));
-        assert_eq!(home_visits(&fixture).await, 1);
-    }
-
-    #[tokio::test]
-    async fn moli_google_challenge_stops_before_deadline() {
+    #[ignore = "requires installed Chrome/Chromium; set STRAVIA_CHROME_PATH when not on a standard path"]
+    async fn chrome_google_challenges_stop_before_deadline() {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fixture = Fixture::start(private.local_addr().unwrap()).await;
         let runtime = BrowserRuntime::new(fixture.config.clone());
@@ -590,7 +816,6 @@ mod tests {
                 Some("http://93.184.216.34/challenge-preflight"),
             ),
         ] {
-            let runtime = BrowserRuntime::new(fixture.config.clone());
             let mut input = request(url, "a h3");
             input.preflight_url = preflight;
             input.failure_expression =
@@ -611,21 +836,32 @@ mod tests {
         assert!(page.html.contains("Understanding unusual traffic"));
     }
 
-    #[tokio::test]
-    async fn moli_javascript_redirect_rebinds_readiness() {
-        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let fixture = Fixture::start(private.local_addr().unwrap()).await;
-        let runtime = BrowserRuntime::new(fixture.config.clone());
-        let page = runtime
-            .render(request("http://93.184.216.34/redirect", "body#ready"))
-            .await
-            .unwrap();
-        assert_eq!(page.url, "http://93.184.216.34/worlds");
-        assert!(page.html.contains("id=\"ready\""));
+    async fn wait_for_no_pages(browser: &Chrome) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let targets = browser
+                    .cdp
+                    .call(None, "Target.getTargets", json!({}))
+                    .await
+                    .unwrap();
+                if targets["targetInfos"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|target| target["type"] != "page")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("canceled page must close");
     }
 
     #[tokio::test]
-    async fn moli_dynamic_cookie_workers_frames_and_network_policy() {
+    #[ignore = "requires installed Chrome/Chromium; set STRAVIA_CHROME_PATH when not on a standard path"]
+    async fn chrome_dynamic_cookie_workers_frames_and_network_policy() {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fixture = Fixture::start(private.local_addr().unwrap()).await;
         let runtime = BrowserRuntime::new(fixture.config.clone());
@@ -633,7 +869,6 @@ mod tests {
         input.preflight_url = Some("http://93.184.216.34/preflight");
         let rendered = runtime.render(input).await.unwrap();
         assert!(rendered.html.contains("data-cookie=\"true\""));
-        assert!(rendered.html.contains("data-session=\"passed\""));
         assert!(rendered.html.contains("data-computed=\"42\""));
         assert!(!rendered.html.contains("HeadlessChrome"));
         let repeated = runtime
@@ -669,18 +904,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moli_timeout_and_cancellation_release_owner_for_next_render() {
+    #[ignore = "requires installed Chrome/Chromium; set STRAVIA_CHROME_PATH when not on a standard path"]
+    async fn chrome_worlds_timeout_cancel_and_profile_cleanup() {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fixture = Fixture::start(private.local_addr().unwrap()).await;
         let runtime = BrowserRuntime::new(fixture.config.clone());
-        let mut input = request("http://93.184.216.34/wait", "#never");
-        input.timeout = Duration::from_millis(300);
+        let browser = runtime.browser().await.unwrap();
+        let profile = browser.process.as_ref().unwrap().profile.clone();
+        let page = browser.page().await.unwrap();
+        page.navigate_and_render("http://93.184.216.34/worlds", "body#ready", None)
+            .await
+            .unwrap();
+        let tree = page
+            .cdp
+            .call(Some(&page.session), "Page.getFrameTree", json!({}))
+            .await
+            .unwrap();
+        let frame = tree["frameTree"]["frame"]["id"].as_str().unwrap();
+        assert_eq!(
+            page.evaluate(frame, "globalThis.frameMarker", true)
+                .await
+                .unwrap(),
+            "top"
+        );
+        let child = tree["frameTree"]["childFrames"][0]["frame"]["id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            page.evaluate(child, "globalThis.frameMarker", true)
+                .await
+                .unwrap(),
+            "frame"
+        );
+        assert_eq!(
+            page.evaluate(child, "typeof globalThis.frameMarker", false)
+                .await
+                .unwrap(),
+            "undefined"
+        );
+        assert_eq!(
+            page.evaluate(frame, "typeof globalThis.frameMarker", false)
+                .await
+                .unwrap(),
+            "undefined"
+        );
+        assert_eq!(
+            page.evaluate(frame, "navigator.webdriver", true)
+                .await
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            page.evaluate(
+                frame,
+                "navigator.userAgent.includes('HeadlessChrome')",
+                true
+            )
+            .await
+            .unwrap(),
+            false
+        );
+        assert_eq!(
+            page.evaluate(frame, "devicePixelRatio", true)
+                .await
+                .unwrap(),
+            1.25
+        );
+        assert_eq!(
+            page.evaluate(frame, "document.body.dataset.stackRead === 'true'", true)
+                .await
+                .unwrap(),
+            false
+        );
+        let stack = page
+            .evaluate(frame, "new Error().stack", false)
+            .await
+            .unwrap();
+        assert!(!stack.as_str().unwrap().contains("pptr:"));
+        assert!(!stack
+            .as_str()
+            .unwrap()
+            .contains("__puppeteer_evaluation_script__"));
+        page.close().await.unwrap();
+        let mut timeout = request("http://93.184.216.34/wait", "#never");
+        timeout.timeout = Duration::from_millis(300);
         assert!(runtime
-            .render(input)
+            .render(timeout)
             .await
             .unwrap_err()
             .to_string()
             .contains("timed out"));
+        wait_for_no_pages(&browser).await;
         let clone = runtime.clone();
         let pending = tokio::spawn(async move {
             clone
@@ -690,11 +1004,15 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         pending.abort();
         let _ = pending.await;
-        let rendered = runtime
-            .render(request("http://93.184.216.34/worlds", "body#ready"))
-            .await
-            .unwrap();
-        assert!(rendered.html.contains("id=\"ready\""));
-        assert!(!rendered.html.contains("data-stack-read=\"true\""));
+        wait_for_no_pages(&browser).await;
+        drop(browser);
+        drop(runtime);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while tokio::fs::try_exists(&profile).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("last runtime owner must reap Chrome and remove profile");
     }
 }

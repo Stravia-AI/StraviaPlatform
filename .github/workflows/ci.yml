@@ -42,12 +42,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -83,7 +77,7 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev \
+            pkg-config libssl-dev cmake clang libclang-dev python3 \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
@@ -145,13 +139,6 @@ jobs:
           echo "stable_differs=$stable_differs" >> "$GITHUB_OUTPUT"
           echo "run_expensive=$run_expensive" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Go for BoringSSL
-        if: steps.unit-lane.outputs.run_expensive == 'true'
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
@@ -184,7 +171,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev python3
 
       - name: Prepare vendor components and test fixtures
         if: steps.unit-lane.outputs.run_expensive == 'true'
@@ -210,18 +197,12 @@ jobs:
 
   web-access-browser:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none' }}
-    name: Embedded Moli Web Access
+    name: Headless Chrome Web Access
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Install NASM for BoringSSL
         run: |
@@ -248,11 +229,19 @@ jobs:
           cache-on-failure: 'false'
           cache-bin: 'false'
 
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: stable
+
       - name: Compile browser regression tests
         run: cargo test --locked -p stravia-web-access browser::tests --no-run
 
       - name: Run real browser regression tests
-        run: cargo test --locked -p stravia-web-access browser::tests
+        run: cargo test --locked -p stravia-web-access browser::tests -- --ignored
+        env:
+          STRAVIA_CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
 
   backend-e2e:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none' || inputs.cache_warm == 'linux-e2e' }}
@@ -266,12 +255,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -315,7 +298,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev python3
 
       # Build serially: debug and release otherwise compete on a cold runner.
       - name: Compile E2E cache dependencies
@@ -363,12 +346,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -411,7 +388,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev python3
 
       - name: Run PostgreSQL E2E suite
         run: task test:e2e:storage:postgres
@@ -426,12 +403,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -469,7 +440,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev python3
 
       - name: Install Chromium
         run: |
@@ -493,12 +464,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Setup Go for BoringSSL
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Install NASM for BoringSSL
         run: |

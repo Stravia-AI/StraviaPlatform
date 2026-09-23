@@ -1,9 +1,9 @@
 use std::{sync::LazyLock, time::Duration};
 
-use crate::http_client::Request;
 use futures::future::join_all;
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -32,10 +32,7 @@ pub(crate) const GOOGLE_FAILURE_EXPRESSION: &str = r#"(() => {
 })()"#;
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    // 首次搜索也必须先建立浏览器身份，不能先用独立 HTTP Cookie jar 访问结果页。
-    Ok(RequestResponse::Instant(Box::new(
-        render_response(search).await?,
-    )))
+    Ok(Request::new(wreq::Method::GET, search_url(search).as_str().parse()?).into())
 }
 
 pub(crate) fn requires_browser_render(body: &str) -> bool {
@@ -179,7 +176,7 @@ fn is_google_goto_url(url: &str) -> bool {
 }
 
 async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Result<String> {
-    let request = http::Request::get(url).body(Vec::new())?;
+    let request = Request::new(wreq::Method::GET, url.parse()?);
     let (response, _) = client
         .fetch_once(request)
         .await
@@ -189,7 +186,7 @@ async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Resu
     }
     let location = response
         .headers()
-        .get(http::header::LOCATION)
+        .get(wreq::header::LOCATION)
         .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?
         .to_str()?;
     let target = Url::parse(location)
@@ -307,7 +304,7 @@ pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result
         ],
     )
     .unwrap();
-    Ok(http::Request::get(url.as_str()).body(Vec::new())?)
+    Ok(Request::new(wreq::Method::GET, url.as_str().parse()?))
 }
 
 pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
