@@ -2,6 +2,8 @@
 
 Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 是更新发现和下载的唯一来源；发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64 四个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
 
+Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像。
+
 ## 首次生成和托管密钥
 
 在受控的离线工作站生成密钥，不要在 CI runner、共享终端或仓库目录中生成：

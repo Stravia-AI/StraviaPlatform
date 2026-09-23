@@ -24,6 +24,7 @@
 
 ### Removed
 
+- Linux musl server release archives and their Zig-based static build jobs. Linux server archives now ship only GNU builds for x86_64 and ARM64.
 - Removed Nix flake packaging, the NixOS service module, and their release/cache jobs. Server deployments use release archives or the container image.
 
 ### Fixed

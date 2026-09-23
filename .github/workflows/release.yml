@@ -17,10 +17,6 @@ env:
   RUST_VERSION: "1.98.1"
   BUN_VERSION: "1.4.2"
   TASK_VERSION: "3.52.0"
-  ZIG_VERSION: "0.15.1"
-  ZIG_SHA256_X64: c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05
-  ZIG_SHA256_ARM64: bb4a8d2ad735e7fba764c497ddf4243cb129fece4148da3222a7046d3f1f19fe
-  CARGO_ZIGBUILD_VERSION: "0.23.3"
   IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
 
 jobs:
@@ -200,35 +196,15 @@ jobs:
         include:
           - runner: ubuntu-24.04
             suffix: linux-x86_64-gnu
-            target: ""
-            libc: gnu
             binary: target/release/stravia-server
-          - runner: ubuntu-24.04
-            suffix: linux-x86_64-musl
-            target: x86_64-unknown-linux-musl
-            libc: musl
-            binary: target/x86_64-unknown-linux-musl/release/stravia-server
-            v8_sha256: 68f284fb8184b9f9e8d7e23b8f2675dbe464f43f77c0bf152f705bf7ead29558
           - runner: ubuntu-24.04-arm
             suffix: linux-aarch64-gnu
-            target: ""
-            libc: gnu
             binary: target/release/stravia-server
-          - runner: ubuntu-24.04-arm
-            suffix: linux-aarch64-musl
-            target: aarch64-unknown-linux-musl
-            libc: musl
-            binary: target/aarch64-unknown-linux-musl/release/stravia-server
-            v8_sha256: 419a242557833151cf9dde82c12c8272c3c00015bfe7e340e48164a600d34039
           - runner: windows-2022
             suffix: windows-x86_64
-            target: ""
-            libc: windows
             binary: target/release/stravia-server.exe
           - runner: windows-11-vs2026-arm
             suffix: windows-aarch64
-            target: ""
-            libc: windows
             binary: target/release/stravia-server.exe
     steps:
       - name: Checkout
@@ -256,11 +232,6 @@ jobs:
           cache-save-if: 'false'
           cache-on-failure: 'false'
 
-      - name: Add musl target
-        if: matrix.target != ''
-        shell: bash
-        run: rustup target add "${{ matrix.target }}" --toolchain "${RUST_VERSION}"
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -271,41 +242,6 @@ jobs:
         uses: go-task/setup-task@v2
         with:
           version: ${{ env.TASK_VERSION }}
-
-      - name: Setup Zig
-        if: matrix.libc == 'musl'
-        shell: bash
-        run: |
-          case "${RUNNER_ARCH}" in
-            X64)
-              zig_arch=x86_64
-              zig_sha256="${ZIG_SHA256_X64}"
-              ;;
-            ARM64)
-              zig_arch=aarch64
-              zig_sha256="${ZIG_SHA256_ARM64}"
-              ;;
-            *)
-              echo "Unsupported runner architecture: ${RUNNER_ARCH}" >&2
-              exit 1
-              ;;
-          esac
-
-          zig_archive="${RUNNER_TEMP}/zig-${ZIG_VERSION}.tar.xz"
-          zig_directory="${RUNNER_TOOL_CACHE}/zig/${ZIG_VERSION}/${zig_arch}"
-          curl --fail --location --output "${zig_archive}" \
-            "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz"
-          echo "${zig_sha256}  ${zig_archive}" | sha256sum --check -
-          mkdir -p "${zig_directory}"
-          tar --extract --xz --file "${zig_archive}" --strip-components=1 --directory "${zig_directory}"
-          echo "${zig_directory}" >> "${GITHUB_PATH}"
-          "${zig_directory}/zig" version
-
-      - name: Install cargo-zigbuild
-        if: matrix.libc == 'musl'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
 
       - name: Configure BoringSSL for native Windows ARM64
         if: matrix.suffix == 'windows-aarch64'
@@ -321,60 +257,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake clang libclang-dev golang python3 pkg-config libfontconfig1-dev
 
-      - name: Build server with the native toolchain
-        if: matrix.libc != 'musl'
-        run: task build:server TARGET="${{ matrix.target }}"
-
-      - name: Build static musl server with Zig
-        if: matrix.libc == 'musl'
-        shell: bash
-        run: |
-          task build:vendors
-          task build:web
-          # Moli 链接 Fontconfig；不能把 runner 的 glibc 库混入静态 musl 产物。
-          sysroot="${RUNNER_TEMP}/stravia-musl-libs"
-          mkdir -p "${sysroot}/usr"
-          docker run --rm --volume "${sysroot}:/out" alpine:3.23 sh -ec '
-            apk add --no-cache fontconfig-dev fontconfig-static freetype-static \
-              expat-static bzip2-static brotli-static libpng-static zlib-static
-            cp -a /usr/include /usr/lib /out/usr/
-          '
-          export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_ALL_STATIC=1
-          export PKG_CONFIG_SYSROOT_DIR="${sysroot}"
-          export PKG_CONFIG_LIBDIR="${sysroot}/usr/lib/pkgconfig"
-          pkg-config --static --libs fontconfig
-
-          # V8 与其他原生依赖分别使用 Chromium libc++ ABI 和 Zig libc++ ABI。
-          # 两者只在 stdexcept.o 的无版本符号上冲突；弱化该对象后保留两套 ABI。
-          v8_archive_gz="${RUNNER_TEMP}/librusty_v8.a.gz"
-          v8_archive="${RUNNER_TEMP}/librusty_v8.a"
-          v8_patch_dir="${RUNNER_TEMP}/rusty-v8-stdlib"
-          curl --fail --location --output "${v8_archive_gz}" \
-            "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_${{ matrix.target }}.a.gz"
-          echo "${{ matrix.v8_sha256 }}  ${v8_archive_gz}" | sha256sum --check -
-          gzip --decompress --stdout "${v8_archive_gz}" > "${v8_archive}"
-          mkdir -p "${v8_patch_dir}"
-          (
-            cd "${v8_patch_dir}"
-            ar x "${v8_archive}" stdexcept.o
-            objcopy \
-              --weaken-symbol=_ZNSt11logic_erroraSERKS_ \
-              --weaken-symbol=_ZNSt11logic_errorC1EPKc \
-              --weaken-symbol=_ZNSt11logic_errorC1ERKS_ \
-              --weaken-symbol=_ZNSt11logic_errorC2EPKc \
-              --weaken-symbol=_ZNSt11logic_errorC2ERKS_ \
-              --weaken-symbol=_ZNSt13runtime_erroraSERKS_ \
-              --weaken-symbol=_ZNSt13runtime_errorC1EPKc \
-              --weaken-symbol=_ZNSt13runtime_errorC1ERKS_ \
-              --weaken-symbol=_ZNSt13runtime_errorC2EPKc \
-              --weaken-symbol=_ZNSt13runtime_errorC2ERKS_ \
-              stdexcept.o
-            ar r "${v8_archive}" stdexcept.o
-          )
-          export RUSTY_V8_ARCHIVE="${v8_archive}"
-
-          cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
+      - name: Build server
+        run: task build:server
 
       - name: Package Unix server
         if: runner.os != 'Windows'
