@@ -11,7 +11,7 @@ use crate::provider_models::{
     NewProviderModelRecord, PriceComponents, ProviderModelCostRule, ProviderModelCostRuleKind,
     ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
     ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelRecord,
-    ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
 };
 use crate::storage::traits::ProviderModelStore;
 
@@ -20,6 +20,7 @@ struct ProviderModelRow {
     provider_id: String,
     model_id: String,
     source_kind: String,
+    snapshot_state: String,
     metadata_source_provider_id: Option<String>,
     presence: String,
     selection_policy: String,
@@ -52,7 +53,7 @@ impl ProviderModelStore for SqliteStorage {
         provider_id: &str,
     ) -> anyhow::Result<Vec<ProviderModelRecord>> {
         let rows = sqlx::query_as::<_, ProviderModelRow>(
-            r#"SELECT provider_id, model_id, source_kind, metadata_source_provider_id,
+            r#"SELECT provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
                       presence, selection_policy, metadata_json, revision,
                       created_at, updated_at
                FROM provider_models
@@ -86,6 +87,32 @@ impl ProviderModelStore for SqliteStorage {
     ) -> anyhow::Result<()> {
         let mut connection = self.pool.acquire().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        for update in &reconciliation.updates {
+            let revision = sqlx::query_scalar::<_, i64>(
+                "SELECT revision FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'",
+            )
+            .bind(provider_id)
+            .bind(&update.model_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            anyhow::ensure!(
+                revision == Some(update.expected_revision),
+                "Provider Model has changed while synchronizing discovered models"
+            );
+        }
+        for input in &reconciliation.inserts {
+            let exists = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM provider_models WHERE provider_id = ? AND model_id = ?",
+            )
+            .bind(provider_id)
+            .bind(&input.model_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            anyhow::ensure!(
+                exists == 0,
+                "Provider Model has changed while synchronizing discovered models"
+            );
+        }
         for update in reconciliation.updates {
             if update.metadata.is_some() {
                 apply_discovered_metadata_update(&mut tx, provider_id, &update).await?;
@@ -98,25 +125,30 @@ impl ProviderModelStore for SqliteStorage {
             .bind(&update.model_id)
             .fetch_optional(&mut *tx)
             .await?;
-            let Some(metadata_json) = metadata_json else {
-                continue;
-            };
+            let metadata_json =
+                metadata_json.context("Provider Model disappeared during reconciliation")?;
             let mut metadata: ProviderModelMetadata = serde_json::from_str(&metadata_json)
                 .context("decode Provider Model metadata during reconciliation")?;
             metadata.status = update.lifecycle_status.clone();
-            sqlx::query(
+            let result = sqlx::query(
                 r#"UPDATE provider_models
-                   SET presence = ?, lifecycle_status = ?, metadata_json = ?,
+                   SET presence = ?, lifecycle_status = ?, metadata_source_provider_id = ?, metadata_json = ?,
                        revision = revision + 1, updated_at = datetime('now')
-                   WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'"#,
+                   WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
             )
             .bind(update.presence.as_str())
             .bind(update.lifecycle_status)
+            .bind(update.metadata_source_provider_id)
             .bind(serde_json::to_string(&metadata)?)
             .bind(provider_id)
-            .bind(update.model_id)
+            .bind(&update.model_id)
+            .bind(update.expected_revision)
             .execute(&mut *tx)
             .await?;
+            anyhow::ensure!(
+                result.rows_affected() == 1,
+                "Provider Model has changed while synchronizing discovered models"
+            );
         }
         for input in reconciliation.inserts {
             insert_record(&mut tx, input).await?;
@@ -155,12 +187,19 @@ impl ProviderModelStore for SqliteStorage {
         provider_id: &str,
         model_id: &str,
         metadata: ProviderModelMetadata,
+        snapshot_state: SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation> {
         let mut tx = self.pool.begin().await?;
-        let result =
-            update_record_metadata(&mut tx, provider_id, model_id, &metadata, expected_revision)
-                .await?;
+        let result = update_record_metadata(
+            &mut tx,
+            provider_id,
+            model_id,
+            &metadata,
+            &snapshot_state,
+            expected_revision,
+        )
+        .await?;
         if !result {
             let exists = model_exists(&mut tx, provider_id, model_id).await?;
             return Ok(if exists {
@@ -233,7 +272,7 @@ async fn get_record(
     model_id: &str,
 ) -> anyhow::Result<Option<ProviderModelRecord>> {
     let row = sqlx::query_as::<_, ProviderModelRow>(
-        r#"SELECT provider_id, model_id, source_kind, metadata_source_provider_id,
+        r#"SELECT provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
                   presence, selection_policy, metadata_json, revision,
                   created_at, updated_at
            FROM provider_models
@@ -303,6 +342,8 @@ fn decode_record(
         provider_id: row.provider_id,
         model_id: row.model_id,
         source_kind: ProviderModelSourceKind::from_str(&row.source_kind)?,
+        snapshot_state: serde_json::from_str(&row.snapshot_state)
+            .context("decode Provider Model snapshot state")?,
         metadata_source_provider_id: row.metadata_source_provider_id,
         presence: ProviderModelPresence::from_str(&row.presence)?,
         selection_policy: ProviderModelSelectionPolicy::from_str(&row.selection_policy)?,
@@ -351,8 +392,8 @@ async fn apply_discovered_metadata_update(
                limit_context = ?, limit_input = ?, limit_output = ?,
                cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
                cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
-               metadata_json = ?, revision = revision + 1, updated_at = datetime('now')
-           WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'"#,
+               metadata_json = ?, snapshot_state = COALESCE(?, snapshot_state), metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
+           WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
     )
     .bind(update.presence.as_str())
     .bind(&metadata.status)
@@ -375,13 +416,17 @@ async fn apply_discovered_metadata_update(
     .bind(decimal_text(prices.and_then(|prices| prices.input_audio)))
     .bind(decimal_text(prices.and_then(|prices| prices.output_audio)))
     .bind(serde_json::to_string(metadata)?)
+    .bind(update.snapshot_state.as_ref().map(serde_json::to_string).transpose()?)
+    .bind(&update.metadata_source_provider_id)
     .bind(provider_id)
     .bind(&update.model_id)
+    .bind(update.expected_revision)
     .execute(&mut **tx)
     .await?;
-    if result.rows_affected() == 0 {
-        return Ok(());
-    }
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "Provider Model has changed while synchronizing discovered models"
+    );
     replace_cost_rules(tx, provider_id, &update.model_id, &metadata.cost_rules()).await
 }
 
@@ -394,17 +439,18 @@ async fn insert_record(
     let prices = input.metadata.cost.as_ref().map(|cost| &cost.prices);
     sqlx::query(
         r#"INSERT INTO provider_models (
-               provider_id, model_id, source_kind, metadata_source_provider_id,
+               provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
                presence, lifecycle_status, selection_policy, name, family,
                attachment, reasoning, tool_call, open_weights, structured_output, temperature,
                limit_context, limit_input, limit_output,
                cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
                cost_input_audio, cost_output_audio, metadata_json
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&input.provider_id)
     .bind(&input.model_id)
     .bind(input.source_kind.as_str())
+    .bind(serde_json::to_string(&input.snapshot_state)?)
     .bind(&input.metadata_source_provider_id)
     .bind(input.presence.as_str())
     .bind(&input.metadata.status)
@@ -444,6 +490,7 @@ async fn update_record_metadata(
     provider_id: &str,
     model_id: &str,
     metadata: &ProviderModelMetadata,
+    snapshot_state: &SnapshotState,
     expected_revision: i64,
 ) -> anyhow::Result<bool> {
     let limit = metadata.limit.as_ref();
@@ -455,7 +502,7 @@ async fn update_record_metadata(
                limit_context = ?, limit_input = ?, limit_output = ?,
                cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
                cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
-               metadata_json = ?, revision = revision + 1, updated_at = datetime('now')
+               metadata_json = ?, snapshot_state = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND revision = ?"#,
     )
     .bind(&metadata.status)
@@ -478,6 +525,7 @@ async fn update_record_metadata(
     .bind(decimal_text(prices.and_then(|prices| prices.input_audio)))
     .bind(decimal_text(prices.and_then(|prices| prices.output_audio)))
     .bind(serde_json::to_string(metadata)?)
+    .bind(serde_json::to_string(snapshot_state)?)
     .bind(provider_id)
     .bind(model_id)
     .bind(expected_revision)
@@ -564,6 +612,86 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn stale_reconciliation_rolls_back_all_sqlite_updates() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key)
+                     VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let storage = SqliteStorage::from_pool(pool);
+        for model_id in ["first", "second"] {
+            storage
+                .create(NewProviderModelRecord {
+                    provider_id: "provider".into(),
+                    model_id: model_id.into(),
+                    source_kind: ProviderModelSourceKind::Discovered,
+                    snapshot_state: SnapshotState::Unregistered,
+                    metadata_source_provider_id: None,
+                    presence: ProviderModelPresence::Present,
+                    selection_policy: ProviderModelSelectionPolicy::Auto,
+                    metadata: ProviderModelMetadata::bare(model_id),
+                })
+                .await
+                .unwrap();
+        }
+        let second = storage.get("provider", "second").await.unwrap().unwrap();
+        storage
+            .update_metadata(
+                "provider",
+                "second",
+                ProviderModelMetadata {
+                    name: Some("Admin correction".into()),
+                    ..second.metadata
+                },
+                SnapshotState::Edited { source: None },
+                second.revision,
+            )
+            .await
+            .unwrap();
+        let updates = ["first", "second"]
+            .into_iter()
+            .map(|model_id| ProviderModelPresenceUpdate {
+                model_id: model_id.into(),
+                expected_revision: 1,
+                snapshot_state: Some(SnapshotState::Imported {
+                    source: crate::provider_models::SourceStamp::Discovery,
+                }),
+                metadata_source_provider_id: None,
+                presence: ProviderModelPresence::Missing,
+                lifecycle_status: None,
+                metadata: Some(ProviderModelMetadata::bare(model_id)),
+            })
+            .collect();
+        assert!(
+            storage
+                .apply_reconciliation(
+                    "provider",
+                    ProviderModelReconciliation {
+                        inserts: vec![],
+                        updates
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let first = storage.get("provider", "first").await.unwrap().unwrap();
+        let second = storage.get("provider", "second").await.unwrap().unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.presence, ProviderModelPresence::Present);
+        assert_eq!(first.snapshot_state, SnapshotState::Unregistered);
+        assert_eq!(second.metadata.name.as_deref(), Some("Admin correction"));
+        assert_eq!(
+            second.snapshot_state,
+            SnapshotState::Edited { source: None }
+        );
+    }
+
+    #[tokio::test]
     async fn create_waits_for_a_concurrent_sqlite_writer() {
         let data_dir = tempfile::tempdir().expect("temporary data directory");
         let pool = crate::db::init_pool(data_dir.path())
@@ -594,6 +722,7 @@ mod tests {
                     provider_id: "provider".into(),
                     model_id: "model".into(),
                     source_kind: ProviderModelSourceKind::Manual,
+                    snapshot_state: SnapshotState::Edited { source: None },
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,

@@ -136,6 +136,7 @@ struct StagedGeneration {
 pub(crate) enum BeginError {
     PreviousResponseNotFound,
     ItemReferenceNotFound,
+    ItemReferenceAmbiguous,
     CompactionConflict,
     CompactionUnavailable,
     CompactionStorageFailed,
@@ -146,6 +147,7 @@ impl std::fmt::Display for BeginError {
         formatter.write_str(match self {
             Self::PreviousResponseNotFound => "previous_response_not_found",
             Self::ItemReferenceNotFound => "item_reference_not_found",
+            Self::ItemReferenceAmbiguous => "item_reference_ambiguous",
             Self::CompactionConflict => "compaction_conflict",
             Self::CompactionUnavailable => "compaction_unavailable",
             Self::CompactionStorageFailed => "compaction_storage_failed",
@@ -420,13 +422,17 @@ impl GenerationChain {
                 if extension.previous_response_id.is_some()
         );
 
-        if request_has_item_references(&request) {
+        // Explicit continuation resolves only against its authorized parent lineage.
+        if !has_explicit_parent && request_has_item_references(&request) {
             let ingress = ProtocolTransform::inferred_ingress(&request)
                 .ok_or(BeginError::ItemReferenceNotFound)?;
             self.store
                 .resolve_available_item_references(&principal, &mut request.items, ingress)
                 .await
-                .map_err(|_| BeginError::ItemReferenceNotFound)?;
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    _ => BeginError::ItemReferenceNotFound,
+                })?;
         }
 
         let mut parent = if let Some(native) = native.as_ref() {
@@ -489,12 +495,10 @@ impl GenerationChain {
             self.store
                 .materialize_parent(&principal, &mut request)
                 .await
-                .map_err(|error| {
-                    if error == "item_reference_not_found" {
-                        BeginError::ItemReferenceNotFound
-                    } else {
-                        BeginError::PreviousResponseNotFound
-                    }
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    "item_reference_not_found" => BeginError::ItemReferenceNotFound,
+                    _ => BeginError::PreviousResponseNotFound,
                 })?
         } else if request_has_item_references(&request) {
             return Err(BeginError::ItemReferenceNotFound);
@@ -627,7 +631,10 @@ impl GenerationChain {
                     ingress,
                 )
                 .await
-                .map_err(|_| BeginError::ItemReferenceNotFound)?;
+                .map_err(|error| match error.as_str() {
+                    "item_reference_ambiguous" => BeginError::ItemReferenceAmbiguous,
+                    _ => BeginError::ItemReferenceNotFound,
+                })?;
         }
         hydrate_response_artifact_references(
             &write.principal,

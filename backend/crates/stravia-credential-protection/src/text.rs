@@ -716,9 +716,11 @@ mod tests {
         ]);
         let mut item =
             AiItem::function_call_output("call-media", Value::String(payload.to_string()));
-        item.meta = Some(serde_json::json!({
-            (TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
-        }));
+        item.meta = Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                (TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
+            })),
+        );
         let mut request = AiRequest::new("model", vec![item]);
         for _ in 0..2 {
             ContextSnapshot::from_request(&request, ContextCompleteness::Full)

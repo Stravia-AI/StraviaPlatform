@@ -203,8 +203,11 @@ fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<A
 }
 
 fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
-    let mut ids = HashMap::<String, String>::new();
-    let mut names = HashMap::<String, String>::new();
+    let mut ids = HashMap::<
+        stravia_runtime_contract::protocol::ir::ToolCallId,
+        stravia_runtime_contract::protocol::ir::ToolCallId,
+    >::new();
+    let mut names = HashMap::<String, stravia_runtime_contract::protocol::ir::ToolCallId>::new();
 
     for item in items {
         if let MessageContent::Blocks(blocks) = &mut item.content {
@@ -219,7 +222,9 @@ fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => {
-                        let stable = stable_gemini_tool_id(name, input);
+                        let stable = stravia_runtime_contract::protocol::ir::ToolCallId::new(
+                            stable_gemini_tool_id(name, input),
+                        );
                         ids.insert(id.clone(), stable.clone());
                         names.insert(name.clone(), stable.clone());
                         *id = stable;
@@ -227,7 +232,7 @@ fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
                     ContentBlock::ToolResult { tool_use_id, .. } => {
                         if let Some(stable) = ids
                             .get(tool_use_id)
-                            .or_else(|| names.get(tool_use_id))
+                            .or_else(|| names.get(tool_use_id.as_str()))
                             .cloned()
                         {
                             *tool_use_id = stable;
@@ -241,7 +246,9 @@ fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
             for call in tool_calls {
                 let arguments = serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone()));
-                let stable = stable_gemini_tool_id(&call.name, &arguments);
+                let stable = stravia_runtime_contract::protocol::ir::ToolCallId::new(
+                    stable_gemini_tool_id(&call.name, &arguments),
+                );
                 ids.insert(call.id.clone(), stable.clone());
                 names.insert(call.name.clone(), stable.clone());
                 call.id = stable;
@@ -250,7 +257,7 @@ fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
         if let Some(tool_call_id) = item.tool_call_id.as_mut()
             && let Some(stable) = ids
                 .get(tool_call_id)
-                .or_else(|| names.get(tool_call_id))
+                .or_else(|| names.get(tool_call_id.as_str()))
                 .cloned()
         {
             *tool_call_id = stable;
@@ -282,12 +289,8 @@ pub(super) fn generic_client_history_output(response: &AiResponse) -> Vec<AiItem
 }
 
 pub(super) fn item_reference_id(item: &AiItem) -> Option<&str> {
-    item.meta
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|meta| meta.get("__open_responses_item_reference"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty())
+    item.item_reference()
+        .map(stravia_runtime_contract::protocol::ir::ItemReference::as_str)
 }
 
 pub(super) fn item_reference_node_ids(ingress: ProtocolId, items: &[AiItem]) -> Vec<String> {
@@ -309,18 +312,42 @@ pub(super) fn resolve_protocol_item_references(
     catalog: &[AiItem],
 ) -> Result<(), String> {
     if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24 {
-        let mut index = std::collections::HashMap::<String, AiItem>::new();
+        let requested: std::collections::HashSet<&str> =
+            items.iter().filter_map(item_reference_id).collect();
+        let mut index = std::collections::HashMap::new();
         for item in catalog {
-            if let Some(id) = item.id_ref() {
-                index.insert(id.to_owned(), item.clone());
+            let Some(id) = item.canonical_id() else {
+                continue;
+            };
+            if !requested.contains(id.as_str()) {
+                continue;
+            }
+            match index.entry(id.as_str()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(item);
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    let previous = *entry.get();
+                    // phase 会回传给模型，但不属于已持久化的历史指纹；引用消歧必须额外比较它。
+                    let same_phase = previous.meta.as_ref().and_then(|meta| meta.get("phase"))
+                        == item.meta.as_ref().and_then(|meta| meta.get("phase"));
+                    if !same_phase
+                        || !stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
+                            std::slice::from_ref(previous),
+                            std::slice::from_ref(item),
+                        )
+                    {
+                        return Err("item_reference_ambiguous".into());
+                    }
+                }
             }
         }
         for item in items {
-            let Some(id) = item_reference_id(item) else {
+            let Some(reference) = item.item_reference() else {
                 continue;
             };
-            if let Some(resolved) = index.get(id) {
-                *item = resolved.clone();
+            if let Some(resolved) = index.get(reference.as_str()) {
+                *item = (*resolved).clone();
             }
         }
         return Ok(());
@@ -561,14 +588,15 @@ pub(super) fn remap_client_tool_result_ids(
         if let Some(tool_call_id) = item.tool_call_id.as_mut()
             && let Some(effective_id) = ids.get(tool_call_id.as_str())
         {
-            (*effective_id).clone_into(tool_call_id);
+            *tool_call_id = stravia_runtime_contract::protocol::ir::ToolCallId::new(*effective_id);
         }
         if let MessageContent::Blocks(blocks) = &mut item.content {
             for block in blocks {
                 if let ContentBlock::ToolResult { tool_use_id, .. } = block
                     && let Some(effective_id) = ids.get(tool_use_id.as_str())
                 {
-                    (*effective_id).clone_into(tool_use_id);
+                    *tool_use_id =
+                        stravia_runtime_contract::protocol::ir::ToolCallId::new(*effective_id);
                 }
             }
         }

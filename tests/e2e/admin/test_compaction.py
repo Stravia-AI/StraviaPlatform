@@ -190,7 +190,7 @@ def _native_route(env: dict[str, Any], base_url: str, name: str, *, vendor: str 
     provider_id = body["data"]["id"]
     status, body = http_request("POST", f"{env['admin']}/api/v1/providers/{provider_id}/models", payload={"model_id": "native-model", "metadata": {"name": name, "tool_call": True, "reasoning_options": [{"type": "effort", "values": ["none", "low", "medium", "high"]}], "limit": {"context": 100000, "output": 10000}}}, headers=env["auth"])
     assert status == 201, body
-    status, body = http_request("POST", f"{env['admin']}/api/v1/models", payload={"model_id": name, "target_provider": provider_id, "target_model": "native-model"}, headers=env["auth"])
+    status, body = http_request("POST", f"{env['admin']}/api/v1/models", payload={"model_id": name, "targets": [{"provider_id": provider_id, "model": "native-model"}]}, headers=env["auth"])
     assert status == 200 and "data" in body, body
     route_id = body["data"]["id"]
     status, body = http_request("POST", f"{env['admin']}/api/v1/api-keys", payload={"name": name, "model_ids": [route_id]}, headers=env["auth"])

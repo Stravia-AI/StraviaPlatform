@@ -399,12 +399,12 @@ fn decode_content(
                         next_synthetic_tool_call_id(generated_tool_id_seq, supplied_tool_ids)
                     });
                 tool_calls.push(ToolCall {
-                    id: id.clone(),
+                    id: (id.clone()).into(),
                     name: function_call.name.clone(),
                     arguments: function_call.args.to_string(),
                 });
                 blocks.push(ContentBlock::ToolUse {
-                    id,
+                    id: id.into(),
                     name: function_call.name,
                     input: function_call.args,
                     cache_control: None,
@@ -415,7 +415,7 @@ fn decode_content(
                 let tool_use_id = function_response.id.unwrap_or(function_response.name);
                 tool_result_ids.push(tool_use_id.clone());
                 blocks.push(ContentBlock::ToolResult {
-                    tool_use_id,
+                    tool_use_id: tool_use_id.into(),
                     content: function_response.response,
                     content_kind: Some(
                         stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -488,7 +488,8 @@ fn decode_content(
         role,
         content: msg_content,
         tool_calls: tool_calls_opt,
-        tool_call_id: (tool_result_ids.len() == 1).then(|| tool_result_ids.remove(0)),
+        tool_call_id: ((tool_result_ids.len() == 1).then(|| tool_result_ids.remove(0)))
+            .map(Into::into),
         meta: None,
     })
 }

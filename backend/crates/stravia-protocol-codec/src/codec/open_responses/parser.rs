@@ -501,15 +501,21 @@ impl ResponsesResponseParser {
                             content: MessageContent::Blocks(blocks),
                             tool_calls: None,
                             tool_call_id: None,
-                            meta: Some(serde_json::json!({
-                                "__open_responses_content": item.get("content").cloned().unwrap_or_default(),
-                            })),
+                            meta: Some(
+                                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                                    serde_json::json!({
+                                        "__open_responses_content": item.get("content").cloned().unwrap_or_default(),
+                                    }),
+                                ),
+                            ),
                         };
-                        if let Some(phase) = item.get("phase")
-                            && let Some(meta) =
-                                canonical.meta.as_mut().and_then(Value::as_object_mut)
-                        {
-                            meta.insert("phase".into(), phase.clone());
+                        if let Some(phase) = item.get("phase") {
+                            canonical
+                                .meta
+                                .as_mut()
+                                .expect("metadata created above")
+                                .insert_extension("phase", phase.clone())
+                                .expect("phase is not reserved");
                         }
                         items.push(with_wire_metadata(canonical, item));
                     }
@@ -539,7 +545,7 @@ impl ResponsesResponseParser {
                         saw_tool_call = true;
                         items.push(with_wire_metadata(
                             AiItem::function_call(ToolCall {
-                                id: call_id,
+                                id: (call_id).into(),
                                 name,
                                 arguments,
                             }),

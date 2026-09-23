@@ -7,20 +7,30 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::db::models::{RouteSelectionStrategy, Target};
+use crate::db::identity::{ProviderId, TargetDestination, UpstreamModelId};
+use crate::db::models::{RouteSelectionStrategy, TargetConfig};
 use stravia_runtime_contract::protocol::ir::AiErrorKind;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
-    pub provider_id: String,
-    pub model: Option<String>,
+    pub destination: TargetDestination,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
     pub target_cooldown_ms: i64,
     pub thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
+}
+
+impl SelectedTarget {
+    pub fn provider_id(&self) -> &ProviderId {
+        self.destination.provider_id()
+    }
+
+    pub fn model(&self) -> Option<&UpstreamModelId> {
+        self.destination.model()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,7 +399,7 @@ impl RouteAttemptPolicy {
     /// `RouteSelector::select` and only drive it.
     pub(super) fn new(
         strategy: &str,
-        targets: &[Target],
+        targets: &[TargetConfig],
         context: RouteAttemptContext,
         snapshot: &RouteSchedulingSnapshot,
         state: RoutePolicyState,
@@ -428,7 +438,7 @@ impl RouteAttemptPolicy {
             .iter()
             .map(|item| (item.target_key.as_str(), item))
             .collect::<HashMap<_, _>>();
-        let mut priority_groups = BTreeMap::<Reverse<i32>, Vec<&Target>>::new();
+        let mut priority_groups = BTreeMap::<Reverse<i32>, Vec<&TargetConfig>>::new();
         let inner = state.inner.lock();
         for target in targets {
             if !target.enabled {
@@ -438,7 +448,7 @@ impl RouteAttemptPolicy {
             // 属性，不是冷却；只有新凭据证据能恢复资格。
             if snapshot
                 .credential_invalid_providers
-                .contains(&target.provider_id)
+                .contains(target.provider_id().as_str())
             {
                 continue;
             }
@@ -464,7 +474,7 @@ impl RouteAttemptPolicy {
             .unwrap_or_default();
         let mut ordered = Vec::with_capacity(targets.len());
         for group in priority_groups.into_values() {
-            let group = order_group(strategy.clone(), group, &snapshots, &in_flight);
+            let group = order_group(strategy, group, &snapshots, &in_flight);
             ordered.extend(group.into_iter().map(to_selected));
         }
         if let Some(preferred) = preferred
@@ -680,10 +690,10 @@ impl Drop for RouteAttemptPolicy {
 
 fn order_group<'a>(
     strategy: RouteSelectionStrategy,
-    mut group: Vec<&'a Target>,
+    mut group: Vec<&'a TargetConfig>,
     snapshots: &HashMap<&str, &TargetSchedulingSnapshot>,
     in_flight: &HashMap<String, u64>,
-) -> Vec<&'a Target> {
+) -> Vec<&'a TargetConfig> {
     if strategy == RouteSelectionStrategy::LatencyPreference {
         let valid = group
             .iter()
@@ -725,7 +735,7 @@ struct TrafficWeights {
 }
 
 fn traffic_weights(
-    group: &[&Target],
+    group: &[&TargetConfig],
     snapshots: &HashMap<&str, &TargetSchedulingSnapshot>,
 ) -> TrafficWeights {
     let priced = group
@@ -771,7 +781,7 @@ fn average_price_ratio(
 }
 
 fn traffic_score(
-    target: &Target,
+    target: &TargetConfig,
     snapshots: &HashMap<&str, &TargetSchedulingSnapshot>,
     in_flight: &HashMap<String, u64>,
     weights: TrafficWeights,
@@ -858,22 +868,27 @@ pub(crate) fn target_key(provider_id: &str, model: Option<&str>) -> String {
 }
 
 pub fn selected_target_key(target: &SelectedTarget) -> String {
-    target_key(&target.provider_id, target.model.as_deref())
+    target_key(
+        target.provider_id().as_str(),
+        target.model().map(UpstreamModelId::as_str),
+    )
 }
 
-fn persisted_target_key(target: &Target) -> String {
-    target_key(&target.provider_id, target.model.as_deref())
+fn persisted_target_key(target: &TargetConfig) -> String {
+    target_key(
+        target.provider_id().as_str(),
+        target.model().map(|model| model.as_str()),
+    )
 }
 
-fn to_selected(target: &Target) -> SelectedTarget {
+fn to_selected(target: &TargetConfig) -> SelectedTarget {
     SelectedTarget {
-        provider_id: target.provider_id.clone(),
-        model: target.model.clone(),
+        destination: target.destination.clone(),
         priority: target.priority,
         first_token_timeout_ms: target.first_token_timeout_ms,
         target_retry_budget: target.target_retry_budget,
         target_cooldown_ms: target.target_cooldown_ms,
-        thinking_level_map: target.thinking_level_map.0.clone(),
+        thinking_level_map: target.thinking_level_map.clone(),
     }
 }
 
@@ -884,19 +899,21 @@ mod tests {
         DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_RETRY_BUDGET,
     };
 
-    fn target(provider_id: &str, priority: i32) -> Target {
-        Target {
-            id: format!("target-{provider_id}"),
+    fn target(provider_id: &str, priority: i32) -> TargetConfig {
+        TargetConfig {
+            id: format!("target-{provider_id}").into(),
             model_id: "route".into(),
-            provider_id: provider_id.into(),
-            model: Some("model".into()),
+            destination: crate::db::identity::TargetDestination::Model {
+                provider_id: provider_id.into(),
+                model_id: "model".into(),
+            },
             enabled: true,
             priority,
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
             created_at: String::new(),
-            thinking_level_map: sqlx::types::Json(Vec::new()),
+            thinking_level_map: Vec::new(),
         }
     }
 
@@ -923,7 +940,9 @@ mod tests {
     }
 
     fn next_provider(policy: &mut RouteAttemptPolicy) -> Option<String> {
-        policy.next_healthy().map(|target| target.provider_id)
+        policy
+            .next_healthy()
+            .map(|target| target.destination.into_parts().0.into())
     }
 
     #[test]
@@ -978,8 +997,13 @@ mod tests {
             targets: Vec::new(),
             credential_invalid_providers: ["dead".to_string()].into_iter().collect(),
         };
-        let mut policy =
-            RouteAttemptPolicy::new("traffic_equalization", &targets, context(0), &snapshot, state);
+        let mut policy = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            context(0),
+            &snapshot,
+            state,
+        );
 
         assert_eq!(next_provider(&mut policy).as_deref(), Some("alive"));
         assert_eq!(next_provider(&mut policy), None);
@@ -1326,7 +1350,7 @@ mod tests {
             state.clone(),
         );
         let flaky = policy.next_healthy().expect("first Target");
-        assert_eq!(flaky.provider_id, "flaky");
+        assert_eq!(flaky.provider_id().as_str(), "flaky");
         assert_eq!(
             policy.record_failure(
                 &flaky,
@@ -1502,7 +1526,11 @@ mod tests {
         );
     }
 
-    fn policy_at(state: &RoutePolicyState, targets: &[Target], now_ms: u64) -> RouteAttemptPolicy {
+    fn policy_at(
+        state: &RoutePolicyState,
+        targets: &[TargetConfig],
+        now_ms: u64,
+    ) -> RouteAttemptPolicy {
         RouteAttemptPolicy::new(
             "traffic_equalization",
             targets,
@@ -1529,7 +1557,7 @@ mod tests {
         for _ in 0..3 {
             let mut request = policy_at(&state, &targets, 0);
             let selected = request.next_healthy().expect("target");
-            assert_eq!(selected.provider_id, "recovering");
+            assert_eq!(selected.provider_id().as_str(), "recovering");
             state.record_failure("recovering:model", request.current_epoch(), 5, 120_000);
             assert_eq!(
                 state.target_status("recovering:model").state,
@@ -1538,7 +1566,7 @@ mod tests {
         }
         let mut request = policy_at(&state, &targets, 0);
         let selected = request.next_healthy().expect("target");
-        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(selected.provider_id().as_str(), "recovering");
         for _ in 0..2 {
             assert_eq!(
                 request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
@@ -1585,7 +1613,7 @@ mod tests {
 
         let mut request = policy_at(&state, &targets, 0);
         let selected = request.next_healthy().expect("target after success");
-        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(selected.provider_id().as_str(), "recovering");
         assert!(matches!(
             request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
             AttemptFailureDisposition::RetrySame { .. }
@@ -1662,7 +1690,7 @@ mod tests {
         );
     }
 
-    fn cooled_targets() -> (RoutePolicyState, Vec<Target>) {
+    fn cooled_targets() -> (RoutePolicyState, Vec<TargetConfig>) {
         let state = RoutePolicyState::default();
         let mut recovering = target("recovering", 1);
         recovering.target_retry_budget = 0;
@@ -1686,7 +1714,7 @@ mod tests {
         );
         let mut probe = policy_at(&state, &targets, 11_000);
         let selected = probe.next_healthy().expect("probe");
-        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(selected.provider_id().as_str(), "recovering");
         assert_eq!(
             probe.record_failure(&selected, failure_at(AiErrorKind::Timeout, 11_000)),
             AttemptFailureDisposition::TryNextTarget
@@ -1704,7 +1732,7 @@ mod tests {
         );
         let mut second_probe = policy_at(&state, &targets, 12_000);
         let selected = second_probe.next_healthy().expect("next probe");
-        assert_eq!(selected.provider_id, "recovering");
+        assert_eq!(selected.provider_id().as_str(), "recovering");
         assert_eq!(
             second_probe.record_failure(&selected, failure_at(AiErrorKind::InvalidRequest, 12_000)),
             AttemptFailureDisposition::Stop
@@ -1881,7 +1909,7 @@ mod tests {
         );
         targets[0].enabled = true;
         let mut filtered = policy_at(&state, &targets, 11_000);
-        filtered.retain(|target| target.provider_id != "recovering");
+        filtered.retain(|target| target.provider_id().as_str() != "recovering");
         assert_eq!(next_provider(&mut filtered).as_deref(), Some("fallback"));
         assert_eq!(
             state.target_status_at("recovering:model", 11_000).state,
@@ -1909,7 +1937,7 @@ mod tests {
             state.clone(),
         );
         let recovering = opener.next_healthy().expect("first Target");
-        assert_eq!(recovering.provider_id, "recovering");
+        assert_eq!(recovering.provider_id().as_str(), "recovering");
         assert_eq!(
             opener.record_failure(
                 &recovering,

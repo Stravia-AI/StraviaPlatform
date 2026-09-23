@@ -191,7 +191,7 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
         .find(|route| route.model_id == model)
         .expect("configured Route")
         .targets[0]
-        .provider_id
+        .provider_id()
         .clone();
     gateway
         .admin()

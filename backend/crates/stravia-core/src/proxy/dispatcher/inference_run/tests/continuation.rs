@@ -1061,16 +1061,15 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
             backends
                 .iter()
                 .enumerate()
-                .map(|(index, target)| crate::db::models::UpsertTarget {
-                    id: Some(target.id.clone()),
-                    provider_id: target.provider_id.clone(),
-                    model: target.model.clone(),
+                .map(|(index, target)| crate::db::models::CreateTarget {
+                    provider_id: target.provider_id().clone().into(),
+                    model: target.model().cloned().map(Into::into),
                     enabled: index != 0 || enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    thinking_level_map: target.thinking_level_map.0.clone(),
+                    thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect(),
         ),
@@ -1099,7 +1098,10 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         ))
         .await
         .expect("first Model Turn");
-    assert_eq!(first_turn.route.provider_id, backends[1].provider_id);
+    assert_eq!(
+        first_turn.route.provider_id,
+        backends[1].provider_id().as_str()
+    );
     let _ = first_turn.output.collect::<Vec<_>>().await;
 
     // Both targets are eligible again: only the recorded cache prefix should
@@ -1126,7 +1128,10 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         ))
         .await
         .expect("affine Model Turn");
-    assert_eq!(second_turn.route.provider_id, backends[1].provider_id);
+    assert_eq!(
+        second_turn.route.provider_id,
+        backends[1].provider_id().as_str()
+    );
     let events = second_turn.output.collect::<Vec<_>>().await;
     assert!(matches!(
         events.last(),

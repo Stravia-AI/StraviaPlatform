@@ -35,7 +35,7 @@ async fn responses_thinking_tool_replay_discovers_immediate_parent() {
                     expected_root = Some(write.root_id().to_owned());
                 }
                 let call = ToolCall {
-                    id: format!("call_{turn}"),
+                    id: (format!("call_{turn}")).into(),
                     name: "read".into(),
                     arguments: "{}".into(),
                 };
@@ -54,7 +54,7 @@ async fn responses_thinking_tool_replay_discovers_immediate_parent() {
                 deltas.extend([
                     AiStreamDelta::ToolCallStart {
                         index: 0,
-                        id: call.id.clone(),
+                        id: call.id.to_string(),
                         name: call.name.clone(),
                     },
                     AiStreamDelta::ToolCallDelta {
@@ -909,7 +909,11 @@ fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
         content: MessageContent::Text(String::new()),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({"__open_responses_item_reference": id})),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"__open_responses_item_reference": id}),
+            ),
+        ),
     }];
     resolve_protocol_item_references(OPEN_RESPONSES_2026_04_24, &mut request_items, &output)
         .expect("resolve");
@@ -918,6 +922,99 @@ fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
         request_items[0].id_ref().map(str::to_owned),
         output[0].id_ref().map(str::to_owned)
     );
+}
+
+#[test]
+fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_history() {
+    let saved = AiItem::output_text("saved answer").with_graph_metadata(
+        Some("msg_saved".into()),
+        None,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+    );
+    let reference = || AiItem {
+        role: Role::User,
+        content: MessageContent::Text(String::new()),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"__open_responses_item_reference": "msg_saved"}),
+            ),
+        ),
+    };
+    let mut conflicting = AiItem::output_text("different answer");
+    conflicting.set_graph_metadata(
+        Some("msg_saved".into()),
+        None,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+    );
+    let mut requested = vec![reference()];
+    assert_eq!(
+        resolve_protocol_item_references(
+            OPEN_RESPONSES_2026_04_24,
+            &mut requested,
+            &[saved.clone(), conflicting]
+        )
+        .expect_err("conflicting interpretations are ambiguous"),
+        "item_reference_ambiguous",
+    );
+    let mut requested = vec![reference()];
+    resolve_protocol_item_references(
+        OPEN_RESPONSES_2026_04_24,
+        &mut requested,
+        &[saved.clone(), saved.clone()],
+    )
+    .expect("identical history can repeat");
+    assert_eq!(requested[0].content.to_text(), "saved answer");
+
+    let mut commentary = saved.clone();
+    commentary
+        .meta
+        .as_mut()
+        .expect("graph metadata")
+        .insert_extension("phase", serde_json::json!("commentary"))
+        .expect("phase extension");
+    let mut final_answer = saved.clone();
+    final_answer
+        .meta
+        .as_mut()
+        .expect("graph metadata")
+        .insert_extension("phase", serde_json::json!("final_answer"))
+        .expect("phase extension");
+    let mut requested = vec![reference()];
+    assert_eq!(
+        resolve_protocol_item_references(
+            OPEN_RESPONSES_2026_04_24,
+            &mut requested,
+            &[commentary, final_answer]
+        )
+        .expect_err("phase changes model-visible meaning"),
+        "item_reference_ambiguous",
+    );
+
+    let mut unrelated = AiItem::output_text("unrelated");
+    unrelated.set_graph_metadata(
+        Some("msg_unrequested".into()),
+        None,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+    );
+    let mut other = AiItem::output_text("conflict");
+    other.set_graph_metadata(
+        Some("msg_unrequested".into()),
+        None,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+    );
+    let mut requested = vec![reference()];
+    resolve_protocol_item_references(
+        OPEN_RESPONSES_2026_04_24,
+        &mut requested,
+        &[saved, unrelated, other],
+    )
+    .expect("unrequested identities must not affect resolution");
 }
 
 #[test]
@@ -1007,7 +1104,11 @@ fn chat_rejects_item_references() {
         content: MessageContent::Text(String::new()),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({"__open_responses_item_reference": "msg_saved"})),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"__open_responses_item_reference": "msg_saved"}),
+            ),
+        ),
     }];
     let error =
         resolve_protocol_item_references(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, &mut items, &[])

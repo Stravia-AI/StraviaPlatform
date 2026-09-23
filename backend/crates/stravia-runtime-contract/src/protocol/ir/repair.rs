@@ -16,7 +16,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::protocol::ir::request::{
-    AiItem, AiRequest, ContentBlock, MessageContent, Role, ToolCall,
+    AiItem, AiRequest, ContentBlock, MessageContent, Role, ToolCall, ToolCallId,
 };
 
 // ── fill_tool_call_ids ────────────────────────────────────────────────────────
@@ -34,7 +34,7 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
                     .iter()
                     .map(|call| call.id.trim())
                     .filter(|id| !id.is_empty())
-                    .map(str::to_owned),
+                    .map(ToolCallId::new),
             );
         }
         if let Some(id) = msg
@@ -42,14 +42,14 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
             .as_deref()
             .filter(|id| !id.trim().is_empty())
         {
-            supplied_ids.insert(id.to_owned());
+            supplied_ids.insert(ToolCallId::new(id));
         }
         if let Some(id) = extract_tool_result_hint(&msg.content) {
             supplied_ids.insert(id);
         }
     }
 
-    let mut pending_calls: VecDeque<(String, String)> = VecDeque::new();
+    let mut pending_calls: VecDeque<(ToolCallId, String)> = VecDeque::new();
     let mut generated_id_seq: usize = 0;
     let mut normalized: Vec<AiItem> = Vec::with_capacity(req.items.len());
 
@@ -75,10 +75,10 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
         let existing_id = msg
             .tool_call_id
             .as_ref()
-            .filter(|v: &&String| !v.trim().is_empty())
+            .filter(|v| !v.trim().is_empty())
             .cloned();
 
-        let mut resolved_id: Option<String> = None;
+        let mut resolved_id: Option<ToolCallId> = None;
         let mut has_linked = false;
 
         // Try exact ID match.
@@ -106,7 +106,7 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
             && let Some(h) = hint.as_ref()
             && let Some(pos) = pending_calls
                 .iter()
-                .position(|(_, pname)| pname.eq_ignore_ascii_case(h))
+                .position(|(_, pname)| pname.eq_ignore_ascii_case(h.as_str()))
             && let Some((cid, _)) = pending_calls.remove(pos)
         {
             resolved_id = Some(cid);
@@ -135,7 +135,9 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
         let final_id = resolved_id.unwrap();
 
         if !has_linked {
-            let synth_name = hint.unwrap_or_else(|| "unknown_tool".to_string());
+            let synth_name = hint
+                .map(ToolCallId::into_string)
+                .unwrap_or_else(|| "unknown_tool".to_string());
             normalized.push(AiItem {
                 role: Role::Assistant,
                 content: MessageContent::Text(String::new()),
@@ -178,17 +180,20 @@ pub fn patch_broken_conversation(req: &mut AiRequest) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {
+fn next_synthetic_tool_call_id(
+    sequence: &mut usize,
+    supplied_ids: &HashSet<ToolCallId>,
+) -> ToolCallId {
     loop {
         *sequence += 1;
         let id = format!("tc_{}", *sequence);
-        if !supplied_ids.contains(&id) {
-            return id;
+        if !supplied_ids.contains(id.as_str()) {
+            return id.into();
         }
     }
 }
 
-fn extract_tool_result_hint(content: &MessageContent) -> Option<String> {
+fn extract_tool_result_hint(content: &MessageContent) -> Option<ToolCallId> {
     let MessageContent::Blocks(blocks) = content else {
         return None;
     };
@@ -218,7 +223,7 @@ mod tests {
             role: Role::Assistant,
             content: MessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: id.to_string(),
+                id: (id.to_string()).into(),
                 name: name.to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -232,7 +237,7 @@ mod tests {
             role: Role::Tool,
             content: MessageContent::Text("result".to_string()),
             tool_calls: None,
-            tool_call_id: tool_call_id.map(|s| s.to_string()),
+            tool_call_id: (tool_call_id.map(|s| s.to_string())).map(Into::into),
             meta: None,
         }
     }
@@ -277,7 +282,7 @@ mod tests {
     fn generated_call_ids_skip_supplied_ids() {
         let mut assistant = asst_with_tool("", "lookup");
         assistant.tool_calls.as_mut().unwrap().push(ToolCall {
-            id: "tc_1".to_string(),
+            id: ("tc_1".to_string()).into(),
             name: "other".to_string(),
             arguments: "{}".to_string(),
         });

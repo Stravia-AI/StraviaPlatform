@@ -54,24 +54,18 @@ pub fn prepare_thinking_replay(
         }
         *blocks = replay;
         if !blocks.iter().any(is_thinking)
-            && let Some(meta) = item
-                .meta
-                .as_mut()
-                .and_then(serde_json::Value::as_object_mut)
+            && let Some(meta) = item.meta.as_mut()
         {
             for key in ["reasoning_content", "reasoning", "reasoning_text"] {
-                meta.remove(key);
+                meta.remove_extension(key)
+                    .expect("reasoning keys are not reserved");
             }
         }
         // These extras belong to the original native reasoning item, not its text fallback.
         // Mixed items may carry hard fields for ordinary content/tools: keep those strict.
-        if thinking_only
-            && let Some(meta) = item
-                .meta
-                .as_mut()
-                .and_then(serde_json::Value::as_object_mut)
-        {
-            meta.remove("__open_responses_item_fields");
+        if thinking_only && let Some(meta) = item.meta.as_mut() {
+            meta.remove_extension("__open_responses_item_fields")
+                .expect("native item fields key is not reserved");
         }
         changed = true;
         !(item.role == Role::Assistant && blocks.is_empty() && thinking_only)

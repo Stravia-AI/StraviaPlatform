@@ -324,6 +324,7 @@ pub(super) async fn create_provider_model_handler(
             &input.model_id,
             CreateManualProviderModel {
                 metadata: input.metadata,
+                template_id: input.template_id,
             },
         )
         .await
@@ -426,6 +427,8 @@ pub(super) struct PrepareProviderModelRequest {
 pub(super) struct CreateProviderModelRequest {
     model_id: String,
     metadata: serde_json::Value,
+    #[serde(default)]
+    template_id: Option<String>,
 }
 
 #[derive(Deserialize)]

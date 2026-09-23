@@ -9,7 +9,7 @@ fn assistant_with_tool(tool_id: &str, tool_name: &str) -> AiItem {
         role: Role::Assistant,
         content: MessageContent::Text(String::new()),
         tool_calls: Some(vec![ToolCall {
-            id: tool_id.to_string(),
+            id: (tool_id.to_string()).into(),
             name: tool_name.to_string(),
             arguments: "{}".to_string(),
         }]),
@@ -23,7 +23,7 @@ fn tool_result_with_id(tool_call_id: &str) -> AiItem {
         role: Role::Tool,
         content: MessageContent::Text("result".to_string()),
         tool_calls: None,
-        tool_call_id: Some(tool_call_id.to_string()),
+        tool_call_id: Some((tool_call_id.to_string()).into()),
         meta: None,
     }
 }
@@ -88,7 +88,7 @@ fn test_generated_id_for_empty_tool_call_id() {
             role: Role::Assistant,
             content: MessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "".to_string(),
+                id: ("".to_string()).into(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -130,12 +130,12 @@ fn generated_ids_skip_supplied_ids_without_breaking_fifo() {
             content: MessageContent::Text(String::new()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: String::new(),
+                    id: (String::new()).into(),
                     name: "generated".to_string(),
                     arguments: "{}".to_string(),
                 },
                 ToolCall {
-                    id: "tc_1".to_string(),
+                    id: ("tc_1".to_string()).into(),
                     name: "external".to_string(),
                     arguments: "{}".to_string(),
                 },
@@ -162,12 +162,12 @@ fn test_multiple_tool_calls_fifo_order() {
             content: MessageContent::Text(String::new()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: "call_1".to_string(),
+                    id: ("call_1".to_string()).into(),
                     name: "tool_a".to_string(),
                     arguments: "{}".to_string(),
                 },
                 ToolCall {
-                    id: "call_2".to_string(),
+                    id: ("call_2".to_string()).into(),
                     name: "tool_b".to_string(),
                     arguments: "{}".to_string(),
                 },

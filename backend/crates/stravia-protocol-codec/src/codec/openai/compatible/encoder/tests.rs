@@ -130,13 +130,15 @@ fn internal_artifact_identity_is_not_sent_upstream() {
             content: MessageContent::Text("hello".into()),
             tool_calls: None,
             tool_call_id: None,
-            meta: Some(serde_json::json!({
-                "__stravia_artifact_references": [{
-                    "block_index": 0,
-                    "artifact_id": "artifact_secret"
-                }],
-                "reasoning_content": "visible reasoning"
-            })),
+            meta: Some(
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                    "__stravia_artifact_references": [{
+                        "block_index": 0,
+                        "artifact_id": "artifact_secret"
+                    }],
+                    "reasoning_content": "visible reasoning"
+                })),
+            ),
         }],
     );
 
@@ -163,7 +165,7 @@ fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
                 content: MessageContent::Text(String::new()),
                 tool_calls: Some(vec![
                     ToolCall {
-                        id: String::new(),
+                        id: (String::new()).into(),
                         name: "first".into(),
                         arguments: "{}".into(),
                     },
@@ -173,7 +175,7 @@ fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
                         arguments: "{}".into(),
                     },
                     ToolCall {
-                        id: String::new(),
+                        id: (String::new()).into(),
                         name: "second".into(),
                         arguments: "{}".into(),
                     },

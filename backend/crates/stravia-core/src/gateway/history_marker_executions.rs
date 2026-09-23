@@ -36,7 +36,7 @@ impl Gateway {
         if let Some(observer) = observer.as_ref() {
             observer.record(RunEvent::PlatformToolStarted {
                 model_turn_id: job.model_turn_id.clone(),
-                tool_id: call.id.clone(),
+                tool_id: call.id.to_string(),
                 name: call.name.clone(),
                 input: Some(
                     serde_json::from_str(&call.arguments)
@@ -50,7 +50,7 @@ impl Gateway {
         let result = if remaining_ms <= 0 {
             stravia_runtime_contract::hook::PlatformToolResult {
                 tool_id: stravia_runtime_contract::hook::ToolId::new("deadline"),
-                call_id: call.id.clone(),
+                call_id: call.id.to_string(),
                 content_kind: stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                 content: serde_json::Value::String(
                     "Platform tool execution reached its registered deadline.".into(),
@@ -68,7 +68,7 @@ impl Gateway {
                 Ok(result) => result,
                 Err(_) => stravia_runtime_contract::hook::PlatformToolResult {
                     tool_id: stravia_runtime_contract::hook::ToolId::new("deadline"),
-                    call_id: call.id.clone(),
+                    call_id: call.id.to_string(),
                     content_kind:
                         stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                     content: serde_json::Value::String(
@@ -82,7 +82,7 @@ impl Gateway {
         if let Some(observer) = observer.as_ref() {
             observer.record(RunEvent::PlatformToolFinished {
                 model_turn_id: job.model_turn_id.clone(),
-                tool_id: call.id.clone(),
+                tool_id: call.id.to_string(),
                 status: if result.is_error {
                     "failed"
                 } else {

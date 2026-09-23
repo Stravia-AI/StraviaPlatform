@@ -381,13 +381,15 @@ mod tests {
             name: "lookup".into(),
             arguments: "{}".into(),
         }]);
-        item.meta = Some(serde_json::json!({
-            "__open_responses_content": [{
-                "type": "output_text",
-                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-                "logprobs": [{"token": "before", "logprob": -0.1}]
-            }]
-        }));
+        item.meta = Some(crate::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({
+                "__open_responses_content": [{
+                    "type": "output_text",
+                    "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                    "logprobs": [{"token": "before", "logprob": -0.1}]
+                }]
+            }),
+        ));
         let mut response = AiResponse::new("resp_1", "logical-model");
         response.items.push(item);
 

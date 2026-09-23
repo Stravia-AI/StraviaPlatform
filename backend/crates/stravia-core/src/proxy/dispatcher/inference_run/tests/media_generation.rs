@@ -281,6 +281,7 @@ async fn generation_http_fixture(
                     "capabilities": ["media_image"],
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
+                template_id: None,
             },
         )
         .await
@@ -291,8 +292,6 @@ async fn generation_http_fixture(
             model_id: "local-image-generation".into(),
             display_name: Some("Local image generation".into()),
             balance: None,
-            target_provider: generation_provider.id.clone(),
-            target_model: Some("gpt-5.4".into()),
             targets: vec![CreateTarget {
                 provider_id: generation_provider.id,
                 model: Some("gpt-5.4".into()),
@@ -312,7 +311,7 @@ async fn generation_http_fixture(
         .update_media_generation_config(MediaGenerationConfig {
             enabled: generation_enabled,
             image: ImageGenerationConfig {
-                route_id: Some(generation_route.model_id),
+                route_id: Some(generation_route.model_id.into()),
             },
         })
         .await

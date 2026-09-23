@@ -68,6 +68,12 @@ export interface CanonicalModelList {
 
 export type ProviderModelSourceKind = 'discovered' | 'manual'
 
+export type SourceStamp =
+  { type: 'provider_catalog'; provider_id: string } | { type: 'canonical'; model_id: string } | { type: 'discovery' }
+
+export type SnapshotState =
+  { type: 'unregistered' } | { type: 'imported'; source: SourceStamp } | { type: 'edited'; source: SourceStamp | null }
+
 export type ProviderModelSelectionPolicy = 'auto' | 'force_enabled' | 'force_disabled'
 
 export type ProviderModelReasoningOption =
@@ -140,6 +146,7 @@ export interface ProviderModelSummary {
   name: string
   available: boolean
   source_kind: ProviderModelSourceKind
+  snapshot_state: SnapshotState
   selection_policy: ProviderModelSelectionPolicy
   specification: ModelSpecification
   revision: number
@@ -154,6 +161,7 @@ export interface ProviderModelDetail {
   available: boolean
   source_kind: ProviderModelSourceKind
   can_reimport: boolean
+  snapshot_state: SnapshotState
   selection_policy: ProviderModelSelectionPolicy
   metadata: ProviderModelMetadata
   thinking_level_map?: ThinkingLevelMapping[]
@@ -165,6 +173,7 @@ export interface ProviderModelDetail {
 
 export interface PreparedProviderModel {
   id: string
+  snapshot_state: SnapshotState
   metadata: ProviderModelMetadata
   extensions: Record<string, unknown>
 }

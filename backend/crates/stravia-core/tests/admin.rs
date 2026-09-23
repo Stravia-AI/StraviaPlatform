@@ -8,8 +8,8 @@ use stravia_core::db::models::*;
 use stravia_core::provider_catalog::{CatalogError, CatalogSource, CatalogVersion};
 use stravia_core::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelMetadata,
-    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
-    UpdateProviderModel, UpdateProviderModelSelection,
+    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
+    SourceStamp, UpdateProviderModel, UpdateProviderModelSelection,
 };
 use stravia_core::storage::{MemoryStorage, Storage as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -462,6 +462,12 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         serde_json::Value::String("Locally curated description".to_string()),
     );
     object.insert(
+        "limit".to_string(),
+        serde_json::json!({"context": 256 * 1024}),
+    );
+    object.insert("reasoning".to_string(), serde_json::json!(true));
+    object.insert("tool_call".to_string(), serde_json::json!(true));
+    object.insert(
         "cost".to_string(),
         serde_json::from_str(
             r#"{
@@ -508,6 +514,12 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
     );
     assert_eq!(stored.cost_rules.len(), 1);
     assert_eq!(stored.cost_rules[0].threshold_tokens, 200_000);
+    assert!(matches!(
+        stored.snapshot_state,
+        SnapshotState::Edited {
+            source: Some(SourceStamp::ProviderCatalog { .. })
+        }
+    ));
 
     let synced_again = gw.admin().sync_provider_models(&provider.id).await?;
     assert_eq!(synced_again.added, 0);
@@ -519,6 +531,20 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         frozen.metadata.description.as_deref(),
         Some("Locally curated description")
     );
+    assert_eq!(
+        frozen
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
+        Some(256 * 1024)
+    );
+    assert_eq!(frozen.metadata.reasoning, Some(true));
+    assert_eq!(frozen.metadata.tool_call, Some(true));
+    assert!(matches!(
+        frozen.snapshot_state,
+        SnapshotState::Edited { .. }
+    ));
 
     let stale = gw
         .admin()
@@ -567,6 +593,12 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         reimported.metadata.description.as_deref(),
         Some("Locally curated description")
     );
+    assert!(matches!(
+        reimported.snapshot_state,
+        SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog { .. }
+        }
+    ));
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;
@@ -637,6 +669,55 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
         Some(CatalogError::ModelNotFound { id }) if id == "openai/not-in-catalog"
     ));
 
+    let mut curated = prepared_template.metadata.to_value()?;
+    curated["description"] = serde_json::json!("Manually curated from template");
+    let from_template = gw
+        .admin()
+        .create_manual_provider_model(
+            &provider.id,
+            "provider-gpt-3.5",
+            CreateManualProviderModel {
+                metadata: curated,
+                template_id: Some("openai/gpt-3.5-turbo".into()),
+            },
+        )
+        .await?;
+    assert_eq!(
+        from_template.metadata.description.as_deref(),
+        Some("Manually curated from template")
+    );
+    assert_eq!(
+        from_template.snapshot_state,
+        SnapshotState::Edited {
+            source: Some(SourceStamp::Canonical {
+                model_id: "openai/gpt-3.5-turbo".into()
+            }),
+        }
+    );
+    let invalid_source = gw
+        .admin()
+        .create_manual_provider_model(
+            &provider.id,
+            "private/invalid-template",
+            CreateManualProviderModel {
+                metadata: serde_json::json!({"id":"private/invalid-template"}),
+                template_id: Some("openai/not-in-catalog".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        invalid_source.downcast_ref::<CatalogError>(),
+        Some(CatalogError::ModelNotFound { .. })
+    ));
+    assert!(
+        gw.storage
+            .provider_models()
+            .get(&provider.id, "private/invalid-template")
+            .await?
+            .is_none()
+    );
+
     let created = gw
         .admin()
         .create_manual_provider_model(
@@ -651,12 +732,18 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
                         "type": "effort",
                         "values": ["none", "low", "medium", "high", "xhigh"]
                     }],
-                    "vendor_extension": {"mode": "private"}
+                    "vendor_extension": {"mode": "private"},
+                    "snapshot_state": {"type": "imported", "source": {"type": "discovery"}}
                 }),
+                template_id: None,
             },
         )
         .await?;
     assert_eq!(created.metadata.name.as_deref(), Some("Private Model"));
+    assert_eq!(
+        created.snapshot_state,
+        SnapshotState::Edited { source: None }
+    );
     assert_eq!(created.extensions["vendor_extension"]["mode"], "private");
 
     let route = gw
@@ -665,9 +752,16 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
             model_id: "private-route".to_string(),
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
-            target_provider: provider.id.clone(),
-            target_model: Some("private/model".to_string()),
-            targets: vec![],
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("private/model".to_string()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -824,33 +918,11 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
         unknown.metadata.name.as_deref(),
         Some("unknown-local-model")
     );
-    // 未匹配模型登记占位默认:text→text、256K 上下文、推理与工具调用。
-    assert_eq!(
-        unknown
-            .metadata
-            .limit
-            .as_ref()
-            .and_then(|limit| limit.context),
-        Some(256 * 1024)
-    );
-    assert_eq!(unknown.metadata.tool_call, Some(true));
-    assert_eq!(unknown.metadata.reasoning, Some(true));
-    assert_eq!(
-        unknown
-            .metadata
-            .modalities
-            .as_ref()
-            .map(|modalities| modalities.input.as_slice()),
-        Some(["text".to_string()].as_slice())
-    );
-    assert_eq!(
-        unknown
-            .metadata
-            .modalities
-            .as_ref()
-            .map(|modalities| modalities.output.as_slice()),
-        Some(["text".to_string()].as_slice())
-    );
+    assert_eq!(unknown.snapshot_state, SnapshotState::Unregistered);
+    assert!(unknown.metadata.limit.is_none());
+    assert!(unknown.metadata.modalities.is_none());
+    assert!(unknown.metadata.tool_call.is_none());
+    assert!(unknown.metadata.reasoning.is_none());
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;
@@ -900,10 +972,19 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             provider_id: provider.id.clone(),
             model_id: "glm-5.1".to_string(),
             source_kind: ProviderModelSourceKind::Discovered,
+            snapshot_state: SnapshotState::Unregistered,
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
-            metadata: ProviderModelMetadata::bare("glm-5.1"),
+            metadata: ProviderModelMetadata {
+                limit: Some(stravia_core::provider_models::ModelLimit {
+                    context: Some(256 * 1024),
+                    ..Default::default()
+                }),
+                reasoning: Some(true),
+                tool_call: Some(true),
+                ..ProviderModelMetadata::bare("glm-5.1")
+            },
         })
         .await?;
     gw.storage
@@ -912,6 +993,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             provider_id: provider.id.clone(),
             model_id: "legacy-unmatched".to_string(),
             source_kind: ProviderModelSourceKind::Discovered,
+            snapshot_state: SnapshotState::Edited { source: None },
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -927,7 +1009,15 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         .admin()
         .get_provider_model(&provider.id, "glm-5.1")
         .await?;
-    assert!(listed.metadata.lacks_registered_specification());
+    assert_eq!(listed.snapshot_state, SnapshotState::Unregistered);
+    assert_eq!(
+        listed
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
+        Some(256 * 1024)
+    );
 
     let summary = gw.admin().sync_provider_models(&provider.id).await?;
     server.await??;
@@ -946,23 +1036,25 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             .and_then(|limit| limit.context),
         Some(200_000)
     );
-    assert!(!filled.metadata.lacks_registered_specification());
+    assert!(matches!(
+        filled.snapshot_state,
+        SnapshotState::Imported {
+            source: SourceStamp::Canonical { .. }
+        }
+    ));
 
-    // 历史空快照(仅 id/name)在同步时升级到 bare() 占位默认。
+    // Legacy edited identity-only metadata is not inferred to be unregistered.
     let upgraded = gw
         .admin()
         .get_provider_model(&provider.id, "legacy-unmatched")
         .await?;
     assert_eq!(
-        upgraded
-            .metadata
-            .limit
-            .as_ref()
-            .and_then(|limit| limit.context),
-        Some(256 * 1024)
+        upgraded.snapshot_state,
+        SnapshotState::Edited { source: None }
     );
-    assert_eq!(upgraded.metadata.tool_call, Some(true));
-    assert_eq!(upgraded.metadata.reasoning, Some(true));
+    assert!(upgraded.metadata.limit.is_none());
+    assert!(upgraded.metadata.tool_call.is_none());
+    assert!(upgraded.metadata.reasoning.is_none());
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;
@@ -1146,8 +1238,6 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
             model_id: "source-model".to_string(),
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
-            target_provider: String::new(),
-            target_model: None,
             targets: vec![
                 CreateTarget {
                     provider_id: original.id.clone(),
@@ -1208,25 +1298,28 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
         .expect("source route should remain");
     assert_eq!(updated_model.model_id, "source-model");
     assert_eq!(updated_model.balance, "traffic_equalization");
-    assert_eq!(updated_model.target_provider, original.id);
+    let primary = updated_model
+        .primary_target()
+        .expect("retained primary Target");
+    assert_eq!(primary.provider_id().as_str(), original.id.as_str());
     assert_eq!(
-        updated_model.target_model.as_deref(),
+        primary.model().map(|model| model.as_str()),
         Some("source-upstream-model")
     );
     assert_eq!(updated_model.targets.len(), 3);
     assert!(updated_model.targets.iter().any(|target| {
-        target.provider_id == original.id
-            && target.model.as_deref() == Some("source-upstream-model")
+        target.provider_id().as_str() == original.id.as_str()
+            && target.model().map(|model| model.as_str()) == Some("source-upstream-model")
             && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
-        target.provider_id == copied.id
-            && target.model.as_deref() == Some("source-upstream-model")
+        target.provider_id().as_str() == copied.id.as_str()
+            && target.model().map(|model| model.as_str()) == Some("source-upstream-model")
             && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
-        target.provider_id == fallback.id
-            && target.model.as_deref() == Some("fallback-upstream-model")
+        target.provider_id().as_str() == fallback.id.as_str()
+            && target.model().map(|model| model.as_str()) == Some("fallback-upstream-model")
             && target.priority == 0
     }));
 
@@ -1250,9 +1343,16 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
             model_id: "no-route-copy-model".to_string(),
             display_name: None,
             balance: None,
-            target_provider: original.id.clone(),
-            target_model: Some("source-upstream-model".to_string()),
-            targets: vec![],
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: original.id.clone(),
+                model: Some("source-upstream-model".to_string()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -1262,7 +1362,10 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
     let models = gw.admin().list_models().await?;
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].targets.len(), 1);
-    assert_eq!(models[0].targets[0].provider_id, original.id);
+    assert_eq!(
+        models[0].targets[0].provider_id().as_str(),
+        original.id.as_str()
+    );
 
     gw.shutdown().await;
     drop(gw);
@@ -1530,6 +1633,7 @@ async fn add_manual_provider_model(
                     "id": model_id,
                     "name": model_id,
                 }),
+                template_id: None,
             },
         )
         .await?;
@@ -1561,9 +1665,16 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
             model_id: "epoch-test-model".to_string(),
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
-            target_provider: provider.id.clone(),
-            target_model: Some("gpt-4".to_string()),
-            targets: vec![],
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("gpt-4".to_string()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -1601,9 +1712,16 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
             model_id: "epoch-update-model".to_string(),
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
-            target_provider: provider.id.clone(),
-            target_model: Some("gpt-4".to_string()),
-            targets: vec![],
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("gpt-4".to_string()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;

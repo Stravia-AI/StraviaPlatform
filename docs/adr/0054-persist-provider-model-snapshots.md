@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Stravia persists each Provider Model as the Provider instance’s editable metadata snapshot. Provider discovery supplies model IDs and the Provider Catalog enriches new records, but later reconciliation only adds models, updates discovery/lifecycle availability, and disables missing or deprecated entries; it does not rewrite existing capability, limit, or cost metadata. Administrators can explicitly re-import one complete Provider Catalog Entry when they want current catalog values.
+Stravia persists each Provider Model as the Provider instance’s editable metadata snapshot. Its explicit state distinguishes `unregistered`, `imported` with a source stamp, and `edited` with any known previous source. An ID-only discovery does not invent capabilities, modalities, or context limits. A later discovery may supply the first real specification only while the snapshot remains unregistered; normal reconciliation preserves imported and edited specifications. Administrators can explicitly re-import one complete Provider Catalog Entry when they want current catalog values.
 
 ## Considered Options
 
@@ -11,3 +11,5 @@ A sparse overlay would keep unedited fields current but requires inheritance, to
 ## Consequences
 
 Provider Model data is stored in the database with queryable projections and preserved full metadata. Reconciliation is user-triggered and atomic. Effective Availability is separate from metadata: `auto` follows discovery and lifecycle, while force policies preserve administrator intent. Existing route targets continue to operate when a Provider Model becomes unavailable for new selection.
+
+Snapshot state is not inferred from equality with default metadata. Manual writes mark the snapshot edited, including writes that happen to equal a previous default. Reconciliation still refreshes plugin-owned execution metadata and discovery/lifecycle facts, but uses expected revisions to reject stale writes rather than overwrite concurrent edits. Existing records migrate conservatively to edited snapshots with unknown provenance; schema migration does not rewrite their specification JSON.

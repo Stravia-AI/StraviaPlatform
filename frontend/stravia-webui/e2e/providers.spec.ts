@@ -287,6 +287,7 @@ test('editing a Provider keeps saved credentials write-only', async ({ page }) =
                 name: 'GPT Test',
                 available: true,
                 source_kind: 'discovered',
+                snapshot_state: { type: 'imported', source: { type: 'discovery' } },
                 selection_policy: 'auto',
                 specification: {
                   limit: { context: 128000, input: null, output: null },
@@ -530,6 +531,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     name: 'Precision Model',
     available: true,
     source_kind: 'discovered',
+    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
       limit: { context: 1050000, input: 1048576, output: 32000 },
@@ -547,6 +549,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     name: 'Unknown Model',
     available: true,
     source_kind: 'manual',
+    snapshot_state: { type: 'edited', source: null },
     selection_policy: 'auto',
     specification: {
       limit: null,
@@ -704,6 +707,10 @@ test('Model specification filters combine all conditions and compose with catalo
     name,
     available: overrides.available ?? true,
     source_kind: overrides.source_kind ?? 'discovered',
+    snapshot_state:
+      overrides.source_kind === 'manual'
+        ? { type: 'edited', source: null }
+        : { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification,
     revision: 1,
@@ -911,6 +918,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
+    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
       limit: { context: 128000, input: null, output: null },
@@ -1008,6 +1016,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
         json: {
           data: {
             id: body.model_id,
+            snapshot_state: body.template_id
+              ? { type: 'imported', source: { type: 'canonical', model_id: body.template_id } }
+              : { type: 'unregistered' },
             available: true,
             source_kind: 'manual',
             selection_policy: 'auto',
@@ -1514,6 +1525,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
+    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
       limit: { context: 128000, input: null, output: null },
@@ -1532,6 +1544,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     name: 'Retired Model',
     available: false,
     source_kind: 'manual',
+    snapshot_state: { type: 'edited', source: null },
   }
   const detail = {
     ...available,
@@ -1593,6 +1606,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
             ...detail,
             id: modelId,
             source_kind: modelId === unavailable.id ? unavailable.source_kind : detail.source_kind,
+            snapshot_state: modelId === unavailable.id ? unavailable.snapshot_state : detail.snapshot_state,
             available: modelId === unavailable.id ? unavailable.available : detail.available,
             can_reimport: modelId === unavailable.id ? false : detail.can_reimport,
             metadata: {
@@ -1996,6 +2010,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT Existing',
       available: true,
       source_kind: 'discovered',
+      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
       selection_policy: 'auto',
       specification: {
         limit: { context: 128000, input: null, output: null },
@@ -2013,6 +2028,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT New',
       available: true,
       source_kind: 'discovered',
+      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
       selection_policy: 'auto',
       specification: {
         limit: { context: 128000, input: null, output: null },

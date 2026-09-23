@@ -1,11 +1,4 @@
-import type {
-  CreateTarget,
-  ProviderModelSummary,
-  Route,
-  ThinkingLevel,
-  ThinkingLevelMapping,
-  UpsertTarget,
-} from '$lib/types'
+import type { CreateTarget, ProviderModelSummary, Route, ThinkingLevel, ThinkingLevelMapping } from '$lib/types'
 
 export interface RouteTargetForm {
   key: string
@@ -274,7 +267,7 @@ export function reorderRouteTargetBefore(targets: RouteTargetForm[], key: string
 }
 
 export function buildRouteTargets(targets: RouteTargetForm[]): {
-  targets: Array<CreateTarget & UpsertTarget>
+  targets: CreateTarget[]
   error?: RouteTargetsValidationError
 } {
   if (targets.some((target) => !validInteger(target.priority, i32Minimum, i32Maximum)))
@@ -290,8 +283,7 @@ export function buildRouteTargets(targets: RouteTargetForm[]): {
   const cleanTargets = [...targets]
     .sort((left, right) => targetKeyOrder(left) - targetKeyOrder(right))
     .filter((target) => target.providerId && (target.model === null || target.model.trim()))
-    .map((target): CreateTarget & UpsertTarget => ({
-      id: target.id,
+    .map((target): CreateTarget => ({
       provider_id: target.providerId,
       model: target.model === null ? null : target.model.trim(),
       enabled: target.enabled,

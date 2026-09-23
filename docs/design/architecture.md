@@ -735,18 +735,22 @@ Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提�
 
 ### 8.1 Route 聚合
 
-Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的精确匹配命中：
+Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小写敏感的精确匹配命中：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `id` | TEXT PK | 28 位 ASCII 小写字母的随机不透明 ID |
-| `name` | TEXT | Route ID，同时是客户端模型 ID |
+| `id` | TEXT PK | Route 存储主键，Rust 类型为 `RouteKey` |
+| `model_id` | TEXT | 客户端 Route ID，Rust 类型为 `RouteId` |
 | `balance` | TEXT | Route Scheduling Strategy：`traffic_equalization` / `latency_preference` |
 | `is_enabled` | BOOL | Route 启用状态，默认 true |
 
 > `ingress_protocol` 不属于 Route 配置；它由 `RequestContext` 携带，并写入 `inference_run_observations.ingress_protocol`。Rejected Request 则写入 `rejected_request_observations.ingress_protocol`。
 
 **Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 的共享连续失败计数、冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
+
+SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 区分模型目标与合法的 Provider-only 目标。
+
+`targets` 是唯一 Target 写入入口，不接受调用方指定 Target ID；`target_provider` / `target_model` 仅保留为派生读投影。更新省略 `targets` 时，事务完全保留现有 Target 行、身份和策略；显式提交时才原子替换，校验或持久化失败不得留下部分修改。`display_name` 与 `default_thinking_level` 省略表示不改，`null` 表示清除；`targets`、`model_id`、`balance`、`is_enabled` 不接受 `null`。补丁序列化必须省略未提供字段。WebUI 仅修改显示名称时不重新提交 Target 集合。
 
 运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。`UsageStatsStore` 从 `target_attempt_observations` 读取 Confirmed Upstream Usage：Traffic Equalization 比较过去 24 小时的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。查询失败时返回最后一次成功的进程内 snapshot 并标记 `stale`；尚无 snapshot 或 Observation gap 造成历史不完整时按无历史样本执行原有确定性 fallback，观测故障不能阻断选路。
 
@@ -761,11 +765,13 @@ Route 与 API Token 是**独立管理、多对多绑定**的关系（经 `api_ke
 ```
 API Token ──── (授权绑定) ──── Route
   │                             │
-  ├── 并发上限: concurrency_limit ├── 匹配键 (name)
+  ├── 并发上限: concurrency_limit ├── 匹配键 (model_id)
   ├── 过期时间                  ├── 后端列表 (model_backends)
   ├── 状态: is_enabled           ├── 调度策略 (balance)
   └── 名称                       └── 语义 (operation)
 ```
+
+`api_key_models.model_id` 绑定 `models.id`（`RouteKey`），不是客户端提交的 `RouteId`。相似的 SQL 列名不代表同一种身份。
 
 Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
 
@@ -781,7 +787,7 @@ Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
    c. `expires_at < now` → 401 token expired
 4. 认证成功后，在 Request Hook 前获取一个根执行准入名额
    └── 已达 `concurrency_limit` → `ConcurrencyLimitExceeded` (429)
-5. 执行 Request Hook，再按最终 `model` 精确匹配 `models.name`
+5. 执行 Request Hook，再按最终 `model` 精确匹配 `models.model_id`
    └── 未匹配 → `GatewayError::ModelNotFound` (404)
 6. 最终模型不在 API Key 绑定列表（`api_key_models`）→ 403 forbidden
 7. 执行路由转发 → `model_backends` → 健康感知 target 选择
@@ -809,13 +815,13 @@ MCP 的外部 `tools/call` 与 Proxy 的 `Inference Run` 共用同一 Principal
 
 Provider discovery 只负责提供当前可见的模型 ID。动态端点响应包含 `visibility` 时只保留 `list` 项；Core 再以相同 Provider Catalog scope 中的精确 upstream model ID 补齐初始 metadata。Catalog 独有模型不会扩充动态 discovery 集合，端点独有模型则以最小 metadata 创建。没有可靠账号 discovery 的 Catalog Provider 直接使用其按需加载的 scoped inventory。
 
-`provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。首次同步插入 discovery 结果；后续同步只对账 `presence` 与来源生命周期，不覆盖管理员已编辑的 metadata。管理员可显式执行 re-import，以当前来源值整体替换单个模型 metadata。未知字段保存在 `metadata_json` 中，成本与上限的常用查询列及分档成本规则同时规范化到关系列。
+`provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。`snapshot_state` 区分 `unregistered`、带来源的 `imported` 和保留可知来源的 `edited`；来源可为 Provider Catalog、Canonical Model 或 Discovery。ID-only discovery 不填充虚假的能力、模态或上下文默认值；只有未登记快照可在普通同步中首次获取真实规格。已导入和人工编辑规格保持不变，插件拥有的执行 metadata、presence 与生命周期仍按各自契约刷新。管理员显式 re-import 才整体替换规格。对账写入使用 expected revision 防止覆盖并发编辑；旧行保守迁移为来源未知的 edited，不重写 `metadata_json`。未知字段仍保存在完整 metadata 中，常用查询列与分档成本规则继续规范化到关系列。
 
 管理列表的每个 Provider Model 返回 `specification`，替代原有不完整的 `capabilities` 摘要。Core 从已保存 metadata 投影 `limit`（`context`、`input`、`output`）、`modalities`（`input`、`output`），以及 `reasoning`、`tool_call`、`structured_output`、`attachment`、`temperature` 五项可空声明；缺失功能保持 `null`，不补 `false`，缺失限额与模态组保持 `null`。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。此管理契约变更不修改持久化 schema、推理接口或运行时能力判定。
 
 WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开完整限额和三态功能。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格列在既有列筛选状态中保存五类 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中模态与功能已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
 
-Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使用的 Route ID 仍落在现有 `models.name` 存储列；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。两个流程都不保存 Canonical Model binding。
+Canonical Model 只用作一次性模板：客户端 Route ID 落在 `models.model_id`，与存储主键 `models.id` 分离；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。手动创建可提交同一可选 `template_id`，Core 验证模板存在后保存为带已知来源的 edited 快照；客户端不能直接指定 `snapshot_state`。这保留来源而不推断 metadata 是否被改过，也不形成持续继承的 Canonical Model binding。
 
 `stravia-core` 通过 crate-private Provider connection 与 Route 两个深模块收口管理写入。Provider connection 负责 Catalog/custom 解析、Adapter Credentials、Base URL、OAuth、连通性与删除；Route 负责 Provider Model snapshot、discovery、Selection Policy、Canonical Model 一次性模板、Route ID 与 Target。Admin HTTP 只做 DTO adapter：`POST /api/v1/models/bind` 执行一键或指定 Route ID 的 Target 绑定，`POST /api/v1/models/unbind` 摘除 Target，并在最后一个 Target 被摘除时删除 Route。
 
@@ -834,7 +840,7 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
-SQLite 与 PostgreSQL 各由单一 SQLx 基线 migration（`0001_baseline.sql`）建立当前 schema。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。启动时核对 `_sqlx_migrations`：版本集不等于基线的旧版数据库、以及无任何迁移历史的非空数据库均明确拒绝启动，不增量升级、不自动清空；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。结构以 migration 为事实来源；两份 SQL 仅供 DBA 审阅，不能用于初始化部署，应由 `stravia-server` 对空数据库应用 migration。
+SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后续变化通过增量 migration 交付。Server 完成存储配置后、Desktop 打开本地库时，校验已应用历史是否为当前迁移列表的连续成功前缀，再保留数据升级；未知版本、缺口、失败记录、checksum 不一致和无版本非空库都拒绝启动。违反新增约束的历史数据使迁移失败，不自动清空或修正。升级前备份完整数据根及外部数据库；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。参考 SQL 仅供 DBA 审阅，不用于初始化部署。
 
 每次新增或修改 migration，都必须通过工具同步重新生成两份参考文件，并与 migration 一并交付，不得手工修改 schema 正文：
 
@@ -853,7 +859,7 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
 
-旧布局启动失败且不可升级；`stravia-tools migrate-data` 只搬迁当前版本的数据根：停机复制、校验 SQLite schema 与快照完整性后发布完整目标，不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键、Trace 相对身份和 `plugins/artifacts/` 中的本地导入 Component 均随源数据根复制；内嵌 `base` 由程序二进制提供，不形成待迁移文件。插件不增加独立路径参数，继续使用同一 `--from` / `--to` 根目录契约。存在本地导入插件时，数据库与实例本地文件必须配套迁移和备份；远程 PostgreSQL 备份本身不包含这些 Component，不能单独作为完整实例备份。路径来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+旧布局仍不可升级；`stravia-tools migrate-data` 可以搬迁具有受支持迁移前缀的数据根：停机复制、校验 SQLite schema 与快照完整性后发布完整目标，不修改源 schema、不连接外部后端，也不自动删除源数据。目标由宿主启动时应用尚未执行的迁移。Artifact、Trace 和 `plugins/artifacts/` 中的本地导入 Component 随数据根复制；内嵌 `base` 由程序二进制提供。插件继续使用同一 `--from` / `--to` 根目录契约。数据库与本地导入文件必须配套备份；远程 PostgreSQL 备份不包含 Component，不能单独作为完整实例备份。路径取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 
@@ -863,7 +869,7 @@ stravia-tools migrate-data --from <源目录> --to <新目录> --optimize-storag
 
 确认计划后，在同一命令末尾追加 `--apply --source-stopped`。工具只在目标副本中校验内容还原并回收 SQLite 空闲页，源数据保留用于回退；旧版程序不能读取新存储格式。历史数据在同一 Principal 内共享完全相同的 instructions、工具定义与响应 profile，Debug 分段通过内容和元数据引用去重，不使用压缩算法；去重不会补造已丢失的记录或交互关联。Debug 存储契约见[交互观察设计](interaction-observation.md)。
 
-> 单一基线 migration 在 SQLite 与 PostgreSQL 中分别直接创建全部当前表；不兼容的既有数据库被拒绝，不通过删除数据库处理。
+> 当前结构来自基线及全部增量迁移。两后端约束布尔值、调度枚举、Target 数值范围与配置 JSON；Turn 父链须具有相同 Principal 和 kind。活动计数是非负整数，不是布尔值。完整约束以生成的参考 SQL 为准。
 
 ```sql
 -- 提供商配置

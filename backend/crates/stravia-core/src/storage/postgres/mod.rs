@@ -8,9 +8,9 @@ use std::time::Duration;
 use crate::db::models::{
     ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord,
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_PRIORITY,
-    DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute,
-    Route, StatsOverview, StatsSeries, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
-    ProviderCredentialVersion, is_valid_provider_auth_mode,
+    DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderCredentialVersion,
+    ProviderStats, PutRoute, RouteConfig, StatsOverview, StatsSeries, TargetConfig, UpdateApiKey,
+    UpdateProvider, UpsertOAuthCredential, is_valid_provider_auth_mode,
 };
 use crate::plugin::PluginStore;
 use crate::storage::sql::config::SqlBackendConfig;

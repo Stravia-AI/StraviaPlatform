@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::GenerationError;
-use crate::{Gateway, db::models::Route};
+use crate::{Gateway, db::models::RouteConfig};
 
 pub(crate) const SETTINGS_KEY: &str = "media_generation_config";
 
@@ -72,7 +72,7 @@ pub(crate) async fn validate_route(
     validate_targets(gateway, &route).await
 }
 
-async fn validate_targets(gateway: &Gateway, route: &Route) -> Result<(), GenerationError> {
+async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), GenerationError> {
     if !route.is_enabled {
         return Err(GenerationError::new(
             "media_generation_route_disabled",
@@ -155,7 +155,7 @@ pub(crate) async fn eligible_routes(
     for route in gateway.storage.routes().list().await? {
         match validate_targets(gateway, &route).await {
             Ok(()) => result.push(EligibleGenerationRoute {
-                id: route.model_id,
+                id: route.model_id.into(),
                 name: route.display_name,
             }),
             Err(error) if error.code == "media_generation_unavailable" => return Err(error),
@@ -165,7 +165,7 @@ pub(crate) async fn eligible_routes(
     Ok(result)
 }
 
-pub(crate) async fn validated_route(gateway: &Gateway) -> Result<Route, GenerationError> {
+pub(crate) async fn validated_route(gateway: &Gateway) -> Result<RouteConfig, GenerationError> {
     let config = load(gateway).await?;
     if !config.enabled {
         return Err(GenerationError::new(

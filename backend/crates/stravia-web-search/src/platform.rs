@@ -386,7 +386,7 @@ impl HookSession for WebSearchHookSession {
                     };
                     arguments.insert("path".into(), serde_json::json!(path));
                     actions.push(HookAction::PatchResponse(ResponsePatch::SetToolArguments {
-                        call_id: platform_call.call.id.clone(),
+                        call_id: platform_call.call.id.clone().into_string(),
                         arguments: Value::Object(arguments).to_string(),
                     }));
                 }

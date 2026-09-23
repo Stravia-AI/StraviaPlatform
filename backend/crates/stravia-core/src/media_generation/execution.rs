@@ -108,7 +108,7 @@ pub(crate) async fn generate(
     check_execution(&cancellation, deadline)?;
 
     let mut observation_request = reference_request(
-        route.model_id.clone(),
+        route.model_id.clone().into(),
         input.input.prompt.clone(),
         references,
     );
@@ -154,7 +154,7 @@ pub(crate) async fn generate(
                     principal: principal.api_key_id().into(),
                     api_key_id: Some(principal.api_key_id().into()),
                     api_key_name: None,
-                    route_id: route.model_id.clone(),
+                    route_id: route.model_id.clone().into(),
                     model_display_name: route.display_name.clone(),
                     ingress_protocol: "mcp".into(),
                 },
@@ -196,7 +196,7 @@ pub(crate) async fn generate(
 
 async fn generate_image(
     gateway: &Gateway,
-    route: &crate::db::models::Route,
+    route: &crate::db::models::RouteConfig,
     request: MediaImageRequest,
     principal: Principal,
     cancellation: CancellationToken,

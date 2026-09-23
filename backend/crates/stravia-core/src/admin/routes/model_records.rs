@@ -24,11 +24,11 @@ pub struct RouteTargetStatus {
 }
 
 impl AdminService {
-    pub async fn list_models(&self) -> anyhow::Result<Vec<Route>> {
+    pub async fn list_models(&self) -> anyhow::Result<Vec<RouteConfig>> {
         RouteModule::new(self).list().await
     }
 
-    pub async fn get_model(&self, route_id: &str) -> anyhow::Result<Route> {
+    pub async fn get_model(&self, route_id: &str) -> anyhow::Result<RouteConfig> {
         RouteModule::new(self).get(route_id).await
     }
 
@@ -58,14 +58,15 @@ impl AdminService {
                     .gw
                     .route_policy_state
                     .target_status(&crate::router::target_key(
-                        &target.provider_id,
-                        target.model.as_deref(),
+                        target.provider_id().as_str(),
+                        target.model().map(|model| model.as_str()),
                     ));
-                let credential_invalid = credential_invalid.contains(&target.provider_id);
+                let credential_invalid = credential_invalid.contains(target.provider_id().as_str());
+                let (provider_id, model) = target.destination.into_parts();
                 RouteTargetStatus {
-                    target_id: target.id,
-                    provider_id: target.provider_id,
-                    model: target.model,
+                    target_id: target.id.into(),
+                    provider_id: provider_id.into(),
+                    model: model.map(Into::into),
                     state: status.state,
                     credential_invalid,
                     cooldown_remaining_ms: status.cooldown_remaining_ms,
@@ -74,11 +75,15 @@ impl AdminService {
             .collect())
     }
 
-    pub async fn create_model(&self, input: CreateRoute) -> anyhow::Result<Route> {
+    pub async fn create_model(&self, input: CreateRoute) -> anyhow::Result<RouteConfig> {
         RouteModule::new(self).create(input).await
     }
 
-    pub async fn update_model(&self, route_id: &str, input: UpdateRoute) -> anyhow::Result<Route> {
+    pub async fn update_model(
+        &self,
+        route_id: &str,
+        input: UpdateRoute,
+    ) -> anyhow::Result<RouteConfig> {
         RouteModule::new(self).change(route_id, input).await
     }
 
@@ -88,13 +93,13 @@ impl AdminService {
 }
 
 impl RouteModule<'_> {
-    pub(crate) async fn list(&self) -> anyhow::Result<Vec<Route>> {
+    pub(crate) async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
         let mut routes = self.admin.gw.storage.routes().list().await?;
         self.refresh_route_client_capabilities(&mut routes).await?;
         Ok(routes)
     }
 
-    pub(crate) async fn get(&self, route_id: &str) -> anyhow::Result<Route> {
+    pub(crate) async fn get(&self, route_id: &str) -> anyhow::Result<RouteConfig> {
         let route_id = normalize_name(route_id, "model ID sent by clients")?;
         let mut route = self
             .admin
@@ -108,12 +113,11 @@ impl RouteModule<'_> {
             .await?;
         Ok(route)
     }
-    pub(super) async fn create_record(&self, input: CreateRoute) -> anyhow::Result<Route> {
+    pub(super) async fn create_record(&self, input: CreateRoute) -> anyhow::Result<RouteConfig> {
         let route_id = normalize_name(&input.model_id, "model ID sent by clients")?;
         let display_name = normalize_display_name(input.display_name.as_deref());
         let selection_strategy = normalize_model_balance(input.balance.as_deref())?;
-        let targets = normalize_create_route_targets(&input)?;
-        ensure_route_targets_valid(&targets)?;
+        ensure_route_targets_valid(&input.targets)?;
         let route = self
             .admin
             .gw
@@ -121,11 +125,11 @@ impl RouteModule<'_> {
             .routes()
             .put(PutRoute {
                 id: None,
-                model_id: route_id,
+                model_id: route_id.into(),
                 display_name,
                 selection_strategy,
                 is_enabled: true,
-                targets,
+                targets: Some(input.targets),
                 default_thinking_level: input.default_thinking_level,
             })
             .await?;
@@ -137,16 +141,15 @@ impl RouteModule<'_> {
         &self,
         route_id: &str,
         input: UpdateRoute,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         let current = self.get(route_id).await?;
         let next_route_id = normalize_name(
             input.model_id.as_deref().unwrap_or(&current.model_id),
             "model ID sent by clients",
         )?;
-        let display_name = if input.display_name.is_some() {
-            normalize_display_name(input.display_name.as_deref())
-        } else {
-            current.display_name.clone()
+        let display_name = match input.display_name.as_ref() {
+            Some(value) => normalize_display_name(value.as_deref()),
+            None => current.display_name.clone(),
         };
         let selection_strategy =
             normalize_model_balance(input.balance.as_deref().or(Some(&current.balance)))?;
@@ -157,8 +160,9 @@ impl RouteModule<'_> {
                 .as_deref()
                 .and_then(|value| ThinkingLevel::from_wire(value).ok()),
         };
-        let targets = normalize_update_route_targets(&current, &input)?;
-        ensure_route_targets_valid(&targets)?;
+        if let Some(targets) = input.targets.as_deref() {
+            ensure_route_targets_valid(targets)?;
+        }
         let route = self
             .admin
             .gw
@@ -166,11 +170,11 @@ impl RouteModule<'_> {
             .routes()
             .put(PutRoute {
                 id: Some(current.id),
-                model_id: next_route_id,
+                model_id: next_route_id.into(),
                 display_name,
                 selection_strategy,
                 is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
-                targets,
+                targets: input.targets,
                 default_thinking_level,
             })
             .await?;
@@ -202,16 +206,16 @@ impl RouteModule<'_> {
 
     pub(super) async fn refresh_route_client_capabilities(
         &self,
-        routes: &mut [Route],
+        routes: &mut [RouteConfig],
     ) -> anyhow::Result<()> {
         let mut capabilities_by_target = BTreeMap::<String, ClientModelCapabilities>::new();
 
         for route in &mut *routes {
             for target in route.targets.iter().filter(|target| target.enabled) {
-                let Some(model) = target.model.as_deref() else {
+                let Some(model) = target.model().map(|model| model.as_str()) else {
                     continue;
                 };
-                let key = format!("{}\u{0}{model}", target.provider_id);
+                let key = format!("{}\u{0}{model}", target.provider_id());
                 if capabilities_by_target.contains_key(&key) {
                     continue;
                 }
@@ -220,7 +224,7 @@ impl RouteModule<'_> {
                     .gw
                     .storage
                     .provider_models()
-                    .find(&target.provider_id, model)
+                    .find(target.provider_id().as_str(), model)
                     .await?
                 else {
                     continue;
@@ -265,15 +269,15 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 }
 
 fn target_capabilities<'a>(
-    target: &Target,
+    target: &TargetConfig,
     capabilities_by_target: &'a BTreeMap<String, ClientModelCapabilities>,
 ) -> Option<&'a ClientModelCapabilities> {
-    let model = target.model.as_deref()?;
-    capabilities_by_target.get(&format!("{}\u{0}{model}", target.provider_id))
+    let model = target.model().map(|model| model.as_str())?;
+    capabilities_by_target.get(&format!("{}\u{0}{model}", target.provider_id()))
 }
 
 fn common_target_limit(
-    targets: &[Target],
+    targets: &[TargetConfig],
     capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
     select: impl Fn(&ClientModelCapabilities) -> Option<u64>,
 ) -> Option<u64> {
@@ -290,7 +294,7 @@ fn common_target_limit(
 }
 
 fn all_targets_support_image_input(
-    targets: &[Target],
+    targets: &[TargetConfig],
     capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
 ) -> bool {
     targets.iter().any(|target| target.enabled)

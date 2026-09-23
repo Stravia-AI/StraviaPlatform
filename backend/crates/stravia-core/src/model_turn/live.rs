@@ -102,7 +102,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 .resolve(&input.request.model)
                 .map(|route| {
                     (
-                        route.id.clone(),
+                        route.id.to_string(),
                         Some(route.effective_display_name().to_owned()),
                     )
                 })
@@ -986,7 +986,7 @@ impl AttemptFailure {
 
 async fn prepare_attempt(
     executor: &LiveModelTurnExecutor,
-    route: &crate::db::models::Route,
+    route: &crate::db::models::RouteConfig,
     target: &SelectedTarget,
     input: &TurnInput,
     model_turn_id: &str,
@@ -996,8 +996,8 @@ async fn prepare_attempt(
     let gateway = &executor.gateway;
     let omit_protected_thinking = false;
     let target_key = selected_target_key(target);
-    let actual_model = match target.model.as_deref().map(str::trim) {
-        Some("*") => route.model_id.clone(),
+    let actual_model = match target.model().map(|model| model.as_str().trim()) {
+        Some("*") => route.model_id.to_string(),
         Some(model) if !model.is_empty() => model.to_owned(),
         _ => {
             return Err(AttemptFailure::reroutable(
@@ -1019,7 +1019,7 @@ async fn prepare_attempt(
     preparation_context.response_continuation_available = response_continuation_available.clone();
     let mut execution = gateway
         .prepare_vendor_execution(
-            &target.provider_id,
+            target.provider_id().as_str(),
             Some(&actual_model),
             if compact {
                 stravia_vendor_sdk::Operation::Compact
@@ -1046,7 +1046,7 @@ async fn prepare_attempt(
     let provider = gateway
         .storage
         .providers()
-        .get(&target.provider_id)
+        .get(target.provider_id().as_str())
         .await
         .map_err(|_| {
             AttemptFailure::reroutable(
@@ -1057,7 +1057,7 @@ async fn prepare_attempt(
         .ok_or_else(|| {
             AttemptFailure::reroutable(
                 "provider_unavailable",
-                format!("provider unavailable: {}", target.provider_id),
+                format!("provider unavailable: {}", target.provider_id()),
             )
         })?;
     let provider_model = execution.provider().model_metadata.as_ref();
@@ -1144,7 +1144,7 @@ async fn prepare_attempt(
         .find(|channel| channel.id == provider_snapshot.channel)
         .is_some_and(|channel| channel.capabilities.contains(&Capability::AuthOauth));
     let target_namespace = target_namespace(
-        &target.provider_id,
+        target.provider_id().as_str(),
         &supplier_id,
         &provider_snapshot,
         execution.oauth_connection_id(),
@@ -1331,8 +1331,8 @@ async fn prepare_attempt(
     Ok(PreparedAttempt {
         model_turn_id: model_turn_id.to_owned(),
         route: RouteContext {
-            model_id: route.id.clone(),
-            provider_id: target.provider_id.clone(),
+            model_id: route.id.to_string(),
+            provider_id: target.provider_id().to_string(),
             target_id: target_key,
             egress,
         },
@@ -1342,7 +1342,7 @@ async fn prepare_attempt(
         observer: input.observer.clone(),
         request: provider_request,
         continuation_fallback: continued_id.map(|_| full_provider_request),
-        dispatch_model: route.model_id.clone(),
+        dispatch_model: route.model_id.to_string(),
         actual_model,
         namespace: target_namespace,
         protocol_hint: protocol_hint.to_owned(),
@@ -1590,7 +1590,7 @@ impl Stream for VendorOutputStream {
 
 async fn begin_attempt(
     gateway: &Gateway,
-    route: &crate::db::models::Route,
+    route: &crate::db::models::RouteConfig,
     target: &SelectedTarget,
     input: &TurnInput,
     prepared: PreparedAttempt,
@@ -1627,7 +1627,7 @@ async fn begin_attempt(
     let operation_cancellation = stravia_runtime_contract::CancellationToken::new();
     let driver_cancellation = operation_cancellation.clone();
     let driver_gateway = gateway.clone();
-    let driver_route_id = route.id.clone();
+    let driver_route_id = route.id.to_string();
     let driver_target = target.clone();
     let principal = input.principal.clone();
     let canonical_request = input.request.clone();
@@ -2808,7 +2808,7 @@ async fn finish_vendor_failure(
         && let Some(version) = credential_version
     {
         gateway
-            .mark_provider_credential_invalid(&target.provider_id, version)
+            .mark_provider_credential_invalid(target.provider_id().as_str(), version)
             .await;
     }
     if committed && failure.is_upstream() && failure.error.code == "upstream_error" {
@@ -3371,7 +3371,11 @@ mod tests {
         ));
 
         let mut malformed = native.clone();
-        malformed.meta = Some(serde_json::json!({"__stravia_thinking_source": "invalid"}));
+        malformed.meta = Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"__stravia_thinking_source": "invalid"}),
+            ),
+        );
         assert!(!thinking_replay_source_is_compatible(
             &malformed,
             Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),

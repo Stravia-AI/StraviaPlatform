@@ -556,7 +556,9 @@ impl ModelLegConsume {
                 && !self
                     .early_platform_executions
                     .iter()
-                    .any(|early: &EarlyPlatformExecution| early.marker.call_id() == call.id)
+                    .any(|early: &EarlyPlatformExecution| {
+                        early.marker.call_id() == call.id.as_str()
+                    })
         });
         for call in completed_platform_calls {
             let platform_call = run

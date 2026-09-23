@@ -86,8 +86,7 @@ async fn sqlite_schema(migrator: &Migrator) -> Result<String> {
         .connect("sqlite::memory:")
         .await?;
     let result = async {
-        migrator
-            .run(&pool)
+        stravia_core::migrations::run_sqlite_migrator(&pool, migrator)
             .await
             .context("SQLite migrations failed in the isolated in-memory database")?;
         let definitions = sqlx::query_scalar::<_, String>(
@@ -189,7 +188,7 @@ async fn dump_postgres_database(
     let pool = PgPool::connect_with(options)
         .await
         .context("cannot connect to the newly created isolated database")?;
-    let migration_result = migrator.run(&pool).await;
+    let migration_result = stravia_core::migrations::run_postgres_migrator(&pool, migrator).await;
     pool.close().await;
     migration_result.context("PostgreSQL migrations failed in the isolated database")?;
 

@@ -38,10 +38,8 @@ impl ResponsesEncoder {
                 continue;
             }
             if let Some(reference_id) = item
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("__open_responses_item_reference"))
-                .and_then(Value::as_str)
+                .item_reference()
+                .map(stravia_runtime_contract::protocol::ir::ItemReference::as_str)
             {
                 input.push(serde_json::json!({
                     "type": "item_reference",

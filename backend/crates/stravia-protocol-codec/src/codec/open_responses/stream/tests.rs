@@ -663,14 +663,16 @@ fn streams_agent_result_and_drops_deleted_media_result() {
 fn terminal_message_clears_metadata_after_text_rewrite() {
     let mut formatter = ResponsesStreamFormatter::new();
     let mut completed = stravia_runtime_contract::protocol::ir::AiItem::output_text("before");
-    completed.meta = Some(serde_json::json!({
-        "__open_responses_content": [{
-            "type": "output_text",
-            "text": "before",
-            "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-            "logprobs": [{"token": "before", "logprob": -0.1}]
-        }]
-    }));
+    completed.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            "__open_responses_content": [{
+                "type": "output_text",
+                "text": "before",
+                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                "logprobs": [{"token": "before", "logprob": -0.1}]
+            }]
+        })),
+    );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
             id: "resp-1".into(),
@@ -1071,18 +1073,20 @@ fn annotation_stays_on_its_unchanged_indexed_message() {
         tool_call_id: None,
         meta: None,
     };
-    completed.meta = Some(serde_json::json!({
-        "__open_responses_content": [
-            {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
-            {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
-            {
-                "type": "output_text",
-                "text": "answer",
-                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-                "logprobs": []
-            }
-        ]
-    }));
+    completed.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            "__open_responses_content": [
+                {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                {
+                    "type": "output_text",
+                    "text": "answer",
+                    "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                    "logprobs": []
+                }
+            ]
+        })),
+    );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
             id: "resp_annotation".into(),
@@ -1144,14 +1148,16 @@ fn annotation_stays_on_its_unchanged_indexed_message() {
 fn rewritten_text_drops_stale_annotation_events() {
     let mut formatter = ResponsesStreamFormatter::new();
     let mut completed = stravia_runtime_contract::protocol::ir::AiItem::output_text("before");
-    completed.meta = Some(serde_json::json!({
-        "__open_responses_content": [{
-            "type": "output_text",
-            "text": "before",
-            "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-            "logprobs": []
-        }]
-    }));
+    completed.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            "__open_responses_content": [{
+                "type": "output_text",
+                "text": "before",
+                "annotations": [{"type": "url_citation", "url": "https://example.test"}],
+                "logprobs": []
+            }]
+        })),
+    );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
             id: "resp_rewritten".into(),

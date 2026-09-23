@@ -107,7 +107,7 @@ pub struct PlatformToolResult {
 impl PlatformToolResult {
     pub fn content_block(&self) -> ContentBlock {
         ContentBlock::ToolResult {
-            tool_use_id: self.call_id.clone(),
+            tool_use_id: self.call_id.clone().into(),
             content: self.content.clone(),
             content_kind: Some(self.content_kind),
             is_error: Some(self.is_error),

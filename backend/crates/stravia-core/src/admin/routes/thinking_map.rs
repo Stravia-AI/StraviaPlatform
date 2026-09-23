@@ -3,7 +3,7 @@ use super::*;
 impl RouteModule<'_> {
     pub(super) async fn prepare_thinking_maps(
         &self,
-        existing: &[Target],
+        existing: &[TargetConfig],
         proposed: &mut [CreateTarget],
     ) -> anyhow::Result<()> {
         for target in proposed {
@@ -24,8 +24,8 @@ impl RouteModule<'_> {
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
             let provider = self.admin.get_provider(target.provider_id.trim()).await?;
             let current = existing.iter().find(|current| {
-                current.provider_id == target.provider_id.trim()
-                    && current.model.as_deref() == Some(model.as_str())
+                current.provider_id().as_str() == target.provider_id.trim()
+                    && current.model().map(|model| model.as_str()) == Some(model.as_str())
             });
             if let Some(current) = current {
                 if target.thinking_level_map.is_empty() {
@@ -33,7 +33,7 @@ impl RouteModule<'_> {
                         target.thinking_level_map =
                             generate_thinking_level_map(&provider_model.metadata);
                     } else {
-                        target.thinking_level_map = current.thinking_level_map.0.clone();
+                        target.thinking_level_map = current.thinking_level_map.clone();
                     }
                 } else {
                     let submitted = std::mem::take(&mut target.thinking_level_map);
@@ -180,7 +180,7 @@ impl RouteModule<'_> {
         route_id: &str,
         target_id: &str,
         level: ThinkingLevel,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         self.replace_generated_thinking_rows(route_id, target_id, Some(level))
             .await
     }
@@ -189,7 +189,7 @@ impl RouteModule<'_> {
         &self,
         route_id: &str,
         target_id: &str,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         self.replace_generated_thinking_rows(route_id, target_id, None)
             .await
     }
@@ -199,7 +199,7 @@ impl RouteModule<'_> {
         route_id: &str,
         target_id: &str,
         only_level: Option<ThinkingLevel>,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         let route = self.get(route_id).await?;
         let target = route
             .targets
@@ -207,18 +207,21 @@ impl RouteModule<'_> {
             .find(|target| target.id == target_id)
             .ok_or_else(|| anyhow::anyhow!("Target not found: {target_id}"))?;
         let model = target
-            .model
-            .as_deref()
+            .model()
+            .map(|model| model.as_str())
             .ok_or_else(|| anyhow::anyhow!("Provider-only Target has no Thinking Level Map"))?;
         let provider_model = self
             .admin
             .gw
             .storage
             .provider_models()
-            .find(&target.provider_id, model)
+            .find(target.provider_id().as_str(), model)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-        let provider = self.admin.get_provider(&target.provider_id).await?;
+        let provider = self
+            .admin
+            .get_provider(target.provider_id().as_str())
+            .await?;
         let mut generated = generate_thinking_level_map(&provider_model.metadata);
         hide_unwritable_generated_controls(
             self.admin,
@@ -229,7 +232,10 @@ impl RouteModule<'_> {
         let mut targets = route_targets_for_update(&route);
         let edited = targets
             .iter_mut()
-            .find(|candidate| candidate.id.as_deref() == Some(target_id))
+            .find(|candidate| {
+                candidate.provider_id == target.provider_id().as_str()
+                    && candidate.model.as_deref() == target.model().map(|model| model.as_str())
+            })
             .expect("target was loaded from this Route");
         for row in &mut edited.thinking_level_map {
             if only_level.is_none_or(|level| row.level == level) {
@@ -240,11 +246,7 @@ impl RouteModule<'_> {
                     .expect("generated map contains every Thinking Level");
             }
         }
-        let prepared = targets
-            .iter()
-            .map(create_backend_from_upsert)
-            .collect::<Vec<_>>();
-        self.ensure_thinking_controls_representable(&prepared)
+        self.ensure_thinking_controls_representable(&targets)
             .await?;
         self.change_record(
             route_id,
@@ -269,8 +271,8 @@ impl RouteModule<'_> {
         let mut changes = Vec::new();
         for route in self.admin.list_models().await? {
             if !route.targets.iter().any(|target| {
-                target.provider_id == provider_id
-                    && target.model.as_deref() == Some(provider_model_id)
+                target.provider_id().as_str() == provider_id
+                    && target.model().map(|model| model.as_str()) == Some(provider_model_id)
             }) {
                 continue;
             }
@@ -289,11 +291,7 @@ impl RouteModule<'_> {
                     }
                 }
             }
-            let prepared = targets
-                .iter()
-                .map(create_backend_from_upsert)
-                .collect::<Vec<_>>();
-            self.ensure_thinking_controls_representable(&prepared)
+            self.ensure_thinking_controls_representable(&targets)
                 .await?;
             changes.push((route.model_id, targets));
         }

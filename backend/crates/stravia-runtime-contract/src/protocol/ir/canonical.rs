@@ -142,7 +142,6 @@ fn history_item_value(item: &AiItem) -> serde_json::Value {
     let artifact_references = item
         .meta
         .as_ref()
-        .and_then(serde_json::Value::as_object)
         .and_then(|meta| meta.get("__stravia_artifact_references"));
     serde_json::json!({
         "role": &item.role,
@@ -222,7 +221,6 @@ fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
     if let Some(artifact_references) = item
         .meta
         .as_ref()
-        .and_then(serde_json::Value::as_object)
         .and_then(|meta| meta.get("__stravia_artifact_references"))
     {
         values.push(serde_json::json!({

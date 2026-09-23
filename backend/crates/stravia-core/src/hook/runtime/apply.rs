@@ -178,7 +178,7 @@ pub(super) fn apply_response_patch(
                 .map_err(|error| format!("tool arguments are not valid JSON: {error}"))?;
             let mut found = false;
             for call in response.tool_calls_mut() {
-                if call.id == call_id {
+                if call.id.as_str() == call_id.as_str() {
                     call.arguments = arguments.clone();
                     found = true;
                 }
@@ -232,7 +232,9 @@ pub(super) fn validate_response_protected_fields(
     Ok(())
 }
 
-pub(super) fn tool_call_identities(response: &AiResponse) -> Vec<(String, String)> {
+pub(super) fn tool_call_identities(
+    response: &AiResponse,
+) -> Vec<(stravia_runtime_contract::protocol::ir::ToolCallId, String)> {
     response
         .tool_calls()
         .map(|call| (call.id.clone(), call.name.clone()))

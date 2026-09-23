@@ -47,6 +47,7 @@ async fn route_fixture_with_protocol(
             &provider.id,
             "upstream-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "upstream-model",
                     "name": "Upstream Model",
@@ -70,38 +71,35 @@ async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider
 }
 
 #[test]
-fn route_wire_inputs_use_model_id_and_reject_legacy_name() {
+fn route_wire_inputs_require_targets_and_reject_legacy_fields() {
     let current = serde_json::from_value::<CreateRoute>(json!({
         "model_id": "client-model",
         "display_name": "Friendly model",
-        "target_provider": "provider",
-        "target_model": "upstream-model"
+        "targets": [{"provider_id": "provider", "model": "upstream-model"}]
     }));
-    assert!(current.is_ok(), "current Route contract must deserialize");
+    assert!(current.is_ok());
 
     let provider_only = serde_json::from_value::<CreateRoute>(json!({
         "model_id": "research",
-        "target_provider": "provider",
-        "target_model": null
+        "targets": [{"provider_id": "provider", "model": null}]
     }))
     .expect("Provider-only Route contract");
-    assert!(provider_only.target_model.is_none());
+    assert!(provider_only.targets[0].model.is_none());
 
-    let provider_only_patch = serde_json::from_value::<UpdateRoute>(json!({
-        "target_model": null
-    }))
-    .expect("explicit Provider-only Route patch");
-    let omitted_patch =
-        serde_json::from_value::<UpdateRoute>(json!({})).expect("partial Route patch");
-    assert_eq!(provider_only_patch.target_model, Some(None));
-    assert_eq!(omitted_patch.target_model, None);
-
-    let legacy = serde_json::from_value::<CreateRoute>(json!({
-        "name": "client-model",
-        "target_provider": "provider",
-        "target_model": "upstream-model"
-    }));
-    assert!(legacy.is_err(), "legacy name input must be rejected");
+    for legacy in ["name", "target_provider", "target_model"] {
+        let mut input = json!({"model_id": "client-model", "targets": []});
+        input[legacy] = json!("legacy");
+        assert!(serde_json::from_value::<CreateRoute>(input).is_err());
+        let mut update = json!({});
+        update[legacy] = json!("legacy");
+        assert!(serde_json::from_value::<UpdateRoute>(update).is_err());
+    }
+    assert!(
+        serde_json::from_value::<UpdateRoute>(json!({
+            "targets": [{"id": "caller-id", "provider_id": "provider", "model": "model"}]
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -114,6 +112,12 @@ fn route_target_wire_input_rejects_removed_weight() {
     assert!(
         target.is_err(),
         "Target.weight must not remain in the write API"
+    );
+    assert!(
+        serde_json::from_value::<CreateTarget>(json!({
+            "id": "caller-id", "provider_id": "provider", "model": "upstream-model"
+        }))
+        .is_err()
     );
 }
 
@@ -164,6 +168,28 @@ fn route_update_default_thinking_level_distinguishes_omitted_null_and_invalid() 
     let invalid =
         serde_json::from_value::<UpdateRoute>(json!({"default_thinking_level": "ludicrous"}));
     assert!(invalid.is_err(), "unknown Thinking Level must be rejected");
+
+    let omitted: UpdateRoute = serde_json::from_value(json!({})).expect("omitted patch");
+    let cleared: UpdateRoute =
+        serde_json::from_value(json!({"display_name": null})).expect("clear display name");
+    assert!(omitted.display_name.is_none());
+    assert_eq!(cleared.display_name, Some(None));
+    assert_eq!(
+        serde_json::to_value(&omitted).expect("serialize omitted"),
+        json!({})
+    );
+    assert_eq!(
+        serde_json::to_value(&cleared).expect("serialize clear"),
+        json!({"display_name": null})
+    );
+    for field in ["model_id", "balance", "is_enabled", "targets"] {
+        let mut invalid = json!({});
+        invalid[field] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<UpdateRoute>(invalid).is_err(),
+            "null {field} must fail"
+        );
+    }
 }
 
 #[tokio::test]
@@ -175,9 +201,16 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
             model_id: "default-thinking-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: Some(ThinkingLevel::High),
         })
         .await?;
@@ -188,12 +221,24 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
         .update_model(
             "default-thinking-route",
             UpdateRoute {
-                display_name: Some("Renamed".into()),
+                display_name: Some(Some("Renamed".into())),
                 ..Default::default()
             },
         )
         .await?;
     assert_eq!(route.default_thinking_level.as_deref(), Some("high"));
+    assert_eq!(route.display_name.as_deref(), Some("Renamed"));
+    let cleared = admin
+        .update_model(
+            "default-thinking-route",
+            UpdateRoute {
+                display_name: Some(None),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(cleared.display_name.is_none());
+    assert_eq!(cleared.targets[0].id, route.targets[0].id);
 
     // 显式 null 清除
     let route = admin
@@ -232,6 +277,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 &provider.id,
                 model,
                 CreateManualProviderModel {
+                    template_id: None,
                     metadata: json!({"id": model, "name": model}),
                 },
             )
@@ -252,8 +298,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             model_id: "layered-route".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![
                 create_target("upstream-model", 100_000),
                 create_target("second-model", 0),
@@ -278,8 +323,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 model_id: format!("signed-priority-{valid}"),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: String::new(),
-                target_model: None,
+
                 targets: vec![create_target("upstream-model", valid)],
                 default_thinking_level: None,
             })
@@ -291,8 +335,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             model_id: "invalid-strategy".into(),
             display_name: None,
             balance: Some("weighted_random".into()),
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![create_target("upstream-model", 0)],
             default_thinking_level: None,
         })
@@ -316,6 +359,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
             &provider.id,
             "standby-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({"id": "standby-model", "name": "Standby"}),
             },
         )
@@ -336,8 +380,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
             model_id: "enabled-and-standby".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![
                 target("upstream-model", true),
                 target("standby-model", false),
@@ -350,25 +393,29 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         route
             .targets
             .iter()
-            .find(|target| target.model.as_deref() == Some("upstream-model"))
+            .find(|target| target.model().map(|model| model.as_str()) == Some("upstream-model"))
             .is_some_and(|target| target.enabled)
     );
     assert!(
         route
             .targets
             .iter()
-            .find(|target| target.model.as_deref() == Some("standby-model"))
+            .find(|target| target.model().map(|model| model.as_str()) == Some("standby-model"))
             .is_some_and(|target| !target.enabled)
     );
-    assert_eq!(route.target_model.as_deref(), Some("upstream-model"));
+    assert_eq!(
+        route
+            .primary_target()
+            .and_then(|target| target.model().map(|model| model.as_str())),
+        Some("upstream-model")
+    );
 
     let error = admin
         .create_model(CreateRoute {
             model_id: "all-disabled".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![target("upstream-model", false)],
             default_thinking_level: None,
         })
@@ -408,8 +455,14 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     assert_eq!(first.model_id, "upstream-model");
     assert_eq!(first.display_name.as_deref(), Some("Upstream Model"));
     assert_eq!(second.targets.len(), 1);
-    assert_eq!(second.targets[0].provider_id, provider.id);
-    assert_eq!(second.targets[0].model.as_deref(), Some("upstream-model"));
+    assert_eq!(
+        second.targets[0].provider_id().as_str(),
+        provider.id.as_str()
+    );
+    assert_eq!(
+        second.targets[0].model().map(|model| model.as_str()),
+        Some("upstream-model")
+    );
     assert!(second.targets[0].enabled);
     assert_eq!(second.context_window, Some(200_000));
     assert_eq!(second.output_max_tokens, Some(32_000));
@@ -458,6 +511,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
             &provider.id,
             "zhipuai/glm-4.6",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "zhipuai/glm-4.6",
                     "name": "GLM-4.6",
@@ -484,14 +538,16 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
             model_id: "glm-4.6".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![create_target("GLM-4.6")],
             default_thinking_level: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(route.targets[0].model.as_deref(), Some("GLM-4.6"));
+    assert_eq!(
+        route.targets[0].model().map(|model| model.as_str()),
+        Some("GLM-4.6")
+    );
     // 能力元数据经宽松匹配解析成功
     assert_eq!(route.context_window, Some(131_072));
     assert_eq!(route.output_max_tokens, Some(16_384));
@@ -509,6 +565,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
                 &provider.id,
                 model,
                 CreateManualProviderModel {
+                    template_id: None,
                     metadata: json!({ "id": model, "name": model }),
                 },
             )
@@ -528,8 +585,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         model_id: "gpt-4o-route".into(),
         display_name: None,
         balance: None,
-        target_provider: String::new(),
-        target_model: None,
+
         targets: vec![target],
         default_thinking_level: None,
     };
@@ -573,7 +629,10 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
 
     let route = routes.get("cased-route").await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(route.targets[0].model.as_deref(), Some("upstream-model"));
+    assert_eq!(
+        route.targets[0].model().map(|model| model.as_str()),
+        Some("upstream-model")
+    );
     Ok(())
 }
 
@@ -645,9 +704,16 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         model_id: model_id.into(),
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
-        target_provider: provider.id.clone(),
-        target_model: Some("upstream-model".into()),
-        targets: Vec::new(),
+        targets: vec![CreateTarget {
+            provider_id: provider.id.clone(),
+            model: Some("upstream-model".into()),
+            enabled: true,
+            priority: None,
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
+            thinking_level_map: Vec::new(),
+        }],
         default_thinking_level: None,
     };
 
@@ -664,7 +730,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         .update_model(
             &first.model_id,
             UpdateRoute {
-                display_name: Some("   ".into()),
+                display_name: Some(Some("   ".into())),
                 ..Default::default()
             },
         )
@@ -719,8 +785,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             model_id: "manual-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("upstream-model".into()),
+
             targets: vec![CreateTarget {
                 provider_id: provider.id,
                 model: Some("upstream-model".into()),
@@ -750,9 +815,16 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
             model_id: "missing-model-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("missing-model".into()),
-            targets: vec![],
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("missing-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -797,6 +869,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             &provider.id,
             "effort-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "effort-model",
                     "reasoning_options": [{
@@ -812,16 +885,23 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             model_id: "thinking-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("effort-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("effort-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
 
     assert_eq!(route.targets[0].thinking_level_map.len(), 7);
     assert_eq!(
-        route.supported_thinking_levels.0,
+        route.supported_thinking_levels,
         vec![
             ThinkingLevel::Off,
             ThinkingLevel::Low,
@@ -851,7 +931,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         )
         .await?;
     assert_eq!(
-        updated.supported_thinking_levels.0,
+        updated.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::High, ThinkingLevel::Max]
     );
     let low = updated.targets[0]
@@ -877,7 +957,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         }
     );
     assert_eq!(
-        reset.supported_thinking_levels.0,
+        reset.supported_thinking_levels,
         vec![
             ThinkingLevel::Off,
             ThinkingLevel::Low,
@@ -897,6 +977,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             &provider.id,
             "max-effort-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "max-effort-model",
                     "reasoning_options": [{
@@ -913,9 +994,16 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             model_id: "max-effort-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("max-effort-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("max-effort-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -937,7 +1025,7 @@ async fn create_toggle_route(
     protocol: &str,
     capabilities: &[&str],
     reasoning: Option<bool>,
-) -> anyhow::Result<Route> {
+) -> anyhow::Result<RouteConfig> {
     let data_dir = tempfile::tempdir()?;
     let gateway = Gateway::from_storage(
         GatewayConfig {
@@ -975,6 +1063,7 @@ async fn create_toggle_route(
             &provider.id,
             model,
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": model,
                     "reasoning": reasoning,
@@ -990,9 +1079,16 @@ async fn create_toggle_route(
             model_id: model.into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some(model.into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some(model.into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -1003,7 +1099,7 @@ async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Re
     let route = create_toggle_route("xiaomi", "mimo-v2.5", "openai-compatible", &[], None).await?;
 
     assert_eq!(
-        route.supported_thinking_levels.0,
+        route.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
     );
     Ok(())
@@ -1020,7 +1116,7 @@ async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow
     )
     .await?;
 
-    assert!(route.supported_thinking_levels.0.is_empty());
+    assert!(route.supported_thinking_levels.is_empty());
     for row in route.targets[0].thinking_level_map.iter() {
         assert_eq!(
             row.control,
@@ -1042,7 +1138,7 @@ async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::
     )
     .await?;
 
-    assert!(route.supported_thinking_levels.0.is_empty());
+    assert!(route.supported_thinking_levels.is_empty());
     assert!(
         route.targets[0]
             .thinking_level_map
@@ -1065,7 +1161,7 @@ async fn model_capability_declaration_authorizes_compatible_toggle_controls() ->
     .await?;
 
     assert_eq!(
-        route.supported_thinking_levels.0,
+        route.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
     );
     Ok(())
@@ -1082,7 +1178,7 @@ async fn reasoning_false_rejects_declared_toggle_controls() -> anyhow::Result<()
     )
     .await?;
 
-    assert!(route.supported_thinking_levels.0.is_empty());
+    assert!(route.supported_thinking_levels.is_empty());
     assert!(
         route.targets[0]
             .thinking_level_map
@@ -1133,6 +1229,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             &provider.id,
             "custom-toggle-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "custom-toggle-model",
                     "reasoning_options": [{"type": "toggle"}]
@@ -1148,8 +1245,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             model_id: "submitted-toggle-route".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
+
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
                 model: Some("custom-toggle-model".into()),
@@ -1230,6 +1326,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             &provider.id,
             "gemini-effort-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "gemini-effort-model",
                     "reasoning_options": [{
@@ -1246,15 +1343,22 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             model_id: "gemini-thinking-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("gemini-effort-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("gemini-effort-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
 
     assert_eq!(
-        route.supported_thinking_levels.0,
+        route.supported_thinking_levels,
         vec![ThinkingLevel::Low, ThinkingLevel::High]
     );
     Ok(())
@@ -1285,6 +1389,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                 &provider.id,
                 model,
                 CreateManualProviderModel {
+                    template_id: None,
                     metadata: json!({
                         "id": model,
                         "reasoning_options": [{
@@ -1310,8 +1415,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
             model_id: "intersection-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("wide-effort-model".into()),
+
             targets: vec![
                 CreateTarget {
                     provider_id: provider.id.clone(),
@@ -1339,7 +1443,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
         .await?;
 
     assert_eq!(
-        route.supported_thinking_levels.0,
+        route.supported_thinking_levels,
         vec![ThinkingLevel::Low, ThinkingLevel::High]
     );
     assert_eq!(route.context_window, Some(128_000));
@@ -1373,6 +1477,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             &provider.id,
             "toggle-model",
             CreateManualProviderModel {
+                template_id: None,
                 metadata: json!({
                     "id": "toggle-model",
                     "reasoning_options": [{"type": "toggle"}]
@@ -1385,9 +1490,16 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             model_id: "toggle-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("toggle-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("toggle-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -1410,7 +1522,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(
-        updated.supported_thinking_levels.0,
+        updated.supported_thinking_levels,
         vec![
             ThinkingLevel::Off,
             ThinkingLevel::Medium,
@@ -1422,7 +1534,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .regenerate_target_thinking_map(&route.model_id, &updated.targets[0].id)
         .await?;
     assert_eq!(
-        regenerated.supported_thinking_levels.0,
+        regenerated.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
     );
     Ok(())
@@ -1437,9 +1549,16 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
             model_id: "refresh-route".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;

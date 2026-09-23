@@ -1,8 +1,8 @@
-use crate::db::models::Route;
+use crate::db::models::RouteConfig;
 use crate::storage::RouteStore;
 
 pub struct RouteCache {
-    pub models: Vec<Route>,
+    pub models: Vec<RouteConfig>,
 }
 
 impl RouteCache {
@@ -20,7 +20,7 @@ impl RouteCache {
     }
 }
 
-pub fn match_model<'a>(models: &'a [Route], model: &str) -> Option<&'a Route> {
+pub fn match_model<'a>(models: &'a [RouteConfig], model: &str) -> Option<&'a RouteConfig> {
     models.iter().find(|m| m.model_id == model)
 }
 
@@ -28,17 +28,15 @@ pub fn match_model<'a>(models: &'a [Route], model: &str) -> Option<&'a Route> {
 mod tests {
     use super::*;
 
-    fn route(id: &str, model_id: &str) -> Route {
-        Route {
+    fn route(id: &str, model_id: &str) -> RouteConfig {
+        RouteConfig {
             id: id.into(),
             model_id: model_id.into(),
             display_name: None,
             balance: "traffic_equalization".into(),
-            target_provider: String::new(),
-            target_model: None,
             is_enabled: true,
             created_at: String::new(),
-            supported_thinking_levels: sqlx::types::Json(Vec::new()),
+            supported_thinking_levels: Vec::new(),
             context_window: None,
             output_max_tokens: None,
             supports_image_input: false,

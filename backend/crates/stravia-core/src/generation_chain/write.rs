@@ -369,7 +369,6 @@ impl GenerationChainWrite {
 fn history_marker_restored(item: &AiItem) -> bool {
     item.meta
         .as_ref()
-        .and_then(serde_json::Value::as_object)
         .and_then(|meta| meta.get("__stravia_history_marker_restored"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
@@ -384,7 +383,6 @@ fn history_marker_anchor_indices(items: &[AiItem]) -> Vec<(usize, String)> {
         let Some(reference) = item
             .meta
             .as_ref()
-            .and_then(serde_json::Value::as_object)
             .and_then(|meta| meta.get("__stravia_history_marker_reference"))
             .and_then(serde_json::Value::as_str)
         else {

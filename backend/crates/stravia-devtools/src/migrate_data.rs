@@ -1,4 +1,4 @@
-//! 离线复制迁移；结构优化仅在显式启用时作用于目标副本，源数据不改写。
+//! 离线复制受支持的迁移前缀；目标副本由正常启动流程升级，源数据不改写。
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
@@ -278,33 +278,19 @@ impl Plan {
     }
 }
 
-/// 源库必须已是当前基线；旧迁移历史不复制、不升级。
+/// Verify source history without applying migrations or changing the source.
 async fn check_source_schema(database: &Path) -> Result<()> {
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
             .filename(database)
+            .read_only(true)
             .create_if_missing(false),
     )
     .await
     .context("open source SQLite database")?;
-    let has_history: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations')",
-    )
-    .fetch_one(&mut connection)
-    .await?;
-    let versions: Vec<i64> = if has_history {
-        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&mut connection)
-            .await?
-    } else {
-        Vec::new()
-    };
+    let result = stravia_core::migrations::check_sqlite_source_history(&mut connection).await;
     connection.close().await?;
-    ensure!(
-        versions == [stravia_core::migrations::BASELINE_VERSION],
-        "source database was created by an older Stravia version and cannot be upgraded by this release"
-    );
-    Ok(())
+    result.context("source SQLite migration history is not a supported prefix")
 }
 
 async fn snapshot(source: &Path, destination: &Path) -> Result<()> {
@@ -610,11 +596,14 @@ mod tests {
         )
         .execute(&mut connection)
         .await?;
+        let baseline = sqlx::migrate!("../stravia-core/migrations/sqlite");
+        let baseline = baseline.iter().next().expect("frozen baseline migration");
         sqlx::query(
             "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
-             VALUES (?, 'baseline', 1, X'00', 0)",
+             VALUES (?, 'baseline', 1, ?, 0)",
         )
-        .bind(stravia_core::migrations::BASELINE_VERSION)
+        .bind(baseline.version)
+        .bind(baseline.checksum.as_ref())
         .execute(&mut connection)
         .await?;
         connection.close().await?;
@@ -732,12 +721,32 @@ mod tests {
             .execute(&mut connection)
             .await?;
         connection.close().await?;
-        let error = check_source_schema(&database)
+        check_source_schema(&database)
             .await
-            .err()
-            .context("old schema accepted")?
-            .to_string();
-        assert!(error.contains("older Stravia version"), "{error}");
+            .expect_err("a migration history with a missing baseline must be rejected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_source_with_tampered_migration_checksum() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let args = modern(temp.path())?;
+        let database = args.from.join("db/gateway.db");
+        fs::remove_file(&database)?;
+        create_database(&database).await?;
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(false),
+        )
+        .await?;
+        sqlx::query("UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=1")
+            .execute(&mut connection)
+            .await?;
+        connection.close().await?;
+        check_source_schema(&database)
+            .await
+            .expect_err("a tampered migration checksum must be rejected");
         Ok(())
     }
 

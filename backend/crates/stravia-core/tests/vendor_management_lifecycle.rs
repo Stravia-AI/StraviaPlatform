@@ -352,16 +352,23 @@ async fn create_route(
     gateway: &Gateway,
     provider_id: &str,
     route_id: &str,
-) -> anyhow::Result<stravia_core::db::models::Route> {
+) -> anyhow::Result<stravia_core::db::models::RouteConfig> {
     gateway
         .admin()
         .create_model(CreateRoute {
             model_id: route_id.into(),
             display_name: Some("Management Lifecycle Route".into()),
             balance: None,
-            target_provider: provider_id.into(),
-            target_model: Some(MODEL_ID.into()),
-            targets: Vec::new(),
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider_id.into(),
+                model: Some(MODEL_ID.into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -507,7 +514,7 @@ async fn compatible_update_keeps_oauth_401_refresh_and_replay_on_the_original_co
     let token = api_key(&gateway, &route.id).await?;
     let router = create_router(gateway.clone());
 
-    let mut call = tokio::spawn(invoke(router, token, route.id));
+    let mut call = tokio::spawn(invoke(router, token, route.model_id.into()));
     let rejected = upstream.next().await;
     assert_eq!(rejected.operation(), "infer");
     assert_eq!(rejected.header("x-management-version"), Some("1.0.0"));
@@ -840,7 +847,11 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
         "fresh allowance must create a durable sample"
     );
 
-    let mut seed = tokio::spawn(invoke(router.clone(), token.clone(), route.id.clone()));
+    let mut seed = tokio::spawn(invoke(
+        router.clone(),
+        token.clone(),
+        route.model_id.clone().into(),
+    ));
     let request = tokio::select! {
         request = upstream.next() => request,
         result = &mut seed => panic!("seed inference ended before reaching the upstream: {result:?}"),
@@ -859,7 +870,7 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
         .roots
         .iter()
         .flat_map(|root| &root.interactions)
-        .find(|interaction| interaction.first_route_id == route.id)
+        .find(|interaction| interaction.first_route_id == route.id.as_str())
         .expect("seeded interaction history");
     assert_eq!(history.usage.output_tokens, Some(7));
     let history_id = history.id.clone();
@@ -1062,8 +1073,16 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
     assert_eq!(retained_route.display_name, route.display_name);
     assert_eq!(retained_route.targets.len(), 1);
     assert_eq!(retained_route.targets[0].id, original_target.id);
-    assert_eq!(retained_route.targets[0].provider_id, provider.id);
-    assert_eq!(retained_route.targets[0].model.as_deref(), Some(MODEL_ID));
+    assert_eq!(
+        retained_route.targets[0].provider_id().as_str(),
+        provider.id.as_str()
+    );
+    assert_eq!(
+        retained_route.targets[0]
+            .model()
+            .map(|model| model.as_str()),
+        Some(MODEL_ID)
+    );
     assert_eq!(
         allowance_sample_count(directory.path(), &provider.id).await?,
         samples_before,
@@ -1079,7 +1098,12 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
 
     // Keep HTTP dispatch on its own task, as in the server and the other requests here.
     // Nesting it inside this long-lived scenario exhausts the Windows test thread stack.
-    let unavailable = tokio::spawn(invoke(router.clone(), token.clone(), route.id.clone())).await?;
+    let unavailable = tokio::spawn(invoke(
+        router.clone(),
+        token.clone(),
+        route.model_id.clone().into(),
+    ))
+    .await?;
     assert_ne!(unavailable.0, StatusCode::OK);
     upstream.assert_no_request();
 
@@ -1146,7 +1170,7 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
         "3.0.0"
     );
 
-    let mut recovered = tokio::spawn(invoke(router, token, route.id));
+    let mut recovered = tokio::spawn(invoke(router, token, route.model_id.into()));
     let request = tokio::select! {
         request = upstream.next() => request,
         result = &mut recovered => panic!("recovered inference ended before reaching the upstream: {result:?}"),

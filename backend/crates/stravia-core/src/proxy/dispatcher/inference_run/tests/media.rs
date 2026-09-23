@@ -33,9 +33,16 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             model_id: "read-scope-parent".into(),
             display_name: None,
             balance: None,
-            target_provider: parent_provider.id,
-            target_model: Some("vision".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: parent_provider.id,
+                model: Some("vision".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -44,7 +51,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     admin
         .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
-            model_id: Some(parent.id.clone()),
+            model_id: Some(parent.id.clone().into()),
             thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
         })
         .await
@@ -91,7 +98,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: true,
-            model_ids: vec![parent.id],
+            model_ids: vec![parent.id.into()],
         })
         .await
         .expect("media-only API key");
@@ -166,6 +173,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                     "tool_call": true,
                     "modalities": {"input": ["text"], "output": ["text"]}
                 }),
+                template_id: None,
             },
         )
         .await
@@ -175,9 +183,16 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             model_id: "text-parent".into(),
             display_name: None,
             balance: None,
-            target_provider: parent_provider.id,
-            target_model: Some("parent".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: parent_provider.id,
+                model: Some("parent".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -211,6 +226,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                     "attachment": true,
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
+                template_id: None,
             },
         )
         .await
@@ -220,9 +236,16 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             model_id: "media-vision".into(),
             display_name: None,
             balance: None,
-            target_provider: media_provider.id,
-            target_model: Some("vision".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: media_provider.id,
+                model: Some("vision".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -230,7 +253,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
     admin
         .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
-            model_id: Some(media_model.id),
+            model_id: Some(media_model.id.into()),
             thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
         })
         .await
@@ -245,7 +268,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             transparent_injection_enabled: true,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![parent_model.id],
+            model_ids: vec![parent_model.id.into()],
             inject_media_understanding: true,
         })
         .await
@@ -512,8 +535,6 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             model_id: "mixed-media".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets: vec![
                 CreateTarget {
                     provider_id: bridge.id,
@@ -546,9 +567,16 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             model_id: "unsupported-media".into(),
             display_name: None,
             balance: None,
-            target_provider: no_tools.id,
-            target_model: Some("unsupported".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: no_tools.id,
+                model: Some("unsupported".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -564,7 +592,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![mixed_model.id, unsupported_model.id],
+            model_ids: vec![mixed_model.id.into(), unsupported_model.id.into()],
             inject_media_understanding: false,
         })
         .await

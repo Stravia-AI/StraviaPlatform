@@ -967,7 +967,7 @@ impl ResponsesStreamFormatter {
         };
         if let Some(completed) = completed {
             if !completed.id.is_empty() {
-                call.call_id.clone_from(&completed.id);
+                completed.id.as_str().clone_into(&mut call.call_id);
             }
             if !completed.name.is_empty() {
                 call.name.clone_from(&completed.name);

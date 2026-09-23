@@ -458,6 +458,10 @@ function clearManualTemplate(): void {
 function preparedDetail(prepared: PreparedProviderModel): ProviderModelDetail {
   return {
     ...prepared,
+    snapshot_state: {
+      type: 'edited',
+      source: prepared.snapshot_state.type === 'imported' ? prepared.snapshot_state.source : null,
+    },
     available: true,
     source_kind: 'manual',
     can_reimport: false,
@@ -473,8 +477,12 @@ async function saveModel(metadataJson: string): Promise<void> {
   const wasDraft = draft
   saving = true
   try {
+    const templateId =
+      selectedDetail.snapshot_state.type === 'edited' && selectedDetail.snapshot_state.source?.type === 'canonical'
+        ? selectedDetail.snapshot_state.source.model_id
+        : undefined
     const saved = draft
-      ? await admin.providers.createManualModel(providerId, selectedDetail.id, metadataJson)
+      ? await admin.providers.createManualModel(providerId, selectedDetail.id, metadataJson, templateId)
       : await admin.providers.updateModel(providerId, selectedDetail.id, metadataJson, selectedDetail.revision)
     selectedDetail = saved
     draft = false
@@ -590,6 +598,9 @@ async function deleteManualModel(): Promise<void> {
   <Badge variant="outline">
     {context.row.original.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
   </Badge>
+  {#if context.row.original.snapshot_state.type === 'unregistered'}
+    <p class="mt-1 text-xs text-muted-foreground">{m.model_specification_not_registered()}</p>
+  {/if}
 {/snippet}
 
 {#snippet providerModelUsageCell(context: DataTableCellContext<ProviderModelSummary>)}

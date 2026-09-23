@@ -77,16 +77,13 @@ impl ThinkingSource {
     }
 
     pub(crate) fn stamp_item(&self, item: &mut stravia_runtime_contract::protocol::ir::AiItem) {
-        let meta = item.meta.get_or_insert_with(|| serde_json::json!({}));
-        if !meta.is_object() {
-            *meta = serde_json::json!({ "vendor_meta": meta.take() });
-        }
-        meta.as_object_mut()
-            .expect("item metadata is an object")
-            .insert(
-                Self::ITEM_META_KEY.into(),
+        item.meta
+            .get_or_insert_with(Default::default)
+            .insert_graph_extension(
+                Self::ITEM_META_KEY,
                 serde_json::to_value(self).expect("thinking source is serializable"),
-            );
+            )
+            .expect("thinking source key is not reserved");
     }
 }
 

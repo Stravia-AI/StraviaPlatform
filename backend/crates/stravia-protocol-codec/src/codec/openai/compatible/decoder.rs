@@ -274,7 +274,7 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
     let tool_calls = msg.tool_calls.map(|tcs| {
         tcs.into_iter()
             .map(|tc| ToolCall {
-                id: tc.id,
+                id: (tc.id).into(),
                 name: tc.function.name,
                 arguments: tc.function.arguments,
             })
@@ -319,14 +319,14 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
     let meta = if meta_obj.is_empty() {
         None
     } else {
-        Some(Value::Object(meta_obj))
+        Some(stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(Value::Object(meta_obj)))
     };
 
     Ok(AiItem {
         role,
         content,
         tool_calls,
-        tool_call_id: msg.tool_call_id,
+        tool_call_id: (msg.tool_call_id).map(Into::into),
         meta,
     }
     .with_plain_tool_text_kind())

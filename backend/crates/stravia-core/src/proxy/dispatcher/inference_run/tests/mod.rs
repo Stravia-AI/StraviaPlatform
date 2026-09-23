@@ -703,7 +703,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
         .await
         .expect("list test models")
         .into_iter()
-        .map(|model| model.id)
+        .map(|model| model.id.into())
         .collect::<Vec<_>>();
     let key = match admin
         .list_api_keys()
@@ -935,7 +935,10 @@ async fn create_test_provider_with_model(
         .create_manual_provider_model(
             &provider.id,
             upstream_model,
-            crate::provider_models::CreateManualProviderModel { metadata },
+            crate::provider_models::CreateManualProviderModel {
+                metadata,
+                template_id: None,
+            },
         )
         .await
         .expect("test Provider Model");
@@ -1355,6 +1358,7 @@ async fn configure_route_with_protocol(
                         "tool_call": true,
                         "reasoning_options": reasoning_options.clone()
                     }),
+                    template_id: None,
                 },
             )
             .await
@@ -1376,14 +1380,13 @@ async fn configure_route_with_protocol(
             model_id: model.into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets,
             default_thinking_level: None,
         })
         .await
         .expect("create route")
         .id
+        .into()
 }
 
 async fn configure_route_with_id(gateway: &Gateway, model: &str, base_urls: &[String]) -> String {
@@ -1409,16 +1412,15 @@ async fn set_target_retry_budget(gateway: &Gateway, model: &str, budget: i32) {
                     route
                         .targets
                         .into_iter()
-                        .map(|target| crate::db::models::UpsertTarget {
-                            id: Some(target.id),
-                            provider_id: target.provider_id,
-                            model: target.model,
+                        .map(|target| crate::db::models::CreateTarget {
+                            provider_id: target.provider_id().clone().into(),
+                            model: target.model().cloned().map(Into::into),
                             enabled: target.enabled,
                             priority: Some(target.priority),
                             first_token_timeout_ms: Some(target.first_token_timeout_ms),
                             target_retry_budget: Some(budget),
                             target_cooldown_ms: Some(target.target_cooldown_ms),
-                            thinking_level_map: target.thinking_level_map.0,
+                            thinking_level_map: target.thinking_level_map,
                         })
                         .collect(),
                 ),

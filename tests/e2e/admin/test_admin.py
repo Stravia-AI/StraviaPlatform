@@ -108,7 +108,7 @@ def _create_probe_provider(
             "name": name,
             "source": {
                 "type": "custom", "vendor": "custom", "channel": "default",
-                "protocol": "openai", "base_url": env["mock"],
+                "protocol": "openai-compatible", "base_url": env["mock"],
                 "models_source": endpoint, **source,
             },
             "credential": credential if credential is not None else {
@@ -379,7 +379,7 @@ def _create_provider(env: dict[str, str], name: str) -> str:
                 "type": "custom",
                 "vendor": "custom",
                 "channel": "default",
-                "protocol": "openai",
+                "protocol": "openai-compatible",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "dummy-key"},
@@ -412,8 +412,7 @@ def _create_model(
 ) -> str:
     payload: dict[str, Any] = {
         "model_id": model_id,
-        "target_provider": provider_id,
-        "target_model": target_model,
+        "targets": [{"provider_id": provider_id, "model": target_model}],
     }
     if display_name is not None:
         payload["display_name"] = display_name
@@ -821,8 +820,7 @@ def test_model_crud(admin_env: dict[str, str]) -> None:
         f"{admin_env['admin']}/api/v1/models",
         payload={
             "name": "legacy-model",
-            "target_provider": provider_id,
-            "target_model": "gpt-4o-mini",
+            "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
         },
         headers=admin_env["auth"],
     )

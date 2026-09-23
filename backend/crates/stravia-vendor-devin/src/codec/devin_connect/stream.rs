@@ -665,13 +665,17 @@ impl DevinConnectStreamParser {
                 });
             }
             let tool_call = ToolCall {
-                id: call.id,
+                id: (call.id).into(),
                 name: call.name,
                 arguments: call.arguments,
             };
             let mut item = AiItem::function_call(tool_call.clone());
             if call.custom {
-                item.meta = Some(serde_json::json!({CUSTOM_TOOL_META: true}));
+                item.meta = Some(
+                    stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                        serde_json::json!({CUSTOM_TOOL_META: true}),
+                    ),
+                );
             }
             deltas.push(AiStreamDelta::ToolCallComplete { index, tool_call });
             deltas.push(AiStreamDelta::ItemDone { index, item });

@@ -38,12 +38,16 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
         role: IrRole::Assistant,
         content: IrMessageContent::Text("".to_string()),
         tool_calls: Some(vec![ToolCall {
-            id: "call_1".to_string(),
+            id: ("call_1".to_string()).into(),
             name: "exec_command".to_string(),
             arguments: "{\"cmd\":\"echo hello\"}".to_string(),
         }]),
         tool_call_id: None,
-        meta: Some(serde_json::Value::Object(extra.into_iter().collect())),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::Value::Object(extra.into_iter().collect()),
+            ),
+        ),
     }];
     let mut req = AiRequest::new("deepseek-v4-flash", messages);
     req.stream = StreamConfig {
@@ -70,7 +74,7 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
 fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
     let mut resp = IrAiResponse::new("gen_1", "gemini-2.5-flash");
     resp.extend_tool_calls(vec![ToolCall {
-        id: "call_1".to_string(),
+        id: ("call_1".to_string()).into(),
         name: "bash".to_string(),
         arguments: "{\"command\":\"ls\"}".to_string(),
     }]);
@@ -310,7 +314,7 @@ fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
         role: IrRole::Tool,
         content: IrMessageContent::Text("{\"ok\":true}".to_string()),
         tool_calls: None,
-        tool_call_id: Some("call_orphan_1".to_string()),
+        tool_call_id: Some(("call_orphan_1".to_string()).into()),
         meta: None,
     }];
     let mut req = AiRequest::new("minimax-m2.7", messages);
@@ -348,7 +352,7 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text("will call".to_string()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_x".to_string(),
+                id: ("call_x".to_string()).into(),
                 name: "ls".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -366,7 +370,7 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("{\"ok\":true}".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_x".to_string()),
+            tool_call_id: Some(("call_x".to_string()).into()),
             meta: None,
         },
     ];
@@ -415,7 +419,7 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text("plan".to_string()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_keep".to_string(),
+                id: ("call_keep".to_string()).into(),
                 name: "exec_command".to_string(),
                 arguments: "{\"command\":\"ls -la\"}".to_string(),
             }]),
@@ -433,7 +437,7 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("{\"stdout\":\"...\"}".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_keep".to_string()),
+            tool_call_id: Some(("call_keep".to_string()).into()),
             meta: None,
         },
     ];
@@ -483,7 +487,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_dup".to_string(),
+                id: ("call_dup".to_string()).into(),
                 name: "exec_command".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -494,7 +498,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_dup".to_string(),
+                id: ("call_dup".to_string()).into(),
                 name: "exec_command".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -505,14 +509,14 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("{\"ok\":true}".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_dup".to_string()),
+            tool_call_id: Some(("call_dup".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Text("{\"ok\":true}".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_dup".to_string()),
+            tool_call_id: Some(("call_dup".to_string()).into()),
             meta: None,
         },
     ];
@@ -671,7 +675,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text("tool".to_string()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_1".to_string(),
+                id: ("call_1".to_string()).into(),
                 name: "exec_command".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -682,7 +686,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("result".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_1".to_string()),
+            tool_call_id: Some(("call_1".to_string()).into()),
             meta: None,
         },
     ];
@@ -730,7 +734,7 @@ fn anthropic_encoder_preserves_correlated_external_tool_ids() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_function_abc_1".to_string(),
+                id: ("call_function_abc_1".to_string()).into(),
                 name: "glob".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -740,7 +744,7 @@ fn anthropic_encoder_preserves_correlated_external_tool_ids() {
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "call_function_abc_1".to_string(),
+                tool_use_id: "call_function_abc_1".into(),
                 content: serde_json::json!({"ok": true}),
                 content_kind: Some(
                     stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
@@ -749,7 +753,7 @@ fn anthropic_encoder_preserves_correlated_external_tool_ids() {
                 cache_control: None,
             }]),
             tool_calls: None,
-            tool_call_id: Some("call_function_abc_1".to_string()),
+            tool_call_id: Some(("call_function_abc_1".to_string()).into()),
             meta: None,
         },
     ];
@@ -801,7 +805,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_same".to_string(),
+                id: ("call_same".to_string()).into(),
                 name: "exec_command".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -812,7 +816,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("ok1".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_same".to_string()),
+            tool_call_id: Some(("call_same".to_string()).into()),
             meta: None,
         },
         AiItem {
@@ -826,7 +830,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("ok2".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_same".to_string()),
+            tool_call_id: Some(("call_same".to_string()).into()),
             meta: None,
         },
     ];
@@ -874,12 +878,12 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
             content: IrMessageContent::Text("".to_string()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: "call_a".to_string(),
+                    id: ("call_a".to_string()).into(),
                     name: "Glob".to_string(),
                     arguments: "{}".to_string(),
                 },
                 ToolCall {
-                    id: "call_b".to_string(),
+                    id: ("call_b".to_string()).into(),
                     name: "Bash".to_string(),
                     arguments: "{}".to_string(),
                 },
@@ -891,14 +895,14 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("r1".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_a".to_string()),
+            tool_call_id: Some(("call_a".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Text("r2".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_b".to_string()),
+            tool_call_id: Some(("call_b".to_string()).into()),
             meta: None,
         },
     ];
@@ -988,31 +992,35 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
             content: IrMessageContent::Text("".to_string()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: "call_tokyo".to_string(),
+                    id: ("call_tokyo".to_string()).into(),
                     name: "get_time".to_string(),
                     arguments: "{\"location\":\"Tokyo\"}".to_string(),
                 },
                 ToolCall {
-                    id: "call_paris".to_string(),
+                    id: ("call_paris".to_string()).into(),
                     name: "get_time".to_string(),
                     arguments: "{\"location\":\"Paris\"}".to_string(),
                 },
             ]),
             tool_call_id: None,
-            meta: Some(serde_json::Value::Object(extra.into_iter().collect())),
+            meta: Some(
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                    serde_json::Value::Object(extra.into_iter().collect()),
+                ),
+            ),
         },
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Text("10:30 JST".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_tokyo".to_string()),
+            tool_call_id: Some(("call_tokyo".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
             content: IrMessageContent::Text("03:30 CEST".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_paris".to_string()),
+            tool_call_id: Some(("call_paris".to_string()).into()),
             meta: None,
         },
     ];
@@ -1201,12 +1209,12 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![
                 ToolCall {
-                    id: "call_old_1".to_string(),
+                    id: ("call_old_1".to_string()).into(),
                     name: String::new(),
                     arguments: "{}".to_string(),
                 },
                 ToolCall {
-                    id: "call_old_2".to_string(),
+                    id: ("call_old_2".to_string()).into(),
                     name: "list_directory".to_string(),
                     arguments: "{}".to_string(),
                 },
@@ -1218,7 +1226,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
             role: IrRole::Assistant,
             content: IrMessageContent::Text(String::new()),
             tool_calls: Some(vec![ToolCall {
-                id: "call_new".to_string(),
+                id: ("call_new".to_string()).into(),
                 name: "glob".to_string(),
                 arguments: "{}".to_string(),
             }]),
@@ -1229,7 +1237,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
             role: IrRole::Tool,
             content: IrMessageContent::Text("{\"ok\":true}".to_string()),
             tool_calls: None,
-            tool_call_id: Some("call_new".to_string()),
+            tool_call_id: Some(("call_new".to_string()).into()),
             meta: None,
         },
     ];

@@ -445,7 +445,7 @@ async fn create_route(
     route_id: &str,
     targets: Vec<(&stravia_core::db::models::Provider, Option<&str>, i32)>,
     target_retry_budget: i32,
-) -> anyhow::Result<stravia_core::db::models::Route> {
+) -> anyhow::Result<stravia_core::db::models::RouteConfig> {
     for (provider, model, _) in &targets {
         if let Some(model) = model
             && gateway
@@ -469,6 +469,7 @@ async fn create_route(
                             "capabilities": ["infer", "search", "media_image"],
                             "modalities": {"input":["text","image"],"output":["text","image"]}
                         }),
+                        template_id: None,
                     },
                 )
                 .await?;
@@ -480,8 +481,6 @@ async fn create_route(
             model_id: route_id.into(),
             display_name: Some(route_id.into()),
             balance: Some("latency_preference".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets: targets
                 .into_iter()
                 .map(|(provider, model, priority)| CreateTarget {
@@ -761,6 +760,7 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
                     "name":"Not a Search Model",
                     "capabilities":["media_image"]
                 }),
+                template_id: None,
             },
         )
         .await?;
@@ -779,7 +779,7 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
             revision: current.revision,
             enabled: true,
             backend: Some(WebSearchBackendDraft::External {
-                route_id: Some(ineligible_model_route.model_id.clone()),
+                route_id: Some(ineligible_model_route.model_id.clone().into()),
             }),
             max_turns: current.max_turns,
             total_time_seconds: current.total_time_seconds,
@@ -850,18 +850,16 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
     assert!(
         eligible
             .iter()
-            .any(|route| { route.model_id == provider_only.model_id && route.available })
+            .any(|route| { route.model_id == provider_only.model_id.as_str() && route.available })
     );
     assert!(
         eligible
             .iter()
-            .any(|route| { route.model_id == model_route.model_id && route.available })
+            .any(|route| { route.model_id == model_route.model_id.as_str() && route.available })
     );
-    assert!(
-        eligible
-            .iter()
-            .any(|route| { route.model_id == ineligible_model_route.model_id && !route.available })
-    );
+    assert!(eligible.iter().any(|route| {
+        route.model_id == ineligible_model_route.model_id.as_str() && !route.available
+    }));
     Ok(())
 }
 
@@ -1129,7 +1127,7 @@ async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Re
             .update_media_generation_config(MediaGenerationConfig {
                 enabled: true,
                 image: ImageGenerationConfig {
-                    route_id: Some(mixed_route.model_id),
+                    route_id: Some(mixed_route.model_id.into()),
                 },
             })
             .await
@@ -1268,6 +1266,7 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
                         "capabilities": capabilities,
                         "modalities": modalities,
                     }),
+                    template_id: None,
                 },
             )
             .await?;
@@ -1284,6 +1283,7 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
                     "name":"Legacy text model without an explicit infer label",
                     "modalities":{"input":["text"],"output":["text"]},
                 }),
+                template_id: None,
             },
         )
         .await?;
@@ -1731,6 +1731,14 @@ async fn incompatible_update_cancels_search_and_image_retry_backoff_without_repl
     };
     search_entered.await.expect("Search reached first attempt");
     image_entered.await.expect("image reached first attempt");
+    // Wasm compilation belongs outside the retry window; both operations are
+    // already active while their first upstream responses remain blocked.
+    let preview = preview_fixture(&harness.gateway, "capability-incompatible.wasm").await?;
+    assert!(preview.cancels_active_operations);
+    assert_eq!(
+        preview.active_operations, 2,
+        "both pending capabilities must remain owned by the old Vendor"
+    );
     search_release
         .send(())
         .expect("release retryable Search response");
@@ -1741,12 +1749,6 @@ async fn incompatible_update_cancels_search_and_image_retry_backoff_without_repl
     image_responded.await.expect("image retry response sent");
     tokio::task::yield_now().await;
 
-    let preview = preview_fixture(&harness.gateway, "capability-incompatible.wasm").await?;
-    assert!(preview.cancels_active_operations);
-    assert_eq!(
-        preview.active_operations, 2,
-        "retry backoff must remain owned by both old Vendor operations"
-    );
     harness
         .gateway
         .admin()
@@ -1837,12 +1839,9 @@ async fn compatible_capability_removal_preserves_inflight_result_and_binding() -
     let preview = preview_fixture(&harness.gateway, "capability-removed.wasm").await?;
     assert!(!preview.cancels_active_operations);
     assert_eq!(preview.active_operations, 1);
-    assert!(
-        preview
-            .affected_bindings
-            .iter()
-            .any(|impact| { impact.route_id == route.model_id && impact.capability == "search" })
-    );
+    assert!(preview.affected_bindings.iter().any(|impact| {
+        impact.route_id == route.model_id.as_str() && impact.capability == "search"
+    }));
     harness
         .gateway
         .admin()
@@ -1859,7 +1858,7 @@ async fn compatible_capability_removal_preserves_inflight_result_and_binding() -
     let config = harness.gateway.admin().get_web_search_config().await?;
     assert!(matches!(
         config.backend.as_ref(),
-        Some(WebSearchBackendDraft::External { route_id: Some(id) }) if id == &route.model_id
+        Some(WebSearchBackendDraft::External { route_id: Some(id) }) if id.as_str() == route.model_id.as_str()
     ));
     let persisted_route = harness.gateway.admin().get_model(&route.model_id).await?;
     assert_eq!(persisted_route.targets.len(), 1);
@@ -1884,12 +1883,9 @@ async fn compatible_capability_removal_preserves_inflight_result_and_binding() -
         .find(|plugin| plugin.vendor_id == "fixture.capability-contract")
         .expect("updated fixture summary");
     assert_eq!(summary.version, "2.0.0");
-    assert!(
-        summary
-            .affected_bindings
-            .iter()
-            .any(|impact| { impact.route_id == route.model_id && impact.capability == "search" })
-    );
+    assert!(summary.affected_bindings.iter().any(|impact| {
+        impact.route_id == route.model_id.as_str() && impact.capability == "search"
+    }));
     Ok(())
 }
 
@@ -2206,7 +2202,7 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![image_route.id.clone()],
+            model_ids: vec![image_route.id.clone().into()],
             inject_media_understanding: false,
         })
         .await?;
@@ -2283,10 +2279,10 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
     assert_eq!(updated.status, "ready");
     assert!(updated.pending_update.is_none());
     assert!(updated.affected_bindings.iter().any(|impact| {
-        impact.route_id == search_route.model_id && impact.capability == "search"
+        impact.route_id == search_route.model_id.as_str() && impact.capability == "search"
     }));
     assert!(updated.affected_bindings.iter().any(|impact| {
-        impact.route_id == image_route.model_id && impact.capability == "media_image"
+        impact.route_id == image_route.model_id.as_str() && impact.capability == "media_image"
     }));
 
     let retained_provider = restarted.admin().get_provider(&provider.id).await?;
@@ -2294,13 +2290,16 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
     for route in [&search_route, &image_route] {
         let retained = restarted.admin().get_model(&route.model_id).await?;
         assert_eq!(retained.targets.len(), 1);
-        assert_eq!(retained.targets[0].provider_id, provider.id);
+        assert_eq!(
+            retained.targets[0].provider_id().as_str(),
+            provider.id.as_str()
+        );
     }
     let search_config = restarted.admin().get_web_search_config().await?;
     assert!(matches!(
         &search_config.backend,
         Some(WebSearchBackendDraft::External { route_id: Some(id) })
-            if id == &search_route.model_id
+            if id.as_str() == search_route.model_id.as_str()
     ));
     let media_config = restarted.admin().get_media_generation_config().await?;
     assert_eq!(
@@ -2408,7 +2407,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: false,
-            model_ids: vec![inference_route.id.clone()],
+            model_ids: vec![inference_route.id.clone().into()],
         })
         .await?;
 
@@ -2593,7 +2592,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: false,
-            model_ids: vec![openai_route.id.clone()],
+            model_ids: vec![openai_route.id.clone().into()],
         })
         .await?;
     upstream

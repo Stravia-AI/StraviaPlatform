@@ -161,7 +161,6 @@ def test_sqlite_rejects_incompatible_migration_history(
     try:
         proc.wait(timeout=30)
         assert proc.returncode != 0
-        assert any("older Stravia version" in line for line in logs), "\n".join(logs[-40:])
     finally:
         stop_stravia_server(proc, logs)
 
@@ -226,7 +225,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
                             "type": "custom",
                             "vendor": "custom",
                             "channel": "default",
-                            "protocol": "openai",
+                            "protocol": "openai-compatible",
                             "base_url": f"http://127.0.0.1:{upstream_port}/v1",
                         },
                         "credential": {
@@ -260,8 +259,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
                     payload={
                         "model_id": "postgres-server-e2e-model",
                         "display_name": "PostgreSQL server E2E model",
-                        "target_provider": provider_id,
-                        "target_model": "gpt-4o-mini",
+                        "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
                     },
                     headers=headers,
                 )

@@ -884,7 +884,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     let mut first_history = vec![system.clone(), user.clone(), first_assistant];
     first_history.extend(first_calls.iter().map(|call| {
         stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
-            &call.id,
+            call.id.clone(),
             serde_json::Value::String(format!("{}-result", call.id)),
         )
     }));
@@ -930,7 +930,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     second_history.push(second_assistant);
     second_history.extend(second_calls.iter().map(|call| {
         stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
-            &call.id,
+            call.id.clone(),
             serde_json::Value::String(format!("{}-result", call.id)),
         )
     }));
@@ -1115,6 +1115,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
                     "id": "glm-5",
                     "name": "GLM-5",
                 }),
+                template_id: None,
             },
         )
         .await
@@ -1125,9 +1126,16 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
             model_id: "gpt-5.4".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("glm-5".into()),
-            targets: Vec::new(),
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("glm-5".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -1315,7 +1323,7 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .into_iter()
         .find(|route| route.id == route_id)
         .expect("thinking Route");
-    let mut map = route.targets[0].thinking_level_map.0.clone();
+    let mut map = route.targets[0].thinking_level_map.clone();
     map.iter_mut()
         .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
         .expect("medium row")
@@ -1330,16 +1338,16 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
             display_name: route.display_name.clone(),
             selection_strategy: route.balance.clone(),
             is_enabled: route.is_enabled,
-            targets: vec![CreateTarget {
-                provider_id: route.targets[0].provider_id.clone(),
-                model: route.targets[0].model.clone(),
+            targets: Some(vec![CreateTarget {
+                provider_id: route.targets[0].provider_id().clone().into(),
+                model: route.targets[0].model().cloned().map(Into::into),
                 enabled: route.targets[0].enabled,
                 priority: Some(route.targets[0].priority),
                 first_token_timeout_ms: Some(route.targets[0].first_token_timeout_ms),
                 target_retry_budget: Some(route.targets[0].target_retry_budget),
                 target_cooldown_ms: Some(route.targets[0].target_cooldown_ms),
                 thinking_level_map: map,
-            }],
+            }]),
             default_thinking_level: None,
         })
         .await
@@ -1396,14 +1404,13 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
         .targets
         .iter()
         .map(|target| {
-            let mut map = target.thinking_level_map.0.clone();
+            let mut map = target.thinking_level_map.clone();
             for row in &mut map {
                 row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
             }
-            crate::db::models::UpsertTarget {
-                id: Some(target.id.clone()),
-                provider_id: target.provider_id.clone(),
-                model: target.model.clone(),
+            crate::db::models::CreateTarget {
+                provider_id: target.provider_id().clone().into(),
+                model: target.model().cloned().map(Into::into),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
@@ -1478,17 +1485,16 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .iter()
         .enumerate()
         .map(|(index, target)| {
-            let mut map = target.thinking_level_map.0.clone();
+            let mut map = target.thinking_level_map.clone();
             map.iter_mut()
                 .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
                 .expect("medium row")
                 .control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
                 value: if index == 0 { "low" } else { "high" }.into(),
             };
-            crate::db::models::UpsertTarget {
-                id: Some(target.id.clone()),
-                provider_id: target.provider_id.clone(),
-                model: target.model.clone(),
+            crate::db::models::CreateTarget {
+                provider_id: target.provider_id().clone().into(),
+                model: target.model().cloned().map(Into::into),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),

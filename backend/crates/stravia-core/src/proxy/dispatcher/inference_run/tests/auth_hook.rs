@@ -130,7 +130,7 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![final_route.id],
+            model_ids: vec![final_route.id.into()],
             inject_media_understanding: false,
         })
         .await

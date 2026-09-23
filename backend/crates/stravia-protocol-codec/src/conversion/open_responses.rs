@@ -5,7 +5,7 @@ fn openai_to_responses_reasoning_and_function_call_items() {
     let mut resp = IrAiResponse::new("resp_1", "minimax-m2.7");
     resp.push_reasoning("chain", None);
     resp.extend_tool_calls(vec![ToolCall {
-        id: "call_123".to_string(),
+        id: ("call_123".to_string()).into(),
         name: "ls".to_string(),
         arguments: "{\"path\":\".\"}".to_string(),
     }]);
@@ -126,7 +126,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
                 role: IrRole::Assistant,
                 content: IrMessageContent::Text(String::new()),
                 tool_calls: Some(vec![ToolCall {
-                    id: "call_abc".to_string(),
+                    id: ("call_abc".to_string()).into(),
                     name: "list_dir".to_string(),
                     arguments: "{\"path\":\".\"}".to_string(),
                 }]),
@@ -137,7 +137,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
                 role: IrRole::Tool,
                 content: IrMessageContent::Text("file1\nfile2".to_string()),
                 tool_calls: None,
-                tool_call_id: Some("call_abc".to_string()),
+                tool_call_id: Some(("call_abc".to_string()).into()),
                 meta: None,
             },
         ],

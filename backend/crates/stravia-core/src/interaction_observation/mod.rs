@@ -1124,7 +1124,7 @@ impl RunObserver {
                     } = block
                     {
                         pending.push(RunEvent::ClientToolResult {
-                            tool_id: tool_use_id.clone(),
+                            tool_id: tool_use_id.to_string(),
                             content: content.clone(),
                             is_error: is_error.unwrap_or(false),
                         });
@@ -1136,7 +1136,7 @@ impl RunObserver {
                 && let Some(tool_id) = &item.tool_call_id
             {
                 pending.push(RunEvent::ClientToolResult {
-                    tool_id: tool_id.clone(),
+                    tool_id: tool_id.to_string(),
                     content: serde_json::to_value(&item.content).expect("canonical tool content"),
                     is_error: false,
                 });

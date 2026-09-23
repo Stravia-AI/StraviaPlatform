@@ -34,13 +34,15 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
     let mut models = cache
         .models
         .iter()
-        .filter(|model| unrestricted_model_access || accessible_route_ids.contains(&model.id))
+        .filter(|model| {
+            unrestricted_model_access || accessible_route_ids.contains(model.id.as_str())
+        })
         .filter(|model| !model.model_id.trim().is_empty())
         .map(|model| {
             (
                 model.model_id.trim().to_string(),
                 model.effective_display_name().to_string(),
-                model.supported_thinking_levels.0.clone(),
+                model.supported_thinking_levels.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -78,7 +80,7 @@ mod tests {
     use super::*;
     use crate::db::models::{
         CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
-        Route,
+        RouteConfig,
     };
     use crate::provider_models::CreateManualProviderModel;
 
@@ -141,6 +143,7 @@ mod tests {
                         "id": "provider-model",
                         "name": "provider-model",
                     }),
+                    template_id: None,
                 },
             )
             .await
@@ -149,8 +152,6 @@ mod tests {
             model_id: model_id.into(),
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
                 model: Some("provider-model".into()),
@@ -189,7 +190,7 @@ mod tests {
                 transparent_injection_enabled: false,
                 inject_web_search: false,
                 inject_media_generation: false,
-                model_ids: vec![bound.id.clone()],
+                model_ids: vec![bound.id.clone().into()],
                 inject_media_understanding: false,
             })
             .await
@@ -281,14 +282,13 @@ mod tests {
             .targets
             .iter()
             .map(|target| {
-                let mut map = target.thinking_level_map.0.clone();
+                let mut map = target.thinking_level_map.clone();
                 for row in &mut map {
                     row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
                 }
-                crate::db::models::UpsertTarget {
-                    id: Some(target.id.clone()),
-                    provider_id: target.provider_id.clone(),
-                    model: target.model.clone(),
+                crate::db::models::CreateTarget {
+                    provider_id: target.provider_id().clone().into(),
+                    model: target.model().cloned().map(Into::into),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
@@ -364,16 +364,15 @@ mod tests {
     async fn models_list_rejects_when_authentication_is_unavailable() {
         let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
             Vec::new(),
-            vec![Route {
+            vec![RouteConfig {
                 id: "model-id".into(),
                 model_id: "model".into(),
                 display_name: None,
                 balance: "traffic_equalization".into(),
-                target_provider: String::new(),
-                target_model: None,
+
                 is_enabled: true,
                 created_at: "2000-01-01T00:00:00Z".into(),
-                supported_thinking_levels: sqlx::types::Json(Vec::new()),
+                supported_thinking_levels: Vec::new(),
                 context_window: None,
                 output_max_tokens: None,
                 supports_image_input: false,

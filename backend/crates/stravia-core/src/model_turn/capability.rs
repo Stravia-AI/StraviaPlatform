@@ -8,7 +8,7 @@ use stravia_vendor_runtime::{RuntimeError, RuntimeEvent};
 use stravia_vendor_sdk::{Capability, Operation, OperationOutput};
 
 use crate::Gateway;
-use crate::db::models::Route;
+use crate::db::models::RouteConfig;
 use crate::plugin::execution::PreparedVendorExecution;
 use crate::plugin::{VendorCallContext, VendorEvent, VendorPublicationFence, VendorRequest};
 use crate::router::selector::AttemptFailureSignal;
@@ -39,7 +39,10 @@ struct CapabilityObservation {
 }
 
 impl CapabilityObservation {
-    fn new(observer: Option<crate::interaction_observation::RunObserver>, route: &Route) -> Self {
+    fn new(
+        observer: Option<crate::interaction_observation::RunObserver>,
+        route: &RouteConfig,
+    ) -> Self {
         let id = observer
             .as_ref()
             .map(|_| stravia_runtime_contract::identifier::new_id())
@@ -47,7 +50,7 @@ impl CapabilityObservation {
         if let Some(observer) = &observer {
             observer.record(crate::interaction_observation::RunEvent::ModelTurnStarted {
                 model_turn_id: id.clone(),
-                route_id: route.id.clone(),
+                route_id: route.id.clone().into(),
                 model_display_name: route.display_name.clone(),
             });
         }
@@ -85,22 +88,20 @@ impl Gateway {
     /// than silently filtering targets and changing its scheduling policy.
     pub(crate) async fn validate_vendor_route_capability(
         &self,
-        route: &Route,
+        route: &RouteConfig,
         capability: Capability,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(route.is_enabled, "Route is disabled");
-        let enabled = route
-            .targets
-            .iter()
-            .filter(|target| target.enabled)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(!enabled.is_empty(), "Route has no enabled Target");
+        anyhow::ensure!(
+            route.targets.iter().any(|target| target.enabled),
+            "Route has no enabled Target"
+        );
 
-        for target in enabled {
+        for target in route.targets.iter().filter(|target| target.enabled) {
             let provider = self
                 .storage
                 .providers()
-                .get(&target.provider_id)
+                .get(target.provider_id().as_str())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Target Provider is unavailable"))?;
             anyhow::ensure!(provider.is_enabled, "Target Provider is disabled");
@@ -123,7 +124,7 @@ impl Gateway {
                 capability.as_str()
             );
 
-            match target.model.as_deref() {
+            match target.model().map(|model| model.as_str()) {
                 Some(model) => {
                     anyhow::ensure!(
                         !model.trim().is_empty()
@@ -133,7 +134,7 @@ impl Gateway {
                     let model = self
                         .storage
                         .provider_models()
-                        .find(&target.provider_id, model)
+                        .find(target.provider_id().as_str(), model)
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("Target Provider Model is unavailable"))?;
                     anyhow::ensure!(
@@ -177,7 +178,7 @@ impl Gateway {
     pub(crate) async fn execute_vendor_route(
         &self,
         principal: &Principal,
-        route: &Route,
+        route: &RouteConfig,
         request: VendorRequest,
         context: VendorCallContext,
     ) -> anyhow::Result<VendorRouteExecution> {
@@ -224,17 +225,17 @@ impl Gateway {
                     _ = any_vendor_cancelled(&vendor_leases) => {
                         return Err(RuntimeError::Cancelled.into());
                     }
-                    result = self.storage.providers().get(&target.provider_id) => result?,
+                    result = self.storage.providers().get(target.provider_id().as_str()) => result?,
                 }
                 .ok_or_else(|| anyhow::anyhow!("Target Provider is unavailable"))?;
-                let attempt = target.model.as_ref().map(|model| {
+                let attempt = target.model().map(|model| {
                     AttemptObservation::new(
                         context.observer.clone(),
                         capability_observation.id.clone(),
                         selected_target_key(&target),
                         provider.id.clone(),
                         provider.name.clone(),
-                        model.clone(),
+                        model.clone().into(),
                         provider.protocol.clone(),
                         provider.base_url.clone(),
                         None,
@@ -258,16 +259,16 @@ impl Gateway {
                             if let Some(lease) = existing_lease.as_ref() {
                                 self.prepare_vendor_execution_with_lease(
                                     lease,
-                                    &target.provider_id,
-                                    target.model.as_deref(),
+                                    target.provider_id().as_str(),
+                                    target.model().map(|model| model.as_str()),
                                     operation,
                                     &context,
                                 )
                                 .await
                             } else {
                                 self.prepare_vendor_execution(
-                                    &target.provider_id,
-                                    target.model.as_deref(),
+                                    target.provider_id().as_str(),
+                                    target.model().map(|model| model.as_str()),
                                     operation,
                                     &context,
                                 )
@@ -341,11 +342,12 @@ impl Gateway {
                         );
                         policy.accept_current();
                         capability_observation.finish("completed");
+                        let (provider_id, upstream_model) = target.destination.into_parts();
                         return Ok(VendorRouteExecution {
                             output: execution.output,
                             publication: execution.publication,
-                            provider_id: target.provider_id,
-                            upstream_model: target.model,
+                            provider_id: provider_id.into(),
+                            upstream_model: upstream_model.map(Into::into),
                             target_id,
                         });
                     }
@@ -356,7 +358,7 @@ impl Gateway {
                             && crate::plugin::execution::is_credential_rejection(&failure.error)
                         {
                             self.mark_provider_credential_invalid(
-                                &target.provider_id,
+                                target.provider_id().as_str(),
                                 execution.credential_version(),
                             )
                             .await;

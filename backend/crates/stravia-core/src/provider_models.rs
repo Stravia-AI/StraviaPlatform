@@ -34,6 +34,32 @@ impl FromStr for ProviderModelSourceKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourceStamp {
+    ProviderCatalog { provider_id: String },
+    Canonical { model_id: String },
+    Discovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SnapshotState {
+    Unregistered,
+    Imported { source: SourceStamp },
+    Edited { source: Option<SourceStamp> },
+}
+
+impl SnapshotState {
+    pub fn source(&self) -> Option<&SourceStamp> {
+        match self {
+            Self::Unregistered => None,
+            Self::Imported { source } => Some(source),
+            Self::Edited { source } => source.as_ref(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderModelPresence {
@@ -160,52 +186,33 @@ impl ProviderModelMetadata {
         Self::from_value(model_id, value)
     }
 
-    /// 未匹配 Provider Catalog 与 Canonical 模板时的占位快照：按最常见的文本
-    /// 对话模型登记保守默认，避免规格完全空白。占位不等于已登记（见
-    /// lacks_registered_specification），后续同步命中真实元数据仍会整体替换。
+    /// Unknown specifications remain unknown until an authoritative source supplies them.
     pub fn bare(model_id: &str) -> Self {
         Self {
             id: Some(model_id.to_string()),
             name: Some(model_id.to_string()),
-            reasoning: Some(true),
-            tool_call: Some(true),
-            modalities: Some(unmatched_default_modalities()),
-            limit: Some(unmatched_default_limit()),
             ..Self::default()
         }
     }
 
-    /// 规格芯片依赖这些字段。全空或仅含 bare() 占位默认值时视为「未登记」，
-    /// 后续同步可按模型 ID 补模板。
-    pub fn lacks_registered_specification(&self) -> bool {
-        if self.structured_output.is_some()
+    pub fn has_specification(&self) -> bool {
+        let declared_limit = self.limit.as_ref().is_some_and(|limit| {
+            limit.context.is_some() || limit.input.is_some() || limit.output.is_some()
+        });
+        let declared_modalities = self.modalities.as_ref().is_some_and(|modalities| {
+            !modalities.input.is_empty() || !modalities.output.is_empty()
+        });
+        declared_limit
+            || declared_modalities
+            || self.reasoning.is_some()
+            || self.tool_call.is_some()
+            || self.structured_output.is_some()
             || self.attachment.is_some()
             || self.temperature.is_some()
-        {
-            return false;
-        }
-        if self.limit.is_none()
-            && self.modalities.is_none()
-            && self.reasoning.is_none()
-            && self.tool_call.is_none()
-        {
-            return true;
-        }
-        self.limit == Some(unmatched_default_limit())
-            && self.modalities == Some(unmatched_default_modalities())
-            && self.reasoning == Some(true)
-            && self.tool_call == Some(true)
-    }
-
-    /// 与历史 bare() 写法完全一致（id/name 均为模型 ID、其余全空）的快照；
-    /// 同步时可整体升级为占位默认或模板数据而不覆盖人工修改。
-    pub(crate) fn is_identity_only(&self) -> bool {
-        *self
-            == Self {
-                id: self.id.clone(),
-                name: self.id.clone(),
-                ..Self::default()
-            }
+            || self.open_weights.is_some()
+            || self.reasoning_options.is_some()
+            || self.interleaved.is_some()
+            || self.cost.is_some()
     }
 
     pub fn to_value(&self) -> anyhow::Result<Value> {
@@ -282,23 +289,6 @@ impl ProviderModelMetadata {
             cost.validate()?;
         }
         Ok(())
-    }
-}
-
-/// 未匹配占位规格：最常见的文本对话模型假设，发现后仍可人工改正或由同步用真实元数据替换。
-const UNMATCHED_DEFAULT_CONTEXT_TOKENS: u64 = 256 * 1024;
-
-fn unmatched_default_limit() -> ModelLimit {
-    ModelLimit {
-        context: Some(UNMATCHED_DEFAULT_CONTEXT_TOKENS),
-        ..ModelLimit::default()
-    }
-}
-
-fn unmatched_default_modalities() -> ModelModalities {
-    ModelModalities {
-        input: vec!["text".to_string()],
-        output: vec!["text".to_string()],
     }
 }
 
@@ -508,6 +498,7 @@ pub struct ProviderModelRecord {
     pub provider_id: String,
     pub model_id: String,
     pub source_kind: ProviderModelSourceKind,
+    pub snapshot_state: SnapshotState,
     pub metadata_source_provider_id: Option<String>,
     pub presence: ProviderModelPresence,
     pub selection_policy: ProviderModelSelectionPolicy,
@@ -544,6 +535,7 @@ pub struct NewProviderModelRecord {
     pub provider_id: String,
     pub model_id: String,
     pub source_kind: ProviderModelSourceKind,
+    pub snapshot_state: SnapshotState,
     pub metadata_source_provider_id: Option<String>,
     pub presence: ProviderModelPresence,
     pub selection_policy: ProviderModelSelectionPolicy,
@@ -553,6 +545,9 @@ pub struct NewProviderModelRecord {
 #[derive(Debug, Clone)]
 pub struct ProviderModelPresenceUpdate {
     pub model_id: String,
+    pub expected_revision: i64,
+    pub snapshot_state: Option<SnapshotState>,
+    pub metadata_source_provider_id: Option<String>,
     pub presence: ProviderModelPresence,
     pub lifecycle_status: Option<String>,
     pub metadata: Option<ProviderModelMetadata>,
@@ -578,6 +573,7 @@ pub struct ProviderModelSummary {
     pub name: String,
     pub available: bool,
     pub source_kind: ProviderModelSourceKind,
+    pub snapshot_state: SnapshotState,
     pub selection_policy: ProviderModelSelectionPolicy,
     pub specification: ModelSpecification,
     pub revision: i64,
@@ -605,6 +601,7 @@ impl From<&ProviderModelRecord> for ProviderModelSummary {
                 .unwrap_or_else(|| record.model_id.clone()),
             available: record.effective_available(),
             source_kind: record.source_kind,
+            snapshot_state: record.snapshot_state.clone(),
             selection_policy: record.selection_policy,
             specification: ModelSpecification {
                 limit: record.metadata.limit.clone(),
@@ -626,6 +623,7 @@ pub struct ProviderModelDetail {
     pub available: bool,
     pub source_kind: ProviderModelSourceKind,
     pub can_reimport: bool,
+    pub snapshot_state: SnapshotState,
     pub selection_policy: ProviderModelSelectionPolicy,
     pub metadata: ProviderModelMetadata,
     pub thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
@@ -646,6 +644,7 @@ impl From<ProviderModelRecord> for ProviderModelDetail {
             source_kind: record.source_kind,
             can_reimport: record.source_kind == ProviderModelSourceKind::Discovered
                 && record.metadata_source_provider_id.is_some(),
+            snapshot_state: record.snapshot_state,
             selection_policy: record.selection_policy,
             metadata: record.metadata,
             thinking_level_map,
@@ -660,6 +659,8 @@ impl From<ProviderModelRecord> for ProviderModelDetail {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateManualProviderModel {
     pub metadata: Value,
+    #[serde(default)]
+    pub template_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -725,6 +726,8 @@ fn validate_optional_string_values(field: &str, values: &[Option<String>]) -> an
 mod tests {
     use serde_json::json;
 
+    use crate::provider_models::{SnapshotState, SourceStamp};
+
     use super::{ProviderModelMetadata, model_id_match_key};
 
     #[test]
@@ -738,57 +741,30 @@ mod tests {
     }
 
     #[test]
-    fn lacks_registered_specification_matches_bare_metadata() {
+    fn unknown_snapshot_does_not_invent_specifications() {
         let bare = ProviderModelMetadata::bare("glm-5.1");
-        assert_eq!(bare.reasoning, Some(true));
-        assert_eq!(bare.tool_call, Some(true));
-        assert_eq!(
-            bare.limit.as_ref().and_then(|limit| limit.context),
-            Some(256 * 1024)
-        );
-        assert_eq!(
-            bare.modalities
-                .as_ref()
-                .map(|modalities| modalities.input.as_slice()),
-            Some(["text".to_string()].as_slice())
-        );
-        assert_eq!(
-            bare.modalities
-                .as_ref()
-                .map(|modalities| modalities.output.as_slice()),
-            Some(["text".to_string()].as_slice())
-        );
-        // 占位默认不算已登记,后续同步仍可补模板。
-        assert!(bare.lacks_registered_specification());
-        assert!(!bare.is_identity_only());
+        assert_eq!(bare.id.as_deref(), Some("glm-5.1"));
+        assert!(!bare.has_specification());
+        assert!(bare.limit.is_none());
+        assert!(bare.modalities.is_none());
+        assert!(bare.reasoning.is_none());
+        assert!(bare.tool_call.is_none());
 
-        // 占位之外的任何规格修改都视为已登记。
-        let mut touched = ProviderModelMetadata::bare("glm-5.1");
-        touched.temperature = Some(false);
-        assert!(!touched.lacks_registered_specification());
-
-        let specified = ProviderModelMetadata::from_value(
-            "glm-5.1",
-            json!({
-                "name": "GLM-5.1",
-                "tool_call": true,
-                "limit": { "context": 200000, "output": 131072 }
+        let state = SnapshotState::Edited {
+            source: Some(SourceStamp::Canonical {
+                model_id: "template/model".into(),
             }),
-        )
-        .expect("specified metadata");
-        assert!(!specified.lacks_registered_specification());
-
-        // 历史空快照:规格全空时仍视为未登记,且允许整体升级。
-        let mut legacy = ProviderModelMetadata {
-            id: Some("glm-5.1".to_string()),
-            name: Some("glm-5.1".to_string()),
-            ..Default::default()
         };
-        assert!(legacy.lacks_registered_specification());
-        assert!(legacy.is_identity_only());
-        legacy.name = Some("Renamed".to_string());
-        assert!(legacy.lacks_registered_specification());
-        assert!(!legacy.is_identity_only());
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            json!({"type":"edited","source":{"type":"canonical","model_id":"template/model"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SnapshotState>(json!({"type":"edited","source":null}))
+                .unwrap()
+                .source(),
+            None
+        );
     }
 
     #[test]

@@ -391,7 +391,7 @@ pub(super) struct CompletionInput<'a> {
 }
 
 pub(super) struct PreparedPlatformMarker {
-    call_id: String,
+    call_id: stravia_runtime_contract::protocol::ir::ToolCallId,
     marker: HistoryMarker,
 }
 
@@ -623,7 +623,7 @@ pub(super) async fn complete_canonical_response(
     for call in &classified.client {
         observer.record(
             crate::interaction_observation::RunEvent::ClientToolHandoff {
-                tool_id: call.id.clone(),
+                tool_id: call.id.to_string(),
                 name: call.name.clone(),
                 input: Some(
                     serde_json::from_str(&call.arguments)
@@ -647,7 +647,7 @@ pub(super) async fn complete_canonical_response(
         let executions = classified
             .platform
             .into_iter()
-            .filter(|call| !early_call_ids.contains(&call.call.id))
+            .filter(|call| !early_call_ids.contains(call.call.id.as_str()))
             .map(|call| {
                 run.detached_platform_execution(
                     call,

@@ -42,10 +42,10 @@ impl MediaAdminHost for AdminHost {
             result.push(MediaAdminModel {
                 route,
                 view: EligibleMediaModel {
-                    id: model.id,
-                    model_id: model.model_id,
+                    id: model.id.into(),
+                    model_id: model.model_id.into(),
                     display_name,
-                    supported_thinking_levels: model.supported_thinking_levels.0,
+                    supported_thinking_levels: model.supported_thinking_levels,
                 },
             });
         }
@@ -118,6 +118,7 @@ mod tests {
                         "attachment": true,
                         "modalities": { "input": ["text", "image"], "output": ["text"] }
                     }),
+                    template_id: None,
                 },
             )
             .await
@@ -131,6 +132,7 @@ mod tests {
                         "id": "text",
                         "modalities": { "input": ["text"], "output": ["text"] }
                     }),
+                    template_id: None,
                 },
             )
             .await
@@ -140,9 +142,16 @@ mod tests {
                 model_id: "Visual Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: provider.id.clone(),
-                target_model: Some("vision".into()),
-                targets: vec![],
+                targets: vec![crate::db::models::CreateTarget {
+                    provider_id: provider.id.clone(),
+                    model: Some("vision".into()),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
                 default_thinking_level: None,
             })
             .await
@@ -152,8 +161,6 @@ mod tests {
                 model_id: "Mixed Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: String::new(),
-                target_model: None,
                 targets: vec![
                     crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
@@ -188,7 +195,7 @@ mod tests {
         let eligible = before_update
             .eligible_models
             .iter()
-            .find(|candidate| candidate.id == model.id)
+            .find(|candidate| candidate.id == model.id.as_str())
             .expect("all-image Model should be eligible");
         assert!(
             eligible
@@ -199,13 +206,13 @@ mod tests {
             !before_update
                 .eligible_models
                 .iter()
-                .any(|candidate| candidate.id == mixed_model.id)
+                .any(|candidate| candidate.id == mixed_model.id.as_str())
         );
 
         let unsupported_error = admin
             .update_media_understanding_config(MediaUnderstandingConfigUpdate {
                 enabled: true,
-                model_id: Some(model.id.clone()),
+                model_id: Some(model.id.clone().into()),
                 thinking_level: Some(ThinkingLevel::Max),
             })
             .await
@@ -218,7 +225,7 @@ mod tests {
         let updated = admin
             .update_media_understanding_config(MediaUnderstandingConfigUpdate {
                 enabled: true,
-                model_id: Some(model.id.clone()),
+                model_id: Some(model.id.clone().into()),
                 thinking_level: Some(ThinkingLevel::Medium),
             })
             .await
@@ -233,7 +240,7 @@ mod tests {
             .expect("persisted Media configuration");
         assert_eq!(
             (persisted.model_id, persisted.thinking_level),
-            (Some(model.id), Some(ThinkingLevel::Medium))
+            (Some(model.id.into()), Some(ThinkingLevel::Medium))
         );
     }
 }

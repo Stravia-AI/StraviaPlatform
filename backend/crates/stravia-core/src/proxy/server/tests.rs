@@ -193,6 +193,7 @@ async fn protected_responses_router_with_base_url(
                         "values": ["none", "low", "medium", "high", "xhigh"]
                     }]
                 }),
+                template_id: None,
             },
         )
         .await
@@ -202,9 +203,16 @@ async fn protected_responses_router_with_base_url(
             model_id: "auth-model".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("auth-model".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("auth-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -219,7 +227,7 @@ async fn protected_responses_router_with_base_url(
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -770,6 +778,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
                     "name": "No tools",
                     "tool_call": false
                 }),
+                template_id: None,
             },
         )
         .await
@@ -779,9 +788,16 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             model_id: "web-search-test".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("no-tools".into()),
-            targets: vec![],
+            targets: vec![crate::db::models::CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("no-tools".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -796,7 +812,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await

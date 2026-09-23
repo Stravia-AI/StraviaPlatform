@@ -310,7 +310,7 @@ def build_harness(work_dir: Path) -> None:
                 source: ProviderSourceInput::Custom {
                     vendor: "custom".to_string(),
                     channel: "default".to_string(),
-                    protocol: Some("openai".to_string()),
+                    protocol: Some("openai-compatible".to_string()),
                     base_url: format!("{upstream}/v1"),
                     models_source: None,
                     static_models: None,
@@ -325,6 +325,7 @@ def build_harness(work_dir: Path) -> None:
                 &provider.id,
                 "gpt-4o-mini",
                 CreateManualProviderModel {
+                    template_id: None,
                     metadata: serde_json::json!({
                         "id": "gpt-4o-mini",
                         "name": "GPT-4o mini",
@@ -336,9 +337,16 @@ def build_harness(work_dir: Path) -> None:
                 model_id: format!("{backend}-model"),
                 display_name: Some(format!("{backend} Model")),
                 balance: None,
-                target_provider: provider.id.clone(),
-                target_model: Some("gpt-4o-mini".to_string()),
-                targets: vec![],
+                targets: vec![stravia_core::db::models::CreateTarget {
+                    provider_id: provider.id.clone(),
+                    model: Some("gpt-4o-mini".to_string()),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
                 default_thinking_level: None,
             }).await?;
 
@@ -352,7 +360,7 @@ def build_harness(work_dir: Path) -> None:
                 inject_web_search: false,
                 inject_media_generation: false,
                 expires_at: None,
-                model_ids: vec![route.id.clone()],
+                model_ids: vec![route.id.clone().into()],
             }).await?;
 
             ensure!(!api_key.inject_media_generation, "new keys must not auto-inject media generation");
@@ -368,9 +376,9 @@ def build_harness(work_dir: Path) -> None:
             ensure!(routes[0].model_id == format!("{backend}-model"), "Route Model ID");
             ensure!(routes[0].display_name.as_deref() == Some(format!("{backend} Model").as_str()), "Route display name");
             ensure!(routes[0].targets.len() == 1, "Route aggregate Target count");
-            ensure!(routes[0].targets[0].provider_id == provider.id, "Route aggregate Provider");
+            ensure!(routes[0].targets[0].provider_id().as_str() == provider.id, "Route aggregate Provider");
             let updated = admin.update_model(&route.model_id, UpdateRoute {
-                display_name: Some(format!("{backend} Renamed Model")),
+                display_name: Some(Some(format!("{backend} Renamed Model"))),
                 ..Default::default()
             }).await?;
             ensure!(updated.id == route.id, "display-name update preserves Route identity");
@@ -383,7 +391,7 @@ def build_harness(work_dir: Path) -> None:
                 selection_strategy: "latency_preference".to_string(),
                 is_enabled: false,
                 default_thinking_level: None,
-                targets: vec![CreateTarget {
+                targets: Some(vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
                     model: Some("missing-model".to_string()),
                     enabled: true,
@@ -392,14 +400,14 @@ def build_harness(work_dir: Path) -> None:
                     target_retry_budget: Some(5),
                     target_cooldown_ms: Some(120_000),
                     thinking_level_map: vec![],
-                }],
+                }]),
             }).await;
             ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");
             let preserved = gw.storage.routes().get(&route.model_id).await?.context("preserved Route")?;
             ensure!(preserved.balance == route.balance, "failed put preserves Route strategy");
             ensure!(preserved.is_enabled == route.is_enabled, "failed put preserves Route state");
             ensure!(preserved.targets.len() == 1, "failed put preserves Target count");
-            ensure!(preserved.targets[0].provider_id == provider.id, "failed put preserves Target");
+            ensure!(preserved.targets[0].provider_id().as_str() == provider.id, "failed put preserves Target");
             ensure!(admin.list_api_keys().await?.len() == 1, "api key count");
 
             let admin_auth = AdminAuth::new(gw.storage.clone());

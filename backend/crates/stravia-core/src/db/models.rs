@@ -104,39 +104,41 @@ pub struct UpsertOAuthCredential {
     pub meta: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Route {
-    pub id: String,
-    pub model_id: String,
+#[derive(Debug, Clone)]
+pub struct RouteConfig {
+    pub id: super::identity::RouteKey,
+    pub model_id: super::identity::RouteId,
     pub display_name: Option<String>,
     /// 客户端未表达任何推理意图时应用的 Canonical Thinking Level；
     /// `None` 表示不加控制，由上游模型自行决定。
-    #[serde(default)]
     pub default_thinking_level: Option<String>,
     pub balance: String,
-    pub target_provider: String,
-    /// Model of the highest-priority enabled Target, or `None` for Provider-only.
-    pub target_model: Option<String>,
     pub is_enabled: bool,
     pub created_at: String,
-    #[serde(default)]
-    #[sqlx(skip)]
-    pub supported_thinking_levels: sqlx::types::Json<Vec<ThinkingLevel>>,
-    #[serde(default)]
-    #[sqlx(skip)]
+    pub supported_thinking_levels: Vec<ThinkingLevel>,
     pub context_window: Option<u64>,
-    #[serde(default)]
-    #[sqlx(skip)]
     pub output_max_tokens: Option<u64>,
-    #[serde(default)]
-    #[sqlx(skip)]
     pub supports_image_input: bool,
-    #[serde(default)]
-    #[sqlx(skip)]
-    pub targets: Vec<Target>,
+    pub targets: Vec<TargetConfig>,
 }
 
-impl Route {
+impl RouteConfig {
+    pub fn primary_target(&self) -> Option<&TargetConfig> {
+        fn highest_priority<'a>(
+            targets: impl Iterator<Item = &'a TargetConfig>,
+        ) -> Option<&'a TargetConfig> {
+            targets.fold(None, |highest: Option<&TargetConfig>, target| {
+                if highest.is_none_or(|current| target.priority > current.priority) {
+                    Some(target)
+                } else {
+                    highest
+                }
+            })
+        }
+        highest_priority(self.targets.iter().filter(|target| target.enabled))
+            .or_else(|| highest_priority(self.targets.iter()))
+    }
+
     pub fn effective_display_name(&self) -> &str {
         self.display_name
             .as_deref()
@@ -146,22 +148,74 @@ impl Route {
     }
 
     pub fn refresh_supported_thinking_levels(&mut self) {
-        self.supported_thinking_levels = sqlx::types::Json(
-            ThinkingLevel::ALL
-                .into_iter()
-                .filter(|level| {
-                    self.targets.iter().any(|target| target.enabled)
-                        && self
-                            .targets
-                            .iter()
-                            .filter(|target| target.enabled)
-                            .all(|target| {
-                                mapping_control(&target.thinking_level_map, *level)
-                                    .is_some_and(|control| !control.is_hidden())
-                            })
-                })
-                .collect(),
-        );
+        self.supported_thinking_levels = ThinkingLevel::ALL
+            .into_iter()
+            .filter(|level| {
+                self.targets.iter().any(|target| target.enabled)
+                    && self
+                        .targets
+                        .iter()
+                        .filter(|target| target.enabled)
+                        .all(|target| {
+                            mapping_control(&target.thinking_level_map, *level)
+                                .is_some_and(|control| !control.is_hidden())
+                        })
+            })
+            .collect();
+    }
+}
+
+#[derive(Serialize)]
+pub struct RouteView<'a> {
+    pub id: &'a str,
+    pub model_id: &'a str,
+    pub display_name: Option<&'a str>,
+    pub default_thinking_level: Option<&'a str>,
+    pub balance: &'a str,
+    pub target_provider: &'a str,
+    pub target_model: Option<&'a str>,
+    pub is_enabled: bool,
+    pub created_at: &'a str,
+    pub supported_thinking_levels: &'a [ThinkingLevel],
+    pub context_window: Option<u64>,
+    pub output_max_tokens: Option<u64>,
+    pub supports_image_input: bool,
+    #[serde(serialize_with = "serialize_target_views")]
+    pub targets: &'a [TargetConfig],
+}
+
+fn serialize_target_views<S: serde::Serializer>(
+    targets: &[TargetConfig],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(targets.iter().map(TargetView::from))
+}
+
+impl<'a> From<&'a RouteConfig> for RouteView<'a> {
+    fn from(route: &'a RouteConfig) -> Self {
+        let primary = route.primary_target();
+        Self {
+            id: &route.id,
+            model_id: &route.model_id,
+            display_name: route.display_name.as_deref(),
+            default_thinking_level: route.default_thinking_level.as_deref(),
+            balance: &route.balance,
+            target_provider: primary.map_or("", |target| target.provider_id().as_str()),
+            target_model: primary.and_then(|target| target.model().map(|model| model.as_str())),
+            is_enabled: route.is_enabled,
+            created_at: &route.created_at,
+            supported_thinking_levels: &route.supported_thinking_levels,
+            context_window: route.context_window,
+            output_max_tokens: route.output_max_tokens,
+            supports_image_input: route.supports_image_input,
+            targets: &route.targets,
+        }
+    }
+}
+
+impl Serialize for RouteConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RouteView::from(self).serialize(serializer)
     }
 }
 
@@ -174,25 +228,70 @@ const fn default_target_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Target {
-    pub id: String,
-    pub model_id: String,
-    pub provider_id: String,
-    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
-    pub model: Option<String>,
-    #[serde(default = "default_target_enabled")]
+#[derive(Debug, Clone)]
+pub struct TargetConfig {
+    pub id: super::identity::TargetId,
+    pub model_id: super::identity::RouteKey,
+    pub destination: super::identity::TargetDestination,
     pub enabled: bool,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
     pub target_cooldown_ms: i64,
     pub created_at: String,
-    #[serde(default)]
-    pub thinking_level_map: sqlx::types::Json<Vec<ThinkingLevelMapping>>,
+    pub thinking_level_map: Vec<ThinkingLevelMapping>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl TargetConfig {
+    pub fn provider_id(&self) -> &super::identity::ProviderId {
+        self.destination.provider_id()
+    }
+
+    pub fn model(&self) -> Option<&super::identity::UpstreamModelId> {
+        self.destination.model()
+    }
+}
+
+#[derive(Serialize)]
+pub struct TargetView<'a> {
+    pub id: &'a str,
+    pub model_id: &'a str,
+    pub provider_id: &'a str,
+    pub model: Option<&'a str>,
+    pub enabled: bool,
+    pub priority: i32,
+    pub first_token_timeout_ms: i64,
+    pub target_retry_budget: i32,
+    pub target_cooldown_ms: i64,
+    pub created_at: &'a str,
+    pub thinking_level_map: &'a [ThinkingLevelMapping],
+}
+
+impl<'a> From<&'a TargetConfig> for TargetView<'a> {
+    fn from(target: &'a TargetConfig) -> Self {
+        Self {
+            id: &target.id,
+            model_id: &target.model_id,
+            provider_id: target.provider_id().as_str(),
+            model: target.model().map(|model| model.as_str()),
+            enabled: target.enabled,
+            priority: target.priority,
+            first_token_timeout_ms: target.first_token_timeout_ms,
+            target_retry_budget: target.target_retry_budget,
+            target_cooldown_ms: target.target_cooldown_ms,
+            created_at: &target.created_at,
+            thinking_level_map: &target.thinking_level_map,
+        }
+    }
+}
+
+impl Serialize for TargetConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TargetView::from(self).serialize(serializer)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum RouteSelectionStrategy {
@@ -390,17 +489,41 @@ impl UpdateProvider {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRoute {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub model_id: Option<String>,
-    pub display_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub display_name: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub balance: Option<String>,
-    pub target_provider: Option<String>,
-    /// Omitted preserves the projection; explicit `null` selects Provider-only.
-    #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub target_model: Option<Option<String>>,
-    #[serde(default)]
-    pub targets: Option<Vec<UpsertTarget>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub targets: Option<Vec<CreateTarget>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub is_enabled: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
     pub default_thinking_level: Option<Option<ThinkingLevel>>,
 }
 
@@ -411,9 +534,6 @@ pub struct CreateRoute {
     #[serde(default)]
     pub display_name: Option<String>,
     pub balance: Option<String>,
-    pub target_provider: String,
-    pub target_model: Option<String>,
-    #[serde(default)]
     pub targets: Vec<CreateTarget>,
     #[serde(default)]
     pub default_thinking_level: Option<ThinkingLevel>,
@@ -435,31 +555,15 @@ pub struct CreateTarget {
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpsertTarget {
-    pub id: Option<String>,
-    pub provider_id: String,
-    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
-    pub model: Option<String>,
-    #[serde(default = "default_target_enabled")]
-    pub enabled: bool,
-    pub priority: Option<i32>,
-    pub first_token_timeout_ms: Option<i64>,
-    pub target_retry_budget: Option<i32>,
-    pub target_cooldown_ms: Option<i64>,
-    #[serde(default)]
-    pub thinking_level_map: Vec<ThinkingLevelMapping>,
-}
-
 #[derive(Debug, Clone)]
 pub struct PutRoute {
-    pub id: Option<String>,
-    pub model_id: String,
+    pub id: Option<super::identity::RouteKey>,
+    pub model_id: super::identity::RouteId,
     pub display_name: Option<String>,
     pub selection_strategy: String,
     pub is_enabled: bool,
-    pub targets: Vec<CreateTarget>,
+    /// `None` leaves existing Target rows untouched, including their IDs and timestamps.
+    pub targets: Option<Vec<CreateTarget>>,
     pub default_thinking_level: Option<ThinkingLevel>,
 }
 
@@ -568,6 +672,14 @@ pub struct CreateWebProvider {
     #[serde(default)]
     pub use_proxy: bool,
     pub local_engines: Option<LocalSearchEngineConfigs>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>

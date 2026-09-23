@@ -114,16 +114,20 @@ pub(crate) async fn normalize_request(
         }
         if let Some(calls) = &mut item.tool_calls {
             for call in calls {
-                scrub(&mut call.id);
+                let mut id = std::mem::take(&mut call.id).into_string();
+                scrub(&mut id);
+                call.id = id.into();
                 scrub(&mut call.name);
                 scrub(&mut call.arguments);
             }
         }
         if let Some(id) = &mut item.tool_call_id {
-            scrub(id);
+            let mut value = std::mem::take(id).into_string();
+            scrub(&mut value);
+            *id = value.into();
         }
         if let Some(meta) = &mut item.meta {
-            crate::agent::upload_grant::scrub_upload_grant_value(meta);
+            scrub_serialized(meta)?;
         }
     }
     if let Some(instructions) = crate::agent::upload_grant::upload_instructions(gateway).await? {

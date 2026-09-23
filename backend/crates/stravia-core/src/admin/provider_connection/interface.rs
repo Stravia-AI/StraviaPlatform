@@ -681,6 +681,7 @@ mod tests {
                         "id": "disposable-model",
                         "name": "Disposable Model"
                     }),
+                    template_id: None,
                 },
             )
             .await?;
@@ -740,6 +741,7 @@ mod tests {
                 "primary-model",
                 CreateManualProviderModel {
                     metadata: json!({"id": "primary-model", "name": "Primary Model"}),
+                    template_id: None,
                 },
             )
             .await?;
@@ -749,6 +751,7 @@ mod tests {
                 "fallback-model",
                 CreateManualProviderModel {
                     metadata: json!({"id": "fallback-model", "name": "Fallback Model"}),
+                    template_id: None,
                 },
             )
             .await?;
@@ -757,8 +760,6 @@ mod tests {
                 model_id: "durable-route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
-                target_provider: primary.id.clone(),
-                target_model: Some("primary-model".into()),
                 targets: vec![
                     CreateTarget {
                         provider_id: primary.id.clone(),
@@ -789,10 +790,23 @@ mod tests {
 
         let routes = admin.list_models().await?;
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].target_provider, fallback.id);
-        assert_eq!(routes[0].target_model.as_deref(), Some("fallback-model"));
+        assert_eq!(
+            routes[0]
+                .primary_target()
+                .map(|target| target.provider_id().as_str()),
+            Some(fallback.id.as_str())
+        );
+        assert_eq!(
+            routes[0]
+                .primary_target()
+                .and_then(|target| target.model().map(|model| model.as_str())),
+            Some("fallback-model")
+        );
         assert_eq!(routes[0].targets.len(), 1);
-        assert_eq!(routes[0].targets[0].provider_id, fallback.id);
+        assert_eq!(
+            routes[0].targets[0].provider_id().as_str(),
+            fallback.id.as_str()
+        );
         assert!(
             gateway
                 .model_cache

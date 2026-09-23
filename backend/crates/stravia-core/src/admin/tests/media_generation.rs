@@ -6,8 +6,8 @@ use std::sync::{
 use crate::Gateway;
 use crate::config::GatewayConfig;
 use crate::db::models::{
-    CreateProviderRecord, CreateRoute, CreateTarget, Provider, Route, UpdateRoute,
-    UpsertOAuthCredential, UpsertTarget,
+    CreateProviderRecord, CreateRoute, CreateTarget, Provider, RouteConfig, UpdateRoute,
+    UpsertOAuthCredential,
 };
 use crate::media_generation::{ImageGenerationConfig, MediaGenerationConfig};
 use crate::provider_models::CreateManualProviderModel;
@@ -133,6 +133,7 @@ impl GenerationRouteFixture {
                             "capabilities": ["media_image"],
                             "modalities": {"input": ["text", "image"], "output": ["text"]}
                         }),
+                        template_id: None,
                     },
                 )
                 .await?;
@@ -152,15 +153,13 @@ impl GenerationRouteFixture {
         &self,
         model_id: &str,
         incompatible_enabled: bool,
-    ) -> anyhow::Result<Route> {
+    ) -> anyhow::Result<RouteConfig> {
         self.gateway
             .admin()
             .create_model(CreateRoute {
                 model_id: model_id.into(),
                 display_name: Some("Image Route".into()),
                 balance: Some("latency_preference".into()),
-                target_provider: String::new(),
-                target_model: None,
                 targets: vec![
                     CreateTarget {
                         provider_id: self.compatible_provider.id.clone(),
@@ -188,29 +187,29 @@ impl GenerationRouteFixture {
             .await
     }
 
-    fn config(route: &Route, enabled: bool) -> MediaGenerationConfig {
+    fn config(route: &RouteConfig, enabled: bool) -> MediaGenerationConfig {
         MediaGenerationConfig {
             enabled,
             image: ImageGenerationConfig {
-                route_id: Some(route.model_id.clone()),
+                route_id: Some(route.model_id.clone().into()),
             },
         }
     }
 
-    fn targets_with_incompatible_enabled(&self, route: &Route) -> Vec<UpsertTarget> {
+    fn targets_with_incompatible_enabled(&self, route: &RouteConfig) -> Vec<CreateTarget> {
         route
             .targets
             .iter()
-            .map(|target| UpsertTarget {
-                id: Some(target.id.clone()),
-                provider_id: target.provider_id.clone(),
-                model: target.model.clone(),
-                enabled: target.enabled || target.provider_id == self.incompatible_provider.id,
+            .map(|target| CreateTarget {
+                provider_id: target.provider_id().clone().into(),
+                model: target.model().cloned().map(Into::into),
+                enabled: target.enabled
+                    || target.provider_id().as_str() == self.incompatible_provider.id.as_str(),
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                thinking_level_map: target.thinking_level_map.0.clone(),
+                thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect()
     }
@@ -235,15 +234,19 @@ async fn route_qualification_is_atomic_and_a_stale_binding_can_be_disabled() -> 
     let eligible = admin.list_eligible_media_generation_routes().await?;
     let listed = eligible
         .iter()
-        .find(|route| route.id == eligible_route.model_id)
+        .find(|route| route.id == eligible_route.model_id.as_str())
         .expect("eligible Route is listed by its client-facing model ID");
     assert!(
         eligible
             .iter()
-            .all(|route| route.id != mixed_route.model_id),
+            .all(|route| route.id != mixed_route.model_id.as_str()),
         "a Route with an enabled incompatible Target must not be eligible"
     );
-    assert_ne!(listed.id, eligible_route.id, "storage ID must not escape");
+    assert_ne!(
+        listed.id,
+        eligible_route.id.as_str(),
+        "storage ID must not escape"
+    );
     assert_eq!(listed.name.as_deref(), Some("Image Route"));
 
     let persisted_route = admin.get_model(&eligible_route.model_id).await?;
@@ -251,7 +254,7 @@ async fn route_qualification_is_atomic_and_a_stale_binding_can_be_disabled() -> 
     let primary = persisted_route
         .targets
         .iter()
-        .find(|target| target.provider_id == fixture.compatible_provider.id)
+        .find(|target| target.provider_id().as_str() == fixture.compatible_provider.id.as_str())
         .expect("image-capable Target");
     assert_eq!(
         (
@@ -265,7 +268,7 @@ async fn route_qualification_is_atomic_and_a_stale_binding_can_be_disabled() -> 
     let standby = persisted_route
         .targets
         .iter()
-        .find(|target| target.provider_id == fixture.incompatible_provider.id)
+        .find(|target| target.provider_id().as_str() == fixture.incompatible_provider.id.as_str())
         .expect("disabled incompatible Target");
     assert!(!standby.enabled);
     assert_eq!(

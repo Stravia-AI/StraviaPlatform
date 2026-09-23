@@ -834,6 +834,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
             "upstream-model",
             CreateManualProviderModel {
                 metadata: serde_json::json!({"id": "upstream-model", "name": "Upstream Model"}),
+                template_id: None,
             },
         )
         .await?;
@@ -843,9 +844,16 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
             model_id: "statused-model".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![stravia_core::db::models::CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await?;
@@ -921,6 +929,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
                     "id": "route-model",
                     "name": "Route Model"
                 }),
+                template_id: None,
             },
         )
         .await?;

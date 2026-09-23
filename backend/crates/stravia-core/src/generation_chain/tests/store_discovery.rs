@@ -99,14 +99,16 @@ async fn delivered_prefix_waits_for_commit_without_serializing_real_branches() {
         let pending_id = pending_id.clone();
         tokio::spawn(async move {
             let mut reference = user_message("");
-            reference.meta = Some(serde_json::json!({
-                "__open_responses_item_reference":
-                    stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
-                        "msg",
-                        &pending_id,
-                        0,
-                    )
-            }));
+            reference.meta = Some(
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                    "__open_responses_item_reference":
+                        stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
+                            "msg",
+                            &pending_id,
+                            0,
+                        )
+                })),
+            );
             let mut request = responses_request(vec![
                 reference,
                 user_message("continuation with item reference"),
@@ -259,10 +261,14 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         vec!["content".into()],
         Some("ciphertext".into()),
     );
-    reasoning.meta = Some(serde_json::json!({"__open_responses_item_fields": {
-        "internal_chat_message_metadata_passthrough": {"trace": "opaque"},
-        "metadata": {"turn_id": "trace-turn"}
-    }}));
+    reasoning.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({"__open_responses_item_fields": {
+                "internal_chat_message_metadata_passthrough": {"trace": "opaque"},
+                "metadata": {"turn_id": "trace-turn"}
+            }}),
+        ),
+    );
     let mut output_b = AiResponse::new("upstream-b", "model");
     output_b.items = vec![reasoning];
     b.stage(&mut output_b, &generation_source(), None);
@@ -320,7 +326,9 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         Some("ciphertext".into()),
     );
     unknown_extension.meta = Some(
-        serde_json::json!({"__open_responses_item_fields": {"future_model_content": "different"}}),
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({"__open_responses_item_fields": {"future_model_content": "different"}}),
+        ),
     );
     replay[3] = unknown_extension;
     let fork = restarted
@@ -1240,9 +1248,11 @@ async fn previous_response_resolves_principal_scoped_item_references() {
         content: MessageContent::Text(String::new()),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({
-            "__open_responses_item_reference": "msg_saved"
-        })),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                "__open_responses_item_reference": "msg_saved"
+            })),
+        ),
     }]);
     let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_mut() else {
         unreachable!();
@@ -1276,15 +1286,70 @@ async fn previous_response_resolves_principal_scoped_item_references() {
         content: MessageContent::Text(String::new()),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({
-            "__open_responses_item_reference": "msg_saved"
-        })),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                "__open_responses_item_reference": "msg_saved"
+            })),
+        ),
     }];
     let error = store
         .materialize_parent(&principal("other"), &mut unauthorized)
         .await
         .expect_err("cross-principal reference must not resolve");
     assert_eq!(error, "item_reference_not_found");
+}
+
+#[tokio::test]
+async fn explicit_parent_cannot_reference_another_branch_of_same_principal() {
+    let chain = generation_chain().await;
+    let owner = principal("owner");
+    let mut parent = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![user_message("first")]),
+        )
+        .await
+        .expect("begin parent");
+    let parent_id = parent.id().to_owned();
+    let mut parent_output = AiResponse::new(parent_id.clone(), "model");
+    parent_output.items = vec![AiItem::output_text("first answer")];
+    assert!(parent.stage(&mut parent_output, &generation_source(), None));
+    parent.persist().await.expect("persist parent");
+
+    let mut unrelated = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![user_message("other")]),
+        )
+        .await
+        .expect("begin independent root");
+    let unrelated_id = unrelated.id().to_owned();
+    let mut unrelated_output = AiResponse::new(unrelated_id.clone(), "model");
+    unrelated_output.items = vec![AiItem::output_text("secret")];
+    assert!(unrelated.stage(&mut unrelated_output, &generation_source(), None));
+    unrelated.persist().await.expect("persist independent root");
+
+    let item_id = stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
+        "msg",
+        &unrelated_id,
+        0,
+    );
+    let mut reference = user_message("");
+    reference.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({"__open_responses_item_reference": item_id}),
+        ),
+    );
+    let mut request = responses_request(vec![reference]);
+    crate::router::stamp_previous_response_id(&mut request, &parent_id);
+    assert_eq!(
+        chain
+            .begin(owner, request)
+            .await
+            .err()
+            .expect("reference outside the parent lineage"),
+        BeginError::ItemReferenceNotFound,
+    );
 }
 
 #[tokio::test]
@@ -1316,9 +1381,11 @@ async fn previous_response_resolves_references_to_persisted_input_items() {
         content: MessageContent::Text(String::new()),
         tool_calls: None,
         tool_call_id: None,
-        meta: Some(serde_json::json!({
-            "__open_responses_item_reference": "msg_client"
-        })),
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+                "__open_responses_item_reference": "msg_client"
+            })),
+        ),
     }]);
     let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_mut() else {
         unreachable!();
@@ -1528,9 +1595,11 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     .to_string();
     let plain = AiItem::function_call_output("plain", serde_json::Value::String(encoded.clone()));
     let mut media = AiItem::function_call_output("media", serde_json::Value::String(encoded));
-    media.meta = Some(serde_json::json!({
-        (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
-    }));
+    media.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
+            (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
+        })),
+    );
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
         Duration::from_secs(60),

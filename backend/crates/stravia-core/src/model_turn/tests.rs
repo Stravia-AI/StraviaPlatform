@@ -34,6 +34,7 @@ async fn add_test_provider_model(gateway: &Gateway, provider_id: &str) {
                     "id": "upstream-model",
                     "name": "upstream-model",
                 }),
+                template_id: None,
             },
         )
         .await
@@ -309,29 +310,43 @@ async fn gateway_with_captured_thinking(
             model_id: model_name.into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level,
         })
         .await
         .expect("Model");
     let model_ids = if bind_key {
-        vec![model.id]
+        vec![model.id.into()]
     } else {
         let other_model = admin
             .create_model(CreateRoute {
                 model_id: format!("{model_name}-other"),
                 display_name: None,
                 balance: None,
-                target_provider: provider.id,
-                target_model: Some("upstream-model".into()),
-                targets: Vec::new(),
+                targets: vec![CreateTarget {
+                    provider_id: provider.id,
+                    model: Some("upstream-model".into()),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
                 default_thinking_level: None,
             })
             .await
             .expect("other Model");
-        vec![other_model.id]
+        vec![other_model.id.into()]
     };
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -490,8 +505,6 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             model_id: "timeout-model".into(),
             display_name: None,
             balance: None,
-            target_provider: String::new(),
-            target_model: None,
             targets: vec![CreateTarget {
                 enabled: true,
                 provider_id: provider.id,
@@ -516,7 +529,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -610,8 +623,6 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             model_id: "failover-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets: providers
                 .iter()
                 .enumerate()
@@ -640,7 +651,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -708,9 +719,16 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             model_id: "zdr-model".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -725,7 +743,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -813,9 +831,16 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             model_id: "request-error-model".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -830,7 +855,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -908,9 +933,16 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             model_id: "no-tools-model".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id,
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id,
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -925,7 +957,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -1008,8 +1040,6 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             model_id: "stream-lock-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
-            target_provider: String::new(),
-            target_model: None,
             targets: providers
                 .iter()
                 .enumerate()
@@ -1038,7 +1068,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             transparent_injection_enabled: false,
             inject_web_search: false,
             inject_media_generation: false,
-            model_ids: vec![model.id],
+            model_ids: vec![model.id.into()],
             inject_media_understanding: false,
         })
         .await
@@ -1326,10 +1356,9 @@ async fn route_default_thinking_level_is_dropped_when_no_level_is_supported() {
         .update_model(
             "empty-support-model",
             crate::db::models::UpdateRoute {
-                targets: Some(vec![crate::db::models::UpsertTarget {
-                    id: Some(target.id),
-                    provider_id: target.provider_id,
-                    model: target.model,
+                targets: Some(vec![crate::db::models::CreateTarget {
+                    provider_id: target.provider_id().clone().into(),
+                    model: target.model().cloned().map(Into::into),
                     enabled: true,
                     priority: None,
                     first_token_timeout_ms: None,
@@ -2259,9 +2288,16 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             model_id: "compact-codex".into(),
             display_name: None,
             balance: None,
-            target_provider: provider.id.clone(),
-            target_model: Some("upstream-model".into()),
-            targets: Vec::new(),
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("upstream-model".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
             default_thinking_level: None,
         })
         .await
@@ -2278,7 +2314,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             inject_web_search: false,
             inject_media_generation: false,
             inject_media_understanding: false,
-            model_ids: vec![route.id],
+            model_ids: vec![route.id.into()],
         })
         .await
         .unwrap();
