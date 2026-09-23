@@ -404,10 +404,19 @@ fn infer_responses_websocket(
         };
         format!("wss://{rest}")
     };
+    let previous_response_id = body
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty());
+    let continuation_requested = previous_response_id.is_some();
+    let continuation_id = (body.get("store").and_then(Value::as_bool) == Some(false))
+        .then(|| previous_response_id.map(str::to_owned))
+        .flatten();
     let connection = host.ws_connect(stravia_vendor_sdk::WsRequest {
         url,
         headers,
         protocols: Vec::new(),
+        continuation_id,
     })?;
     let mut frame = body.clone();
     let object = frame
@@ -426,6 +435,7 @@ fn infer_responses_websocket(
         &OPEN_RESPONSES_2026_04_24.to_string(),
         connection,
         preserve_upstream_errors,
+        continuation_requested,
         classify_responses_stream_error,
     )
 }

@@ -2056,6 +2056,21 @@ async fn drive_vendor_attempt(
             }
             Err(failure)
                 if !committed
+                    && failure.error.code == "continuation_unavailable"
+                    && continuation_fallback.is_some() =>
+            {
+                // 宿主尚未发送请求；连接本地优化失效不是上游失败，
+                // 不消耗恢复预算，也不影响 Target 的连续失败计数。
+                attempt.finish(
+                    "failed",
+                    None,
+                    Some("continuation_unavailable".into()),
+                    None,
+                );
+                request = continuation_fallback.take().expect("checked fallback");
+            }
+            Err(failure)
+                if !committed
                     && failure.error.code == "continuation_not_found"
                     && prepared.allow_recovery
                     && continuation_fallback.is_some()
@@ -2925,6 +2940,10 @@ fn classify_vendor_kind(
             retry_after,
             transport_failure,
             diagnostic_message,
+        ),
+        ErrorKind::ContinuationUnavailable => AttemptFailure::terminal(
+            "continuation_unavailable",
+            "Vendor continuation transport is no longer available",
         ),
         ErrorKind::ContinuationNotFound => AttemptFailure::terminal(
             "continuation_not_found",

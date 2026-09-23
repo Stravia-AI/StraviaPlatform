@@ -287,6 +287,7 @@ impl VendorGuest for LifecycleContractVendor {
                     url: configured_url(&provider.options, "targetUrl")?.into(),
                     headers: Vec::new(),
                     protocols: Vec::new(),
+                    continuation_id: None,
                 })?;
             }
             _ => {}

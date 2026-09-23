@@ -112,7 +112,7 @@ pub trait HostHttpResponse: Send + Sync {
 pub trait HostWebSocket: Send + Sync {
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure>;
     async fn next(&self) -> Result<Option<WebSocketMessage>, HostFailure>;
-    async fn close(&self, response_continuation: bool) -> Result<(), HostFailure>;
+    async fn close(&self, continuation_id: Option<String>) -> Result<(), HostFailure>;
 }
 
 /// Services are constructed by Core for exactly one operation and one fixed
@@ -131,6 +131,7 @@ pub trait HostServices: Send + Sync {
         url: String,
         headers: Vec<(String, String)>,
         protocols: Vec<String>,
+        continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure>;
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure>;

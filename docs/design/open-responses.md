@@ -283,9 +283,11 @@ WebSocket 不在 `response.create` body 中重复传 token。所谓“每轮重�
 
 下游 WebSocket ingress 与 Vendor Plugin 使用的上游受控 host transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Wasm Vendor Plugin 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run，Embeddings 仍走 HTTP。插件从 Responses HTTP URL 选择对应的 `ws:`/`wss:` 目标，宿主 transport 复用同一网络栈的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers，并执行 origin 授权。Codex guest 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
 
-连接池按精确 Target namespace 和 upstream response ID 建立 affinity；每个连接同一时刻只执行一个 response。连接 60 分钟后不再复用；当前不设置本地连接数上限，也不回收仍有 affinity 的 idle 连接，因此高并发分支会增加文件描述符、内存与上游连接占用。`store=false` 只允许同 socket 最近 tip 续接；排队 sibling、重启、断线或 max-age 失去 affinity 后在新 socket 发送完整 Effective Model Request。取消关闭所属 socket。
+连接池按精确 Target namespace、affinity、URL、认证与握手参数隔离，并保存每条空闲连接最新成功完成的 upstream response ID；每个连接同一时刻只执行一个 response。连接 60 分钟后不再复用，宿主最多保留 64 条空闲连接，满时淘汰最早归池的连接；该限制不是 in-flight 连接上限。`store=false` 只有在原子取得匹配 tip 的可用 socket 后才能发送续接 ID。sibling 占用、tip 前移、重启、断线、淘汰或 max-age 导致匹配失败时，在任何增量请求发出前切换为完整 Effective Model Request，不消耗上游恢复预算。取消关闭所属 socket。
 
-握手 400/404/405/426/501 会把当前 Target namespace 标记为不支持，短暂连接错误进入 15 秒 cooldown；两者都只在请求尚未被上游接受时回退同 Target HTTP/SSE。401/403/429 保持 typed Provider rejection。发送后断线、malformed/binary event 与未知接受状态不重放。`previous_response_not_found` 仅在尚无 client-visible event 时失效旧 affinity，并在同 socket 全量重放一次；再次失败或已有可见输出立即终止。
+Codex 的连接级 session/thread/window ID 由 `transport_affinity` 派生，turn ID 每轮变化且放在消息中；省略的默认服务级别与上游补全的 `default` 使用同一路由提示。不会通过忽略认证、账号或其他握手差异来强行复用连接。
+
+握手不支持或可恢复的传输失败沿现有 Target 重试与 cooldown 策略，在安全边界内回退同 Target HTTP/SSE；401/403/429 保持 typed Provider rejection。发送后接受状态不明、malformed/binary event 不因本地续接优化而获得重放许可。对于实际携带续接 ID 的请求，`previous_response_not_found`，以及 Codex 无 code 的明确 ``Invalid `previous_response_id`.`` 错误，只在尚无模型响应事件且既有恢复预算允许时清除旧 tip、最多回放一次完整历史。连接仍可用时可以复用，但不再携带旧 ID；普通 400、再次失败或响应已经开始时不走该回退。
 
 ---
 

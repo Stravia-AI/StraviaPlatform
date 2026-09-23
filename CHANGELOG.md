@@ -12,7 +12,7 @@
 ### Changed
 
 - Desktop windows now open at 1440×900 when space permits and remember their last position, size, and maximized state. Restored windows are kept within the available display work area when monitor layouts change.
-- **Breaking:** Vendor plugins now require `stravia:vendor@0.4.0` and must be rebuilt for the localized display contract. Configuration keys, values, credentials, and data-format epochs are unchanged; restoring an unavailable plugin still compares its recorded data compatibility without discarding data merely because its old display metadata cannot be decoded.
+- **Breaking:** Vendor plugins now require `stravia:vendor@0.4.0` and must be rebuilt and re-imported with the updated host. The contract adds localized display metadata and exact WebSocket continuation identity; `0.3.0` Components are incompatible. Configuration keys, values, credentials, client APIs, database schemas, and data-format epochs are unchanged. Restoring an unavailable plugin still compares its recorded data compatibility without discarding data merely because its old display metadata cannot be decoded.
 - JavaScript tooling now uses Bun 1.4.2 across development, builds, checks, and tests. CLI entry points and dependency installation explicitly use Bun rather than selecting the installed Node.js runtime; Rust and Python test runners are unchanged.
 - CI test workflows avoid duplicate pinned/stable Rust execution when compiler releases match, reuse the production WebUI build for Playwright, and report per-case SQLite/PostgreSQL storage timings. Authentication fixtures now use a deterministic local upstream with temporary resources cleaned up; Rust tests continue to use cargo test.
 - Web Search, Media, and Web Provider rule coverage now avoids six redundant full Gateway initializations while retaining persistence and error contracts; token activity layout coverage reuses one page navigation across all granularities.
@@ -32,6 +32,8 @@
 
 ### Fixed
 
+- Codex `store=false` continuations now retain stable connection identities and require the exact available WebSocket response tip before sending an upstream ID. Disconnected, evicted, busy, or advanced connections fall back to full history before sending, without consuming retry budget. Explicit upstream continuation rejection can replay full history at most once under the existing recovery budget, never after response events begin.
+- Interaction canvases keep confirmed Generation Chain parent links solid when retained-tail diagnostics identify the same source; cross-root diagnostic links remain dashed.
 - The service picker again shows localized sign-in methods instead of internal capability names, omits capability badges, and prefers model-directory logos before falling back to bundled icons.
 - An empty hidden-round ledger no longer turns confirmed response usage into unknown usage. Streaming and buffered Responses preserve known zero values without inventing values for unreported usage.
 - Observation attribution reuses ancestor windows from the same Generation Chain traversal instead of repeatedly restoring overlapping histories for each retained-tail candidate. Confirmed-parent diagnostics, ambiguity checks, Principal isolation, and resource limits remain unchanged.

@@ -340,20 +340,13 @@ fn decode_ai_response_with_error_policy(
 /// Decode Open Responses-style WebSocket JSON events through the same shared
 /// stream codec. Each text frame is wrapped as one SSE event solely for the
 /// codec parser; canonical deltas are still emitted immediately.
-pub fn decode_ai_response_websocket(
-    host: &GuestHost,
-    protocol: &str,
-    connection: stravia_vendor_sdk::WsConnection,
-) -> Result<AiResponse, PluginError> {
-    decode_normalized_websocket(host, protocol, connection, false, false, no_websocket_error)
-}
-
 pub fn decode_ai_response_websocket_with_error_classifier(
     host: &GuestHost,
     protocol: &str,
     connection: stravia_vendor_sdk::WsConnection,
     preserve_upstream_errors: bool,
-    classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
+    continuation_requested: bool,
+    classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
     decode_normalized_websocket(
         host,
@@ -361,16 +354,9 @@ pub fn decode_ai_response_websocket_with_error_classifier(
         connection,
         false,
         preserve_upstream_errors,
+        continuation_requested,
         classify_error,
     )
-}
-
-pub fn decode_codex_ai_response_websocket(
-    host: &GuestHost,
-    protocol: &str,
-    connection: stravia_vendor_sdk::WsConnection,
-) -> Result<AiResponse, PluginError> {
-    decode_normalized_websocket(host, protocol, connection, true, false, no_websocket_error)
 }
 
 pub fn decode_codex_ai_response_websocket_with_error_classifier(
@@ -378,7 +364,8 @@ pub fn decode_codex_ai_response_websocket_with_error_classifier(
     protocol: &str,
     connection: stravia_vendor_sdk::WsConnection,
     preserve_upstream_errors: bool,
-    classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
+    continuation_requested: bool,
+    classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
     decode_normalized_websocket(
         host,
@@ -386,12 +373,9 @@ pub fn decode_codex_ai_response_websocket_with_error_classifier(
         connection,
         true,
         preserve_upstream_errors,
+        continuation_requested,
         classify_error,
     )
-}
-
-fn no_websocket_error(_: &serde_json::Value, _: bool) -> Option<PluginError> {
-    None
 }
 
 fn decode_normalized_websocket(
@@ -400,139 +384,175 @@ fn decode_normalized_websocket(
     connection: stravia_vendor_sdk::WsConnection,
     drop_response_metadata: bool,
     preserve_upstream_errors: bool,
-    classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
+    continuation_requested: bool,
+    classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    let endpoint = endpoint(protocol)?;
-    let mut decoder = ProtocolTransform::global()
-        .decode_stream(endpoint)
-        .map_err(map_response_transform_error)?;
-    let mut accumulator = StreamResponseAccumulator::default();
-    let mut terminal = false;
-    let mut saw_response_event = false;
-    while !terminal {
-        let Some(message) = connection.next()? else {
-            break;
-        };
-        let text = match message {
-            stravia_vendor_sdk::WsMessage::Text(text) => text,
-            stravia_vendor_sdk::WsMessage::Ping(payload) => {
-                connection.send(&stravia_vendor_sdk::WsMessage::Pong(payload))?;
-                continue;
-            }
-            stravia_vendor_sdk::WsMessage::Pong(_) => continue,
-            stravia_vendor_sdk::WsMessage::Close(_) => break,
-            stravia_vendor_sdk::WsMessage::Binary(_) => {
-                return Err(model_error(
-                    AiErrorKind::StreamMidError,
-                    "inference WebSocket returned an unexpected binary event",
-                ));
-            }
-        };
-        let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-            model_error(
-                AiErrorKind::StreamMidError,
-                format!("inference WebSocket returned invalid JSON: {error}"),
-            )
-        })?;
-        let original_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("message");
-        if !preserve_upstream_errors
-            && original_type == "error"
-            && !saw_response_event
-            && previous_response_not_found(&value)
-        {
-            let _ = connection.close(false);
-            return Err(PluginError {
-                kind: ErrorKind::ContinuationNotFound,
-                message: "upstream continuation is no longer available".into(),
-                upstream_status: value
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|status| u16::try_from(status).ok()),
-            });
-        }
-        if !preserve_upstream_errors && let Some(error) = classify_error(&value, saw_response_event)
-        {
-            let _ = connection.close(false);
-            return Err(error);
-        }
-        if !preserve_upstream_errors
-            && original_type == "error"
-            && value
-                .pointer("/error/code")
-                .or_else(|| value.get("code"))
-                .and_then(serde_json::Value::as_str)
-                == Some("websocket_connection_limit_reached")
-        {
-            return Err(plugin_error(
-                ErrorKind::upstream_transport(
-                    Some(AiErrorKind::ServiceUnavailable),
-                    None,
-                    stravia_vendor_sdk::TransportFailure::Websocket,
-                ),
-                "inference WebSocket connection limit reached",
-            ));
-        }
-        if original_type.starts_with("codex.")
-            || original_type.starts_with("responsesapi.")
-            || (drop_response_metadata && original_type == "response.metadata")
-        {
-            continue;
-        }
-        if original_type.starts_with("response.") {
-            saw_response_event = true;
-        }
-        if original_type == "response.done" {
-            let normalized = match value
-                .pointer("/response/status")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("completed") => "response.completed",
-                Some("incomplete") => "response.incomplete",
-                Some("failed") => "response.failed",
-                status => {
+    let mut reusable = false;
+    let result = (|| {
+        let endpoint = endpoint(protocol)?;
+        let mut decoder = ProtocolTransform::global()
+            .decode_stream(endpoint)
+            .map_err(map_response_transform_error)?;
+        let mut accumulator = StreamResponseAccumulator::default();
+        let mut terminal = false;
+        let mut completed_id = None;
+        let mut saw_response_event = false;
+        while !terminal {
+            let Some(message) = connection.next()? else {
+                break;
+            };
+            let text = match message {
+                stravia_vendor_sdk::WsMessage::Text(text) => text,
+                stravia_vendor_sdk::WsMessage::Ping(payload) => {
+                    connection.send(&stravia_vendor_sdk::WsMessage::Pong(payload))?;
+                    continue;
+                }
+                stravia_vendor_sdk::WsMessage::Pong(_) => continue,
+                stravia_vendor_sdk::WsMessage::Close(_) => break,
+                stravia_vendor_sdk::WsMessage::Binary(_) => {
                     return Err(model_error(
                         AiErrorKind::StreamMidError,
-                        format!(
-                            "Responses WebSocket response.done has invalid terminal status: {status:?}"
-                        ),
+                        "inference WebSocket returned an unexpected binary event",
                     ));
                 }
             };
-            value["type"] = serde_json::Value::String(normalized.to_owned());
-        }
-        let event_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("message");
-        let text = serde_json::to_string(&value).map_err(|error| {
-            plugin_error(
-                ErrorKind::Trapped,
-                format!("failed to normalize WebSocket event: {error}"),
-            )
-        })?;
-        terminal = matches!(
-            event_type,
-            "response.completed" | "response.failed" | "response.incomplete"
-        ) || (event_type == "response.done"
-            && value
-                .pointer("/response/status")
+            let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                model_error(
+                    AiErrorKind::StreamMidError,
+                    format!("inference WebSocket returned invalid JSON: {error}"),
+                )
+            })?;
+            let original_type = value
+                .get("type")
                 .and_then(serde_json::Value::as_str)
-                .is_some());
-        let frame = format!("event: {event_type}\ndata: {text}\n\n");
-        let deltas = decoder
-            .decode_chunk(frame.as_bytes())
-            .map_err(map_response_transform_error)?;
+                .unwrap_or("message");
+            if !preserve_upstream_errors
+                && continuation_requested
+                && original_type == "error"
+                && !saw_response_event
+                && previous_response_not_found(&value)
+            {
+                reusable = true;
+                return Err(PluginError {
+                    kind: ErrorKind::ContinuationNotFound,
+                    message: "upstream continuation is no longer available".into(),
+                    upstream_status: value
+                        .get("status")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|status| u16::try_from(status).ok()),
+                });
+            }
+            if !preserve_upstream_errors
+                && let Some(error) = classify_error(&value, saw_response_event)
+            {
+                reusable = true;
+                return Err(error);
+            }
+            if !preserve_upstream_errors
+                && original_type == "error"
+                && value
+                    .pointer("/error/code")
+                    .or_else(|| value.get("code"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("websocket_connection_limit_reached")
+            {
+                return Err(plugin_error(
+                    ErrorKind::upstream_transport(
+                        Some(AiErrorKind::ServiceUnavailable),
+                        None,
+                        stravia_vendor_sdk::TransportFailure::Websocket,
+                    ),
+                    "inference WebSocket connection limit reached",
+                ));
+            }
+            if original_type.starts_with("codex.")
+                || original_type.starts_with("responsesapi.")
+                || (drop_response_metadata && original_type == "response.metadata")
+            {
+                continue;
+            }
+            if original_type.starts_with("response.") {
+                saw_response_event = true;
+            }
+            if original_type == "response.done" {
+                let normalized = match value
+                    .pointer("/response/status")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("completed") => "response.completed",
+                    Some("incomplete") => "response.incomplete",
+                    Some("failed") => "response.failed",
+                    status => {
+                        return Err(model_error(
+                            AiErrorKind::StreamMidError,
+                            format!(
+                                "Responses WebSocket response.done has invalid terminal status: {status:?}"
+                            ),
+                        ));
+                    }
+                };
+                value["type"] = serde_json::Value::String(normalized.to_owned());
+            }
+            let event_type = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("message");
+            let text = serde_json::to_string(&value).map_err(|error| {
+                plugin_error(
+                    ErrorKind::Trapped,
+                    format!("failed to normalize WebSocket event: {error}"),
+                )
+            })?;
+            terminal = matches!(
+                event_type,
+                "response.completed" | "response.failed" | "response.incomplete"
+            ) || (event_type == "response.done"
+                && value
+                    .pointer("/response/status")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some());
+            let frame = format!("event: {event_type}\ndata: {text}\n\n");
+            let deltas = decoder
+                .decode_chunk(frame.as_bytes())
+                .map_err(map_response_transform_error)?;
+            if terminal
+                && event_type == "response.completed"
+                && value
+                    .pointer("/response/status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("completed")
+            {
+                completed_id = value
+                    .pointer("/response/id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_owned);
+            }
+            emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
+        }
+        let deltas = decoder.finish().map_err(map_response_transform_error)?;
         emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
+        reusable = terminal;
+        Ok((accumulator.into_ai_response(), completed_id))
+    })();
+    match result {
+        Ok((complete, completed_id)) => {
+            if reusable {
+                connection.close(completed_id.as_deref())?;
+            }
+            host.emit_completed(&complete)?;
+            Ok(complete)
+        }
+        Err(error) => {
+            if reusable && let Err(close_error) = connection.close(None) {
+                host.log(
+                    stravia_vendor_sdk::LogLevel::Warn,
+                    &format!("WebSocket release after upstream rejection failed: {close_error}"),
+                );
+            }
+            Err(error)
+        }
     }
-    let deltas = decoder.finish().map_err(map_response_transform_error)?;
-    emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
-    let complete = accumulator.into_ai_response();
-    host.emit_completed(&complete)?;
-    let _ = connection.close(true);
-    Ok(complete)
 }
 
 fn no_http_stream_error(_: &serde_json::Value, _: bool) -> Option<PluginError> {

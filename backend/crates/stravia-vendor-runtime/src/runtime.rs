@@ -576,7 +576,12 @@ impl wit_host::Host for StoreState {
         }
         match self
             .services
-            .ws_connect(request.url, request.headers, request.protocols)
+            .ws_connect(
+                request.url,
+                request.headers,
+                request.protocols,
+                request.continuation_id,
+            )
             .await
         {
             Ok(socket) => self
@@ -755,22 +760,19 @@ impl wit_host::HostWsConnection for StoreState {
     async fn close(
         &mut self,
         socket: Resource<WebSocketResource>,
-        response_continuation: bool,
+        continuation_id: Option<String>,
     ) -> Result<Result<(), wit_types::PluginError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
             return Ok(Err(to_wit_failure(error)));
         }
-        if response_continuation && self.operation != Some(Operation::Infer) {
+        if continuation_id.is_some() && self.operation != Some(Operation::Infer) {
             return Ok(Err(to_wit_failure(HostFailure::new(
                 ErrorKind::Trapped,
                 "response continuation can only be declared by inference",
             ))));
         }
         let socket = self.table.get(&socket)?.0.clone();
-        Ok(socket
-            .close(response_continuation)
-            .await
-            .map_err(to_wit_failure))
+        Ok(socket.close(continuation_id).await.map_err(to_wit_failure))
     }
 
     async fn drop(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<()> {
@@ -883,6 +885,7 @@ fn convert_error_kind(value: wit_types::ErrorKind) -> ErrorKind {
         wit_types::ErrorKind::Invalid => ErrorKind::Invalid,
         wit_types::ErrorKind::Auth => ErrorKind::Auth,
         wit_types::ErrorKind::ContinuationNotFound => ErrorKind::ContinuationNotFound,
+        wit_types::ErrorKind::ContinuationUnavailable => ErrorKind::ContinuationUnavailable,
         wit_types::ErrorKind::ProtectedReasoningRejected => ErrorKind::ProtectedReasoningRejected,
         wit_types::ErrorKind::Upstream(failure) => {
             ErrorKind::Upstream(stravia_vendor_sdk::UpstreamFailure {
@@ -936,6 +939,7 @@ fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
         ErrorKind::Invalid => wit_types::ErrorKind::Invalid,
         ErrorKind::Auth => wit_types::ErrorKind::Auth,
         ErrorKind::ContinuationNotFound => wit_types::ErrorKind::ContinuationNotFound,
+        ErrorKind::ContinuationUnavailable => wit_types::ErrorKind::ContinuationUnavailable,
         ErrorKind::ProtectedReasoningRejected => wit_types::ErrorKind::ProtectedReasoningRejected,
         ErrorKind::Upstream(failure) => {
             wit_types::ErrorKind::Upstream(wit_types::UpstreamFailure {
@@ -1082,6 +1086,7 @@ impl HostServices for DenyServices {
         _url: String,
         _headers: Vec<(String, String)>,
         _protocols: Vec<String>,
+        _continuation_id: Option<String>,
     ) -> Result<Arc<dyn crate::host::HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,

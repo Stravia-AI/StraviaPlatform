@@ -1290,9 +1290,12 @@ impl HostServices for ScopedHostServices {
         url: String,
         headers: Vec<(String, String)>,
         protocols: Vec<String>,
+        continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         self.ensure_current()?;
-        self.network.ws_connect(url, headers, protocols).await
+        self.network
+            .ws_connect(url, headers, protocols, continuation_id)
+            .await
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {

@@ -215,7 +215,15 @@ export class CanvasLinkIndex {
         }
       }
       if (inferred.includes(confirmed)) {
-        return { id: confirmed, kind: 'inferred' }
+        const generationRoot = interaction.generation_root_id
+        // 同一 Generation Chain 的尾部匹配是补充诊断；只有跨根来源才画推断边。
+        return {
+          id: confirmed,
+          kind:
+            generationRoot !== null && generationRoot === this.byId.get(confirmed)?.generation_root_id
+              ? 'confirmed'
+              : 'inferred',
+        }
       }
       return { id: confirmed, kind: 'confirmed' }
     }

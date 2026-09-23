@@ -516,9 +516,9 @@ Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生
 
 Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。
 
-OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace 与 upstream response ID 维护 affinity，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须命中同 socket；排队 sibling 发现 tip 已前移、重启或过期时改用新 socket 发送完整历史。`previous_response_not_found` 只在没有客户端可见输出时于同 socket 全量重放一次。握手不支持或短暂连接失败可在请求尚未接受时回退同 Target HTTP/SSE；401/403/429、发送后的不确定失败、malformed/binary event、取消和 Client Output Commit 后错误不重放。
+OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace、affinity、URL、认证和握手参数隔离，记录最新成功完成的 upstream response ID，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须原子取得匹配 tip 的可用 socket；分支占用、tip 前移、断线或淘汰时，不先发送旧 ID，而是直接使用 Executor 已保留的完整历史，不消耗恢复预算。Codex 连接身份由 affinity 派生，轮次 ID 留在消息中。上游明确返回 `previous_response_not_found` 或 Codex 无 code 的 ``Invalid `previous_response_id`.`` 时，只有实际请求了续接、尚无模型响应事件且恢复预算允许，才清除 tip 并最多全量回放一次。普通 400、已开始响应和未知接受状态不获得该重放许可。
 
-连接管理不设置本地数量上限，也不做 idle 回收；无 affinity 的 root socket 在终态关闭，保留 affinity 的连接最迟由 60 分钟 max-age 淘汰。高并发且存在大量活跃 continuation 时，文件描述符、内存和上游连接数会随 Target/branch 增长。结构化日志只记录 transport、Target namespace、response/connection ID、连接年龄、fallback/replay 与 close reason，不记录 prompt、content、tool arguments、媒体或 credential。
+宿主空闲连接池最多保留 64 条连接，满时淘汰最早归池的连接，并按原始建连时间执行 60 分钟 max-age；无 affinity 的 socket 在终态关闭。该空闲池容量不限制正在执行的连接，高并发分支仍会增加文件描述符、内存和上游连接占用。淘汰只影响续接优化，不影响 Generation Chain 提供完整历史。结构化日志只记录 transport、Target namespace、response/connection ID、连接年龄、fallback/replay 与 close reason，不记录 prompt、content、tool arguments、媒体或 credential。
 
 ### 4.9 安全、观测与边界
 
