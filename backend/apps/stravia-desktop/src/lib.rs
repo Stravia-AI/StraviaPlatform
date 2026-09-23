@@ -3,6 +3,7 @@ mod desktop_gateway_runtime;
 mod desktop_icons;
 mod product_update;
 mod startup;
+mod window_geometry;
 
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +24,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
+use window_geometry::WindowGeometry;
 
 // 托盘语言标签与 WebUI messages/{locale}.json 的语言列表保持一致。
 #[derive(Clone, Copy)]
@@ -121,7 +123,15 @@ pub fn run() {
 
     let application = builder
         .on_window_event(|window, event| {
+            if let Some(geometry) = window.try_state::<WindowGeometry>() {
+                geometry.record_event(window, event);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if let Some(geometry) = window.try_state::<WindowGeometry>()
+                    && let Err(error) = geometry.save(window)
+                {
+                    tracing::warn!(%error, "failed to save desktop window geometry");
+                }
                 api.prevent_close();
                 let should_hide = window
                     .try_state::<Arc<StartupController>>()
@@ -160,6 +170,14 @@ pub fn run() {
                 );
             }
 
+            match WindowGeometry::open(app.handle()) {
+                Ok(geometry) => {
+                    app.manage(geometry);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to open desktop window geometry store");
+                }
+            }
             let preferred_shell_root = root_override
                 .as_ref()
                 .ok()
@@ -235,6 +253,16 @@ pub fn run() {
             && !*has_visible_windows
         {
             show_main_window(app);
+        }
+
+        if let tauri::RunEvent::ExitRequested { .. } = &event
+            && let (Some(geometry), Some(window)) = (
+                app.try_state::<WindowGeometry>(),
+                app.get_webview_window("main"),
+            )
+            && let Err(error) = geometry.save(&window.as_ref().window())
+        {
+            tracing::warn!(%error, "failed to save desktop window geometry");
         }
 
         if let tauri::RunEvent::ExitRequested { api, code, .. } = &event
@@ -802,7 +830,7 @@ fn build_main_window(
     preferred_data_dir: Option<&Path>,
     visible: bool,
 ) -> Result<bool, anyhow::Error> {
-    let window_config = app
+    let mut window_config = app
         .config()
         .app
         .windows
@@ -810,6 +838,11 @@ fn build_main_window(
         .find(|window| window.label == "main")
         .ok_or_else(|| anyhow::anyhow!("main WebView configuration is missing"))?
         .clone();
+    if let Some(geometry) = app.try_state::<WindowGeometry>()
+        && let Err(error) = geometry.configure(app, &mut window_config)
+    {
+        tracing::warn!(%error, "failed to configure desktop window geometry");
+    }
     let profile_key = shell_profile_key(preferred_data_dir.unwrap_or_else(|| Path::new("default")));
     let profile_name = format!("{profile_key:016x}");
     let (webview_dir, used_fallback) =
@@ -818,11 +851,28 @@ fn build_main_window(
         } else {
             independent_webview_profile(app, preferred_data_dir, &profile_name)?
         };
+    // 原生窗口必须带着位置创建；Windows 可能在 WebView 初始化时重置创建后的坐标。
     let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
         .data_directory(webview_dir)
-        .visible(visible)
-        .focused(visible)
+        .visible(false)
         .build()?;
+    if app.try_state::<WindowGeometry>().is_none()
+        && let Err(error) = window.center()
+    {
+        tracing::warn!(%error, "failed to center default desktop window");
+    }
+    if visible {
+        window.show()?;
+        if let Some(geometry) = app.try_state::<WindowGeometry>() {
+            if let Err(error) = geometry.position_after_show(&window.as_ref().window()) {
+                tracing::warn!(%error, "failed to position main window");
+            }
+            geometry.start_tracking(&window.as_ref().window());
+        }
+        if let Err(error) = window.set_focus() {
+            tracing::debug!(%error, "failed to focus main window");
+        }
+    }
     // Wry 的创建消息可能只记录底层 WebView 错误，仍返回逻辑句柄。
     // 查询原生窗口确保恢复界面确实存在；隐藏启动的 false 也是成功结果。
     window.is_visible()?;
@@ -850,6 +900,13 @@ fn show_main_window(app: &tauri::AppHandle) {
     };
     if let Err(error) = window.show() {
         tracing::debug!(%error, "failed to show main window");
+        return;
+    }
+    if let Some(geometry) = app.try_state::<WindowGeometry>() {
+        if let Err(error) = geometry.position_after_show(&window.as_ref().window()) {
+            tracing::warn!(%error, "failed to position main window");
+        }
+        geometry.start_tracking(&window.as_ref().window());
     }
     if let Err(error) = window.set_focus() {
         tracing::debug!(%error, "failed to focus main window");
