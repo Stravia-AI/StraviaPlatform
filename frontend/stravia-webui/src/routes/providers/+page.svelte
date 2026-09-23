@@ -291,10 +291,7 @@ async function copyProvider(): Promise<void> {
   {@const provider = context.row.original}
   {@const drifts = driftsByProvider[provider.id] ?? []}
   <div class="flex items-center gap-3">
-    <ProviderMark
-      icon={providerIcon(provider)}
-      name={provider.name}
-      logo={provider.id} />
+    <ProviderMark icon={providerIcon(provider)} name={provider.name} logo={provider.id} />
     <div class="min-w-0">
       <p class="truncate font-medium">{provider.name}</p>
       {#if provider.vendor}
@@ -429,10 +426,7 @@ async function copyProvider(): Promise<void> {
           <div class="route-mobile-row">
             <div class="min-w-0">
               <div class="flex items-center gap-3">
-                <ProviderMark
-                  icon={providerIcon(provider)}
-                  name={provider.name}
-                  logo={provider.id} />
+                <ProviderMark icon={providerIcon(provider)} name={provider.name} logo={provider.id} />
                 <div class="min-w-0">
                   <p class="truncate font-medium">{provider.name}</p>
                   <p class="mt-1 text-xs text-muted-foreground">
@@ -453,7 +447,11 @@ async function copyProvider(): Promise<void> {
                   : provider.is_enabled
                     ? m.common_enabled_status()
                     : m.common_disabled_status()}
-                tone={credentialInvalid && provider.is_enabled ? 'error' : provider.is_enabled ? 'healthy' : 'neutral'} />
+                tone={credentialInvalid && provider.is_enabled
+                  ? 'error'
+                  : provider.is_enabled
+                    ? 'healthy'
+                    : 'neutral'} />
               {#if credentialInvalid && !provider.is_enabled}
                 <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
               {/if}

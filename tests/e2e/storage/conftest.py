@@ -357,7 +357,7 @@ def build_harness(work_dir: Path) -> None:
                 source: ProviderSourceInput::Custom {
                     vendor: "custom".to_string(),
                     channel: "default".to_string(),
-                    protocol: Some("openai".to_string()),
+                    protocol: Some("openai-compatible".to_string()),
                     base_url: format!("{upstream}/v1"),
                     models_source: None,
                     static_models: None,

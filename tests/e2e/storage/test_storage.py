@@ -297,7 +297,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                             "type": "custom",
                             "vendor": "custom",
                             "channel": "default",
-                            "protocol": "openai",
+                            "protocol": "openai-compatible",
                             "base_url": f"http://127.0.0.1:{upstream_port}/v1",
                         },
                         "credential": {

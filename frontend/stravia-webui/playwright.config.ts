@@ -15,7 +15,9 @@ export default defineConfig({
   reporter: process.env.CI ? 'github' : 'list',
   use: { baseURL, colorScheme: 'light', screenshot: 'only-on-failure', trace: 'retain-on-failure' },
   webServer: {
-    command: `${webServerCommand}bun run preview -- --host 127.0.0.1 --port ${port} --strictPort`,
+    // `vite preview` crashes under Bun 1.4.x (oven-sh/bun#40350); the dedicated
+    // Bun.serve static server in scripts/preview-server.ts avoids that path.
+    command: `${webServerCommand}bun scripts/preview-server.ts --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

@@ -148,9 +148,7 @@ function associatedServicesLabel(model: Route): string {
     ...new Set(
       model.targets
         .filter((target) => target.enabled)
-        .map(
-          (target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id,
-        ),
+        .map((target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id),
     ),
   ].join(', ')
 }

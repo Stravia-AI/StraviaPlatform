@@ -108,7 +108,7 @@ def _create_probe_provider(
             "name": name,
             "source": {
                 "type": "custom", "vendor": "custom", "channel": "default",
-                "protocol": "openai", "base_url": env["mock"],
+                "protocol": "openai-compatible", "base_url": env["mock"],
                 "models_source": endpoint, **source,
             },
             "credential": credential if credential is not None else {
@@ -379,7 +379,7 @@ def _create_provider(env: dict[str, str], name: str) -> str:
                 "type": "custom",
                 "vendor": "custom",
                 "channel": "default",
-                "protocol": "openai",
+                "protocol": "openai-compatible",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "dummy-key"},

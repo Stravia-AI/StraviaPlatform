@@ -185,7 +185,7 @@ def _create_media_route(env: dict[str, Any], name: str) -> tuple[str, str]:
                 "type": "custom",
                 "vendor": "custom",
                 "channel": "default",
-                "protocol": "openai",
+                "protocol": "openai-compatible",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "upstream-secret"},

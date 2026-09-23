@@ -47,7 +47,7 @@ def _create_route(
                 "type": "custom",
                 "vendor": "custom",
                 "channel": "default",
-                "protocol": "openai",
+                "protocol": "openai-compatible",
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "upstream-secret"},

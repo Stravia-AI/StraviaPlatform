@@ -815,7 +815,7 @@ def test_interactive_recovery_preserves_data_and_revokes_all_sessions(
                     "type": "custom",
                     "vendor": "custom",
                     "channel": "default",
-                    "protocol": "openai",
+                    "protocol": "openai-compatible",
                     "base_url": "http://127.0.0.1:9/v1",
                 },
                 "credential": {"type": "api_key", "value": "unused"},
