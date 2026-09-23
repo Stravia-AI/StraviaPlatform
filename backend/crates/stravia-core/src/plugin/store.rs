@@ -10,8 +10,6 @@ use crate::db::models::Provider;
 use crate::provider_models::{ProviderModelMetadata, ProviderModelPresence, ProviderModelRecord};
 use crate::storage::memory::MemoryOAuthCredentialStore;
 
-pub(crate) const MAX_PRIVATE_STATE_BYTES: usize = 256 * 1024;
-
 /// Storage-backed vendor plugin packages and their provider-scoped state.
 #[derive(Clone)]
 pub struct PluginStore {
@@ -85,8 +83,6 @@ pub(crate) enum PluginStorageError {
     Changed,
     #[error("plugin operation is no longer current")]
     StaleOperation,
-    #[error("vendor private state exceeds its size limit")]
-    StateTooLarge,
     #[error("plugin storage operation failed")]
     Storage,
 }
@@ -525,9 +521,6 @@ impl PluginStore {
         format_version: &str,
         payload: &[u8],
     ) -> Result<(), PluginStorageError> {
-        if payload.len() > MAX_PRIVATE_STATE_BYTES {
-            return Err(PluginStorageError::StateTooLarge);
-        }
         const SQL: &str = "INSERT INTO vendor_private_state (provider_id,vendor_id,format_version,payload,updated_at)
             SELECT p.id,p.vendor,$4,$5,$6 FROM providers p
             JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT d.vendor_id FROM vendor_plugins d WHERE d.vendor_id=p.vendor),'base')

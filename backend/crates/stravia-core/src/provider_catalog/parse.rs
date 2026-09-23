@@ -44,25 +44,10 @@ pub(super) fn parse_snapshot(
         serde_json::from_slice(providers_body).context("decode provider index JSON")?;
     let providers = parse_providers(&providers_raw)?;
     let canonical_models = parse_canonical_models(canonical_models_body)?;
-    let mut canonical_summaries: Vec<_> = canonical_models
-        .iter()
-        .map(|(id, metadata)| CanonicalModelSummary {
-            id: id.clone(),
-            name: metadata
-                .get("name")
-                .and_then(Value::as_str)
-                .expect("validated Canonical Model name")
-                .to_string(),
-        })
-        .collect();
-    canonical_summaries.sort_by(|left, right| {
-        left.name
-            .to_lowercase()
-            .cmp(&right.name.to_lowercase())
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    let canonical_summaries = canonical_summaries(&canonical_models);
     Ok(CatalogSnapshot {
-        version,
+        version: version.clone(),
+        providers_version: version,
         providers,
         providers_raw,
         canonical_models,
@@ -270,15 +255,14 @@ pub(super) fn model_source_id(source: &CatalogModelSource) -> &str {
         .unwrap_or_default()
 }
 
+/// Upstream membership uses the raw index keys: a provider scope can exist
+/// for entries this instance cannot brand (e.g. an implementation only the
+/// guest understands).
 pub(super) fn ensure_catalog_provider(
     snapshot: &CatalogSnapshot,
     provider_id: &str,
 ) -> anyhow::Result<()> {
-    if snapshot
-        .providers
-        .iter()
-        .any(|provider| provider.id == provider_id)
-    {
+    if snapshot.providers_raw.get(provider_id).is_some() {
         Ok(())
     } else {
         Err(CatalogError::ProviderNotFound {
@@ -495,92 +479,12 @@ pub(super) fn infer_reasoning_options(
     }
 }
 
-pub(super) fn adapter_id_for_npm(package: &str) -> Option<&'static str> {
-    Some(match package {
-        "@ai-sdk/openai" => "openai",
-        "@ai-sdk/openai-compatible" => "openai-compatible",
-        "@ai-sdk/anthropic" => "anthropic",
-        "@ai-sdk/google" => "google",
-        "@ai-sdk/xai" => "xai",
-        "@ai-sdk/azure" => "azure",
-        "@ai-sdk/groq" => "groq",
-        "@ai-sdk/cerebras" => "cerebras",
-        "@ai-sdk/togetherai" => "togetherai",
-        "@ai-sdk/mistral" => "mistral",
-        "@ai-sdk/deepinfra" => "deepinfra",
-        "@ai-sdk/perplexity" => "perplexity",
-        "@ai-sdk/gateway" => "gateway",
-        "@ai-sdk/vercel" => "vercel",
-        "@ai-sdk/google-vertex" => "google-vertex",
-        "@ai-sdk/google-vertex/anthropic" => "google-vertex-anthropic",
-        "@ai-sdk/amazon-bedrock" => "amazon-bedrock",
-        "@ai-sdk/cohere" => "cohere",
-        "@openrouter/ai-sdk-provider" => "openrouter",
-        "watsonx-ai-provider" => "watsonx",
-        "venice-ai-sdk-provider" => "venice",
-        "@aihubmix/ai-sdk-provider" => "aihubmix",
-        "@jerome-benoit/sap-ai-provider-v2" => "sap-ai-core",
-        "@qvac/ai-sdk-provider" => "qvac",
-        "@saladtechnologies-oss/ai-sdk-provider" => "salad-cloud",
-        "ai-gateway-provider" => "cloudflare-ai-gateway",
-        "gitlab-ai-provider" => "gitlab",
-        "merge-gateway-ai-sdk-provider" => "merge-gateway",
-        _ => return None,
-    })
-}
-
-pub(super) fn protocol_for_package(package: &str, provider_id: &str) -> Option<String> {
-    let protocol = match package {
-        "@ai-sdk/openai" => "open-responses",
-        "@ai-sdk/openai-compatible" => "openai-compatible",
-        "@ai-sdk/anthropic" => "anthropic-messages",
-        "@ai-sdk/google" => "google-gemini",
-        "@ai-sdk/xai" => "openai-compatible",
-        "@ai-sdk/google-vertex" => "google-gemini",
-        "@ai-sdk/google-vertex/anthropic" => "anthropic-messages",
-        "@ai-sdk/amazon-bedrock" => "bedrock-converse",
-        "@ai-sdk/cohere" => "cohere-chat",
-        "watsonx-ai-provider" => "watsonx-text-chat",
-        "@ai-sdk/gateway" => "gateway-language-model",
-        _ if adapter_id_for_npm(package).is_some() => "openai-compatible",
-        _ if provider_id == "openai" => "open-responses",
-        _ if provider_id == "anthropic" => "anthropic-messages",
-        _ if provider_id == "google" => "google-gemini",
-        _ if provider_id == "xai" => "openai-compatible",
-        _ => return None,
-    };
-    Some(protocol.to_string())
-}
-
-pub(super) fn adapter_default_base_url(adapter_id: &str) -> Option<&'static str> {
-    match adapter_id {
-        "openai" => Some("https://api.openai.com/v1"),
-        "anthropic" => Some("https://api.anthropic.com"),
-        "google" => Some("https://generativelanguage.googleapis.com"),
-        "xai" => Some("https://api.x.ai/v1"),
-        "groq" => Some("https://api.groq.com/openai/v1"),
-        "cerebras" => Some("https://api.cerebras.ai/v1"),
-        "togetherai" => Some("https://api.together.xyz/v1"),
-        "mistral" => Some("https://api.mistral.ai/v1"),
-        "deepinfra" => Some("https://api.deepinfra.com/v1/openai"),
-        "perplexity" => Some("https://api.perplexity.ai"),
-        "gateway" => Some("https://ai-gateway.vercel.sh/v4/ai"),
-        "vercel" => Some("https://api.v0.dev/v1"),
-        "openrouter" => Some("https://openrouter.ai/api/v1"),
-        "cohere" => Some("https://api.cohere.com/v2"),
-        "watsonx" => Some("https://us-south.ml.cloud.ibm.com"),
-        "venice" => Some("https://api.venice.ai/api/v1"),
-        "aihubmix" => Some("https://aihubmix.com/v1"),
-        "qvac" => Some("http://127.0.0.1:11435/v1"),
-        "salad-cloud" => Some("https://ai.salad.cloud/v1"),
-        "merge-gateway" => Some("https://api-gateway.merge.dev/v1/ai-sdk"),
-        "gitlab" => Some("https://cloud.gitlab.com/ai/v1/proxy/openai/v1"),
-        "google-vertex" | "google-vertex-anthropic" => {
-            Some("https://aiplatform.googleapis.com/v1/projects/{project}/locations/global")
-        }
-        _ => None,
-    }
-}
+// The `npm` → adapter/protocol/base-url vocabulary is contract surface shared
+// with the base guest (which registers profiles only for packages this table
+// maps); it lives in the SDK so both sides cannot drift.
+pub(super) use stravia_vendor_sdk::catalog::{
+    adapter_default_base_url, adapter_id_for_package as adapter_id_for_npm, protocol_for_package,
+};
 
 pub(super) fn catalog_channels(
     provider_id: &str,

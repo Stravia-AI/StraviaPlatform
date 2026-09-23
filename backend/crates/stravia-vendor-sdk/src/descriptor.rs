@@ -128,6 +128,10 @@ pub struct AuthDescriptor {
 /// thinking control for a model, even when its base codec cannot.
 pub const MODEL_CAPABILITY_THINKING_TOGGLE: &str = "thinking_toggle";
 
+/// `models_source` marker selecting the host-owned catalog inventory. Guests
+/// must treat it as an opaque source selector, never as a request URL.
+pub const MODELS_SOURCE_CATALOG: &str = "catalog";
+
 /// Host-owned model inventory source a channel may select by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,7 +142,7 @@ pub enum DefaultModelsSource {
 impl DefaultModelsSource {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Catalog => "catalog",
+            Self::Catalog => MODELS_SOURCE_CATALOG,
         }
     }
 }
@@ -159,6 +163,11 @@ pub struct ChannelDescriptor {
     /// it or reject it. `None` is valid for a custom vendor wire protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// Selectable wire protocols for multi-protocol channels (e.g. the single
+    /// base `custom` profile). When non-empty the admin UI renders a required
+    /// select and the host rejects protocol values outside this set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<EnumOption>,
     /// Vendor-declared initial base URL presented when creating a connection.
     /// Runtime authority still comes from the saved provider snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +176,12 @@ pub struct ChannelDescriptor {
     /// explicitly select one. Currently only the host-owned catalog is valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_models_source: Option<DefaultModelsSource>,
+    /// `true` when catalog-sourced discovery on this channel consumes the
+    /// host-injected `catalog_models` scope. The host resolves the catalog
+    /// scope only for channels declaring this; channels that resolve
+    /// `catalog` into a live account request must leave it `false`.
+    #[serde(default)]
+    pub consumes_catalog_models: bool,
     /// Capabilities actually usable through this channel. Non-empty.
     pub capabilities: BTreeSet<Capability>,
     /// Positive model capability defaults, supplemented by discovered model
@@ -336,6 +351,17 @@ pub struct ProviderDescriptor {
     pub network: NetworkDeclaration,
     #[serde(default)]
     pub data_compat: DataCompatibility,
+    /// Official product site declared by the vendor. Host icon resolution may
+    /// fetch `/favicon.ico` from this origin when the catalog has no logo;
+    /// documentation URLs and guessed domains are not acceptable values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Guest-declared implementation family (e.g. the catalog `npm` value a
+    /// runtime-registered profile was derived from). The host echoes the
+    /// whole profile back in `operation_metadata.vendor_profile` so the guest
+    /// can dispatch dynamically registered profiles without catalog access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
 }
 
 /// The manifest a component returns from its `descriptor` export, serialized
@@ -449,6 +475,13 @@ impl ProviderDescriptor {
             if ch.capabilities.is_empty() {
                 return Err(DescriptorError::ChannelWithoutCapabilities(ch.id.clone()));
             }
+            if ch.default_models_source == Some(DefaultModelsSource::Catalog)
+                && !ch.consumes_catalog_models
+            {
+                return Err(DescriptorError::CatalogDefaultWithoutConsumption(
+                    ch.id.clone(),
+                ));
+            }
             if let Some(auth) = &ch.auth {
                 let callback_expected = matches!(auth.flow, AuthFlow::AuthorizationCode);
                 if callback_expected != auth.callback.is_some()
@@ -501,6 +534,22 @@ impl ProviderDescriptor {
                     {
                         return Err(DescriptorError::InvalidAuthPolicy(ch.id.clone()));
                     }
+                }
+            }
+            if !ch.protocols.is_empty() {
+                let mut values = BTreeSet::new();
+                for option in &ch.protocols {
+                    if option.value.trim().is_empty()
+                        || option.label.trim().is_empty()
+                        || !values.insert(option.value.as_str())
+                    {
+                        return Err(DescriptorError::InvalidProtocols(ch.id.clone()));
+                    }
+                }
+                if let Some(protocol) = &ch.protocol
+                    && !values.contains(protocol.as_str())
+                {
+                    return Err(DescriptorError::InvalidProtocols(ch.id.clone()));
                 }
             }
         }
@@ -647,6 +696,10 @@ pub enum DescriptorError {
     ChannelWithoutCapabilities(String),
     #[error("channel `{0}` declares an invalid authentication callback policy")]
     InvalidAuthPolicy(String),
+    #[error(
+        "channel `{0}` defaults to the catalog model source without consuming injected catalog models"
+    )]
+    CatalogDefaultWithoutConsumption(String),
     #[error("top-level capabilities must equal the union of channel capabilities")]
     CapabilityUnionMismatch,
     #[error("duplicate config field key")]
@@ -673,6 +726,8 @@ pub enum DescriptorError {
     EmptyEnum(String),
     #[error("enum field `{0}` declares a duplicate option value")]
     DuplicateEnumValue(String),
+    #[error("channel `{0}` declares an invalid selectable protocol set")]
+    InvalidProtocols(String),
 }
 
 #[cfg(test)]
@@ -692,13 +747,17 @@ mod tests {
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),
@@ -751,6 +810,7 @@ mod tests {
     fn channel_default_models_source_accepts_only_catalog() {
         let mut valid = provider("alpha");
         valid.channels[0].default_models_source = Some(DefaultModelsSource::Catalog);
+        valid.channels[0].consumes_catalog_models = true;
         let descriptor = manifest("base", VendorKind::Fallback, vec![valid]);
         assert!(descriptor.validate().is_ok());
 
@@ -758,6 +818,18 @@ mod tests {
         invalid["providers"][0]["channels"][0]["default_models_source"] =
             serde_json::json!("https://inventory.test/models");
         assert!(serde_json::from_value::<VendorDescriptor>(invalid).is_err());
+    }
+
+    #[test]
+    fn catalog_default_requires_consuming_injected_models() {
+        let mut invalid = provider("alpha");
+        invalid.channels[0].default_models_source = Some(DefaultModelsSource::Catalog);
+        assert_eq!(
+            manifest("base", VendorKind::Fallback, vec![invalid]).validate(),
+            Err(DescriptorError::CatalogDefaultWithoutConsumption(
+                "default".into()
+            ))
+        );
     }
 
     #[test]

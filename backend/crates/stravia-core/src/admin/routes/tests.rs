@@ -29,11 +29,7 @@ async fn route_fixture_with_protocol(
         .create_provider(CreateProvider {
             name: Some("Route Test Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: match protocol {
-                    "open-responses" => "protocol-open-responses",
-                    _ => "protocol-openai-chat-completions",
-                }
-                .into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some(protocol.into()),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1217,7 +1213,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
         .create_provider(CreateProvider {
             name: Some("Gemini Route Test Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-gemini".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("google-gemini".into()),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1360,7 +1356,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .create_provider(CreateProvider {
             name: Some("Toggle Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-anthropic-messages".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("anthropic-messages".into()),
                 base_url: "http://127.0.0.1:9".into(),

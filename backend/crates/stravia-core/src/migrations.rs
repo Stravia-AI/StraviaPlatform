@@ -97,13 +97,47 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert relying on column defaults");
-        let (enabled, mcp): (bool, bool) =
-            sqlx::query_as("SELECT is_enabled, mcp_access_enabled FROM api_keys WHERE id = 'k'")
-                .fetch_one(&pool)
-                .await
-                .expect("defaults materialized");
+        let (enabled, mcp, media): (bool, bool, bool) = sqlx::query_as(
+            "SELECT is_enabled, mcp_access_enabled, inject_media_generation FROM api_keys WHERE id = 'k'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("defaults materialized");
         assert!(enabled);
         assert!(!mcp);
+        assert!(!media);
+
+        let (use_proxy, api_key, engines): (bool, Option<String>, String) = sqlx::query_as(
+            "SELECT use_proxy, api_key, local_engines FROM web_providers WHERE id = 'web-provider-local'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("built-in Local Web Provider");
+        assert!(!use_proxy);
+        assert!(api_key.is_none());
+        let engines: serde_json::Value = serde_json::from_str(&engines).unwrap();
+        assert_eq!(engines["google"]["enabled"], true);
+        assert_eq!(engines["google_scholar"]["enabled"], false);
+        for key in [
+            "web_access_search_provider_ids",
+            "web_access_fetch_provider_ids",
+        ] {
+            let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE name = ?")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .expect("initial Web Access priority");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&value).unwrap(),
+                ["web-provider-local"]
+            );
+        }
+        assert!(
+            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('removed', 'Removed', 'tavily', 'secret')")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -163,13 +197,45 @@ mod tests {
             .unwrap();
         let result = migrate_postgres(&pool).await;
         let rerun = migrate_postgres(&pool).await;
+        result.expect("fresh baseline");
+        rerun.expect("baseline re-run is a no-op");
+
+        let (use_proxy, api_key, engines): (bool, Option<String>, serde_json::Value) =
+            sqlx::query_as(
+                "SELECT use_proxy, api_key, local_engines FROM web_providers WHERE id = 'web-provider-local'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("built-in Local Web Provider");
+        assert!(!use_proxy);
+        assert!(api_key.is_none());
+        assert_eq!(engines["google"]["enabled"], true);
+        assert_eq!(engines["google_scholar"]["enabled"], false);
+        for key in [
+            "web_access_search_provider_ids",
+            "web_access_fetch_provider_ids",
+        ] {
+            let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE name = $1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .expect("initial Web Access priority");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&value).unwrap(),
+                ["web-provider-local"]
+            );
+        }
+        assert!(
+            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('removed', 'Removed', 'tavily', 'secret')")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
         pool.close().await;
         sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)
             .await
             .unwrap();
         admin.close().await;
-        result.expect("fresh baseline");
-        rerun.expect("baseline re-run is a no-op");
     }
 }

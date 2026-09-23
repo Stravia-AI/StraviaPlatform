@@ -493,6 +493,55 @@ pub struct DiscoverResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Input of the `sync-catalog` export, serialized as the canonical payload
+/// body. The host owns persistence; the guest owns fetching, validation, and
+/// profile derivation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSyncRequest {
+    /// Host-configured catalog service base URL (e.g. `https://models.stravia.cn`).
+    pub catalog_base_url: String,
+    /// `true` = fetch a fresh remote snapshot; `false` = derive profiles from
+    /// `snapshot_body`, falling back to the guest's embedded bootstrap list.
+    #[serde(default)]
+    pub refresh_remote: bool,
+    /// Last-good `providers.json` body persisted by the host, when any.
+    #[serde(default)]
+    pub snapshot_body: Option<String>,
+    /// Revision of `snapshot_body`, echoed in the outcome when present.
+    #[serde(default)]
+    pub snapshot_revision: Option<String>,
+    /// `generated_at` of `snapshot_body`, echoed in the outcome when present.
+    #[serde(default)]
+    pub snapshot_generated_at: Option<String>,
+    /// When set, also fetch `providers/{id}/models.json` and return it as
+    /// `scope_body`. A missing scope is `provider-not-found`, not an empty
+    /// success.
+    #[serde(default)]
+    pub scope_provider_id: Option<String>,
+}
+
+/// Result of `sync-catalog`: the snapshot revision plus the complete
+/// replacement Provider Profile set owned by this vendor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSyncOutcome {
+    /// Revision of the snapshot the profiles were derived from (`"bootstrap"`
+    /// for the embedded bootstrap set).
+    pub revision: String,
+    /// Upstream `generated_at` timestamp of the snapshot, when known.
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    /// Freshly fetched `providers.json` body for the host to persist as
+    /// last-good. Absent when profiles came from the supplied/embedded data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_body: Option<String>,
+    /// Fetched `providers/{scope_provider_id}/models.json` body for the host
+    /// to cache. Absent when no scope was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_body: Option<String>,
+    /// Complete replacement Provider Profile set owned by this vendor.
+    pub providers: Vec<crate::descriptor::ProviderDescriptor>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowanceRequest {
     pub model: Option<String>,
@@ -773,6 +822,20 @@ pub trait VendorGuest {
         channel: &str,
         input: OperationInput,
     ) -> Result<OperationOutput, PluginError>;
+
+    /// Synchronize the vendor-owned runtime catalog. Vendor-scoped rather
+    /// than connection-scoped: `http-start` is admitted only for the
+    /// configured catalog origin. The default implementation reports
+    /// `unsupported` for vendors without a runtime catalog.
+    fn sync_catalog(
+        _host: &GuestHost,
+        _request: CatalogSyncRequest,
+    ) -> Result<CatalogSyncOutcome, PluginError> {
+        Err(error(
+            ErrorKind::Unsupported,
+            "vendor does not implement a runtime catalog",
+        ))
+    }
 }
 
 fn decode_provider(value: &types::ProviderSnapshot) -> Result<ProviderSnapshot, PluginError> {
@@ -845,11 +908,31 @@ fn admit_provider<G: VendorGuest>(
     provider: &ProviderSnapshot,
 ) -> Result<(), PluginError> {
     let descriptor = G::descriptor();
-    let Some(profile) = descriptor.provider(&provider.provider_id) else {
-        return Err(error(
-            ErrorKind::Unsupported,
-            "vendor does not own the provider profile",
-        ));
+    let runtime_profile;
+    let profile = match descriptor.provider(&provider.provider_id) {
+        Some(profile) => profile,
+        None => {
+            // Profiles registered through `sync-catalog` are echoed back by
+            // the host so the guest can admit them on the pure select-protocol
+            // path where catalog state is unavailable.
+            runtime_profile = provider
+                .operation_metadata
+                .get("vendor_profile")
+                .and_then(|value| {
+                    serde_json::from_value::<crate::descriptor::ProviderDescriptor>(value.clone())
+                        .ok()
+                })
+                .filter(|profile| profile.provider_id == provider.provider_id);
+            match runtime_profile.as_ref() {
+                Some(profile) => profile,
+                None => {
+                    return Err(error(
+                        ErrorKind::Unsupported,
+                        "vendor does not own the provider profile",
+                    ));
+                }
+            }
+        }
     };
     let Some(channel) = profile
         .channels
@@ -900,6 +983,15 @@ pub fn dispatch_select_protocol<G: VendorGuest>(
 }
 
 #[doc(hidden)]
+pub fn dispatch_sync_catalog<G: VendorGuest>(
+    input: types::CanonicalPayload,
+) -> Result<types::CanonicalPayload, PluginError> {
+    let request: CatalogSyncRequest = decode_body(&input)?;
+    let host = GuestHost::new();
+    G::sync_catalog(&host, request).and_then(|outcome| encode_canonical(&outcome))
+}
+
+#[doc(hidden)]
 pub fn dispatch<G: VendorGuest>(
     operation: types::OperationKind,
     channel: String,
@@ -943,6 +1035,13 @@ macro_rules! export_vendor {
                 input: $crate::wit::types::OperationInput,
             ) -> Result<Vec<u8>, $crate::wit::types::PluginError> {
                 $crate::guest::dispatch::<$guest>(operation, channel, input)
+            }
+
+            fn sync_catalog(
+                input: $crate::wit::types::CanonicalPayload,
+            ) -> Result<$crate::wit::types::CanonicalPayload, $crate::wit::types::PluginError>
+            {
+                $crate::guest::dispatch_sync_catalog::<$guest>(input)
             }
         }
 
@@ -1000,13 +1099,17 @@ mod profile_admission_tests {
                 description: None,
                 auth: None,
                 protocol: Some("test".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: Vec::new(),
             network: NetworkDeclaration::default(),
             data_compat: DataCompatibility::default(),

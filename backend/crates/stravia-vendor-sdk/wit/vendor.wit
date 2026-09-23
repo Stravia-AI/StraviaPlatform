@@ -1,10 +1,10 @@
-// Stravia vendor plugin contract, version 0.2.
+// Stravia vendor plugin contract, version 0.3.
 //
 // One package = one vendor. The guest orchestrates vendor flows and drives
 // controlled HTTP / WebSocket through host imports; it never gets raw sockets,
 // filesystem, env, or background tasks. Host enforces origin allowlists,
 // backpressure, cancellation, and resource limits.
-package stravia:vendor@0.2.0;
+package stravia:vendor@0.3.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
@@ -141,6 +141,11 @@ interface types {
         deadline-exceeded,
         /// Resource limit (memory/output/handles) exceeded.
         resource-exhausted,
+        /// The referenced supplier/catalog entry is absent from the vendor's
+        /// currently registered set. Distinct from `invalid`: it asserts the
+        /// runtime catalog no longer owns that identity, not that input was
+        /// malformed.
+        provider-not-found,
     }
 
     /// HTTP request issued by the guest through the controlled transport.
@@ -339,4 +344,16 @@ world vendor {
         channel: string,
         input: operation-input,
     ) -> result<list<u8>, plugin-error>;
+
+    /// Synchronize the vendor-owned runtime catalog and return the complete
+    /// replacement Provider Profile set the host should register for this
+    /// vendor. `input` is a serialized `CatalogSyncRequest`; the result is a
+    /// serialized `CatalogSyncOutcome`. The call is vendor-scoped rather than
+    /// connection-scoped: the host admits `http-start` only for the configured
+    /// catalog origin and denies connection state, event emission, and other
+    /// operation imports. Vendors without a runtime catalog return
+    /// `unsupported` (the SDK default does so).
+    export sync-catalog: func(
+        input: canonical-payload,
+    ) -> result<canonical-payload, plugin-error>;
 }

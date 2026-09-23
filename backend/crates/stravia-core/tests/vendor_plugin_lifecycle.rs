@@ -377,6 +377,37 @@ async fn invoke_with_previous(
     (status, body)
 }
 
+async fn invoke_large(
+    router: Router,
+    token: String,
+    model: String,
+) -> (StatusCode, serde_json::Value) {
+    let response = router
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": model,
+                        "input": "exercise the lifecycle fixture",
+                        "store": true
+                    })
+                    .to_string(),
+                ))
+                .expect("proxy request"),
+        )
+        .await
+        .expect("proxy response");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("proxy response body");
+    let body = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| serde_json::json!({ "unparsed": String::from_utf8_lossy(&bytes) }));
+    (status, body)
+}
+
 async fn invoke_stream(
     router: Router,
     token: String,
@@ -1698,27 +1729,62 @@ async fn an_http_origin_does_not_authorize_websocket_on_the_same_host_and_port()
     Ok(())
 }
 
+/// fuel 预算已移除；死循环 guest 现在由 deadline/取消机制终止，故障仍
+/// 限定在该调用内且插件可继续服务。
 #[tokio::test]
-async fn exhausted_wasm_fuel_ends_only_that_call_and_the_plugin_recovers() -> anyhow::Result<()> {
+async fn spinning_guest_is_preempted_by_deadline_and_the_plugin_recovers() -> anyhow::Result<()> {
     assert_wasm_fault_is_scoped("fuel").await
+}
+
+/// 沙箱的字节/内存预算已移除；这些模式原先会触顶失败，现在应与
+/// 普通调用一样完成到上游。emit 过 delta 的模式下客户端内容由 delta
+/// 组成（返回值只作终态），因此用 delta 载荷断言；其余模式断言上游文本。
+async fn assert_wasm_operation_completes(mode: &str, expected: &str) -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = new_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "lifecycle-v1.wasm", false).await?;
+    let mut upstream = TestUpstream::start().await;
+    let target = connection(
+        &gateway,
+        LIFECYCLE_VENDOR,
+        &format!("{mode} account"),
+        &format!("lifecycle-{mode}"),
+        &upstream.base_url,
+        "fixture-secret",
+        options(&[("mode", mode)]),
+    )
+    .await?;
+    let token = api_key(&gateway, &[&target.route_id]).await?;
+    let router = create_router(gateway.clone());
+
+    let call = tokio::spawn(invoke_large(router, token, target.route_id));
+    let request = upstream.next().await;
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer fixture-secret")
+    );
+    request.reply(UpstreamReply::model("upstream-completed"));
+    assert_success_with(&call.await?, expected);
+    upstream.assert_no_request();
+    Ok(())
 }
 
 #[tokio::test]
 async fn exceeding_the_wasm_memory_budget_ends_only_that_call_and_the_plugin_recovers()
 -> anyhow::Result<()> {
-    assert_wasm_fault_is_scoped("memory").await
+    assert_wasm_operation_completes("memory", "upstream-completed").await
 }
 
 #[tokio::test]
 async fn an_oversized_vendor_event_ends_only_that_call_and_the_plugin_recovers()
 -> anyhow::Result<()> {
-    assert_wasm_fault_is_scoped("oversized-event").await
+    assert_wasm_operation_completes("oversized-event", &"e".repeat(1024)).await
 }
 
 #[tokio::test]
 async fn cumulative_vendor_output_ends_only_that_call_and_the_plugin_recovers() -> anyhow::Result<()>
 {
-    assert_wasm_fault_is_scoped("oversized-output").await
+    assert_wasm_operation_completes("oversized-output", &"e".repeat(1024)).await
 }
 
 #[tokio::test]

@@ -128,7 +128,10 @@ impl Gateway {
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
-        let provider_catalog = provider_catalog::ProviderCatalog::new(paths.catalog_root())?;
+        let provider_catalog = provider_catalog::ProviderCatalog::new(
+            paths.catalog_root(),
+            config.catalog_base_url.clone(),
+        )?;
         let retention_days = match storage.settings().get("log_retention_days").await {
             Ok(value) => value
                 .and_then(|value| value.parse::<u32>().ok())
@@ -298,16 +301,24 @@ impl Gateway {
             crate::data_paths::DataPaths::new(&config.data_dir).plugins(),
         )
         .await?;
+        let catalog_base_url = config.catalog_base_url.clone();
         let mut gw = Self {
             config,
             storage,
             storage_kind,
             http_client,
-            vendor_http_client,
-            vendor_websocket_client,
-            vendor_plugins,
+            vendor_http_client: vendor_http_client.clone(),
+            vendor_websocket_client: vendor_websocket_client.clone(),
+            vendor_plugins: vendor_plugins.clone(),
             vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
-            provider_catalog,
+            provider_catalog: provider_catalog.clone(),
+            catalog_sync: crate::plugin::catalog_sync::VendorCatalogSync::new(
+                vendor_plugins.clone(),
+                provider_catalog,
+                catalog_base_url,
+                vendor_http_client.clone(),
+                vendor_websocket_client.clone(),
+            ),
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::default(),
             allowance_samples,
             vendor_client_cache: Arc::new(tokio::sync::RwLock::new([None, None])),
@@ -342,16 +353,19 @@ impl Gateway {
             lifecycle_owner: true,
         };
         gw.vendor_plugins.reconcile_bundled(&gw).await?;
+        if let Err(error) = gw.catalog_sync.bootstrap().await {
+            tracing::warn!(error = ?error, "provider catalog bootstrap sync failed");
+        }
         gw.install_model_turn();
         configure_gateway_extensions(&mut gw, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             .await?;
-        {
-            let catalog = gw.provider_catalog.clone();
+        if gw.config.catalog_background_refresh {
+            let catalog_sync = gw.catalog_sync.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
             gw.lifecycle.spawn(async move {
                 let initial_refresh = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    result = catalog.refresh() => result,
+                    result = catalog_sync.refresh() => result,
                 };
                 if let Err(error) = initial_refresh {
                     tracing::warn!(error = ?error, "provider catalog startup refresh failed");
@@ -369,7 +383,7 @@ impl Gateway {
                     }
                     let refresh = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = catalog.refresh() => result,
+                        result = catalog_sync.refresh() => result,
                     };
                     if let Err(error) = refresh {
                         tracing::warn!(error = ?error, "provider catalog refresh failed");
@@ -571,6 +585,43 @@ impl Gateway {
         admin::AdminService::new(self.clone())
     }
 
+    /// ADR-0073 收口：把一条上游凭据拒绝证据按条件写落库。代际已变（凭据
+    /// 已被新证据替换）时不写；存储失败只记 warn，不改变原请求结果。
+    pub(crate) async fn mark_provider_credential_invalid(
+        &self,
+        provider_id: &str,
+        expected: crate::db::models::ProviderCredentialVersion,
+    ) {
+        match self
+            .storage
+            .providers()
+            .mark_credential_invalid(provider_id, expected)
+            .await
+        {
+            Ok(true) => tracing::warn!(
+                provider_id,
+                "provider credentials marked invalid after upstream authentication rejection"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(provider_id, %error, "failed to record provider credential invalidation")
+            }
+        }
+    }
+
+    /// ADR-0073 收口：新凭据证据出现时清除失效标记（OAuth 刷新成功等不改
+    /// Provider 行的路径）；写失败同样只记 warn。
+    pub(crate) async fn clear_provider_credential_invalid(&self, provider_id: &str) {
+        if let Err(error) = self
+            .storage
+            .providers()
+            .clear_credential_invalid(provider_id)
+            .await
+        {
+            tracing::warn!(provider_id, %error, "failed to clear provider credential invalidation");
+        }
+    }
+
     pub fn web_access(&self) -> web_access::WebAccessService {
         web_access::WebAccessService::new(self.clone())
     }
@@ -743,6 +794,35 @@ fn to_sql_backend_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {
+        let data_dir = tempfile::tempdir()?;
+        let gateway = Gateway::new(GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await?;
+        let health = gateway.storage.bootstrap().health().await?;
+        assert!(
+            health.can_connect,
+            "SQLite health check should report can_connect"
+        );
+        assert!(
+            health.schema_compatible,
+            "SQLite health check should report schema_compatible after migration"
+        );
+        gateway.shutdown().await;
+        gateway
+            ._sqlite_pool
+            .as_ref()
+            .expect("Gateway SQLite pool")
+            .close()
+            .await;
+        drop(gateway);
+        data_dir.close()?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn proxied_http_requests_reuse_connections_across_vendor_snapshots() -> anyhow::Result<()>

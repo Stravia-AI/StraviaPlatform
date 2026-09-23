@@ -459,7 +459,7 @@ async fn media_test_app_with_answer(
         .create_provider(crate::db::models::CreateProvider {
             name: Some("MCP Vision".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: provider_url,

@@ -5,7 +5,6 @@ use crate::auth::{
 };
 use crate::config::GatewayConfig;
 use serde_json::json;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 const FAR_FUTURE_RFC3339: &str = "2099-01-01T00:00:00Z";
@@ -14,7 +13,7 @@ const CODEX_RUNTIME_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 #[tokio::test]
 async fn manual_oauth_session_exposes_its_effective_callback_contract() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
 
     assert_eq!(init.callback_mode, OAuthCallbackMode::Manual);
@@ -26,12 +25,15 @@ async fn manual_oauth_session_exposes_its_effective_callback_contract() -> anyho
         url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback")
     }));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<()> {
-    let gw = build_gateway_with_vendors(&["devin"]).await?;
+    let (data_dir, gw) = build_gateway_with_vendors(&["devin"]).await?;
     let init = gw
         .admin()
         .init_oauth_session(
@@ -70,13 +72,16 @@ async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<(
         )
         .await?;
     assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn oauth_session_is_shared_across_admin_instances_and_cancel_deletes_it() -> anyhow::Result<()>
 {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     let init = init_codex_session(&gw).await?;
     let status = gw
@@ -100,12 +105,15 @@ async fn oauth_session_is_shared_across_admin_instances_and_cancel_deletes_it() 
         .expect_err("cancelled session should be removed");
     assert!(err.to_string().contains("auth session not found"));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     let init = init_codex_session(&gw).await?;
     let err = gw
@@ -144,12 +152,15 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
             && last_error.as_deref().is_some_and(|message| message.contains("state"))
     ));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn denied_oauth_callback_becomes_a_terminal_session_error() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
     let state = reqwest::Url::parse(init.auth_url.as_deref().expect("authorization URL"))?
         .query_pairs()
@@ -179,12 +190,15 @@ async fn denied_oauth_callback_becomes_a_terminal_session_error() -> anyhow::Res
         AuthSessionStatusData::Error { ref code, .. } if code == "AUTH_ACCESS_DENIED"
     ));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn oauth_completion_claim_allows_only_one_exchange() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
 
     let claimed = gw
@@ -213,12 +227,15 @@ async fn oauth_completion_claim_allows_only_one_exchange() -> anyhow::Result<()>
         .expect_err("a second completion must not exchange the same code");
     assert!(error.to_string().contains("AUTH_COMPLETION_IN_PROGRESS"));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn pending_oauth_session_uses_the_latest_proxy_setting() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
 
     gw.admin()
@@ -231,12 +248,15 @@ async fn pending_oauth_session_uses_the_latest_proxy_setting() -> anyhow::Result
         .expect("pending session");
     assert!(session.use_proxy);
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn completing_a_ready_session_is_idempotent() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
     seed_ready_session(
         &gw.admin(),
@@ -263,12 +283,15 @@ async fn completing_a_ready_session_is_idempotent() -> anyhow::Result<()> {
         .await?;
     assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn unsafe_auth_session_url_update_is_atomic() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
     let original = gw
         .admin()
@@ -326,12 +349,15 @@ async fn unsafe_auth_session_url_update_is_atomic() -> anyhow::Result<()> {
         assert_eq!(current.updated_at, original.updated_at);
     }
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn auth_session_url_updates_accept_https_and_loopback_http() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
     let init = init_codex_session(&gw).await?;
     let verification_uri = "https://accounts.example.com/device";
     let verification_uri_complete = "http://localhost:1457/authorize?user_code=public-device-code";
@@ -353,12 +379,15 @@ async fn auth_session_url_updates_accept_https_and_loopback_http() -> anyhow::Re
         updated.verification_uri_complete.as_deref(),
         Some(verification_uri_complete)
     );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn timeout_and_cleanup_remove_expired_sessions() -> anyhow::Result<()> {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     let timed_out = init_codex_session(&gw).await?;
     gw.admin()
@@ -411,13 +440,16 @@ async fn timeout_and_cleanup_remove_expired_sessions() -> anyhow::Result<()> {
             .is_none()
     );
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
 #[tokio::test]
 async fn ready_session_is_single_use_and_provider_status_exposes_runtime_url() -> anyhow::Result<()>
 {
-    let gw = build_gateway().await?;
+    let (data_dir, gw) = build_gateway().await?;
 
     let init = init_codex_session(&gw).await?;
     seed_ready_session(
@@ -460,6 +492,9 @@ async fn ready_session_is_single_use_and_provider_status_exposes_runtime_url() -
     assert_eq!(status.status, AuthBindingStatus::Connected.as_str());
     assert_eq!(status.resource_url.as_deref(), Some(CODEX_RUNTIME_URL));
 
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
     Ok(())
 }
 
@@ -486,13 +521,16 @@ async fn init_codex_session(gw: &Gateway) -> anyhow::Result<AuthSessionInitData>
         .await
 }
 
-async fn build_gateway() -> anyhow::Result<Gateway> {
+async fn build_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
     build_gateway_with_vendors(&["openai-codex"]).await
 }
 
-async fn build_gateway_with_vendors(vendors: &[&str]) -> anyhow::Result<Gateway> {
+async fn build_gateway_with_vendors(
+    vendors: &[&str],
+) -> anyhow::Result<(tempfile::TempDir, Gateway)> {
+    let data_dir = tempfile::tempdir()?;
     let config = GatewayConfig {
-        data_dir: test_data_dir(),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gw = Gateway::from_storage(
@@ -507,11 +545,7 @@ async fn build_gateway_with_vendors(vendors: &[&str]) -> anyhow::Result<Gateway>
     for vendor in vendors {
         crate::plugin::test_support::install_distributed_vendor(&gw, vendor).await?;
     }
-    Ok(gw)
-}
-
-fn test_data_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("stravia-oauth-admin-tests-{}", Uuid::new_v4()))
+    Ok((data_dir, gw))
 }
 
 async fn oauth_provider_input(gw: &Gateway) -> anyhow::Result<CreateProvider> {
@@ -567,7 +601,9 @@ async fn seed_ready_session(
     let (_, operation, _) = admin.gw.vendor_plugins.acquire(&session.driver_key)?;
     let publication = operation.publication_fence(
         runtime.cancellation.clone(),
-        std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+        stravia_runtime_contract::Deadline::fixed(
+            std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+        ),
     );
     drop(operation);
     *runtime.publication.lock().await = Some(publication);

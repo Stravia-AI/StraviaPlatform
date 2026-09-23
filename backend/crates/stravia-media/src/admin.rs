@@ -190,3 +190,74 @@ pub trait MediaAdminHost: Send + Sync {
 pub struct MediaAdmin {
     host: Arc<dyn MediaAdminHost>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DisabledHost;
+
+    #[async_trait]
+    impl MediaAdminHost for DisabledHost {
+        fn storage_available(&self) -> bool {
+            false
+        }
+
+        async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+            Ok(AgentDefinitionConfig::default())
+        }
+
+        async fn patch_config(&self, _config: AgentDefinitionConfig) -> Result<(), ()> {
+            panic!("unexpected config patch")
+        }
+
+        async fn models(&self) -> Result<Vec<MediaAdminModel>, ()> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct UnavailableHost;
+
+    #[async_trait]
+    impl MediaAdminHost for UnavailableHost {
+        fn storage_available(&self) -> bool {
+            false
+        }
+
+        async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+            panic!("unexpected config lookup")
+        }
+
+        async fn patch_config(&self, _config: AgentDefinitionConfig) -> Result<(), ()> {
+            panic!("unexpected config patch")
+        }
+
+        async fn models(&self) -> Result<Vec<MediaAdminModel>, ()> {
+            panic!("unexpected models lookup")
+        }
+    }
+
+    #[tokio::test]
+    async fn media_config_defaults_to_disabled() {
+        let config = MediaAdmin::new(Arc::new(DisabledHost))
+            .get_media_understanding_config()
+            .await
+            .expect("Media Understanding config");
+
+        assert_eq!(config.state, MediaUnderstandingState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn enabling_media_requires_runtime_storage() {
+        let error = MediaAdmin::new(Arc::new(UnavailableHost))
+            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: None,
+                thinking_level: None,
+            })
+            .await
+            .expect_err("Media runtime storage should be required");
+
+        assert_eq!(error.code, "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE");
+    }
+}

@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use parking_lot::Mutex;
-use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::RuntimeError;
 use tokio::sync::{Notify, OwnedRwLockReadGuard, RwLock};
 
@@ -56,7 +55,7 @@ pub(crate) struct VendorPublicationFence {
     epoch: u64,
     publications: CancellationToken,
     caller: CancellationToken,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
 /// 只有旧操作与其受控资源全部退出后，才能取得此凭证并重置数据。
@@ -164,7 +163,7 @@ impl VendorOperation {
     pub(crate) fn publication_fence(
         &self,
         caller: CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
     ) -> VendorPublicationFence {
         VendorPublicationFence {
             activity: Arc::clone(&self.activity),
@@ -213,7 +212,7 @@ impl VendorPublicationFence {
         anyhow::ensure!(
             !self.publications.is_cancelled()
                 && !self.caller.is_cancelled()
-                && Instant::now() < self.deadline
+                && !self.deadline.is_exceeded()
                 && self.activity.state.lock().epoch == self.epoch,
             "vendor result can no longer be published"
         );
@@ -224,7 +223,7 @@ impl VendorPublicationFence {
         tokio::select! {
             () = self.publications.cancelled() => {}
             () = self.caller.cancelled() => {}
-            () = tokio::time::sleep_until(self.deadline.into()) => {}
+            () = self.deadline.wait() => {}
         }
     }
 
@@ -282,7 +281,7 @@ impl Drop for UpdateAdmission {
 mod tests {
     use super::*;
     use std::task::Poll;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn revoked_admission_preserves_cancellation_for_preparation_and_writes() {
@@ -314,7 +313,8 @@ mod tests {
         let tracker = VendorOperationTracker::default();
         let operation = tracker.begin("vendor").unwrap();
         let caller = CancellationToken::new();
-        let publication = operation.publication_fence(caller.clone(), Instant::now());
+        let publication =
+            operation.publication_fence(caller.clone(), Deadline::fixed(Instant::now()));
         assert!(publication.write_fence().await.is_err());
         drop(publication.terminal_write_fence().await.unwrap());
 
@@ -332,7 +332,7 @@ mod tests {
         let other = tracker.begin("second").unwrap();
         let publication = operation.publication_fence(
             CancellationToken::new(),
-            Instant::now() + Duration::from_secs(60),
+            Deadline::from_now(Duration::from_secs(60)),
         );
         drop(operation);
         assert_eq!(tracker.active_count("first"), 0);
@@ -364,12 +364,12 @@ mod tests {
         let operation = tracker.begin("shared").unwrap();
         let valid = operation.publication_fence(
             CancellationToken::new(),
-            Instant::now() + Duration::from_secs(60),
+            Deadline::from_now(Duration::from_secs(60)),
         );
         let cancelled_caller = CancellationToken::new();
         let stale = operation.publication_fence(
             cancelled_caller.clone(),
-            Instant::now() + Duration::from_secs(60),
+            Deadline::from_now(Duration::from_secs(60)),
         );
         drop(operation);
         cancelled_caller.cancel();

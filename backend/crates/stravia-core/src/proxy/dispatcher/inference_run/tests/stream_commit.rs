@@ -210,6 +210,7 @@ async fn mid_stream_failures_preserve_public_retry_classification() {
         assert!(body.trim_end().ends_with("data: [DONE]"));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "must not replay upstream");
     }
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -257,6 +258,7 @@ async fn delivery_stops_reading_at_completed_for_buffered_and_live_turns() {
             assert!(body.contains("[DONE]"), "{body}");
         }
     }
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[derive(Clone, Copy)]
@@ -410,7 +412,7 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         &gateway,
         "failing-live-protected-reasoning",
         &[upstream_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;
@@ -444,6 +446,8 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         assert_eq!(generation_count, 0);
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    drop(marker_store);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -461,7 +465,7 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
         &gateway,
         "late-encrypted-summary",
         &[upstream_url],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;
@@ -481,7 +485,7 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         execute_request_with_headers(
-            gateway,
+            gateway.clone(),
             headers,
             request,
             OPEN_RESPONSES_2026_04_24,
@@ -533,6 +537,8 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
         rest.contains("opaque-reasoning"),
         "encrypted content still arrives on item.done: {rest}"
     );
+    drop(chunks);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -652,6 +658,8 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
     .expect("count Generation Chain nodes");
     assert_eq!(marker_count, 0);
     assert_eq!(generation_count, 0);
+    drop(events);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -699,6 +707,8 @@ async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     assert_marker_failure_diagnostics(&gateway).await;
+    drop(marker_store);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 async fn assert_marker_failure_diagnostics(gateway: &Gateway) {
@@ -809,6 +819,8 @@ async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
     }
     assert_marker_failure_diagnostics(&gateway).await;
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
+    drop(marker_store);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -878,6 +890,7 @@ async fn protocol_delivery_contract_matrix_covers_unary_and_sse_lifecycles() {
             "{name} stream contract: {stream_body}"
         );
     }
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -972,14 +985,14 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
 
     let unary = execute_non_stream(gateway.clone(), "normalizing-unary").await;
     let forced_stream = execute_protocol_request(
-        gateway,
+        gateway.clone(),
         "normalizing-forced-stream",
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         "/v1/chat/completions",
         false,
     )
     .await;
-    let live_stream = execute_stream(live_gateway, "normalizing-live-stream").await;
+    let live_stream = execute_stream(live_gateway.clone(), "normalizing-live-stream").await;
 
     let mut live_chunks = live_stream.into_body().into_data_stream();
     let live_prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1013,7 +1026,8 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
         "{live_prefix}{}",
         String::from_utf8(live_suffix.to_vec()).expect("UTF-8 live stream suffix")
     );
-    let buffered_stream = execute_stream(buffered_gateway, "normalizing-buffered-stream").await;
+    let buffered_stream =
+        execute_stream(buffered_gateway.clone(), "normalizing-buffered-stream").await;
 
     let bodies = [
         (
@@ -1079,6 +1093,13 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     assert_eq!(live_stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(buffered_stream_calls.load(Ordering::SeqCst), 2);
     assert_eq!(*tool_calls.lock(), vec![1]);
+    drop(observed_live_responses);
+    shutdown_test_gateway(gateway).await;
+    shutdown_test_gateway(live_gateway).await;
+    shutdown_test_gateway(buffered_gateway).await;
+    data_dir
+        .close()
+        .expect("remove temporary gateway directory");
 }
 
 #[tokio::test]
@@ -1161,7 +1182,7 @@ async fn reasoning_tags_are_canonicalized_across_delivery_modes() {
         false,
     )
     .await;
-    let unclosed_live = execute_stream(gateway, "unclosed-reasoning-live-stream").await;
+    let unclosed_live = execute_stream(gateway.clone(), "unclosed-reasoning-live-stream").await;
     for (mode, response) in [
         ("unclosed-unary", unclosed_unary),
         ("unclosed-responses-unary", unclosed_responses),
@@ -1173,16 +1194,15 @@ async fn reasoning_tags_are_canonicalized_across_delivery_modes() {
         let body = String::from_utf8(body.to_vec()).expect("utf-8 unclosed reasoning response");
         assert!(body.contains("<think>incomplete"), "{mode}: {body}");
     }
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn stream_and_non_stream_share_terminal_hook_semantics() {
     let base_url = serve_sse_response().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-stream-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::builder(config)
@@ -1191,7 +1211,7 @@ async fn stream_and_non_stream_share_terminal_hook_semantics() {
         .await
         .expect("gateway init");
     configure_route(&gateway, "stream-route", &[base_url]).await;
-    let response = execute_stream(gateway, "stream-route").await;
+    let response = execute_stream(gateway.clone(), "stream-route").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1201,6 +1221,7 @@ async fn stream_and_non_stream_share_terminal_hook_semantics() {
     assert!(body.contains("rewritten"), "{body}");
     assert!(!body.contains("original"), "{body}");
     assert_eq!(body.matches("[DONE]").count(), 1, "{body}");
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1210,11 +1231,9 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
         openai_sse("final stream response"),
     ])
     .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-hidden-stream-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let begins = Arc::new(AtomicUsize::new(0));
@@ -1234,7 +1253,7 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
         .expect("gateway init");
     configure_route(&gateway, "hidden-stream-route", &[base_url]).await;
 
-    let response = execute_stream(gateway, "hidden-stream-route").await;
+    let response = execute_stream(gateway.clone(), "hidden-stream-route").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1247,22 +1266,21 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
     assert_eq!(begins.load(Ordering::SeqCst), 2);
     assert_eq!(closes.load(Ordering::SeqCst), 2);
     assert_eq!(*tool_calls.lock(), vec![1]);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn run_deadline_remains_authoritative_after_stream_preflight() {
     let (base_url, provider_calls) = serve_stalling_sse().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-stream-deadline-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "stream-deadline-route", &[base_url]).await;
     let response = execute_stream_with_timeout(
-        gateway,
+        gateway.clone(),
         "stream-deadline-route",
         std::time::Duration::from_millis(500),
     )
@@ -1282,16 +1300,15 @@ async fn run_deadline_remains_authoritative_after_stream_preflight() {
         String::from_utf8_lossy(&body)
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn dropping_unpolled_live_body_closes_provider_leg() {
     let (base_url, provider_calls) = serve_stalling_sse().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-unpolled-body-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let begins = Arc::new(AtomicUsize::new(0));
@@ -1307,7 +1324,7 @@ async fn dropping_unpolled_live_body_closes_provider_leg() {
         .expect("gateway init");
     configure_route(&gateway, "unpolled-body-route", &[base_url]).await;
 
-    let response = execute_stream(gateway, "unpolled-body-route").await;
+    let response = execute_stream(gateway.clone(), "unpolled-body-route").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(begins.load(Ordering::SeqCst), 1);
     drop(response);
@@ -1321,6 +1338,7 @@ async fn dropping_unpolled_live_body_closes_provider_leg() {
     .expect("dropping an unpolled body must stop the producer");
     assert_eq!(closes.load(Ordering::SeqCst), 1);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1331,11 +1349,9 @@ async fn run_deadline_cancels_forced_stream_collection() {
         .expect("Open Responses fixture has post-delta events");
     let first_event = complete_stream[..terminal_offset].to_owned();
     let (base_url, provider_calls) = serve_stalling_sse_with_event(first_event).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-forced-stream-deadline-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::new(config).await.expect("gateway init");
@@ -1351,7 +1367,7 @@ async fn run_deadline_cancels_forced_stream_collection() {
     let response = tokio::time::timeout(
         std::time::Duration::from_millis(1500),
         execute_protocol_request_with_timeout(
-            gateway,
+            gateway.clone(),
             "forced-stream-deadline-route",
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             "/v1/chat/completions",
@@ -1374,6 +1390,7 @@ async fn run_deadline_cancels_forced_stream_collection() {
         String::from_utf8_lossy(&body)
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
@@ -1498,17 +1515,16 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
             "{}",
             failure.id()
         );
+        close_test_gateway(gateway, data_dir).await;
     }
 }
 
 #[tokio::test]
 async fn terminal_stream_hook_rejection_is_returned_before_http_commit() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![openai_sse("must not escape")]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-stream-reject-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::builder(config)
@@ -1518,7 +1534,7 @@ async fn terminal_stream_hook_rejection_is_returned_before_http_commit() {
         .expect("gateway init");
     configure_route(&gateway, "stream-reject-route", &[base_url]).await;
 
-    let response = execute_stream(gateway, "stream-reject-route").await;
+    let response = execute_stream(gateway.clone(), "stream-reject-route").await;
 
     assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1528,16 +1544,15 @@ async fn terminal_stream_hook_rejection_is_returned_before_http_commit() {
     assert!(body.contains("stream_blocked"), "{body}");
     assert!(!body.contains("must not escape"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]
 async fn terminal_stream_hook_response_replaces_output_before_http_commit() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![openai_sse("must not escape")]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
     let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-stream-respond-test-{}",
-            uuid::Uuid::new_v4()
-        )),
+        data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
     let gateway = Gateway::builder(config)
@@ -1547,7 +1562,7 @@ async fn terminal_stream_hook_response_replaces_output_before_http_commit() {
         .expect("gateway init");
     configure_route(&gateway, "stream-respond-route", &[base_url]).await;
 
-    let response = execute_stream(gateway, "stream-respond-route").await;
+    let response = execute_stream(gateway.clone(), "stream-respond-route").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -1558,4 +1573,5 @@ async fn terminal_stream_hook_response_replaces_output_before_http_commit() {
     assert!(!body.contains("must not escape"), "{body}");
     assert_eq!(body.matches("[DONE]").count(), 1, "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
 }

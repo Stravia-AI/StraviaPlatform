@@ -350,6 +350,17 @@ impl Gateway {
                         });
                     }
                     Err(failure) => {
+                        // ADR-0073：上游确认的凭据拒绝按执行快照的凭据代际
+                        // 条件写 Provider 失效；失败只记 warn，不影响重试决策。
+                        if let Some(execution) = &prepared
+                            && crate::plugin::execution::is_credential_rejection(&failure.error)
+                        {
+                            self.mark_provider_credential_invalid(
+                                &target.provider_id,
+                                execution.credential_version(),
+                            )
+                            .await;
+                        }
                         if let Some(attempt) = &attempt {
                             attempt.finish(
                                 "failed",
@@ -535,7 +546,7 @@ fn clone_request(request: &VendorRequest) -> VendorRequest {
 }
 
 fn clone_context(context: &VendorCallContext) -> VendorCallContext {
-    let mut cloned = VendorCallContext::new(context.cancellation.clone(), context.deadline);
+    let mut cloned = VendorCallContext::new(context.cancellation.clone(), context.deadline.clone());
     cloned.observer = context.observer.clone();
     cloned.model_turn_id = context.model_turn_id.clone();
     cloned.attempt_id = context.attempt_id.clone();
@@ -569,7 +580,7 @@ async fn wait_for_retry(
         biased;
         _ = context.cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
         _ = any_vendor_cancelled(vendor_leases) => Err(RuntimeError::Cancelled.into()),
-        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(context.deadline)) => {
+        () = context.deadline.wait() => {
             Err(RuntimeError::DeadlineExceeded.into())
         }
         _ = tokio::time::sleep(delay) => Ok(()),

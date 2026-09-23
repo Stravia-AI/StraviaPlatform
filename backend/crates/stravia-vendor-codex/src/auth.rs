@@ -271,7 +271,7 @@ fn generate_verifier() -> String {
     )
 }
 
-fn account_id_from_jwt(token: &str) -> Option<String> {
+pub(crate) fn account_id_from_jwt(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)

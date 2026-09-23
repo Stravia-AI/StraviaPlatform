@@ -287,20 +287,51 @@ async fn fetch_provider_allowance(
                         return Ok(None);
                     }
 
-                    let execution = admin
+                    let context = VendorCallContext::new(
+                        stravia_runtime_contract::CancellationToken::new(),
+                        stravia_runtime_contract::Deadline::fixed(
+                            Instant::now() + REQUEST_TIMEOUT,
+                        ),
+                    );
+                    let prepared = admin
                         .gw
-                        .execute_vendor(
+                        .prepare_vendor_execution(
                             &provider_id,
                             None,
-                            VendorRequest::Allowance(
-                                stravia_vendor_sdk::AllowanceRequest::default(),
-                            ),
-                            VendorCallContext::new(
-                                stravia_runtime_contract::CancellationToken::new(),
-                                Instant::now() + REQUEST_TIMEOUT,
-                            ),
+                            stravia_vendor_sdk::Operation::Allowance,
+                            &context,
                         )
                         .await;
+                    let execution = match prepared {
+                        Ok(prepared) => {
+                            let credential_version = prepared.credential_version();
+                            let result = admin
+                                .gw
+                                .execute_prepared_vendor(
+                                    prepared,
+                                    VendorRequest::Allowance(
+                                        stravia_vendor_sdk::AllowanceRequest::default(),
+                                    ),
+                                    context,
+                                )
+                                .await;
+                            // ADR-0073：Allowance 与 Infer 携带同一份凭据，
+                            // 上游拒绝同样算失效证据。
+                            if let Err(error) = &result
+                                && crate::plugin::execution::is_credential_rejection(error)
+                            {
+                                admin
+                                    .gw
+                                    .mark_provider_credential_invalid(
+                                        &provider_id,
+                                        credential_version,
+                                    )
+                                    .await;
+                            }
+                            result
+                        }
+                        Err(error) => Err(error),
+                    };
 
                     let (mut snapshot, publication) = match execution {
                         Ok(execution) => {

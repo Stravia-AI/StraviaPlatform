@@ -34,11 +34,9 @@ let form = $state({
 })
 let saving = $state(false)
 let testing = $state(false)
-let reviewing = $state(false)
-let reviewRequestId = 0
+let saveGeneration = 0
 let connectionError = $state('')
 let preview = $state<ProviderConfigurationPreview>()
-let previewFailure = $state('')
 let oauthSessionId = $state<string>()
 let oauthReady = $state(false)
 let oauthAuthorization = $state<{
@@ -65,8 +63,6 @@ const unknownOptionKeys = $derived(
   ),
 )
 const previewIssues = $derived(preview?.issues ?? [])
-const globalIssues = $derived(previewIssues.filter((issue) => !issue.field))
-const previewAccepted = $derived(Boolean(preview) && previewIssues.length === 0)
 const oauthConfiguration = $derived.by((): OAuthCandidateConfiguration => ({
   provider_id: provider.id,
   base_url: form.baseUrl.trim(),
@@ -89,10 +85,8 @@ $effect(() => {
 })
 
 function invalidatePreview(): void {
-  reviewRequestId += 1
-  reviewing = false
+  saveGeneration += 1
   preview = undefined
-  previewFailure = ''
   connectionError = ''
 }
 
@@ -122,32 +116,6 @@ function configurationValues(secret: boolean): Record<string, unknown> {
   return Object.fromEntries(entries)
 }
 
-async function reviewConfiguration(): Promise<void> {
-  if (!descriptor || !channel || (!form.baseUrl.trim() && !supportsConfigValidation)) return
-  reviewRequestId += 1
-  const requestId = reviewRequestId
-  reviewing = true
-  previewFailure = ''
-  preview = undefined
-  try {
-    const result = await admin.providers.previewConfiguration({
-      provider_id: provider.id,
-      vendor_id: descriptor.provider_id,
-      channel: channel.id,
-      base_url: form.baseUrl.trim(),
-      options: configurationValues(false),
-      credentials: configurationValues(true),
-    })
-    if (requestId !== reviewRequestId) return
-    preview = result
-    if (result.issues.length === 0) form.baseUrl = result.base_url
-  } catch (error) {
-    if (requestId === reviewRequestId) previewFailure = localizeBackendErrorMessage(error)
-  } finally {
-    if (requestId === reviewRequestId) reviewing = false
-  }
-}
-
 async function testConnection(): Promise<void> {
   testing = true
   connectionError = ''
@@ -163,27 +131,46 @@ async function testConnection(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!descriptor || !channel || unknownOptionKeys.length > 0 || !form.name.trim() || !previewAccepted || !preview) {
+  if (saving || !descriptor || !channel || unknownOptionKeys.length > 0 || !form.name.trim()) {
     return
   }
-  if (oauthSessionId && !oauthReady) return
-  const credentials = configurationValues(true)
-  const input: UpdateProvider = {
-    name: form.name.trim(),
-    base_url: preview.base_url,
-    use_proxy: form.useProxy,
-    vendor_options: configurationValues(false),
-    ...(Object.keys(credentials).length > 0 ? { adapter_credentials: credentials } : {}),
-  }
+  const generation = saveGeneration
   saving = true
   connectionError = ''
   try {
+    let baseUrl = form.baseUrl.trim()
+    if (supportsConfigValidation || baseUrl) {
+      const result = await admin.providers.previewConfiguration({
+        provider_id: provider.id,
+        vendor_id: descriptor.provider_id,
+        channel: channel.id,
+        base_url: baseUrl,
+        options: configurationValues(false),
+        credentials: configurationValues(true),
+      })
+      if (generation !== saveGeneration) return
+      preview = result
+      if (result.issues.length > 0) {
+        const globalMessages = result.issues.filter((issue) => !issue.field).map((issue) => issue.message)
+        connectionError = globalMessages.join(' ') || m.provider_config_fix_issues_before_save()
+        return
+      }
+      baseUrl = result.base_url
+    }
+    const credentials = configurationValues(true)
+    const input: UpdateProvider = {
+      name: form.name.trim(),
+      base_url: baseUrl,
+      use_proxy: form.useProxy,
+      vendor_options: configurationValues(false),
+      ...(Object.keys(credentials).length > 0 ? { adapter_credentials: credentials } : {}),
+    }
     const saved = await admin.providers.update(provider.id, input)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['providers'] }),
       queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
     ])
-    if (oauthSessionId) {
+    if (oauthSessionId && oauthReady) {
       try {
         await admin.providers.bindOAuth(provider.id, oauthSessionId)
         oauthAuthorization?.consume()
@@ -297,6 +284,7 @@ async function save(): Promise<void> {
           oauthSessionId = sessionId
           oauthReady = ready
           invalidatePreview()
+          if (sessionId && ready) void save()
         }} />
     {/if}
 
@@ -318,70 +306,6 @@ async function save(): Promise<void> {
         }} />
     </Field.Field>
 
-    <section class="rounded-xl border p-4" aria-labelledby="provider-network-review-title">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 id="provider-network-review-title" class="font-medium">{m.provider_config_review_title()}</h3>
-          <p class="mt-1 text-sm text-muted-foreground">{m.provider_config_review_help()}</p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={reviewing ||
-            !descriptor ||
-            !channel ||
-            (!form.baseUrl.trim() && !supportsConfigValidation) ||
-            unknownOptionKeys.length > 0}
-          onclick={() => void reviewConfiguration()}>
-          {#if reviewing}<Spinner data-icon="inline-start" />{/if}
-          {m.provider_config_review_action()}
-        </Button>
-      </div>
-      {#if preview}
-        <dl class="mt-4 flex flex-col gap-3">
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.provider_config_saved_base_url()}</dt>
-            <dd class="font-technical mt-1 break-all text-sm">{preview.base_url}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.provider_config_authorized_origins()}</dt>
-            <dd class="mt-1">
-              {#if preview.network_permissions.length > 0}
-                <ul class="flex flex-col gap-1">
-                  {#each preview.network_permissions as permission (`${permission.origin}:${permission.configuration_field ?? ''}:${permission.connection_scoped}`)}
-                    <li class="font-technical break-all text-sm">
-                      {permission.origin}
-                      {#if permission.configuration_field}
-                        <span class="font-sans text-xs text-muted-foreground">
-                          · {m.provider_config_origin_from_field({ field: permission.configuration_field })}
-                        </span>
-                      {:else if permission.connection_scoped}
-                        <span class="font-sans text-xs text-muted-foreground">
-                          · {m.provider_config_connection_scoped_origin()}
-                        </span>
-                      {/if}
-                    </li>
-                  {/each}
-                </ul>
-              {:else}
-                <span class="text-sm text-muted-foreground">{m.provider_config_no_origins()}</span>
-              {/if}
-            </dd>
-          </div>
-        </dl>
-        {#if globalIssues.length > 0}
-          <ul class="mt-4 flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
-            {#each globalIssues as issue (`${issue.code}:${issue.message}`)}<li>{issue.message}</li>{/each}
-          </ul>
-        {:else if previewAccepted}
-          <p class="mt-4 text-sm text-success">{m.provider_config_review_ready()}</p>
-        {/if}
-      {:else}
-        <p class="mt-4 text-sm text-muted-foreground">{m.provider_config_review_required()}</p>
-      {/if}
-      {#if previewFailure}<p class="mt-3 text-sm text-destructive">{previewFailure}</p>{/if}
-    </section>
-
     {#if connectionError}<p class="text-sm text-destructive">{connectionError}</p>{/if}
     <div class="flex flex-wrap justify-end gap-2 border-t pt-4">
       {#if supportsInference}
@@ -391,13 +315,7 @@ async function save(): Promise<void> {
       {/if}
       <Button
         type="submit"
-        disabled={saving ||
-          !descriptor ||
-          !channel ||
-          unknownOptionKeys.length > 0 ||
-          !form.name.trim() ||
-          !previewAccepted ||
-          (Boolean(oauthSessionId) && !oauthReady)}>
+        disabled={saving || !descriptor || !channel || unknownOptionKeys.length > 0 || !form.name.trim()}>
         {#if saving}<Spinner data-icon="inline-start" />{/if}
         {m.provider_connection_view_save_connection()}
       </Button>

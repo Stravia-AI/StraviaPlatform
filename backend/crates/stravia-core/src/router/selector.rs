@@ -1,7 +1,7 @@
 //! Layered Route Target selection and failure policy.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,9 @@ pub struct TargetSchedulingSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct RouteSchedulingSnapshot {
     pub(super) targets: Vec<TargetSchedulingSnapshot>,
+    /// ADR-0073：凭据失效的 Provider id 集合。失效 Provider 的全部 Target
+    /// 在资格装配时被排除，与 `is_enabled` 同一层，不进入熔断状态机。
+    pub(super) credential_invalid_providers: HashSet<String>,
 }
 
 /// Evidence `router::selection` assembles for one selection. Fields stay
@@ -429,6 +432,14 @@ impl RouteAttemptPolicy {
         let inner = state.inner.lock();
         for target in targets {
             if !target.enabled {
+                continue;
+            }
+            // ADR-0073：凭据失效的 Provider 不参与调度——失效是持久凭据
+            // 属性，不是冷却；只有新凭据证据能恢复资格。
+            if snapshot
+                .credential_invalid_providers
+                .contains(&target.provider_id)
+            {
                 continue;
             }
             let key = persisted_target_key(target);
@@ -957,6 +968,23 @@ mod tests {
         assert_eq!(next_provider(&mut policy), None);
     }
 
+    // ADR-0073：凭据失效 Provider 的 Target 在资格装配时被排除，
+    // 与 enabled=false 同一层，不受优先级影响。
+    #[test]
+    fn credential_invalid_provider_targets_never_enter_attempt_order() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("dead", i32::MAX), target("alive", -1)];
+        let snapshot = RouteSchedulingSnapshot {
+            targets: Vec::new(),
+            credential_invalid_providers: ["dead".to_string()].into_iter().collect(),
+        };
+        let mut policy =
+            RouteAttemptPolicy::new("traffic_equalization", &targets, context(0), &snapshot, state);
+
+        assert_eq!(next_provider(&mut policy).as_deref(), Some("alive"));
+        assert_eq!(next_provider(&mut policy), None);
+    }
+
     #[test]
     fn signed_priority_groups_remain_descending() {
         let state = RoutePolicyState::default();
@@ -1097,6 +1125,7 @@ mod tests {
                 cache_read_tokens_24h: Some(900),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let mut first_context = context(0);
         first_context.estimated_uncached_input_tokens = 200;
@@ -1129,6 +1158,7 @@ mod tests {
                 input_tokens_24h: Some(100),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let mut attempt_context = context(0);
         attempt_context.estimated_uncached_input_tokens = 200;
@@ -1180,6 +1210,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let mut policy = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1207,6 +1238,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let mut fallback = RouteAttemptPolicy::new(
             "traffic_equalization",
@@ -1241,6 +1273,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let mut policy =
             RouteAttemptPolicy::new("latency_preference", &targets, context(0), &snapshot, state);
@@ -1271,6 +1304,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let mut policy =
             RouteAttemptPolicy::new("latency_preference", &targets, context(0), &snapshot, state);

@@ -595,7 +595,11 @@ CREATE TABLE public.providers (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     adapter_credentials text DEFAULT '{}'::text NOT NULL,
     vendor_options text DEFAULT '{}'::text NOT NULL,
-    CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text])))
+    credential_status text DEFAULT 'ok'::text NOT NULL,
+    credential_invalid_at timestamp with time zone,
+    revision bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text]))),
+    CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text])))
 );
 
 

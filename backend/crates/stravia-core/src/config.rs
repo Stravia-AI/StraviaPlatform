@@ -62,6 +62,16 @@ pub struct GatewayConfig {
     /// `model_cache` when a change is detected. Set to `Duration::ZERO` to
     /// disable (default for desktop / single-process deployments).
     pub config_poll_interval: Duration,
+    /// Provider Catalog origin the guest fetches through host HTTP. `None`
+    /// disables remote catalog access entirely — a gateway that never
+    /// configured an origin fails closed instead of reaching the production
+    /// service. Tests point it at an in-process fixture so the real guest
+    /// still fetches across the production call boundary.
+    pub catalog_base_url: Option<String>,
+    /// Fetch the remote Provider Catalog in the background. Disabled by
+    /// default so tests never reach the network; production deployments opt
+    /// in explicitly.
+    pub catalog_background_refresh: bool,
 }
 
 impl Default for GatewayConfig {
@@ -71,6 +81,8 @@ impl Default for GatewayConfig {
             storage: GatewayStorageConfig::default(),
             product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,
+            catalog_base_url: None,
+            catalog_background_refresh: false,
         }
     }
 }

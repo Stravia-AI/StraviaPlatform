@@ -257,7 +257,7 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("Custom Connection".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: "protocol-openai-chat-completions".into(),
+                    vendor: "custom".into(),
                     channel: "default".into(),
                     protocol: None,
                     base_url: "http://127.0.0.1:9/v1/".into(),
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(provider.vendor.as_deref(), Some("openai"));
         assert_eq!(provider.protocol, "openai-compatible");
         assert_eq!(provider.base_url, "https://proxy.example/v1");
-        assert_eq!(provider.models_source.as_deref(), Some("catalog"));
+        assert!(provider.models_source.is_none());
         Ok(())
     }
 

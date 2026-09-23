@@ -34,7 +34,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         .create_provider(crate::db::models::CreateProvider {
             name: Some("attachment-wire".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url: format!("http://{address}/v1"),
@@ -290,7 +290,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         .create_provider(crate::db::models::CreateProvider {
             name: Some("generated-media".into()),
             source: crate::db::models::ProviderSourceInput::Custom {
-                vendor: "protocol-gemini".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("google-gemini".into()),
                 base_url: format!("http://{address}"),

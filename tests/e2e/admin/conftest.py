@@ -37,17 +37,16 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
                     data_dir,
                 ],
             )
-            admin_base = f"http://127.0.0.1:{server_port}"
-            proxy_base = admin_base
-            wait_until_ready(f"{admin_base}/api/v1/auth/state")
-            setup_token = wait_for_setup_token(logs, proc)
-            session = initialize_server(
-                admin_base,
-                setup_token,
-                {"backend": "sqlite"},
-            )
-
             try:
+                admin_base = f"http://127.0.0.1:{server_port}"
+                proxy_base = admin_base
+                wait_until_ready(f"{admin_base}/api/v1/auth/state")
+                setup_token = wait_for_setup_token(logs, proc)
+                session = initialize_server(
+                    admin_base,
+                    setup_token,
+                    {"backend": "sqlite"},
+                )
                 yield {
                     "admin": admin_base,
                     "proxy": proxy_base,

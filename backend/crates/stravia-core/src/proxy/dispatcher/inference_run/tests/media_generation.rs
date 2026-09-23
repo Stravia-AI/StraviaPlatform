@@ -227,7 +227,7 @@ async fn generation_http_fixture(
         &gateway,
         PARENT_MODEL,
         &[format!("{base_url}/v1")],
-        "protocol-open-responses",
+        "custom",
         "open-responses",
     )
     .await;

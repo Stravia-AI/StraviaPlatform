@@ -288,7 +288,7 @@ async fn gateway_with_captured_thinking(
         .create_provider(CreateProvider {
             name: Some("Capture".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url,
@@ -402,7 +402,10 @@ async fn execute_distinguishes_cancellation_from_deadline() {
                 Principal::new("principal"),
                 AiRequest::new("model", Vec::new()),
             )
-            .with_execution(cancellation, Instant::now() + Duration::from_secs(1)),
+            .with_execution(
+                cancellation,
+                stravia_runtime_contract::Deadline::from_now(Duration::from_secs(1)),
+            ),
         )
         .await
     {
@@ -416,7 +419,10 @@ async fn execute_distinguishes_cancellation_from_deadline() {
                 Principal::new("principal"),
                 AiRequest::new("model", Vec::new()),
             )
-            .with_execution(CancellationToken::new(), Instant::now()),
+            .with_execution(
+                CancellationToken::new(),
+                stravia_runtime_contract::Deadline::fixed(Instant::now()),
+            ),
         )
         .await
     {
@@ -463,7 +469,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
         .create_provider(CreateProvider {
             name: Some("Timeout fixture".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url,
@@ -579,7 +585,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             .create_provider(CreateProvider {
                 name: Some(name.into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: "protocol-openai-chat-completions".into(),
+                    vendor: "custom".into(),
                     channel: "default".into(),
                     protocol: Some("openai-compatible".into()),
                     base_url,
@@ -786,7 +792,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
         .create_provider(CreateProvider {
             name: Some("Request scoped failure".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url,
@@ -881,7 +887,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         .create_provider(CreateProvider {
             name: Some("No tools".into()),
             source: ProviderSourceInput::Custom {
-                vendor: "protocol-openai-chat-completions".into(),
+                vendor: "custom".into(),
                 channel: "default".into(),
                 protocol: Some("openai-compatible".into()),
                 base_url,
@@ -977,7 +983,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                 .create_provider(CreateProvider {
                     name: Some(name.into()),
                     source: ProviderSourceInput::Custom {
-                        vendor: "protocol-openai-chat-completions".into(),
+                        vendor: "custom".into(),
                         channel: "default".into(),
                         protocol: Some("openai-compatible".into()),
                         base_url,
@@ -1873,7 +1879,7 @@ async fn held_publication_turn(
                 .with_observer(observer)
                 .with_execution(
                     cancellation.clone(),
-                    Instant::now() + Duration::from_secs(300),
+                    stravia_runtime_contract::Deadline::from_now(Duration::from_secs(300)),
                 ),
         )
         .await

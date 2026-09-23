@@ -258,7 +258,9 @@ impl AdminService {
                         }),
                         crate::plugin::VendorCallContext::new(
                             stravia_runtime_contract::CancellationToken::new(),
-                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            stravia_runtime_contract::Deadline::fixed(
+                                std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            ),
                         ),
                     )
                     .await?;
@@ -286,7 +288,9 @@ impl AdminService {
             .ok_or_else(|| anyhow::anyhow!("authentication session runtime is unavailable"))?;
         let mut context = crate::plugin::VendorCallContext::new(
             runtime.cancellation.clone(),
-            std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
+            ),
         );
         context
             .metadata
@@ -828,13 +832,15 @@ impl AdminService {
         let (_, operation, _) = self.gw.vendor_plugins.acquire(&driver_key)?;
         let publication = operation.publication_fence(
             stravia_runtime_contract::CancellationToken::new(),
-            std::time::Instant::now() + std::time::Duration::from_secs(120),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(120),
+            ),
         );
         drop(operation);
         let write_fence = publication.write_fence().await?;
         let current = self.get_provider(id).await?;
         anyhow::ensure!(
-            serde_json::to_vec(&current)? == serde_json::to_vec(&provider)?,
+            super::provider_connection::same_provider_generation(&current, &provider),
             "provider changed while logging out"
         );
         self.gw
@@ -922,7 +928,7 @@ impl AdminService {
         let write_fence = publication.write_fence().await?;
         publication.ensure_current()?;
         let current = self.get_provider(provider_id).await?;
-        if serde_json::to_vec(&current)? != serde_json::to_vec(&provider)? {
+        if !super::provider_connection::same_provider_generation(&current, &provider) {
             drop(write_fence);
             *runtime.publication.lock().await = Some(publication);
             self.restore_auth_session_record(session).await?;

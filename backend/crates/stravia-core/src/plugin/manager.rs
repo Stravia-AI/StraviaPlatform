@@ -29,6 +29,10 @@ const PREVIEW_LIFETIME: Duration = Duration::from_secs(15 * 60);
 struct Entry {
     record: InstalledPlugin,
     loaded: Option<LoadedPlugin>,
+    /// Catalog profiles the advertised set dropped. They stay inside the
+    /// effective descriptor so saved connections keep executing, but are
+    /// hidden from every creation/listing surface.
+    retired_profiles: BTreeSet<String>,
 }
 
 struct Pending {
@@ -88,9 +92,13 @@ impl VendorPlugins {
                     if digest == record.digest {
                         Ok(Bytes::from_static(bundle.component))
                     } else {
-                        Err(anyhow::anyhow!(
-                            "bundled plugin digest differs from installed version"
-                        ))
+                        // 记录标为 builtin，但安装的是旧发行版内嵌字节或同版本
+                        // 不同构建；artifact 按 digest 校验完整性，回退读取即可，
+                        // 不能因与当前内嵌字节不同就判为不可用。
+                        match &artifacts {
+                            Some(artifacts) => artifacts.read(&record.digest).await,
+                            None => Ok(record.component.clone()),
+                        }
                     }
                 }
                 None => match &artifacts {
@@ -123,7 +131,14 @@ impl VendorPlugins {
                 record.descriptor = serde_json::to_string(package.descriptor())?;
             }
             record.component = Bytes::new();
-            entries.insert(record.vendor_id.clone(), Entry { record, loaded });
+            entries.insert(
+                record.vendor_id.clone(),
+                Entry {
+                    record,
+                    loaded,
+                    retired_profiles: BTreeSet::new(),
+                },
+            );
         }
         Ok(Arc::new(Self {
             runtime,
@@ -158,12 +173,98 @@ impl VendorPlugins {
         Ok((loaded, operation, entry.record.data_epoch))
     }
 
+    /// Acquire a plugin package without provider admission. Plugin-scoped
+    /// exports like `sync-catalog` operate on the component itself, not on
+    /// one admitted provider profile.
+    pub(crate) fn acquire_package(
+        &self,
+        package_id: &str,
+    ) -> anyhow::Result<(LoadedPlugin, Arc<VendorOperation>, i64)> {
+        let operation = self.operations.begin(package_id)?;
+        let entries = self.entries.read();
+        let entry = entries
+            .get(package_id)
+            .ok_or_else(|| anyhow::anyhow!("vendor plugin is not installed"))?;
+        let loaded = entry
+            .loaded
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("vendor plugin is unavailable"))?;
+        operation.ensure_current()?;
+        Ok((loaded, operation, entry.record.data_epoch))
+    }
+
     pub(crate) fn descriptor(&self, vendor_id: &str) -> anyhow::Result<ProviderDescriptor> {
         resolved_entry(&self.entries.read(), vendor_id)
             .and_then(|entry| entry.loaded.as_ref())
             .and_then(|plugin| plugin.descriptor().provider(vendor_id))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("vendor plugin is unavailable"))
+    }
+
+    /// Replace the base vendor's reported provider set with the profiles the
+    /// guest derived from the latest catalog snapshot. The swap only changes
+    /// the effective descriptor view — the compiled component, install record
+    /// version, and dedicated-vendor takeover rules are untouched.
+    ///
+    /// A profile absent from `providers` is retired, not removed: it stays
+    /// admitted for `acquire`/descriptor resolution so saved connections keep
+    /// executing, while `descriptors()`/creation paths hide it. `seeded` carries
+    /// the retired set restored from disk at bootstrap. Returns the retired
+    /// profiles for the host to persist.
+    pub(crate) fn apply_catalog_overlay(
+        &self,
+        providers: Vec<ProviderDescriptor>,
+        seeded: Vec<ProviderDescriptor>,
+    ) -> anyhow::Result<Vec<ProviderDescriptor>> {
+        let mut entries = self.entries.write();
+        let entry = entries
+            .get_mut("base")
+            .ok_or_else(|| anyhow::anyhow!("base vendor plugin is not installed"))?;
+        let loaded = entry
+            .loaded
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("base vendor plugin is unavailable"))?;
+        let fresh: BTreeSet<String> = providers
+            .iter()
+            .map(|profile| profile.provider_id.clone())
+            .collect();
+        let mut descriptor = loaded.descriptor().clone();
+        // Every profile the effective set once carried but the fresh set drops
+        // is retained as retired; a profile returning to the advertised set is
+        // active again because it arrives through `providers`.
+        let mut retired: BTreeMap<String, ProviderDescriptor> = descriptor
+            .providers
+            .iter()
+            .filter(|profile| !fresh.contains(&profile.provider_id))
+            .map(|profile| (profile.provider_id.clone(), profile.clone()))
+            .collect();
+        for profile in seeded {
+            if !fresh.contains(&profile.provider_id) {
+                retired
+                    .entry(profile.provider_id.clone())
+                    .or_insert(profile);
+            }
+        }
+        entry.retired_profiles = retired.keys().cloned().collect();
+        descriptor.providers = providers;
+        descriptor.providers.extend(retired.values().cloned());
+        entry.loaded = Some(loaded.with_descriptor(descriptor.clone()));
+        entry.record.descriptor = serde_json::to_string(&descriptor)?;
+        Ok(retired.into_values().collect())
+    }
+
+    /// Whether `vendor_id` resolves to a retired catalog profile — still
+    /// admitted for existing connections but unavailable for new ones. A
+    /// dedicated package installed for the same id takes over entirely and is
+    /// never shadowed by the base retired set.
+    pub(crate) fn is_retired_profile(&self, vendor_id: &str) -> bool {
+        let entries = self.entries.read();
+        if entries.contains_key(vendor_id) {
+            return false;
+        }
+        entries
+            .get("base")
+            .is_some_and(|entry| entry.retired_profiles.contains(vendor_id))
     }
 
     pub(crate) fn descriptors(&self) -> Vec<ProviderDescriptor> {
@@ -179,7 +280,9 @@ impl VendorPlugins {
                     .providers
                     .iter()
                     .filter(|profile| {
-                        package_id != "base" || !entries.contains_key(&profile.provider_id)
+                        package_id != "base"
+                            || (!entries.contains_key(&profile.provider_id)
+                                && !entry.retired_profiles.contains(&profile.provider_id))
                     })
                     .cloned(),
             );
@@ -653,6 +756,7 @@ impl VendorPlugins {
             Entry {
                 record,
                 loaded: Some(pending.loaded),
+                retired_profiles: BTreeSet::new(),
             },
         );
         for quiescent in quiescent {

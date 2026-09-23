@@ -116,7 +116,7 @@ mod tests {
             .create_provider(CreateProvider {
                 name: Some("Models list provider".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: "protocol-openai-chat-completions".into(),
+                    vendor: "custom".into(),
                     channel: "default".into(),
                     protocol: Some("openai-compatible".into()),
                     base_url: "http://127.0.0.1:9/v1".into(),

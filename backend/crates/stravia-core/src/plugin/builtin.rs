@@ -22,7 +22,7 @@ impl BundledPlugins {
         static COMPILED: OnceCell<Arc<BundledPlugins>> = OnceCell::const_new();
         COMPILED
             .get_or_try_init(|| async {
-                let runtime = VendorRuntime::new(Default::default())?;
+                let runtime = VendorRuntime::new()?;
                 let mut plugins = BTreeMap::new();
                 for &(vendor_id, component) in COMPONENTS {
                     let loaded = runtime.load(component).await.map_err(|error| {

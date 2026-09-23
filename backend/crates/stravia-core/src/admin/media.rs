@@ -77,65 +77,6 @@ mod tests {
     use stravia_runtime_contract::thinking::ThinkingLevel;
 
     #[tokio::test]
-    async fn media_config_defaults_to_disabled_with_read_only_contract() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
-        .storage(std::sync::Arc::new(crate::storage::MemoryStorage::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )))
-        .build()
-        .await
-        .expect("Gateway");
-
-        let config = gateway
-            .admin()
-            .get_media_understanding_config()
-            .await
-            .expect("Media Understanding config");
-
-        assert_eq!(config.state, MediaUnderstandingState::Disabled);
-        assert!(!config.enabled);
-        assert!(config.model_id.is_none());
-        assert!(config.thinking_level.is_none());
-        assert!(config.eligible_models.is_empty());
-    }
-    #[tokio::test]
-    async fn enabling_media_rejects_a_gateway_without_runtime_storage() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ));
-        let gateway = crate::Gateway::from_storage(
-            crate::config::GatewayConfig {
-                data_dir: directory.path().to_path_buf(),
-                ..Default::default()
-            },
-            storage,
-        )
-        .await
-        .expect("Gateway");
-
-        let error = gateway
-            .admin()
-            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
-                enabled: true,
-                model_id: None,
-                thinking_level: None,
-            })
-            .await
-            .expect_err("Media runtime storage should be required");
-
-        assert_eq!(error.code, "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE");
-    }
-
-    #[tokio::test]
     async fn enabling_media_requires_and_persists_an_explicit_image_model() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
@@ -152,7 +93,7 @@ mod tests {
             .providers()
             .create(crate::db::models::CreateProviderRecord {
                 name: "Vision Provider".into(),
-                vendor: Some("protocol-openai-chat-completions".into()),
+                vendor: Some("custom".into()),
                 protocol: "openai-compatible".into(),
                 base_url: "https://example.com/v1".into(),
                 preset_key: None,

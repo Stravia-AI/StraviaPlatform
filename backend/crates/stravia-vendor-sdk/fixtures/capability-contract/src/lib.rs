@@ -127,13 +127,17 @@ impl VendorGuest for CapabilityContractVendor {
                 description: None,
                 auth: None,
                 protocol: (profile == Profile::BaseOlder).then(|| "openai-compatible".into()),
+                protocols: Vec::new(),
                 default_base_url: None,
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: if profile == Profile::BaseOlder {
                 vec![ConfigField {
                     key: "api_key".into(),

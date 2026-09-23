@@ -20,6 +20,9 @@ export interface Provider {
   /** Descriptor-declared secret keys that have saved values; values are never returned. */
   configured_credential_fields?: string[]
   is_enabled: boolean
+  /** ADR-0073: `ok` | `invalid` — upstream confirmed rejection of the current credentials. */
+  credential_status?: string
+  credential_invalid_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -219,10 +222,14 @@ export interface VendorChannelDescriptor {
   auth?: VendorAuthDescriptor | null
   /** Optional host egress protocol; custom vendor wire protocols may omit it. */
   protocol?: string | null
+  /** Selectable egress protocols when the channel offers more than one wire protocol. */
+  protocols?: Array<{ value: string; label: string }>
   /** Initial connection URL proposed by the plugin; saving still requires preview. */
   default_base_url?: string | null
   /** Discovery source selected when a new connection does not provide one. */
   default_models_source?: 'catalog' | null
+  /** Whether catalog-sourced discovery consumes the host-injected catalog scope. */
+  consumes_catalog_models?: boolean
   capabilities: VendorCapability[]
   model_capabilities?: string[]
   search_model_required: boolean

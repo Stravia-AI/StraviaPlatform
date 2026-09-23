@@ -5,8 +5,6 @@ use stravia_vendor_sdk::ErrorKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("plugin artifact exceeds the configured size limit")]
-    ArtifactTooLarge,
     #[error("plugin is not a valid WebAssembly Component")]
     InvalidComponent(String),
     #[error("plugin imports forbidden interface `{0}`")]
@@ -71,6 +69,7 @@ impl RuntimeError {
             ErrorKind::Cancelled => "vendor operation was cancelled",
             ErrorKind::DeadlineExceeded => "vendor operation exceeded its deadline",
             ErrorKind::ResourceExhausted => "vendor plugin exceeded a resource limit",
+            ErrorKind::ProviderNotFound => "vendor provider profile is no longer available",
         };
         Self::Plugin {
             kind,

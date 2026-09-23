@@ -14,8 +14,8 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthDescriptor, AuthFlow, AuthRequest, AuthResponse, AuthStep, CANONICAL_FORMAT_VERSION,
     Capability, ChannelDescriptor, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, HttpRequest, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    DiscoveredModel, ErrorKind, GuestHost, HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration,
+    Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
     ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
 
@@ -107,13 +107,17 @@ pub fn descriptor() -> VendorDescriptor {
                     manual_input: None,
                 }),
                 protocol: Some("open-responses".into()),
+                protocols: Vec::new(),
                 default_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 default_models_source: None,
+                consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
                 search_model_required: false,
             }],
             capabilities,
+            website: None,
+            implementation: None,
             config_fields: Vec::new(),
             network: NetworkDeclaration {
                 base_url_field: None,
@@ -238,7 +242,7 @@ fn discover(
         .get("models_source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|source| !source.is_empty() && *source != "catalog");
+        .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG);
     let mut url = configured_source
         .map(str::to_owned)
         .unwrap_or_else(|| "https://api.x.ai/v1/models".into());

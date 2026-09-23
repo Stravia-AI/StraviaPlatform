@@ -472,6 +472,11 @@ _避免使用_：调度泳池、可调度 Target、在线 Target
 已禁用 Target 是仍属于该 Route、但不参与选择、亲和或冷却的 Target。它不是已删除的 Target。
 _避免使用_：删除的 Target、暂存 Target、断开的 Target
 
+## 凭据失效（Credential Invalid）
+
+凭据失效是 Provider 的持久化凭据健康状态：上游明确拒绝该 Provider 当前凭据组合的证据记录。失效 Provider 的所有 Target 不参与新选择的调度，已开始执行的请求不中断。它与 `is_enabled` 正交（禁用是管理员意图，失效是上游证据），也不同于自动恢复的 Target Cooldown——仅新凭据证据可以撤销：Provider 非展示字段变更、OAuth 重新绑定或刷新成功、手动测试成功。403 权限失败与 Hook、客户端侧认证失败不构成证据；标记以发出请求时的凭据版本为条件写入，对管理 API 只读。
+_避免使用_：禁用 Provider、熔断、冷却（当指凭据失效）、Provider Status
+
 ## Target Priority
 
 Target Priority 是 Target 上的分组整数，取值 -2147483648–2147483647，缺省为 0；数值越高越优先。用于选择时，仅已启用且数值相同的 Target 构成同一优先级组。它不是列表顺序，也不是 Weight。

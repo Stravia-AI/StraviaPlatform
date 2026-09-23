@@ -26,7 +26,10 @@ fn configured_secret_value(value: &Value) -> bool {
     }
 }
 
-fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
+/// ADR-0073：凭据健康字段（credential_status/credential_invalid_at/revision）
+/// 不属于配置代际——并发 mark/clear 不应中断进行中的 OAuth 绑定、刷新或
+/// 配置保存校验，这些写入本身就携带新凭据证据。
+pub(in crate::admin) fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
     left.id == right.id
         && left.name == right.name
         && left.vendor == right.vendor
@@ -104,6 +107,12 @@ impl AdminService {
         input: ProviderConfigurationPreviewInput,
     ) -> anyhow::Result<ProviderConfigurationPreview> {
         let descriptor = require_descriptor(&self.gw.vendor_plugins, &input.vendor_id)?;
+        anyhow::ensure!(
+            input.provider_id.is_some()
+                || !self.gw.vendor_plugins.is_retired_profile(&input.vendor_id),
+            "Vendor `{}` is no longer available for new providers",
+            input.vendor_id
+        );
         let channel = descriptor
             .channels
             .iter()
@@ -201,7 +210,9 @@ impl AdminService {
                     ),
                     crate::plugin::VendorCallContext::new(
                         stravia_runtime_contract::CancellationToken::new(),
-                        std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        stravia_runtime_contract::Deadline::fixed(
+                            std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        ),
                     ),
                 )
                 .await?;
@@ -237,6 +248,15 @@ impl AdminService {
         stravia_vendor_sdk::AuthDescriptor,
     )> {
         let descriptor = require_descriptor(&self.gw.vendor_plugins, &candidate.vendor_id)?;
+        anyhow::ensure!(
+            candidate.provider_id.is_some()
+                || !self
+                    .gw
+                    .vendor_plugins
+                    .is_retired_profile(&candidate.vendor_id),
+            "Vendor `{}` is no longer available for new providers",
+            candidate.vendor_id
+        );
         let channel_id = candidate.channel.as_str();
         let mut credentials = candidate.credentials.clone();
         let channel = descriptor
@@ -490,10 +510,11 @@ impl AdminService {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Provider profile `{}` is not installed", provider.id)
                     })?;
-                let declared_models_source = descriptor
+                let declared_channel = descriptor
                     .channels
                     .iter()
-                    .find(|declared| declared.id == channel.id)
+                    .find(|declared| declared.id == channel.id);
+                let declared_models_source = declared_channel
                     .and_then(|declared| declared.default_models_source)
                     .map(|source| source.as_str().to_owned());
                 let uses_catalog_scope = match provider.catalog_id.as_deref() {
@@ -502,9 +523,14 @@ impl AdminService {
                     }
                     None => false,
                 };
-                let models_source = uses_catalog_scope
-                    .then(|| "catalog".to_owned())
-                    .or(declared_models_source);
+                // Persisting the catalog marker is only meaningful for
+                // channels that consume the injected scope; account-discovery
+                // channels resolve it back into a live upstream request, so
+                // storing it would misreport the model source.
+                let models_source = (uses_catalog_scope
+                    && declared_channel.is_some_and(|declared| declared.consumes_catalog_models))
+                .then(|| stravia_vendor_sdk::MODELS_SOURCE_CATALOG.to_owned())
+                .or(declared_models_source);
                 let name =
                     normalize_name(name.as_deref().unwrap_or(&provider.name), "provider name")?;
                 let (credentials, auth_mode) = match (channel.auth_mode, credential) {
@@ -616,6 +642,10 @@ impl AdminService {
                 let vendor = vendor.trim().to_owned();
                 anyhow::ensure!(!vendor.is_empty(), "provider vendor is required");
                 let descriptor = require_descriptor(&self.gw.vendor_plugins, &vendor)?;
+                anyhow::ensure!(
+                    !self.gw.vendor_plugins.is_retired_profile(&vendor),
+                    "Vendor `{vendor}` is no longer available for new providers"
+                );
                 let channel = descriptor
                     .channels
                     .iter()
@@ -683,6 +713,19 @@ impl AdminService {
                     .map(str::to_owned)
                     .or_else(|| channel.protocol.clone())
                     .unwrap_or_default();
+                // Merged profiles (e.g. `custom`) advertise every selectable
+                // egress protocol in `protocols`; other vendors keep their
+                // stored wire-protocol key without membership checks.
+                if !channel.protocols.is_empty() {
+                    anyhow::ensure!(
+                        channel
+                            .protocols
+                            .iter()
+                            .any(|option| option.value == protocol),
+                        "Vendor `{vendor}` channel `{}` does not support protocol `{protocol}`",
+                        channel.id
+                    );
+                }
                 Ok((
                     CreateProviderRecord {
                         name,
@@ -792,7 +835,9 @@ impl AdminService {
                         let (_, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
                         let publication = operation.publication_fence(
                             stravia_runtime_contract::CancellationToken::new(),
-                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            stravia_runtime_contract::Deadline::fixed(
+                                std::time::Instant::now() + std::time::Duration::from_secs(120),
+                            ),
                         );
                         drop(operation);
                         let write_fence = publication.write_fence().await?;
@@ -900,6 +945,9 @@ impl AdminService {
             "provider vendor, channel, protocol, and authentication cannot be changed after creation"
         );
 
+        // ADR-0073：黑名单按 API 输入判定——下方写入总是全字段重写，
+        // 不能把"回填现值"误判成凭据变更。
+        let preserve_credential_status = !input.resets_credential_status();
         let changes_options = input.vendor_options.is_some();
         let credential_updates = input.adapter_credentials.clone().unwrap_or_default();
         let changes_credentials = credential_updates.values().any(configured_secret_value)
@@ -1018,6 +1066,7 @@ impl AdminService {
                     auth_mode: Some(auth_mode),
                     use_proxy: Some(input.use_proxy.unwrap_or(current.use_proxy)),
                     is_enabled: Some(input.is_enabled.unwrap_or(current.is_enabled)),
+                    preserve_credential_status,
                 },
             )
             .await?;
@@ -1171,7 +1220,19 @@ impl AdminService {
                     .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
             });
         let result = if supports_validation {
-            let preview = self
+            // ADR-0073：预览前先锁定凭据代际，手动测试的上游 401 同样算
+            // 失效证据（条件写仍按代际比对，不覆盖更新的凭据）。
+            let credential_version = crate::db::models::ProviderCredentialVersion {
+                provider_revision: provider.revision,
+                oauth_status_version: self
+                    .gw
+                    .storage
+                    .oauth_credentials()
+                    .get(&provider.id)
+                    .await?
+                    .map(|credential| credential.status_version),
+            };
+            let preview = match self
                 .preview_provider_configuration(ProviderConfigurationPreviewInput {
                     provider_id: Some(provider.id.clone()),
                     vendor_id: vendor_id.to_owned(),
@@ -1180,7 +1241,18 @@ impl AdminService {
                     options: serde_json::from_str(&provider.vendor_options)?,
                     credentials: std::collections::BTreeMap::new(),
                 })
-                .await?;
+                .await
+            {
+                Ok(preview) => preview,
+                Err(error) => {
+                    if crate::plugin::execution::is_credential_rejection(&error) {
+                        self.gw
+                            .mark_provider_credential_invalid(&provider.id, credential_version)
+                            .await;
+                    }
+                    return Err(error);
+                }
+            };
             let error = if preview.issues.is_empty() {
                 None
             } else {

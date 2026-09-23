@@ -383,7 +383,7 @@ describe('Stravia desktop smoke', () => {
             name: `Desktop smoke provider ${fixtureSuffix}`,
             source: {
               type: 'custom',
-              vendor: 'protocol-open-responses',
+              vendor: 'custom',
               channel: 'default',
               protocol: 'open-responses',
               base_url: 'https://desktop-smoke.invalid',

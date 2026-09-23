@@ -513,7 +513,10 @@ impl AgentRunner {
                     {
                         let mut turn_input =
                             TurnInput::new(input.principal.clone(), request.clone())
-                                .with_execution(cancellation.clone(), turn_deadline);
+                                .with_execution(
+                                    cancellation.clone(),
+                                    stravia_runtime_contract::Deadline::fixed(turn_deadline),
+                                );
                         if let Some(observer) = observation.as_ref() {
                             turn_input = turn_input.with_observer(observer.clone());
                         }
@@ -767,7 +770,7 @@ impl AgentRunner {
         events: &mpsc::Sender<AgentEvent>,
         hooks: Option<&Arc<tokio::sync::Mutex<InferenceRun>>>,
     ) -> Result<AgentModelTurnResult, AgentRunError> {
-        let deadline = input.deadline;
+        let deadline = input.deadline.clone();
         let cancellation = input.cancellation.clone();
         let turn = self
             .model
@@ -790,7 +793,7 @@ impl AgentRunner {
                 _ = cancellation.cancelled() => {
                     return Err(AgentRunError::new("cancelled", "Agent Run was cancelled"));
                 }
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                () = deadline.wait() => {
                     return Err(AgentRunError::new(
                         "deadline_exceeded",
                         "Agent Model Turn deadline exceeded",

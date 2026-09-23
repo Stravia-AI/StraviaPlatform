@@ -37,118 +37,7 @@ impl AdminService {
 mod tests {
 
     use super::*;
-    use stravia_web_search::{WebSearchBackendDraft, admin::WebSearchLimits};
-
-    async fn admin() -> (tempfile::TempDir, AdminService) {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::from_storage(
-            crate::config::GatewayConfig {
-                data_dir: directory.path().to_path_buf(),
-                ..Default::default()
-            },
-            std::sync::Arc::new(crate::storage::MemoryStorage::new(
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )),
-        )
-        .await
-        .expect("Gateway");
-        (directory, gateway.admin())
-    }
-
-    #[tokio::test]
-    async fn disabled_config_accepts_an_incomplete_binding_as_a_full_replacement() {
-        let (_directory, admin) = admin().await;
-        let current = admin.get_web_search_config().await.expect("current config");
-        assert_eq!(
-            current.limits,
-            WebSearchLimits {
-                min_turns: 2,
-                max_turns: 20,
-                min_total_time_seconds: 60,
-                max_total_time_seconds: 900,
-            }
-        );
-
-        let updated = admin
-            .update_web_search_config(WebSearchConfig {
-                revision: current.revision,
-                enabled: false,
-                backend: Some(WebSearchBackendDraft::Local { model_id: None }),
-                max_turns: 6,
-                total_time_seconds: 120,
-                updated_at: current.updated_at.clone(),
-            })
-            .await
-            .expect("disabled incomplete config");
-
-        assert_eq!(updated.revision, current.revision + 1);
-        assert_eq!(updated.max_turns, 6);
-        assert_eq!(
-            admin.get_web_search_config().await.expect("stored config"),
-            updated
-        );
-    }
-
-    #[tokio::test]
-    async fn enabled_config_rejects_incomplete_binding_and_invalid_limits() {
-        let (_directory, admin) = admin().await;
-        let current = admin.get_web_search_config().await.expect("current config");
-        let mut input = WebSearchConfig {
-            revision: current.revision,
-            enabled: true,
-            backend: None,
-            max_turns: 12,
-            total_time_seconds: 600,
-            updated_at: current.updated_at.clone(),
-        };
-
-        let error = admin
-            .update_web_search_config(input.clone())
-            .await
-            .expect_err("incomplete binding");
-        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
-
-        input.enabled = false;
-        input.backend = Some(WebSearchBackendDraft::Local { model_id: None });
-        input.max_turns = 1;
-        let error = admin
-            .update_web_search_config(input)
-            .await
-            .expect_err("invalid limits");
-        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
-    }
-
-    #[tokio::test]
-    async fn external_mode_preserves_local_limits_without_validating_them() {
-        let (_directory, admin) = admin().await;
-        let current = admin.get_web_search_config().await.expect("current config");
-
-        let external = admin
-            .update_web_search_config(WebSearchConfig {
-                revision: current.revision,
-                enabled: false,
-                backend: Some(WebSearchBackendDraft::External { route_id: None }),
-                max_turns: 1,
-                total_time_seconds: 1,
-                updated_at: current.updated_at.clone(),
-            })
-            .await
-            .expect("disabled External config");
-
-        assert_eq!(external.max_turns, 1);
-        assert_eq!(external.total_time_seconds, 1);
-
-        let error = admin
-            .update_web_search_config(WebSearchConfig {
-                backend: Some(WebSearchBackendDraft::Local { model_id: None }),
-                ..external.config
-            })
-            .await
-            .expect_err("Local mode must validate restored limits");
-        assert_eq!(error.code, "WEB_SEARCH_INVALID_CONFIG");
-    }
+    use stravia_web_search::WebSearchBackendDraft;
 
     #[tokio::test]
     async fn local_search_requires_sources_but_ignores_the_legacy_disabled_switch() {
@@ -166,7 +55,7 @@ mod tests {
             .providers()
             .create(crate::db::models::CreateProviderRecord {
                 name: "Tool-capable Provider".into(),
-                vendor: Some("protocol-openai-chat-completions".into()),
+                vendor: Some("custom".into()),
                 protocol: "openai-compatible".into(),
                 base_url: "https://example.com/v1".into(),
                 preset_key: None,

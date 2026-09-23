@@ -13,12 +13,13 @@ pub(crate) mod support;
 pub(crate) use live::LiveModelTurnExecutor;
 
 use std::sync::{Arc, atomic::AtomicBool};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::interaction_observation::RunObserver;
 use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Deadline;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::hook::RouteContext;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -65,7 +66,8 @@ pub struct TurnInput {
     pub authorization: ModelTurnAuthorization,
     pub extra_headers: reqwest::header::HeaderMap,
     pub cancellation: CancellationToken,
-    pub deadline: Instant,
+    /// Shared idle deadline; vendor host-boundary activity keeps it alive.
+    pub deadline: Deadline,
     pub(crate) allow_responses_websocket: bool,
     pub(crate) attachments_normalized: bool,
     pub(crate) observer: Option<RunObserver>,
@@ -82,7 +84,7 @@ impl TurnInput {
             authorization: ModelTurnAuthorization::RouteBinding,
             extra_headers: reqwest::header::HeaderMap::new(),
             cancellation: CancellationToken::new(),
-            deadline: Instant::now() + Duration::from_secs(300),
+            deadline: Deadline::from_now(Duration::from_secs(300)),
             allow_responses_websocket: true,
             attachments_normalized: false,
             observer: None,
@@ -101,7 +103,7 @@ impl TurnInput {
         self
     }
 
-    pub fn with_execution(mut self, cancellation: CancellationToken, deadline: Instant) -> Self {
+    pub fn with_execution(mut self, cancellation: CancellationToken, deadline: Deadline) -> Self {
         self.cancellation = cancellation;
         self.deadline = deadline;
         self

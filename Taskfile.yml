@@ -143,7 +143,7 @@ tasks:
     desc: Run the Windows Tauri desktop smoke test.
     deps: [build:desktop:e2e, build:vendor-fixtures]
     cmds:
-      - bun run test:e2e:desktop
+      - bun tests/common/run-in-tempdir.ts bun run test:e2e:desktop
 
   check:web:
     internal: true
@@ -165,19 +165,19 @@ tasks:
     desc: Run WebUI and supported Rust unit tests without building embedded WebUI assets.
     deps: [install:web, build:vendor-fixtures]
     cmds:
-      - bun run --filter stravia-webui test:unit
-      - cargo test --locked --workspace --exclude stravia-desktop
+      - bun tests/common/run-in-tempdir.ts bun run --filter stravia-webui test:unit
+      - bun tests/common/run-in-tempdir.ts cargo test --locked --workspace --exclude stravia-desktop
 
   test:e2e:proxy:
     desc: Run the proxy protocol matrix E2E tests.
     deps: [build:server:debug, build:devtools:debug]
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
+      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
 
   test:browser:
     desc: Run the embedded Moli Web Access regression tests.
     cmds:
-      - cargo test --locked -p stravia-web-access browser::tests
+      - bun tests/common/run-in-tempdir.ts cargo test --locked -p stravia-web-access browser::tests
 
   test:e2e:admin:
     desc: Run the Admin service E2E tests.
@@ -187,13 +187,13 @@ tasks:
     env:
       STRAVIA_BINARY: '{{.ROOT_DIR}}/target/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
+      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
 
   test:e2e:storage:sqlite:
     desc: Run the SQLite storage E2E tests.
     deps: [build:server:debug, build:vendor-fixtures]
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k sqlite
+      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k sqlite
 
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.
@@ -201,13 +201,15 @@ tasks:
       vars: [DB_URL]
     deps: [build:server:debug, build:vendor-fixtures]
     cmds:
-      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k postgres
+      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
 
   test:e2e:web:
-    desc: Run Chromium WebUI E2E tests.
+    desc: Run Chromium WebUI E2E tests using the production build from build:server.
     deps: [build:server]
+    env:
+      PLAYWRIGHT_USE_PREBUILT: '1'
     cmds:
-      - bun run test:e2e:web
+      - bun tests/common/run-in-tempdir.ts bun run test:e2e:web
 
   test:e2e:
     desc: Run proxy, Admin service, SQLite, and PostgreSQL E2E tests.

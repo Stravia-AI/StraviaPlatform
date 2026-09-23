@@ -1,34 +1,32 @@
+use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
-
-use async_trait::async_trait;
-use serde_json::Value;
-use stravia_runtime_contract::CancellationToken;
-use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest};
+use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent,
 };
 use stravia_vendor_sdk::{
     AllowanceRequest, AuthRequest, ConfigValidationRequest, DiscoverRequest, ErrorKind,
-    MediaImageRequest, ModelMetadata, Operation, OperationInput, OperationOutput, ProviderSnapshot,
-    SearchRequest,
+    MODELS_SOURCE_CATALOG, MediaImageRequest, ModelMetadata, Operation, OperationInput,
+    OperationOutput, ProviderSnapshot, SearchRequest,
 };
 use tokio::sync::{Mutex, mpsc};
 
 use crate::Gateway;
-use crate::db::models::{OAuthCredential, Provider};
+use crate::db::models::{OAuthCredential, Provider, ProviderCredentialVersion};
 use crate::interaction_observation::ProtectedSecrets;
 use crate::provider_models::ProviderModelRecord;
 
 use super::lifecycle::{VendorOperation, VendorPublicationFence};
 use super::network::VendorNetwork;
 use super::permissions::resolve_permissions;
-use super::store::{MAX_PRIVATE_STATE_BYTES, PluginStorageError, PluginStore};
+use super::store::{PluginStorageError, PluginStore};
 
 #[derive(Debug, Clone)]
 pub(crate) enum VendorRequest {
@@ -86,7 +84,7 @@ pub(crate) struct VendorExecution {
 
 pub(crate) struct VendorCallContext {
     pub(crate) cancellation: CancellationToken,
-    pub(crate) deadline: Instant,
+    pub(crate) deadline: Deadline,
     pub(crate) events: Option<mpsc::Sender<VendorEvent>>,
     pub(crate) observer: Option<crate::interaction_observation::RunObserver>,
     pub(crate) model_turn_id: Option<String>,
@@ -98,7 +96,7 @@ pub(crate) struct VendorCallContext {
 }
 
 impl VendorCallContext {
-    pub(crate) fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+    pub(crate) fn new(cancellation: CancellationToken, deadline: Deadline) -> Self {
         Self {
             cancellation,
             deadline,
@@ -136,6 +134,8 @@ pub(crate) struct PreparedVendorExecution {
     use_proxy: bool,
     origins: BTreeSet<String>,
     kind: Operation,
+    /// ADR-0073：连接快照锁定的凭据代际，供上游凭据拒绝的条件写比对。
+    credential_version: ProviderCredentialVersion,
 }
 
 impl PreparedVendorExecution {
@@ -156,6 +156,12 @@ impl PreparedVendorExecution {
 
     pub(crate) fn provider(&self) -> &ProviderSnapshot {
         &self.provider
+    }
+
+    /// ADR-0073：本执行锁定的凭据代际。上游拒绝证据只能按此代际条件写
+    /// `credential_status`——代际已变说明拒绝的是旧凭据，放弃标记。
+    pub(crate) fn credential_version(&self) -> ProviderCredentialVersion {
+        self.credential_version
     }
 
     pub(crate) fn oauth_connection_id(&self) -> Option<&str> {
@@ -260,7 +266,7 @@ impl Gateway {
                 &prepared.provider,
                 request,
                 context.cancellation.clone(),
-                context.deadline,
+                context.deadline.clone(),
             );
             tokio::select! {
                 biased;
@@ -295,7 +301,7 @@ impl Gateway {
             let provider = tokio::select! {
                 biased;
                 _ = context.cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
-                _ = tokio::time::sleep_until(context.deadline.into()) => return Err(RuntimeError::DeadlineExceeded.into()),
+                () = context.deadline.wait() => return Err(RuntimeError::DeadlineExceeded.into()),
                 result = self.storage.providers().get(provider_id) => result?,
             }
             .ok_or_else(|| anyhow::anyhow!("provider was not found"))?;
@@ -389,7 +395,21 @@ impl Gateway {
                     )
                 });
             let catalog_models = if kind == Operation::Discover
-                && effective_models_source == Some("catalog")
+                && effective_models_source == Some(MODELS_SOURCE_CATALOG)
+                // Only channels that consume the injected scope warrant a
+                // catalog fetch; account-discovery channels resolve the same
+                // marker into a live upstream request.
+                && connection
+                    .provider
+                    .channel
+                    .as_deref()
+                    .and_then(|channel| {
+                        descriptor
+                            .channels
+                            .iter()
+                            .find(|declared| declared.id == channel)
+                    })
+                    .is_some_and(|channel| channel.consumes_catalog_models)
                 && connection
                     .provider
                     .static_models
@@ -403,7 +423,7 @@ impl Gateway {
                     .filter(|value| !value.trim().is_empty())
                     .or(descriptor.catalog_id.as_deref())
                     .unwrap_or(vendor_id);
-                match self.provider_catalog.provider_scope(catalog_id).await {
+                match self.catalog_sync.provider_scope(catalog_id).await {
                     Ok(scope) => Some(
                         scope
                             .models
@@ -436,6 +456,13 @@ impl Gateway {
             } else {
                 None
             };
+            let credential_version = ProviderCredentialVersion {
+                provider_revision: connection.provider.revision,
+                oauth_status_version: connection
+                    .oauth
+                    .as_ref()
+                    .map(|credential| credential.status_version),
+            };
             let (mut provider, use_proxy, origins) =
                 provider_snapshot(descriptor, connection, model, kind, context)?;
             if let Some(models) = catalog_models {
@@ -455,13 +482,14 @@ impl Gateway {
                 use_proxy,
                 origins,
                 kind,
+                credential_version,
             })
         };
         tokio::select! {
             biased;
             _ = context.cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled.into()),
-            _ = tokio::time::sleep_until(context.deadline.into()) => Err(RuntimeError::DeadlineExceeded.into()),
+            () = context.deadline.wait() => Err(RuntimeError::DeadlineExceeded.into()),
             result = prepare => result,
         }
     }
@@ -486,6 +514,7 @@ impl Gateway {
                     | "models_source"
                     | "static_models"
                     | "catalog_models"
+                    | "vendor_profile"
             ) {
                 prepared
                     .provider
@@ -665,7 +694,7 @@ impl Gateway {
         input: OperationInput,
         context: VendorCallContext,
     ) -> anyhow::Result<VendorExecution> {
-        if Instant::now() >= context.deadline {
+        if context.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded.into());
         }
         if context.cancellation.is_cancelled() {
@@ -681,7 +710,7 @@ impl Gateway {
         if context.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled.into());
         }
-        if Instant::now() >= context.deadline {
+        if context.deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded.into());
         }
         operation.ensure_current()?;
@@ -729,7 +758,7 @@ impl Gateway {
             _ => anyhow::bail!("vendor operation has an invalid private-state scope"),
         };
         let publication =
-            operation.publication_fence(context.cancellation.clone(), context.deadline);
+            operation.publication_fence(context.cancellation.clone(), context.deadline.clone());
         let services = Arc::new(ScopedHostServices {
             network,
             operation: operation.clone(),
@@ -743,7 +772,7 @@ impl Gateway {
         let scope = OperationScope::new(
             services.clone(),
             context.cancellation.clone(),
-            context.deadline,
+            context.deadline.clone(),
             0,
         );
         let channel = input.provider().channel.clone();
@@ -760,7 +789,7 @@ impl Gateway {
             _ = operation.cancellation().cancelled() => {
                 return Err(RuntimeError::Cancelled.into());
             }
-            _ = tokio::time::sleep_until(context.deadline.into()) => {
+            () = context.deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded.into());
             }
             result = execution => result.map_err(anyhow::Error::from)?,
@@ -851,9 +880,22 @@ fn provider_snapshot(
     }
 
     let mut operation_metadata = context.metadata.clone();
-    for key in ["models_source", "static_models", "catalog_models"] {
+    for key in [
+        "models_source",
+        "static_models",
+        "catalog_models",
+        "vendor_profile",
+    ] {
         operation_metadata.remove(key);
     }
+    // Profiles registered at runtime are not in the guest's compiled
+    // descriptor; echo the acquired profile back so pure admission paths can
+    // accept them without catalog access.
+    operation_metadata.insert(
+        "vendor_profile".into(),
+        serde_json::to_value(descriptor)
+            .map_err(|_| anyhow::anyhow!("vendor profile descriptor is not serializable"))?,
+    );
     if kind == Operation::Discover {
         if let Some(source) = discovery_source {
             operation_metadata.insert("models_source".into(), Value::String(source.to_owned()));
@@ -1135,6 +1177,47 @@ async fn ensure_recovery_complete(
     Ok(())
 }
 
+/// ADR-0073：判定 vendor 执行错误是否为"上游确认拒绝当前凭据"的证据，
+/// 与推理路径归一化为 upstream `provider_auth_error` 的规则一致：
+/// 上游 401、非 403 的 AuthenticationError，或 Vendor 声明的 Auth 拒绝。
+/// 本地校验、Hook 拒绝与 403 授权失败不算。
+pub(crate) fn is_credential_rejection(error: &anyhow::Error) -> bool {
+    let Some(error) = error.downcast_ref::<RuntimeError>() else {
+        return false;
+    };
+    if error.is_upstream_failure() {
+        return error.upstream_status() == Some(401)
+            || (error.upstream_status() != Some(403)
+                && matches!(
+                    error.model_error_kind(),
+                    Some(AiErrorKind::AuthenticationError)
+                ));
+    }
+    matches!(
+        error,
+        RuntimeError::Plugin {
+            kind: ErrorKind::Auth,
+            ..
+        }
+    )
+}
+
+/// ADR-0073：取消与超时是执行中断而非凭据证据——恢复路径因中断失败时
+/// 不得把 Provider 标记为凭据失效。
+pub(crate) fn is_execution_interruption(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<RuntimeError>(),
+        Some(
+            RuntimeError::Cancelled
+                | RuntimeError::DeadlineExceeded
+                | RuntimeError::Plugin {
+                    kind: ErrorKind::Cancelled | ErrorKind::DeadlineExceeded,
+                    ..
+                }
+        )
+    )
+}
+
 fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
     left.id == right.id
         && left.vendor == right.vendor
@@ -1260,12 +1343,6 @@ impl HostServices for ScopedHostServices {
     }
 
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure> {
-        if bytes.len() > MAX_PRIVATE_STATE_BYTES {
-            return Err(HostFailure::new(
-                ErrorKind::ResourceExhausted,
-                "vendor private state exceeds its size limit",
-            ));
-        }
         self.ensure_current()?;
         let fence = self
             .operation
@@ -1427,11 +1504,79 @@ fn storage_failure() -> HostFailure {
 
 fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
     match error {
-        PluginStorageError::StateTooLarge => HostFailure::new(
-            ErrorKind::ResourceExhausted,
-            "vendor private state exceeds its size limit",
-        ),
         PluginStorageError::StaleOperation | PluginStorageError::Changed => cancelled_failure(),
         PluginStorageError::Storage => storage_failure(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime(kind: ErrorKind, upstream_status: Option<u16>) -> anyhow::Error {
+        RuntimeError::from_guest(kind, "diagnostic".to_string(), upstream_status).into()
+    }
+
+    #[test]
+    fn credential_rejection_requires_upstream_evidence() {
+        // 上游 401 是最直接的凭据拒绝证据
+        assert!(is_credential_rejection(&runtime(
+            ErrorKind::upstream(None, None),
+            Some(401),
+        )));
+        // 上游明确分类为 AuthenticationError（非 403）同样算证据
+        assert!(is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthenticationError), None),
+            Some(400),
+        )));
+        // vendor 直接声明凭据失败（如 OAuth 不可刷新）
+        assert!(is_credential_rejection(&runtime(ErrorKind::Auth, None)));
+
+        // 403 是授权问题而非凭据失效——key 有效但无权限
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthenticationError), None),
+            Some(403),
+        )));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::AuthorizationError), None),
+            Some(403),
+        )));
+        // 非认证类上游失败（限流、无效请求）不算
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(Some(AiErrorKind::RateLimitError), None),
+            Some(429),
+        )));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::upstream(None, None),
+            Some(500),
+        )));
+        // 本地/插件失败不是上游证据
+        assert!(!is_credential_rejection(&runtime(ErrorKind::Invalid, None)));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::Trapped,
+            None
+        )));
+        // 非 RuntimeError（如本地 anyhow）不算
+        assert!(!is_credential_rejection(&anyhow::anyhow!("local")));
+    }
+
+    #[test]
+    fn execution_interruption_covers_cancel_and_deadline() {
+        assert!(is_execution_interruption(
+            &RuntimeError::Cancelled.into()
+        ));
+        assert!(is_execution_interruption(
+            &RuntimeError::DeadlineExceeded.into()
+        ));
+        assert!(is_execution_interruption(&runtime(
+            ErrorKind::Cancelled,
+            None
+        )));
+        assert!(is_execution_interruption(&runtime(
+            ErrorKind::DeadlineExceeded,
+            None
+        )));
+        assert!(!is_execution_interruption(&runtime(ErrorKind::Auth, None)));
+        assert!(!is_execution_interruption(&anyhow::anyhow!("local")));
     }
 }
