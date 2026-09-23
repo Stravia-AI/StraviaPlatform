@@ -657,6 +657,40 @@ pub(crate) fn classify_responses_stream_error(
     })
 }
 
+pub(crate) fn classify_codex_websocket_error(
+    value: &Value,
+    saw_response_event: bool,
+    continuation_requested: bool,
+) -> Option<PluginError> {
+    if let Some(error) = classify_responses_stream_error(value, saw_response_event) {
+        return Some(error);
+    }
+    (continuation_requested
+        && !saw_response_event
+        && value.get("type").and_then(Value::as_str) == Some("error")
+        && value.get("status").and_then(Value::as_u64) == Some(400)
+        && value.pointer("/error/type").and_then(Value::as_str) == Some("invalid_request_error")
+        && value.pointer("/error/code").is_none_or(Value::is_null)
+        && value.get("code").is_none_or(Value::is_null)
+        && value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                matches!(
+                    message.trim(),
+                    "Invalid `previous_response_id`." | "Invalid `previous_response_id`"
+                )
+            }))
+    .then(|| PluginError {
+        kind: ErrorKind::ContinuationNotFound,
+        message: "upstream continuation is no longer available".into(),
+        upstream_status: value
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok()),
+    })
+}
+
 pub(crate) fn invalid(message: impl Into<String>) -> PluginError {
     PluginError {
         kind: ErrorKind::Invalid,
@@ -718,3 +752,42 @@ impl VendorGuest for CodexVendor {
 
 #[cfg(target_arch = "wasm32")]
 stravia_vendor_sdk::export_vendor!(CodexVendor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn websocket_continuation_error_requires_exact_unstarted_rejection() {
+        let rejection = json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`."
+            }
+        });
+        assert!(matches!(
+            classify_codex_websocket_error(&rejection, false, true).map(|error| error.kind),
+            Some(ErrorKind::ContinuationNotFound)
+        ));
+        assert!(classify_codex_websocket_error(&rejection, false, false).is_none());
+        assert!(classify_codex_websocket_error(&rejection, true, true).is_none());
+        let ordinary_bad_request = json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid `input`: unsupported content"
+            }
+        });
+        assert!(classify_codex_websocket_error(&ordinary_bad_request, false, true).is_none());
+        let mut unrelated_code = rejection.clone();
+        unrelated_code["error"]["code"] = json!("invalid_parameter");
+        assert!(classify_codex_websocket_error(&unrelated_code, false, true).is_none());
+        let mut extended_message = rejection.clone();
+        extended_message["error"]["message"] =
+            json!("Invalid `previous_response_id`: unsupported syntax");
+        assert!(classify_codex_websocket_error(&extended_message, false, true).is_none());
+    }
+}

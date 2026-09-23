@@ -63,6 +63,7 @@ impl RuntimeError {
             ErrorKind::Invalid => "vendor operation input was rejected",
             ErrorKind::Auth => "vendor authentication failed",
             ErrorKind::ContinuationNotFound => "vendor continuation is no longer available",
+            ErrorKind::ContinuationUnavailable => "vendor continuation socket is unavailable",
             ErrorKind::ProtectedReasoningRejected => "vendor rejected protected reasoning replay",
             ErrorKind::Upstream(_) => "vendor upstream request failed",
             ErrorKind::Trapped => "vendor plugin execution failed",

@@ -3,7 +3,7 @@
 //! A plugin crate links this SDK, fills a [`VendorDescriptor`], implements
 //! [`VendorGuest`] for the capabilities it claims, and calls
 //! [`export_vendor!`] once. The generated component exposes the versioned
-//! `stravia:vendor@0.3.0` world; all model traffic flows through the canonical
+//! `stravia:vendor@0.4.0` world; all model traffic flows through the canonical
 //! contract in [`stravia_runtime_contract::protocol::ir`].
 //!
 //! The WIT contract lives in `wit/` of this crate and is the single source for

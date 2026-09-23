@@ -10060,8 +10060,10 @@ dependencies = [
 name = "stravia-vendor-codex"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "chrono",
+ "parking_lot",
  "semver",
  "serde",
  "serde_json",
@@ -10069,7 +10071,9 @@ dependencies = [
  "stravia-protocol-codec",
  "stravia-runtime-contract",
  "stravia-vendor-common",
+ "stravia-vendor-runtime",
  "stravia-vendor-sdk",
+ "tokio",
  "url",
  "uuid",
 ]

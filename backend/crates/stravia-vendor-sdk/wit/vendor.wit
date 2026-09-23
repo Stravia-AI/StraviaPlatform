@@ -1,10 +1,10 @@
-// Stravia vendor plugin contract, version 0.3.
+// Stravia vendor plugin contract, version 0.4.
 //
 // One package = one vendor. The guest orchestrates vendor flows and drives
 // controlled HTTP / WebSocket through host imports; it never gets raw sockets,
 // filesystem, env, or background tasks. Host enforces origin allowlists,
 // backpressure, cancellation, and resource limits.
-package stravia:vendor@0.3.0;
+package stravia:vendor@0.4.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
@@ -127,6 +127,9 @@ interface types {
         /// exists. Host may safely replay full canonical history according to
         /// Model Turn Executor policy; generic 400/404 errors must not use it.
         continuation-not-found,
+        /// The exact socket tip requested for local continuation is unavailable.
+        /// No new handshake or model request has been sent.
+        continuation-unavailable,
         /// Upstream explicitly rejected protected reasoning replay. The host may
         /// retry once without protected payloads only before any model output.
         protected-reasoning-rejected,
@@ -162,6 +165,8 @@ interface types {
         url: string,
         headers: list<tuple<string, string>>,
         protocols: list<string>,
+        /// Present only for ephemeral continuation; requires the exact local socket tip.
+        continuation-id: option<string>,
     }
 
     /// WebSocket message kind for the controlled socket interface.
@@ -255,9 +260,9 @@ interface host {
         send: func(msg: ws-message) -> result<_, plugin-error>;
         /// Next inbound message; `none` on clean close.
         next: func() -> result<option<ws-message>, plugin-error>;
-        /// Release after a terminal response. `response-continuation` declares
-        /// that this exact socket carried the response whose upstream id may be reused.
-        close: func(response-continuation: bool) -> result<_, plugin-error>;
+        /// Release after a terminal response. `continuation-id` names the latest
+        /// successfully completed response on this socket; `none` clears its old tip.
+        close: func(continuation-id: option<string>) -> result<_, plugin-error>;
     }
 
     /// Open a WebSocket. Same origin enforcement as `http-start` plus

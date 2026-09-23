@@ -312,6 +312,7 @@ impl HostServices for CatalogSyncServices {
         _url: String,
         _headers: Vec<(String, String)>,
         _protocols: Vec<String>,
+        _continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(self.unavailable("WebSocket access"))
     }

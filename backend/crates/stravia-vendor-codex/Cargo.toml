@@ -26,3 +26,9 @@ sha2 = { workspace = true }
 chrono = { workspace = true, features = ["clock", "std"] }
 uuid = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+stravia-vendor-runtime = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

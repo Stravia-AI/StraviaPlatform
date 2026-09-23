@@ -46,6 +46,7 @@ pub(crate) struct VendorWebSocketPool {
 struct PooledWebSocket {
     scope_key: String,
     affinity: String,
+    continuation_id: Option<String>,
     requested_url: String,
     actual_url: String,
     requested_headers: [u8; 32],
@@ -76,6 +77,7 @@ impl VendorWebSocketPool {
         requested_url: &str,
         requested_headers: &[u8; 32],
         requested_protocols: &[String],
+        continuation_id: Option<&str>,
     ) -> Option<PooledWebSocket> {
         let now = tokio::time::Instant::now();
         let mut idle = self.idle.lock();
@@ -83,6 +85,7 @@ impl VendorWebSocketPool {
         let index = idle.iter().position(|entry| {
             entry.scope_key == scope_key
                 && entry.affinity == affinity
+                && continuation_id.is_none_or(|id| entry.continuation_id.as_deref() == Some(id))
                 && entry.requested_url == requested_url
                 && entry.actual_url == requested_url
                 && entry.requested_headers == *requested_headers
@@ -98,6 +101,7 @@ impl VendorWebSocketPool {
         identity: WebSocketPoolIdentity,
         socket: WebSocket,
         connected_at: tokio::time::Instant,
+        continuation_id: Option<String>,
     ) -> bool {
         let now = tokio::time::Instant::now();
         if connected_at + MAX_WEBSOCKET_AGE <= now {
@@ -118,6 +122,7 @@ impl VendorWebSocketPool {
             idle.push(PooledWebSocket {
                 scope_key: identity.scope_key,
                 affinity: identity.affinity,
+                continuation_id,
                 requested_url: identity.requested_url,
                 actual_url: identity.actual_url,
                 requested_headers: identity.requested_headers,
@@ -465,6 +470,7 @@ impl VendorNetwork {
         url: String,
         headers: Vec<(String, String)>,
         protocols: Vec<String>,
+        continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         let mut url = self.url(&url, true)?;
         let requested_url = url.as_str().to_owned();
@@ -484,6 +490,7 @@ impl VendorNetwork {
                 &requested_url,
                 &requested_headers,
                 &requested_protocols,
+                continuation_id.as_deref(),
             ) {
                 if self.url(&entry.actual_url, true).is_err()
                     || !drain_idle_frames(&mut entry.socket)
@@ -512,6 +519,13 @@ impl VendorNetwork {
                     explicitly_released: AtomicBool::new(false),
                 }));
             }
+        }
+        if continuation_id.is_some() {
+            self.ensure_current()?;
+            return Err(HostFailure::new(
+                ErrorKind::ContinuationUnavailable,
+                "requested WebSocket continuation is not available locally",
+            ));
         }
 
         for redirects in 0..=MAX_REDIRECTS {
@@ -1022,7 +1036,7 @@ impl HostWebSocket for ScopedWebSocket {
         Ok(Some(message))
     }
 
-    async fn close(&self, response_continuation: bool) -> Result<(), HostFailure> {
+    async fn close(&self, continuation_id: Option<String>) -> Result<(), HostFailure> {
         self.network
             .response_continuation_available
             .store(false, Ordering::Release);
@@ -1030,6 +1044,7 @@ impl HostWebSocket for ScopedWebSocket {
         let Some(socket) = self.socket.lock().await.take() else {
             return Ok(());
         };
+        let has_continuation = continuation_id.is_some();
         if self.reusable.load(Ordering::Acquire)
             && self.network.ensure_current().is_ok()
             && let (Some(pool), Some(identity)) = (
@@ -1050,9 +1065,10 @@ impl HostWebSocket for ScopedWebSocket {
                 },
                 socket,
                 self.connected_at,
+                continuation_id,
             ) {
                 self.explicitly_released.store(true, Ordering::Release);
-                if response_continuation {
+                if has_continuation {
                     // 只有guest声明“本响应来自此连接”且宿主确实完成归池，
                     // 才允许后续沿用该响应身份；请求允许WS或握手成功都不够。
                     self.network

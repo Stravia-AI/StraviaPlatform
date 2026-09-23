@@ -132,7 +132,8 @@ fn routing_hint(body: &Value) -> Result<String, stravia_vendor_sdk::PluginError>
             .get("service_tier")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            // 首轮省略的默认 tier 会由上游响应补全；两者必须保持同一连接身份。
+            .filter(|value| !value.is_empty() && *value != "default")
         {
             Some(tier) => format!("model={model};tier={tier}"),
             None => format!("model={model}"),
@@ -160,9 +161,24 @@ pub(super) fn infer_websocket(
     preserve_upstream_errors: bool,
 ) -> Result<AiResponse, stravia_vendor_sdk::PluginError> {
     let seed = request_id(body);
-    let session_id = operation_id(provider, "session_id", &format!("session-{seed}"));
-    let thread_id = operation_id(provider, "thread_id", &format!("thread-{seed}"));
-    let window_id = operation_id(provider, "window_id", &format!("window-{seed}"));
+    let affinity = provider
+        .operation_metadata
+        .get("transport_affinity")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session_id = affinity.map_or_else(
+        || operation_id(provider, "session_id", &format!("session-{seed}")),
+        |affinity| format!("session-{affinity}"),
+    );
+    let thread_id = affinity.map_or_else(
+        || operation_id(provider, "thread_id", &format!("thread-{seed}")),
+        |affinity| format!("thread-{affinity}"),
+    );
+    let window_id = affinity.map_or_else(
+        || operation_id(provider, "window_id", &format!("window-{seed}")),
+        |affinity| format!("window-{affinity}"),
+    );
     let turn_id = operation_id(provider, "turn_id", &format!("turn-{seed}"));
 
     let mut headers = Vec::new();
@@ -189,10 +205,18 @@ pub(super) fn infer_websocket(
             .map_err(|_| invalid("Codex WebSocket URL could not be constructed"))?;
         url.to_string()
     };
+    let continuation_id = (body.get("store").and_then(Value::as_bool) == Some(false))
+        .then(|| body.get("previous_response_id").and_then(Value::as_str))
+        .flatten()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    let continuation_requested = continuation_id.is_some();
     let connection = host.ws_connect(WsRequest {
         url,
         headers,
         protocols: Vec::new(),
+        continuation_id,
     })?;
     let mut frame = body.clone();
     let object = frame
@@ -222,7 +246,10 @@ pub(super) fn infer_websocket(
         &OPEN_RESPONSES_2026_04_24.to_string(),
         connection,
         preserve_upstream_errors,
-        super::classify_responses_stream_error,
+        continuation_requested,
+        |value, saw_response_event| {
+            super::classify_codex_websocket_error(value, saw_response_event, continuation_requested)
+        },
     )
 }
 
