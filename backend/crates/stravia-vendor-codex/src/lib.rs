@@ -509,8 +509,56 @@ fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
             })
             .unwrap_or_default(),
     };
+    apply_declared_specifications(&mut model);
     decorate_discovered_model(&mut model);
     Some(model)
+}
+
+/// `/models` 以 Codex 字段声明的每模型规格是权威数据；翻成宿主 metadata
+/// schema 后由宿主合并，覆盖目录与默认填充。
+fn apply_declared_specifications(model: &mut DiscoveredModel) {
+    if let Some(input) = declared_string_list(model.metadata.get("input_modalities")) {
+        // 浅合并以整个 `modalities` key 为单位覆盖，宿主不再提供 output
+        // 模态时按 Codex 文本对话模型补齐。
+        model.metadata.insert(
+            "modalities".into(),
+            serde_json::json!({ "input": input, "output": ["text"] }),
+        );
+    }
+    let efforts = model
+        .metadata
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !efforts.is_empty() {
+        model.metadata.insert("reasoning".into(), Value::Bool(true));
+        model.metadata.insert(
+            "reasoning_options".into(),
+            serde_json::json!([{ "type": "effort", "values": efforts }]),
+        );
+    }
+}
+
+fn declared_string_list(value: Option<&Value>) -> Option<Vec<String>> {
+    let values = value?.as_array()?;
+    let list = values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!list.is_empty()).then_some(list)
 }
 
 fn decorate_discovered_model(model: &mut DiscoveredModel) {
@@ -754,6 +802,50 @@ stravia_vendor_sdk::export_vendor!(CodexVendor);
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn discovered_model_translates_declared_specifications() {
+        let entry = json!({
+            "slug": "gpt-6-luna",
+            "display_name": "GPT-6-Luna",
+            "visibility": "list",
+            "capabilities": ["infer", "media_image", "search"],
+            "input_modalities": ["text", "image"],
+            "context_window": 272000,
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                {"effort": "medium", "description": "Balances speed and reasoning depth"},
+                {"effort": "high", "description": "Greater reasoning depth"},
+                {"effort": "xhigh", "description": "Extra high reasoning depth"},
+                {"effort": "max", "description": "Maximum reasoning depth"}
+            ]
+        });
+        let model = discovered_model(&entry).expect("listed model");
+
+        assert_eq!(model.id, "gpt-6-luna");
+        assert_eq!(
+            model.metadata["modalities"],
+            json!({"input": ["text", "image"], "output": ["text"]})
+        );
+        assert_eq!(model.metadata["context_window"], json!(272000));
+        assert_eq!(model.metadata["reasoning"], json!(true));
+        assert_eq!(
+            model.metadata["reasoning_options"],
+            json!([{"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}])
+        );
+    }
+
+    #[test]
+    fn discovered_model_keeps_undeclared_specifications_empty() {
+        let entry = json!({
+            "slug": "gpt-6-plain",
+            "visibility": "list"
+        });
+        let model = discovered_model(&entry).expect("listed model");
+        assert!(!model.metadata.contains_key("modalities"));
+        assert!(!model.metadata.contains_key("reasoning_options"));
+        assert!(!model.metadata.contains_key("reasoning"));
+    }
 
     #[test]
     fn websocket_continuation_error_requires_exact_unstarted_rejection() {

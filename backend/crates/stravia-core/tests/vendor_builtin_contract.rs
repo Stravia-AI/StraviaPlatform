@@ -574,6 +574,51 @@ async fn supplemental_discovery_capabilities_preserve_explicit_model_specificati
 }
 
 #[tokio::test]
+async fn discovery_declared_context_window_overrides_catalog_defaults() -> anyhow::Result<()> {
+    // Canonical `openai/gpt-5.2-codex` 声明 limit {context:400000,input:272000,
+    // output:128000}；上游直接声明的 context_window 覆盖 context，上游未声明
+    // 的 input/output 默认配额随旧窗口一并失效。
+    let (base_url, server) = local_upstream(1, |_| {
+        MockResponse::json(json!({"data":[
+            {"id":"gpt-5.2-codex","context_window":272000}
+        ]}))
+    })
+    .await?;
+    let (_directory, gateway) = gateway().await?;
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Discovery declared specifications".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "custom".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "fixture-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await?;
+    gateway.admin().sync_provider_models(&provider.id).await?;
+
+    let overridden = gateway
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.2-codex")
+        .await?;
+    let limit = overridden.metadata.limit.expect("canonical limit");
+    assert_eq!(limit.context, Some(272_000));
+    assert_eq!(limit.input, None);
+    assert_eq!(limit.output, None);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn google_protocol_alias_preserves_query_authentication() -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(1, |_| MockResponse::json(json!({
         "responseId":"google-auth","modelVersion":"gemini-fixture",
