@@ -119,6 +119,31 @@ test('Copy failure never reports success and leaves the configuration available'
   await expect(page.locator('pre')).toBeVisible()
 })
 
+test('Connect shrinks the config preview on short windows instead of scrolling the page', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 640 })
+  await setup(page, [key('Personal')])
+  await page.route('**/api/v1/connect-clients/preview', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          paths: [],
+          preview: Array.from({ length: 120 }, (_, index) => `line_${index} = "value"`).join('\n'),
+        },
+      },
+    }),
+  )
+  await page.goto('/connect')
+  const preview = page.locator('pre.route-code-plane')
+  await expect(preview).toBeVisible()
+  const main = page.locator('main')
+  await expect
+    .poll(async () => main.evaluate((el) => el.scrollHeight - el.clientHeight))
+    .toBeLessThanOrEqual(1)
+  const previewBox = await preview.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight }))
+  expect(previewBox.scroll).toBeGreaterThan(previewBox.client)
+  expect(previewBox.client).toBeLessThan(512)
+})
+
 test('Claude requires all four mappings while other clients do not ask for a default model', async ({ page }) => {
   await setup(page, [key('Personal')])
   await page.goto('/connect')

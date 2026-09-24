@@ -232,7 +232,7 @@ function cliModelName(modelId: string): string | undefined {
   </div>
 {/snippet}
 
-<div class="route-page">
+<div class="route-page connect-page">
   <PageHeader
     eyebrow={m.common_setup()}
     title={m.connect_connect_apps()}
@@ -260,15 +260,15 @@ function cliModelName(modelId: string): string | undefined {
         retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
     {/if}
 
-    <Tabs.Root bind:value={tab}>
+    <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
       <Tabs.List aria-label={m.connect_setup_format()}>
         <Tabs.Trigger value="cli"
           ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
         <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
       </Tabs.List>
 
-      <Tabs.Content value="cli" class="mt-5">
-        <div class="grid gap-6 min-[1100px]:grid-cols-12">
+      <Tabs.Content value="cli" class="mt-5 min-h-0">
+        <div class="grid h-full gap-6 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
           <section class="route-section min-[1100px]:col-span-5" aria-labelledby="cli-controls-title">
             <div class="route-section-header">
               <div>
@@ -370,7 +370,9 @@ function cliModelName(modelId: string): string | undefined {
             </Field.FieldGroup>
           </section>
 
-          <section class="route-section min-[1100px]:col-span-7" aria-labelledby="cli-output-title">
+          <section
+            class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
+            aria-labelledby="cli-output-title">
             <div class="route-section-header">
               <div>
                 <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
@@ -415,7 +417,7 @@ function cliModelName(modelId: string): string | undefined {
               </RequestFailure>
             {/if}
             {#if generatedCliConfig}
-              <pre class="route-code-plane">{generatedCliConfig}</pre>
+              <pre class="route-code-plane min-h-24">{generatedCliConfig}</pre>
             {:else}
               <Empty.Root class="min-h-72 border-y"
                 ><Empty.Header
@@ -449,8 +451,8 @@ function cliModelName(modelId: string): string | undefined {
         </div>
       </Tabs.Content>
 
-      <Tabs.Content value="code" class="mt-5">
-        <div class="grid gap-6 min-[1100px]:grid-cols-12">
+      <Tabs.Content value="code" class="mt-5 min-h-0">
+        <div class="grid h-full gap-6 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
           <section class="route-section min-[1100px]:col-span-5" aria-labelledby="code-controls-title">
             <div class="route-section-header">
               <div>
@@ -522,7 +524,9 @@ function cliModelName(modelId: string): string | undefined {
             </Field.FieldGroup>
           </section>
 
-          <section class="route-section min-[1100px]:col-span-7" aria-labelledby="code-output-title">
+          <section
+            class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
+            aria-labelledby="code-output-title">
             <div class="route-section-header">
               <div>
                 <h2 id="code-output-title" class="route-section-title">
@@ -535,7 +539,7 @@ function cliModelName(modelId: string): string | undefined {
               <Button onclick={() => void copyText(generatedCode)} disabled={!codeModel || !selectedCodeKey}
                 ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
             </div>
-            <Tabs.Root bind:value={codeLanguage}>
+            <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">
               <Tabs.List aria-label={m.connect_code_language()}>
                 {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
                     >{language === 'typescript'
@@ -545,10 +549,10 @@ function cliModelName(modelId: string): string | undefined {
                         : 'cURL'}</Tabs.Trigger
                   >{/each}
               </Tabs.List>
-              <Tabs.Content value={codeLanguage} class="mt-3">
+              <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
                 {#if codeModel}
-                  <pre class="route-code-plane">{generatedCode}</pre>
-                  {#if !selectedCodeKey}<Alert.Root class="mt-3" variant="warning" role="status"
+                  <pre class="route-code-plane min-h-24">{generatedCode}</pre>
+                  {#if !selectedCodeKey}<Alert.Root class="mt-3 shrink-0" variant="warning" role="status"
                       ><Alert.Description
                         >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description
                       ></Alert.Root
@@ -574,3 +578,15 @@ function cliModelName(modelId: string): string | undefined {
     </Tabs.Root>
   {/if}
 </div>
+
+<style>
+/* 与壳层保持一致：扣除标题栏、内容内边距和桌面底部沟槽。高度有界后，输出列的代码平面收缩自滚动，而不是撑出页面滚动。 */
+.connect-page {
+  height: calc(100svh - 5rem);
+}
+@media (max-width: 767px) {
+  .connect-page {
+    height: calc(100svh - 4.5rem);
+  }
+}
+</style>
