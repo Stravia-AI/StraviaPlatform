@@ -1455,7 +1455,6 @@
   "model_editor_thinking_overridden": "Overridden",
   "model_editor_thinking_reset_row": "Reset row",
   "model_editor_thinking_regenerate": "Regenerate map",
-  "model_editor_thinking_regenerate_confirm": "Replace every manual change with mappings generated from the service's current model details?",
   "model_editor_thinking_effort": "Effort value",
   "model_editor_thinking_budget": "Token budget",
   "model_editor_thinking_enabled": "Enable thinking",

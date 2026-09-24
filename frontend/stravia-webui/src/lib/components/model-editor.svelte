@@ -94,8 +94,6 @@ let targets = $state<RouteTargetForm[]>(
 )
 let saving = $state(false)
 let initialized = $state(false)
-let regenerateOpen = $state(false)
-let regenerateTarget = $state<RouteTargetForm>()
 let targetEditorOpen = $state(false)
 let targetEditorTarget = $state<RouteTargetForm>()
 let targetEditorIsNew = $state(false)
@@ -620,16 +618,9 @@ async function resetThinkingRow(target: RouteTargetForm, level: ThinkingLevel): 
   }
 }
 
-function requestThinkingMapRegeneration(target: RouteTargetForm): void {
-  regenerateTarget = target
-  regenerateOpen = true
-}
+async function regenerateThinkingMap(target: RouteTargetForm): Promise<void> {
+  if (!initialModel || !target.id) return
 
-async function regenerateThinkingMap(): Promise<void> {
-  const target = regenerateTarget
-  if (!initialModel || !target?.id) return
-
-  regenerateOpen = false
   target.validationError = ''
   try {
     const updated = await admin.models.regenerateThinkingMap(initialModel.model_id, target.id)
@@ -639,8 +630,6 @@ async function regenerateThinkingMap(): Promise<void> {
     )
   } catch (error) {
     target.validationError = localizeBackendErrorMessage(error)
-  } finally {
-    regenerateTarget = undefined
   }
 }
 
@@ -1335,7 +1324,7 @@ async function saveModel(): Promise<void> {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onclick={() => requestThinkingMapRegeneration(target)}>
+                        onclick={() => void regenerateThinkingMap(target)}>
                         {m.model_editor_thinking_regenerate()}
                       </Button>
                     {/if}
@@ -1519,21 +1508,6 @@ async function saveModel(): Promise<void> {
     </div>
   </form>
 </div>
-
-<AlertDialog.Root bind:open={regenerateOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>{m.model_editor_thinking_regenerate()}</AlertDialog.Title>
-      <AlertDialog.Description>{m.model_editor_thinking_regenerate_confirm()}</AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel onclick={() => (regenerateTarget = undefined)}>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action onclick={() => void regenerateThinkingMap()}>
-        {m.model_editor_thinking_regenerate()}
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
 
 <AlertDialog.Root bind:open={leaveConfirmOpen}>
   <AlertDialog.Content>

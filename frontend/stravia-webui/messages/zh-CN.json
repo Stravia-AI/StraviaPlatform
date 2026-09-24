@@ -1452,7 +1452,6 @@
   "model_editor_thinking_overridden": "已覆盖",
   "model_editor_thinking_reset_row": "重置此行",
   "model_editor_thinking_regenerate": "重新生成映射",
-  "model_editor_thinking_regenerate_confirm": "是否用当前服务模型信息生成的映射替换全部手动修改？",
   "model_editor_thinking_effort": "按强度值",
   "model_editor_thinking_budget": "按 Token 预算",
   "model_editor_thinking_enabled": "仅开启思考",
