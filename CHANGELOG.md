@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- Active vendor response streams no longer fail at 300 seconds because of an independent HTTP total timeout. Default and explicitly proxied connections retain the shared operation deadline and cancellation behavior.
 - Codex `store=false` continuations now retain stable connection identities and require the exact available WebSocket response tip before sending an upstream ID. Disconnected, evicted, busy, or advanced connections fall back to full history before sending, without consuming retry budget. Explicit upstream continuation rejection can replay full history at most once under the existing recovery budget, never after response events begin.
 - Interaction canvases keep confirmed Generation Chain parent links solid when retained-tail diagnostics identify the same source; cross-root diagnostic links remain dashed.
 - The service picker again shows localized sign-in methods instead of internal capability names, omits capability badges, and prefers model-directory logos before falling back to bundled icons.

@@ -115,12 +115,12 @@ impl Gateway {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
+        // 供应商操作的共享可续期 deadline 管理整个操作；reqwest 总超时
+        // 不随流式活动续期，会截断仍持续输出的长响应。
         let vendor_http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let vendor_websocket_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
             .http1_only()
             .build()?;
@@ -740,9 +740,7 @@ impl Gateway {
             return Ok(cached.client.clone());
         }
 
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::none());
+        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
         if force_http1 {
             builder = builder.http1_only();
         }
@@ -807,6 +805,85 @@ fn to_sql_backend_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn vendor_stream_continues_past_three_hundred_seconds() -> anyhow::Result<()> {
+        use axum::body::Body;
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        let directory = tempfile::tempdir()?;
+        let gateway = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
+        .await?;
+        let result = async {
+            for proxied in [false, true] {
+                for http1 in [false, true] {
+                    let (sender, receiver) = tokio::sync::mpsc::channel::<Bytes>(1);
+                    let receiver = Arc::new(tokio::sync::Mutex::new(Some(receiver)));
+                    let app = axum::Router::new().fallback(move || {
+                        let receiver = Arc::clone(&receiver);
+                        async move {
+                            let stream = tokio_stream::wrappers::ReceiverStream::new(
+                                receiver.lock().await.take().expect("one request"),
+                            );
+                            Body::from_stream(stream.map(Ok::<_, std::convert::Infallible>))
+                        }
+                    });
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                    let origin = format!("http://{}", listener.local_addr()?);
+                    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+                    let proxy = if proxied {
+                        EffectiveVendorProxy::Explicit {
+                            proxy_url: origin.clone(),
+                            force_http1: http1,
+                        }
+                    } else {
+                        EffectiveVendorProxy::Direct { use_proxy: false }
+                    };
+                    let client = gateway.client_for_vendor(&proxy, http1).await?;
+                    let request_url = if proxied {
+                        "http://127.0.0.1:9/stream"
+                    } else {
+                        &origin
+                    };
+                    sender.send(Bytes::from_static(b"first")).await?;
+                    let mut response = client.get(request_url).send().await?;
+                    assert_eq!(response.chunk().await?.unwrap(), "first");
+                    let streamed = async {
+                        for part in [b"second".as_slice(), b"third", b"after-300s"] {
+                            // 只推进 reqwest 的时钟；读取真实 socket 时恢复时钟，
+                            // 避免 Tokio 空闲自动跳时把网络调度误判成超时。
+                            tokio::time::pause();
+                            tokio::time::advance(Duration::from_secs(101)).await;
+                            tokio::time::resume();
+                            sender.send(Bytes::copy_from_slice(part)).await?;
+                            assert_eq!(response.chunk().await?.unwrap().as_ref(), part);
+                        }
+                        drop(sender);
+                        assert!(response.chunk().await?.is_none());
+                        anyhow::Ok(())
+                    }
+                    .await;
+                    server.abort();
+                    streamed?;
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        gateway.shutdown().await;
+        result
+    }
 
     #[tokio::test]
     async fn storage_health_is_reachable_for_sqlite_gateway() -> anyhow::Result<()> {

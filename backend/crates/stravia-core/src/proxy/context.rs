@@ -319,9 +319,8 @@ impl Drop for CancellationBodyStream {
 /// Axum middleware that creates a `RequestContext` and stores it as an
 /// `Extension`.  Mount this as the outermost layer on the proxy router.
 ///
-/// The timeout used is 300 s (matching the existing reqwest client timeout).
-/// P2 can thread per-route timeouts through here once `RequestContext` carries
-/// a configurable timeout.
+/// The shared deadline expires after 300 s without vendor boundary activity;
+/// activity renews it, so it does not cap the total duration of a live stream.
 pub async fn inject_context(mut request: Request, next: Next) -> Response {
     // We don't know the ingress protocol at middleware time; it will be
     // overwritten by the ingress handler via `inject_context_with_protocol`.
