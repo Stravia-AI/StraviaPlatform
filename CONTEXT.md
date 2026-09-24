@@ -311,7 +311,7 @@ _避免使用_：Native Automatic Window、平台自动压缩、累计 token 限
 
 ## Current Tool Continuation
 
-Current Tool Continuation 是 Interaction Observation 在没有已确认执行父边时，用当前输入尾段中尚未得到结果的工具调用精确对应到唯一已交付来源的诊断判定。确认后归入来源 Interaction，即使夹带新增 User 或超过尾部五分钟窗口。旧结果回放、重复 ID 或冲突来源不能证明续接；它不写入 Generation parent，也不启用 Target Continuation。
+Current Tool Continuation 是 Interaction Observation 用当前输入尾段的工具结果，精确对应到同 Principal 唯一已交付来源中尚待完成工具调用的诊断判定。确认后优先于 Generation parent 的常规观测分组，归入来源 Interaction 并续接来源 Run，即使历史编辑使严格前缀退回较早父节点、夹带新增 User 或超过尾部五分钟窗口。旧结果回放、重复 ID 或冲突来源不能证明续接；它不写入 Generation parent，也不启用 Target Continuation。
 _避免使用_：Automatic Parent Discovery、Generation Chain parent、Retained Tail Association
 
 ## Retained Tail Association

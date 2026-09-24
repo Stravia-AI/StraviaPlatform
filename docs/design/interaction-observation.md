@@ -35,9 +35,9 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 
 已确认的目标领域契约见 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：充分证据确认的同一任务续接可以跨多个 Generation Chain 根，仍归入同一个 Interaction。新准入请求按该决策分组；已有 Observation 不重算。以下编号规则描述当前归并行为。
 
-1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；精确父响应的工具续接与两秒快速续接按以下规则归并。
+1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；已确认的当前工具续接与两秒快速续接按以下规则归并。
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
-3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
+3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。此外，Observation 独立核验完整输入当前尾段的工具结果：若唯一对应同 Principal 已交付来源的待完成调用，则优先归入该来源 Interaction，并以来源 Run 作为观测父节点，即使严格前缀退回较早 Generation parent。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
 4. 同一父响应的并发续接属于同一 Interaction，并在详情中形成 Run 子树。
 5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应、且尚无续接 Run 的执行分支标记为 `user_interrupted`；已被续接的等待分支记为 `superseded`，不当作中断。
 6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
@@ -52,7 +52,7 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 9. 根重试归并只改变 Observation 分组，不建立或伪造 Generation Chain parent。
 10. 工具续接与快速续接同样只改变 Observation 分组，保留独立 Run 与全部输入，不修改 Generation Chain 父边、权限或模型执行。诊断记录保留归并依据；缺少精确父关系或完整交付时间时，不猜测快速归并。
 
-Generation parent 存在但对应父观察不可用时，新准入记录 `generation_parent_observation_unavailable` gap，不伪造父关联。未捕获、已清理、过期或查询失败都可能造成这类缺失，不能仅据此断言历史存储故障。真正的交付后 Generation 提交失败保留 `settlement_generation_commit` 诊断，界面明确“响应已交付，历史未保存”，不把已交付响应改报为请求失败，也不自动重放。
+Generation parent 存在但对应父观察不可用时，新准入记录 `generation_parent_observation_unavailable` gap，不伪造该父节点的观察；独立确认的当前工具来源仍可决定观测归属。未捕获、已清理、过期或查询失败都可能造成这类缺失，不能仅据此断言历史存储故障。真正的交付后 Generation 提交失败保留 `settlement_generation_commit` 诊断，界面明确“响应已交付，历史未保存”，不把已交付响应改报为请求失败，也不自动重放。
 
 ### 3.2 Interaction 主状态
 
@@ -129,9 +129,9 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为对启用后准入的请求生效。
 
-已确认的当前工具续接优先：本次回传来源 Run 当前待完成工具调用的结果时，即使同时夹带额外的 User 输入，也继续原 Interaction，不受尾部归并五分钟窗口限制。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
+已确认的当前工具续接优先于 Generation parent 的常规观测分组：本次回传来源 Run 当前待完成工具调用的结果时，即使已有 Generation parent、同时夹带额外的 User 输入，也继续来源 Interaction，并将观测父节点指向来源 Run，不受尾部归并五分钟窗口限制。Generation 父边不变。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
 
-只有未满足当前工具续接条件时才进入保留尾部路径，先确认来源，再按以下规则决定交互归属：
+只有未满足当前工具续接条件且没有 Generation parent 时，才用保留尾部决定交互归属；先确认来源，再按以下规则分组：
 
 - 匹配区间之后没有新的 User 输入，且满足时间窗口：归入来源 Interaction。
 - 匹配区间之后有新的 User 输入，或已超出归并窗口：创建新的 Interaction，并在诊断树中连接来源 Interaction；两个交互分别汇总状态、用量和 Debug Bundle 范围。
@@ -692,7 +692,7 @@ Rust workspace 新增：
 
 ## 14. 跨 Generation Chain 根归属
 
-本节落实 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：Generation Chain 仍只记录真实执行父边；Interaction Observation 在没有执行父边时用当前工具续接或保留尾部做诊断分组。新规则只作用于启用后准入的请求。
+本节落实 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：Generation Chain 仍只记录真实执行父边；Interaction Observation 优先用当前工具续接做诊断分组，只有该证据不成立且没有执行父边时才用保留尾部决定归属。新规则只作用于启用后准入的请求。
 
 ### 14.1 范围
 
@@ -704,8 +704,8 @@ Rust workspace 新增：
 
 ### 14.2 实现要点
 
-1. **归属判定集中在 Observation 模块。** 已确认 Generation parent 走原路径；没有执行父边时独立解析诊断来源，再决定归并、创建有来源的新 Interaction 或保持独立。Server、Desktop 与 WebUI 不复制判定规则。
-2. **当前工具续接。** 用同 Principal 已交付调用的未完成工具 ID 与当前输入尾段精确匹配；旧结果回放、重复或冲突来源、缺失交付证据不能宣称唯一。确认后优先归入来源 Interaction，即使夹带 User 或超过尾部五分钟窗口。
+1. **归属判定集中在 Observation 模块。** 先独立核验当前工具来源；不成立时，已有 Generation parent 走原路径，没有执行父边才用保留尾部决定归并、创建有来源的新 Interaction 或保持独立。Server、Desktop 与 WebUI 不复制判定规则。
+2. **当前工具续接。** 用同 Principal 已交付调用的未完成工具 ID 与当前输入尾段精确匹配；旧结果回放、重复或冲突来源、缺失交付证据不能宣称唯一。确认后优先归入来源 Interaction，以来源 Run 作为 `parent_run_id`，即使已有 Generation parent、夹带 User 或超过尾部五分钟窗口；`generation_parent_id` 不变。
 3. **尾部指纹索引。** 以最后 canonical 单元哈希筛选候选，再做完整语义核验。同 Principal 历史超过 128 个不再导致全部匹配失败。指纹不代替核验，也不按时间窗口排除潜在冲突来源。
 4. **按需物化。** 缺失窗口从仍保留的 Generation Chain `client_items` 重建；先合并内存和持久化候选、去重并检查候选预算，再批量读取缺失窗口。已确认父节点本身属于候选时优先展开其父链，在完整校验后按 root 到 head 折叠客户端历史，同链祖先候选复用本次遍历的窗口，不各自重新展开整链。只保留本次候选窗口，不缓存所有完整历史前缀，也不引入跨请求缓存；重复来源和其他分支仍参与原有歧义核验。进程缓存可淘汰，过期或已清理来源不复活。核验超过资源预算时返回 `resource_limit` 或 `index_unavailable`，不把部分检查包装成唯一匹配。
 5. **准入时持久化。** `run_admitted` 同时保存 `grouping_reason` 与 `diagnostic_source_run_id`；尾部核验结果以 `retained_tail_associated` 同轮写入。诊断来源不是 `generation_parent_id`。只有新增 User 打断父交互时才 `interrupt_predecessors`；归入本 Interaction 的续接准入在同一事务内把仍等待的父 Run 终结为 `superseded`（见 3.2），不归入中断。
@@ -714,11 +714,12 @@ Rust workspace 新增：
 
 ### 14.3 决策表
 
-本表适用于没有已确认执行父边、需要跨根诊断归属的请求。
+本表按顺序判定。当前工具续接不要求缺少执行父边；保留尾部归属路径仅在工具证据不成立且没有 Generation parent 时适用。
 
 | 条件 | 结果 |
 |---|---|
-| 唯一确认当前工具续接，包括夹带新增 User | 归入来源 Interaction，不受尾部五分钟窗口限制 |
+| 唯一确认当前工具续接，包括已有 Generation parent 或夹带新增 User | 归入来源 Interaction，观测父节点指向来源 Run，不受尾部五分钟窗口限制 |
+| 未满足工具续接；已有 Generation parent | 按 3.1 的父观察规则分组，不用保留尾部覆盖归属 |
 | 未满足工具续接；唯一完整尾部匹配，无新增 User，间隔在 `[0, 300000]` 毫秒内 | 归入来源 Interaction |
 | 未满足工具续接；唯一完整尾部匹配，匹配区间之后有新增 User | 新 Interaction，诊断连接来源 |
 | 未满足工具续接；唯一完整尾部匹配，无新增 User，但超出五分钟窗口 | 新 Interaction，诊断连接来源 |
@@ -731,6 +732,7 @@ Rust workspace 新增：
 
 - 删除首条 User 图片，保留原文本并提交来源的三个当前工具结果：同一 Interaction、新 Generation 根，裁剪图片不重新进入模型输入。
 - 删除旧工具截图，同时新增另一张工具截图且图片总数不变，并提交四个当前工具结果：仍正确确认来源，最终回复留在同一 Interaction。
+- 连续改写旧工具结果，使严格前缀反复退回较早父节点，同时回传最新工具调用的结果：Generation 父边保持原样，观测父节点逐轮跟随最新来源，最终回复留在同一 Interaction，改写后的输入原样交给模型。
 - 旧历史被摘要替换，保留精确连续尾部并提交当前工具结果：正确续接；另设没有当前工具结果的样本单独验证尾部归并，避免工具路径掩盖尾部缺陷。
 - 尾部无新增 User：恰好 `300000` 毫秒归并，`300001` 毫秒创建新交互但仍连接来源；缺少有效时间证据不自动归并。
 - 尾部后新增 User：窗口内外都创建子交互；同时满足当前工具续接时，验证工具续接优先。

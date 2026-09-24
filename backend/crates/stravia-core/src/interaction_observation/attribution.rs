@@ -487,10 +487,10 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         let Some(input) = input else {
             return (None, None);
         };
-        if generation_parent_id.is_none()
-            && let Some(source) = self
-                .current_tool_source(principal, input, ingress_received_at, now)
-                .await
+        // 历史编辑可能只保留较早的生成前缀；当前工具结果仍能确认实际续接来源。
+        if let Some(source) = self
+            .current_tool_source(principal, input, ingress_received_at, now)
+            .await
         {
             return (Some(source), None);
         }
@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unmatched_generation_parent_never_falls_through_to_diagnostics() {
+    async fn unmatched_generation_parent_without_tool_evidence_stays_unparented() {
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let mut facts = facts(vec![user("hi")]);
         facts.generation_parent_id = Some("unobserved".into());
@@ -1036,17 +1036,118 @@ mod tests {
             Some(source_items.clone()),
         );
         let mut attribution = RunAttribution::new(evidence);
+        let mut request = facts(vec![long_user("task"), tool_result("call-1")]);
+        request.generation_parent_id = Some("unobserved-node".into());
         let assigned = attribution
-            .admit(
-                &start("run"),
-                &facts(vec![long_user("task"), tool_result("call-1")]),
-                5_000,
-                5_000,
-            )
+            .admit(&start("run"), &request, 5_000, 5_000)
             .await;
         assert_eq!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
         assert_eq!(assigned.grouping_reason, "current_tool_continuation");
         assert!(assigned.diagnostic_event.is_none());
+    }
+
+    #[tokio::test]
+    async fn current_tool_continuation_advances_beyond_stale_generation_parent() {
+        let mut evidence = MemoryEvidence::default();
+        evidence.parents.insert(
+            "early-node".into(),
+            (
+                "owner".into(),
+                observed_parent("early-interaction", "early-run", Some(100)),
+            ),
+        );
+        let mut attribution = RunAttribution::new(evidence);
+        let mut source_run = "recent-run".to_owned();
+        let mut source_items = vec![
+            user("task"),
+            tool_call("early-call"),
+            tool_result("early-call"),
+            user("keep working"),
+        ];
+        for step in 0..3 {
+            let call_id = format!("current-call-{step}");
+            source_items.push(tool_call(&call_id));
+            attribution.evidence.pending_tools.push((
+                call_id.clone(),
+                source_run.clone(),
+                "task-interaction".into(),
+                "owner".into(),
+            ));
+            let delivered_at = 1_000 + step * 400_000;
+            attribution
+                .evidence
+                .delivered
+                .insert(source_run.clone(), delivered_at);
+            attribution.evidence.add_tail_source(
+                "owner",
+                &source_run,
+                "task-interaction",
+                &source_items,
+                Some(source_items.clone()),
+            );
+            source_items.push(tool_result(&call_id));
+            source_items.push(user("additional task constraint"));
+            let mut request = facts(source_items.clone());
+            request.generation_parent_id = Some("early-node".into());
+            request.has_new_user = true;
+            let run_id = format!("continued-run-{step}");
+            let received_at = delivered_at + 400_000;
+            let assigned = attribution
+                .admit(&start(&run_id), &request, received_at, received_at)
+                .await;
+
+            assert_eq!(assigned.interaction_id, "task-interaction");
+            assert_eq!(assigned.parent_run_id.as_deref(), Some(source_run.as_str()));
+            assert_eq!(assigned.parent_interaction_id, None);
+            assert!(!assigned.interrupt_parent);
+            assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+            assert_eq!(
+                assigned.diagnostic_source_run_id.as_deref(),
+                Some(source_run.as_str())
+            );
+            source_run = run_id;
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_tool_result_does_not_override_generation_parent() {
+        let mut evidence = MemoryEvidence::default();
+        evidence.delivered.insert("source-run".into(), 1_000);
+        evidence.parents.insert(
+            "node".into(),
+            (
+                "owner".into(),
+                observed_parent("interaction", "source-run", Some(1_000)),
+            ),
+        );
+        let mut attribution = RunAttribution::new(evidence);
+        completed_tail_source(
+            &mut attribution,
+            "source-run",
+            "interaction",
+            "owner",
+            &[user("original task"), tool_call("old-call")],
+        );
+        let mut request = facts(vec![
+            user("original task"),
+            tool_call("old-call"),
+            tool_result("old-call"),
+            AiItem::output_text("finished"),
+            user("a new task"),
+        ]);
+        request.generation_parent_id = Some("node".into());
+        request.has_new_user = true;
+        let assigned = attribution
+            .admit(&start("new-run"), &request, 10_000, 10_000)
+            .await;
+        assert_ne!(assigned.interaction_id, "interaction");
+        assert_eq!(
+            assigned.parent_interaction_id.as_deref(),
+            Some("interaction")
+        );
+        assert_eq!(assigned.grouping_reason, "new_user");
+        assert!(assigned.interrupt_parent);
     }
 
     #[tokio::test]
@@ -1090,6 +1191,13 @@ mod tests {
     #[tokio::test]
     async fn current_tool_requires_unique_source_and_prior_delivery() {
         let mut evidence = MemoryEvidence::default();
+        evidence.parents.insert(
+            "node".into(),
+            (
+                "owner".into(),
+                observed_parent("parent-interaction", "parent-run", Some(1_000)),
+            ),
+        );
         // Two persisted rows claim the same pending tool id: not unique.
         for run in ["run-a", "run-b"] {
             evidence.pending_tools.push((
@@ -1102,13 +1210,27 @@ mod tests {
         }
         let mut attribution = RunAttribution::new(evidence);
         let input = vec![long_user("task"), tool_result("call-1")];
+        let mut request = facts(input);
+        request.generation_parent_id = Some("node".into());
+        request.has_new_user = true;
         let assigned = attribution
-            .admit(&start("run"), &facts(input.clone()), 5_000, 5_000)
+            .admit(&start("run"), &request, 5_000, 5_000)
             .await;
-        assert_ne!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.grouping_reason, "new_user");
+        assert_eq!(
+            assigned.parent_interaction_id.as_deref(),
+            Some("parent-interaction")
+        );
 
         // A unique source whose delivery postdates ingress declines too.
         let mut evidence = MemoryEvidence::default();
+        evidence.parents.insert(
+            "node".into(),
+            (
+                "owner".into(),
+                observed_parent("parent-interaction", "parent-run", Some(1_000)),
+            ),
+        );
         evidence.delivered.insert("source-run".into(), 9_000);
         let mut attribution = RunAttribution::new(evidence);
         completed_tail_source(
@@ -1119,10 +1241,14 @@ mod tests {
             &[long_user("task"), tool_call("call-1")],
         );
         let assigned = attribution
-            .admit(&start("run"), &facts(input), 5_000, 5_000)
+            .admit(&start("run"), &request, 5_000, 5_000)
             .await;
         assert_ne!(assigned.interaction_id, "source-interaction");
-        assert_ne!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.grouping_reason, "new_user");
+        assert_eq!(
+            assigned.parent_interaction_id.as_deref(),
+            Some("parent-interaction")
+        );
     }
 
     #[tokio::test]

@@ -94,7 +94,17 @@ impl GroupingIndex {
         let mut parent_interaction_id = None;
         let mut diagnostic_source_run_id = None;
         let mut interrupt_parent = false;
-        let (interaction_id, parent_run_id, inferred_retry) = if let Some(parent) = parent {
+        let (interaction_id, parent_run_id, inferred_retry) = if let Some(source) =
+            diagnostic.filter(|source| source.kind == DiagnosticKind::CurrentTool)
+        {
+            grouping_reason = "current_tool_continuation";
+            diagnostic_source_run_id = Some(source.run_id.clone());
+            (
+                source.interaction_id.clone(),
+                Some(source.run_id.clone()),
+                false,
+            )
+        } else if let Some(parent) = parent {
             let continuation = if !input.has_new_user {
                 Some("exact_continuation")
             } else if input.has_matching_pending_tool_result {
@@ -131,15 +141,8 @@ impl GroupingIndex {
             (stravia_runtime_contract::identifier::new_id(), None, false)
         } else if let Some(source) = diagnostic {
             diagnostic_source_run_id = Some(source.run_id.clone());
-            if source.kind == DiagnosticKind::CurrentTool
-                || (!source.user_after_match
-                    && source.tail_merge_eligible(input.ingress_received_at))
-            {
-                grouping_reason = if source.kind == DiagnosticKind::CurrentTool {
-                    "current_tool_continuation"
-                } else {
-                    "retained_tail_continuation"
-                };
+            if !source.user_after_match && source.tail_merge_eligible(input.ingress_received_at) {
+                grouping_reason = "retained_tail_continuation";
                 (
                     source.interaction_id.clone(),
                     Some(source.run_id.clone()),
@@ -519,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_generation_parent_ignores_diagnostic_source() {
+    fn confirmed_generation_parent_ignores_retained_tail_source() {
         let mut index = GroupingIndex::default();
         let mut input = input("child", "p", "f");
         input.has_new_user = false;
@@ -533,7 +536,7 @@ mod tests {
             input,
             2,
             Some(&parent),
-            Some(&source(DiagnosticKind::CurrentTool, false, Some(1))),
+            Some(&source(DiagnosticKind::RetainedTail, false, Some(1))),
         );
         assert_eq!(assigned.interaction_id, "exec-interaction");
         assert_eq!(assigned.grouping_reason, "exact_continuation");

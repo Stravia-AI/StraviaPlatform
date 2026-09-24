@@ -220,6 +220,149 @@ async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
 }
 
 #[tokio::test]
+async fn rewritten_tool_history_keeps_observation_on_the_current_run() {
+    let mut responses = Vec::new();
+    for step in 0..3 {
+        let mut response = openai_response("");
+        response["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+            "id": format!("call-{step}"),
+            "type": "function",
+            "function": {"name": "inspect", "arguments": "{}"}
+        }]);
+        response["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
+        responses.push(response);
+    }
+    responses.push(openai_response("task completed"));
+    let (base_url, _, upstream_requests) = serve_openai_sequence_with_requests(responses).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let model = "rewritten-tool-history";
+    configure_route(&gateway, model, &[base_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let authorization = headers.get(header::AUTHORIZATION).expect("authorization");
+    let router = crate::proxy::server::create_router(gateway.clone());
+    let mut events = gateway.observation.subscribe(0);
+    let mut input = vec![serde_json::json!({"role": "user", "content": "inspect the task"})];
+    let mut first_result: Option<usize> = None;
+    let mut first_response = None;
+    let mut interaction_id = None;
+    let mut previous_run = None;
+
+    for step in 0..4 {
+        if step >= 2 {
+            // 改写旧工具结果，但保留最新调用与回传；严格前缀退回首个响应。
+            input[first_result.expect("first tool result")]["output"] =
+                serde_json::json!(format!("trimmed-history-{step}"));
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, authorization.clone())
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": model,
+                            "input": input,
+                            "tools": [{
+                                "type": "function",
+                                "name": "inspect",
+                                "parameters": {"type": "object", "properties": {}}
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Responses request"),
+            )
+            .await
+            .expect("Responses response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let response: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        let response_id = response["id"].as_str().expect("response ID");
+        wait_for_observed_run_finish(&mut events).await;
+        let forest = gateway
+            .observation
+            .query_forest(Default::default())
+            .await
+            .expect("observation forest");
+        let interactions: Vec<_> = forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .collect();
+        assert_eq!(
+            interactions.len(),
+            1,
+            "tool continuation must not split the task"
+        );
+        let interaction = interactions[0];
+        if let Some(expected) = &interaction_id {
+            assert_eq!(&interaction.id, expected);
+        } else {
+            interaction_id = Some(interaction.id.clone());
+        }
+        let detail = gateway
+            .observation
+            .get_interaction(&interaction.id, Default::default())
+            .await
+            .expect("interaction query")
+            .expect("interaction");
+        let run = detail
+            .runs
+            .iter()
+            .find(|run| run.generation_node_id.as_deref() == Some(response_id))
+            .expect("delivered run");
+        assert_eq!(run.parent_run_id, previous_run);
+        assert_eq!(run.generation_parent_id, first_response);
+        assert!(detail.runs.iter().all(|run| !run.user_interrupted));
+        previous_run = Some(run.id.clone());
+        if first_response.is_none() {
+            first_response = Some(response_id.to_owned());
+        }
+        if step == 3 {
+            assert_eq!(interaction.status, "completed");
+            assert_eq!(detail.runs.len(), 4);
+        } else {
+            let output = response["output"].as_array().expect("response output");
+            let call_id = output
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .and_then(|item| item["call_id"].as_str())
+                .expect("client tool call ID");
+            input.extend(output.iter().cloned());
+            if first_result.is_none() {
+                first_result = Some(input.len());
+            }
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": format!("initial-tool-result-{step}")
+            }));
+            if step == 0 {
+                input.push(serde_json::json!({"role": "user", "content": "keep inspecting"}));
+            }
+        }
+    }
+
+    {
+        let requests = upstream_requests.lock();
+        let last = requests.last().expect("final upstream request");
+        assert!(last.contains("trimmed-history-3"));
+        assert!(!last.contains("initial-tool-result-0"));
+    }
+    drop(router);
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
 async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuation() {
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;

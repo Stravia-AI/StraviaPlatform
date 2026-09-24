@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Current tool continuations keep the same Interaction and follow the actual source Run when edited history makes strict Generation matching fall back to an earlier parent. Generation links and model input remain unchanged; historical tool-result replay and ambiguous sources still cannot trigger a merge. Existing observations are not regrouped.
 - Request-record token filters now temporarily include estimated input for running model turns before upstream usage arrives, including standalone system instructions and tool definitions rather than only message history, so large requests can appear immediately. Confirmed usage replaces the estimate; estimates never enter usage totals or billing.
 - Vendor inference no longer rejects valid streams after 32 metadata events before the first output. A per-attempt 1 MiB estimated pre-output buffer budget replaces the count limit without blocking the first output or normal completion; Devin suppresses repeated model identifiers while retaining model changes and same-frame usage.
 - Devin model discovery again declares text input/output, image input when supported, and family-specific reasoning controls. Effort levels and thinking toggles match the pre-plugin behavior, while fixed-effort models do not expose an unsupported picker.
