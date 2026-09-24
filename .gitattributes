@@ -1,3 +1,7 @@
+# 所有文本文件统一按 LF 检出：prettier 等工具按 LF 判定格式，Windows 下
+# autocrlf 产生的 CRLF 工作区文件会造成误报。二进制由 text=auto 识别，不受影响。
+* text=auto eol=lf
+
 # SQLx migration checksum 与生成 schema 一致性测试都比较原始字节，必须跨平台保持 LF。
 backend/crates/stravia-core/migrations/**/*.sql text eol=lf
 docs/database/*.sql text eol=lf

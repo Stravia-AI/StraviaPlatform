@@ -916,9 +916,8 @@ async function saveModel(): Promise<void> {
           </div>
 
           {#if targetLanes.length === 0}
-            <div
-              class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']}
-              aria-hidden="true"></div>
+            <div class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']} aria-hidden="true">
+            </div>
             <div
               data-slot="target-priority-connector"
               data-position="empty"
@@ -938,9 +937,8 @@ async function saveModel(): Promise<void> {
                 {m.model_editor_insert_higher_priority()}
               </span>
             </div>
-            <div
-              class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']}
-              aria-hidden="true"></div>
+            <div class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']} aria-hidden="true">
+            </div>
           {:else}
             {@render priorityConnector({ position: 'top' }, 'top')}
             <div class="flex flex-col">
