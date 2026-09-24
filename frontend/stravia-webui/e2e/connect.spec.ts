@@ -125,10 +125,7 @@ test('Connect shrinks the config preview on short windows instead of scrolling t
   await page.route('**/api/v1/connect-clients/preview', (route) =>
     route.fulfill({
       json: {
-        data: {
-          paths: [],
-          preview: Array.from({ length: 120 }, (_, index) => `line_${index} = "value"`).join('\n'),
-        },
+        data: { paths: [], preview: Array.from({ length: 120 }, (_, index) => `line_${index} = "value"`).join('\n') },
       },
     }),
   )
@@ -136,9 +133,7 @@ test('Connect shrinks the config preview on short windows instead of scrolling t
   const preview = page.locator('pre.route-code-plane')
   await expect(preview).toBeVisible()
   const main = page.locator('main')
-  await expect
-    .poll(async () => main.evaluate((el) => el.scrollHeight - el.clientHeight))
-    .toBeLessThanOrEqual(1)
+  await expect.poll(async () => main.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1)
   const previewBox = await preview.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight }))
   expect(previewBox.scroll).toBeGreaterThan(previewBox.client)
   expect(previewBox.client).toBeLessThan(512)
