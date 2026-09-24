@@ -577,10 +577,17 @@ async fn supplemental_discovery_capabilities_preserve_explicit_model_specificati
 async fn discovery_declared_context_window_overrides_catalog_defaults() -> anyhow::Result<()> {
     // Canonical `openai/gpt-5.2-codex` 声明 limit {context:400000,input:272000,
     // output:128000}；上游直接声明的 context_window 覆盖 context，上游未声明
-    // 的 input/output 默认配额随旧窗口一并失效。
-    let (base_url, server) = local_upstream(1, |_| {
+    // 的 input/output 默认配额随旧窗口一并失效。第二次上游声明值变化时，
+    // 未被用户接管的记录持续跟随刷新。
+    let calls = AtomicUsize::new(0);
+    let (base_url, server) = local_upstream(2, move |_| {
+        let context = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            272000
+        } else {
+            305000
+        };
         MockResponse::json(json!({"data":[
-            {"id":"gpt-5.2-codex","context_window":272000}
+            {"id":"gpt-5.2-codex","context_window":context}
         ]}))
     })
     .await?;
@@ -614,6 +621,17 @@ async fn discovery_declared_context_window_overrides_catalog_defaults() -> anyho
     assert_eq!(limit.context, Some(272_000));
     assert_eq!(limit.input, None);
     assert_eq!(limit.output, None);
+
+    // 未被用户接管的已同步记录跟随上游声明值刷新。
+    gateway.admin().sync_provider_models(&provider.id).await?;
+    let refreshed = gateway
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.2-codex")
+        .await?;
+    assert_eq!(
+        refreshed.metadata.limit.and_then(|limit| limit.context),
+        Some(305_000)
+    );
     server.await??;
     Ok(())
 }

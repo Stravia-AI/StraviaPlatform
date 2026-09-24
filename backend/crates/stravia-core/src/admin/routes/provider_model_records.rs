@@ -416,12 +416,14 @@ impl AdminService {
                 {
                     summary.deprecated += 1;
                 }
-                // Only explicitly unregistered snapshots may accept a first authoritative
-                // specification. All later discovery refreshes plugin-owned runtime fields,
-                // never user-editable model specifications or historical provenance.
-                let first_import = current.snapshot_state == SnapshotState::Unregistered
-                    && matches!(incoming_state, SnapshotState::Imported { .. });
-                let mut merged = if first_import {
+                // 上游声明的规格对未被用户接管的记录保持权威：Unregistered 首次
+                // 导入、Imported 持续跟随来源刷新；Edited 记录由用户接管，仅更新
+                // 插件托管的运行时字段与既有 provenance。
+                let follows_upstream = matches!(incoming_state, SnapshotState::Imported { .. })
+                    && !matches!(current.snapshot_state, SnapshotState::Edited { .. });
+                let first_import =
+                    follows_upstream && current.snapshot_state == SnapshotState::Unregistered;
+                let mut merged = if follows_upstream {
                     metadata.clone()
                 } else {
                     current.metadata.clone()
