@@ -220,6 +220,32 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
         "thinking_toggle".into(),
         Value::Bool(family.thinking_toggle),
     );
+    let mut reasoning_options = Vec::new();
+    if family.levels.len() >= 2 {
+        reasoning_options.push(json!({"type": "effort", "values": family.levels}));
+    }
+    if family.thinking_toggle {
+        reasoning_options.push(json!({"type": "toggle"}));
+    }
+    if reasoning_options.is_empty() {
+        // 固定档位没有可选轴；显式空 Effort 阻止宿主推导通用档位。
+        reasoning_options.push(json!({"type": "effort", "values": []}));
+    }
+    metadata.insert("reasoning_options".into(), json!(reasoning_options));
+
+    let supports_images = family
+        .entry
+        .as_ref()
+        .is_some_and(|entry| entry.supports_images == Some(true));
+    let input = if supports_images {
+        vec!["text", "image"]
+    } else {
+        vec!["text"]
+    };
+    metadata.insert(
+        "modalities".into(),
+        json!({"input": input, "output": ["text"]}),
+    );
 
     let mut capabilities = vec![
         "infer".to_string(),
@@ -258,5 +284,69 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
         selector: Some(family.default.clone()),
         capabilities,
         metadata,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discover(selectors: &[&str], supports_images: Option<bool>) -> DiscoveredModel {
+        let entries: Vec<_> = selectors
+            .iter()
+            .map(|selector| DevinModelConfig {
+                selector: (*selector).into(),
+                alias: Some("test-family".into()),
+                supports_images,
+                ..Default::default()
+            })
+            .collect();
+        let selectors = entries
+            .iter()
+            .map(|entry| entry.selector.clone())
+            .collect::<Vec<_>>();
+        discovered_model(&group_families(&selectors, &entries)[0])
+    }
+
+    #[test]
+    fn discovery_declares_text_and_optional_image_modalities() {
+        for (supports_images, input) in [
+            (Some(true), json!(["text", "image"])),
+            (Some(false), json!(["text"])),
+            (None, json!(["text"])),
+        ] {
+            let model = discover(&["test-family"], supports_images);
+            assert_eq!(
+                model.metadata.get("modalities"),
+                Some(&json!({"input": input, "output": ["text"]}))
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_exposes_ordered_efforts() {
+        let model = discover(&["swe-2-high", "swe-2-medium", "swe-2-max"], None);
+        assert_eq!(
+            model.metadata.get("reasoning_options"),
+            Some(&json!([{"type": "effort", "values": ["medium", "high", "max"]}]))
+        );
+    }
+
+    #[test]
+    fn discovery_exposes_toggle_without_inventing_efforts() {
+        let model = discover(&["test-family", "test-family-thinking"], None);
+        assert_eq!(
+            model.metadata.get("reasoning_options"),
+            Some(&json!([{"type": "toggle"}]))
+        );
+    }
+
+    #[test]
+    fn discovery_hides_picker_for_fixed_effort() {
+        let model = discover(&["test-family-high"], None);
+        assert_eq!(
+            model.metadata.get("reasoning_options"),
+            Some(&json!([{"type": "effort", "values": []}]))
+        );
     }
 }

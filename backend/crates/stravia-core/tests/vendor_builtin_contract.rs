@@ -2373,6 +2373,13 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     );
     assert_eq!(family.metadata.extensions["upstream_provider"], "anthropic");
     assert_eq!(family.metadata.extensions["context_window"], 200_000);
+    let modalities = family.metadata.modalities.as_ref().unwrap();
+    assert_eq!(modalities.input, ["text", "image"]);
+    assert_eq!(modalities.output, ["text"]);
+    assert_eq!(
+        serde_json::to_value(&family.metadata.reasoning_options)?,
+        json!([{"type": "effort", "values": ["medium", "high"]}])
+    );
 
     let route = gateway
         .admin()
