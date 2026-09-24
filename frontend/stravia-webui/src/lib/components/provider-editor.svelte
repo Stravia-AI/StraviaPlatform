@@ -96,7 +96,7 @@ const providerOptions = $derived.by(() => {
   return options.filter((option) => {
     if (!query) return true
     const auth = option.channel.auth ? 'oauth account 账号' : 'api key'
-    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${option.descriptor.display_name} ${option.channel.id} ${resolvePluginText(option.channel.name, localeState.current)} ${optionDescription(option, localeState.current)} ${auth}`
+    const text = `${option.descriptor.provider_id} ${option.descriptor.catalog_id ?? ''} ${optionLabel(option, localeState.current)} ${option.channel.id} ${resolvePluginText(option.channel.name, localeState.current)} ${optionDescription(option, localeState.current)} ${auth}`
     return text.toLocaleLowerCase(localeState.current).includes(query)
   })
 })
@@ -271,10 +271,10 @@ async function saveProvider(): Promise<void> {
     <div class="flex w-full items-start gap-3">
       <ProviderMark
         icon={option.descriptor.catalog_id ?? option.descriptor.provider_id}
-        name={optionLabel(option)}
+        name={optionLabel(option, localeState.current)}
         logo={option.descriptor.catalog_id ?? option.descriptor.provider_id} />
       <div class="min-w-0 flex-1">
-        <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option)}</p>
+        <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option, localeState.current)}</p>
         <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
           {optionDescription(option, localeState.current)}
         </p>

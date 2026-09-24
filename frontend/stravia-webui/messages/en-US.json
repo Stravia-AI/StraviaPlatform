@@ -852,6 +852,7 @@
   "provider_editor_try_another_service_name_sign_method": "Try another service name or sign-in method.",
   "provider_editor_update_service_list": "Reload model services",
   "provider_options_api_key": "API key",
+  "provider_options_custom": "Custom",
   "provider_options_setup_token": "Setup token",
   "provider_model_catalog_clear_selected_model": "Clear selected model",
   "provider_model_catalog_clear_filters": "Clear filters",

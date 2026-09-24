@@ -10,13 +10,20 @@ export interface ProviderOption {
 }
 
 export function buildProviderOptions(descriptors: ProviderDescriptor[]): ProviderOption[] {
-  return descriptors.flatMap((descriptor) =>
+  const options = descriptors.flatMap((descriptor) =>
     descriptor.channels.map((channel) => ({ key: `${descriptor.provider_id}/${channel.id}`, descriptor, channel })),
+  )
+  // The generic Custom profile covers any endpoint; pin it ahead of the branded vendors.
+  return options.toSorted(
+    (left, right) =>
+      Number(right.descriptor.provider_id === 'custom') - Number(left.descriptor.provider_id === 'custom'),
   )
 }
 
-export function optionLabel(option: ProviderOption): string {
-  return option.descriptor.display_name
+export function optionLabel(option: ProviderOption, locale: Locale): string {
+  return option.descriptor.provider_id === 'custom'
+    ? m.provider_options_custom({}, { locale })
+    : option.descriptor.display_name
 }
 
 export function optionDescription(option: ProviderOption, locale: Locale): string {

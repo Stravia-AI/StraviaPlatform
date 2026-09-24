@@ -385,7 +385,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 <svelte:window ondragover={guardFileDragDefault} ondrop={guardFileDragDefault} />
 
 <div
-  class="route-page relative min-h-full"
+  class="route-page relative min-h-[calc(100svh-5rem)]"
   role="group"
   aria-label={m.vendor_plugins_title()}
   ondragenter={handleFileDragEnter}
