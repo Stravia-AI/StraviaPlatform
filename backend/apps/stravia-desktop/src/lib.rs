@@ -96,11 +96,14 @@ impl PortSwitchPublisher for TauriPortSwitchPublisher {
     }
 }
 
+/// 非阻塞日志写线程的存活凭证；保持到进程结束，第二实例 setup 再次写入时覆盖即可。
+static DESKTOP_LOG_GUARD: parking_lot::Mutex<Option<stravia_core::logging::RuntimeLoggingGuard>> =
+    parking_lot::Mutex::new(None);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("stravia=debug,tower_http=debug")
-        .init();
+    // tracing 全局初始化放在 setup 内：日志目录依赖 app_log_dir，此处尚不可见。
+    // setup 前的极早期故障由 StartupDiagnostics 的独立日志文件覆盖。
 
     let early_diagnostics = StartupDiagnostics::initialize(Some(
         std::env::temp_dir()
@@ -154,7 +157,15 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(move |app| {
-            let diagnostics_init = StartupDiagnostics::initialize(app.path().app_log_dir().ok());
+            let log_dir = app.path().app_log_dir().ok();
+            let diagnostics_init = StartupDiagnostics::initialize(log_dir.clone());
+            // 与 desktop-startup.log 同目录，按天滚动；STRAVIA_LOG_LEVEL 与服务端一致。
+            let level = std::env::var("STRAVIA_LOG_LEVEL").unwrap_or_else(|_| "debug".into());
+            *DESKTOP_LOG_GUARD.lock() = Some(stravia_core::logging::init_runtime_logging(
+                &format!("stravia={level},tower_http={level}"),
+                log_dir,
+                "stravia-desktop",
+            ));
             {
                 let mut active = setup_diagnostics.lock();
                 active.mark_clean();

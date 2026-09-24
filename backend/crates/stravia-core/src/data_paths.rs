@@ -61,6 +61,11 @@ impl<'a> DataPaths<'a> {
         self.root.join("diagnostics")
     }
 
+    /// 运行时 tracing 日志目录；文件按天滚动并保留最近若干份。
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
     /// Provider Catalog 在此目录内管理 `catalog`。
     pub fn catalog_root(&self) -> PathBuf {
         self.root.join("cache")

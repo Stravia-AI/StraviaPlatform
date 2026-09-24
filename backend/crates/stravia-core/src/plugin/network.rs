@@ -594,16 +594,14 @@ impl VendorNetwork {
                     let chunk = tokio::select! {
                         _ = self.cancelled() => return Err(cancelled()),
                         result = response.chunk() => result.map_err(|error| {
-                            tracing::debug!(
-                                error = %crate::interaction_observation::redact_text(&error.to_string()),
-                                "vendor WebSocket handshake body read failed"
-                            );
+                            let cause = transport_cause(&error);
+                            tracing::debug!(error = %cause, "vendor WebSocket handshake body read failed");
                             HostFailure::upstream_transport(
                                 Some(kind_without_body(status)),
                                 Some(status),
                                 retry_after,
                                 TransportFailure::Websocket,
-                                "WebSocket handshake body read failed",
+                                format!("WebSocket handshake body read failed: {cause}"),
                             )
                         })?,
                     };
@@ -892,7 +890,7 @@ impl ScopedWebSocket {
         )
     }
 
-    fn transport_failure(&self, kind: AiErrorKind, message: &'static str) -> HostFailure {
+    fn transport_failure(&self, kind: AiErrorKind, message: impl Into<String>) -> HostFailure {
         if self.reused && !self.application_message_seen.load(Ordering::Acquire) {
             HostFailure::upstream_transport(
                 Some(kind),
@@ -953,8 +951,12 @@ impl HostWebSocket for ScopedWebSocket {
             _ = tokio::time::sleep_until(self.expires_at()) => (Err(self.expired()), true),
             _ = self.network.cancelled() => (Err(cancelled()), false),
             result = socket.send(message) => (result.map_err(|error| {
-                log_transport_failure(&error);
-                self.transport_failure(AiErrorKind::ServiceUnavailable, "upstream WebSocket send failed")
+                let cause = transport_cause(&error);
+                tracing::debug!(error = %cause, "vendor transport failed");
+                self.transport_failure(
+                    AiErrorKind::ServiceUnavailable,
+                    format!("upstream WebSocket send failed: {cause}"),
+                )
             }), false),
         };
         if result.is_err() {
@@ -982,10 +984,11 @@ impl HostWebSocket for ScopedWebSocket {
             _ = tokio::time::sleep_until(self.expires_at()) => (Ok(None), true),
             _ = self.network.cancelled() => return Err(cancelled()),
             result = socket.next() => (result.transpose().map_err(|error| {
-                log_transport_failure(&error);
+                let cause = transport_cause(&error);
+                tracing::debug!(error = %cause, "vendor transport failed");
                 self.transport_failure(
                     AiErrorKind::ServiceUnavailable,
-                    "upstream WebSocket receive failed",
+                    format!("upstream WebSocket receive failed: {cause}"),
                 )
             }), false),
         };
@@ -1194,31 +1197,32 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     Some(Duration::from_millis(milliseconds as u64))
 }
 
-fn log_transport_failure(error: &impl std::fmt::Display) {
-    tracing::debug!(
-        error = %crate::interaction_observation::redact_text(&error.to_string()),
-        "vendor transport failed"
-    );
+/// 底层错误文本脱敏后作为失败原因：同时进 debug 日志与 HostFailure.message，
+/// 后者最终落入失败请求记录，是打包环境唯一可靠的诊断出口。
+fn transport_cause(error: &impl std::fmt::Display) -> String {
+    crate::interaction_observation::redact_text(&error.to_string())
 }
 
 fn transport_failure(error: impl std::fmt::Display) -> HostFailure {
-    log_transport_failure(&error);
+    let cause = transport_cause(&error);
+    tracing::debug!(error = %cause, "vendor transport failed");
     HostFailure::upstream(
         Some(AiErrorKind::ServiceUnavailable),
         None,
         None,
-        "upstream transport failed",
+        format!("upstream transport failed: {cause}"),
     )
 }
 
 fn websocket_transport_failure(error: impl std::fmt::Display) -> HostFailure {
-    log_transport_failure(&error);
+    let cause = transport_cause(&error);
+    tracing::debug!(error = %cause, "vendor transport failed");
     HostFailure::upstream_transport(
         Some(AiErrorKind::ServiceUnavailable),
         None,
         None,
         TransportFailure::Websocket,
-        "upstream WebSocket transport failed",
+        format!("upstream WebSocket transport failed: {cause}"),
     )
 }
 

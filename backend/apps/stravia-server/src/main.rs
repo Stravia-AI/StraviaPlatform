@@ -79,7 +79,7 @@ struct Args {
         long,
         default_value_t = default_data_dir(),
         env = "STRAVIA_DATA_DIR",
-        help = "Root for configuration, SQLite database, artifacts, diagnostics, cache and host state",
+        help = "Root for configuration, SQLite database, artifacts, diagnostics, logs, cache and host state",
         help_heading = "Storage",
         global = true
     )]
@@ -114,13 +114,15 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     load_dotenv()?;
     let args = Args::parse();
-    let filter = format!("stravia={level},tower_http={level}", level = args.log_level);
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let data_dir = resolve_data_dir(Path::new(&args.data_dir))?;
     let paths = DataPaths::new(&data_dir);
     paths.prepare()?;
     let _instance_lock = paths.lock()?;
+    let filter = format!("stravia={level},tower_http={level}", level = args.log_level);
+    // stdout 之外同步落到 <data-dir>/logs/，guard 持有后台写线程直至进程结束。
+    let _log_guard =
+        stravia_core::logging::init_runtime_logging(&filter, Some(paths.logs()), "stravia-server");
     let config_path = args
         .config
         .as_deref()

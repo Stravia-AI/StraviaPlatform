@@ -13,6 +13,7 @@ pub(crate) mod generation_chain;
 pub mod history_marker;
 pub mod hook;
 mod interaction_observation;
+pub mod logging;
 pub mod mcp;
 pub(crate) mod media;
 pub mod media_generation;
