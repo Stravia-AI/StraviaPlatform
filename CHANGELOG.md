@@ -38,7 +38,7 @@
 
 ### Fixed
 
-- Request-record token filters now temporarily include estimated input for running model turns before upstream usage arrives, so large requests can appear immediately. Confirmed usage replaces the estimate; estimates never enter usage totals or billing.
+- Request-record token filters now temporarily include estimated input for running model turns before upstream usage arrives, including standalone system instructions and tool definitions rather than only message history, so large requests can appear immediately. Confirmed usage replaces the estimate; estimates never enter usage totals or billing.
 - Vendor inference no longer rejects valid streams after 32 metadata events before the first output. A per-attempt 1 MiB estimated pre-output buffer budget replaces the count limit without blocking the first output or normal completion; Devin suppresses repeated model identifiers while retaining model changes and same-frame usage.
 - Devin model discovery again declares text input/output, image input when supported, and family-specific reasoning controls. Effort levels and thinking toggles match the pre-plugin behavior, while fixed-effort models do not expose an unsupported picker.
 - Active vendor response streams no longer fail at 300 seconds because of an independent HTTP total timeout. Default and explicitly proxied connections retain the shared operation deadline and cancellation behavior.

@@ -221,9 +221,27 @@ impl RouteSelector {
 }
 
 pub(crate) fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
-    serde_json::to_vec(&request.items)
-        .map(|bytes| bytes.len().div_ceil(4) as u64)
-        .unwrap_or_default()
+    struct CountBytes(u64);
+    impl std::io::Write for CountBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // 独立 instructions 和工具定义同样占用模型上下文；不能只按短用户消息过滤。
+    // 只累计序列化字节，避免为长系统提示词和工具 schema 再分配完整 JSON 缓冲。
+    let mut count = CountBytes(0);
+    serde_json::to_writer(
+        &mut count,
+        &(&request.items, &request.instructions, &request.tools),
+    )
+    .expect("canonical prompt fields serialize to an infallible byte counter");
+    count.0.div_ceil(4)
 }
 
 #[cfg(test)]

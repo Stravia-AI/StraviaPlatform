@@ -1648,6 +1648,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forest_estimate_includes_instructions_and_tool_definitions() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{
+            AiItem, AiRequest, MessageContent, Role, ToolSpec,
+        };
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool);
+        let request = AiRequest::new(
+            "swe-2",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        let mut instructions = request.clone();
+        instructions.instructions = Some("system guidance ".repeat(6_000));
+        let mut tools = request.clone();
+        tools.tools = Some(vec![ToolSpec {
+            name: "lookup".into(),
+            description: Some("tool guidance ".repeat(3_000)),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "parameter guidance ".repeat(3_000)
+                    }
+                }
+            }),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        }]);
+        for (id, request) in [
+            ("short", request),
+            ("instructions", instructions),
+            ("tools", tools),
+        ] {
+            admit_chain_node(&store, id, id, None, 1).await?;
+            store
+                .persist_run_event(
+                    id,
+                    id,
+                    &RunEvent::ModelTurnStarted {
+                        model_turn_id: id.into(),
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        estimated_input_tokens: Some(
+                            crate::router::selection::estimate_uncached_input_tokens(&request)
+                                .try_into()?,
+                        ),
+                    },
+                    2,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let query = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            ..Default::default()
+        };
+        assert_eq!(store.query_forest(query.clone()).await?.root_total, 3);
+        let filtered = store
+            .query_forest(ForestQuery {
+                min_tokens: Some(20_000),
+                ..query
+            })
+            .await?;
+        let ids: Vec<_> = filtered.roots.iter().map(|root| root.id.as_str()).collect();
+        assert_eq!(ids, ["instructions", "tools"]);
+        assert_eq!(filtered.root_total, 2);
+        assert!(filtered.roots.iter().all(|root| {
+            root.interactions
+                .iter()
+                .all(|interaction| interaction.matched && interaction.usage.input_tokens.is_none())
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn forest_pending_input_estimate_sqlite() -> anyhow::Result<()> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
