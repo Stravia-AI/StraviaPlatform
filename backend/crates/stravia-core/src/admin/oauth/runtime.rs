@@ -60,7 +60,7 @@ impl AdminService {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
         let (_, operation, _) = self.gw.vendor_plugins.acquire(vendor_id)?;
-        let write_fence = operation.write_fence().await?;
+        let _permit = operation.write_permit().await?;
         let current = self
             .gw
             .storage
@@ -86,8 +86,6 @@ impl AdminService {
                 },
             )
             .await?;
-        drop(write_fence);
-        drop(operation);
         Ok(updated)
     }
 
@@ -284,12 +282,11 @@ impl AdminService {
         let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
-                let (fence, operation) = match pinned {
-                    Some(pinned) => (pinned.write_fence().await?, None),
+                let (fence, _permit) = match pinned {
+                    Some(pinned) => (Some(pinned.write_fence().await?), None),
                     None => {
                         let (_, operation, _) = self.gw.vendor_plugins.acquire(&vendor_id)?;
-                        let fence = operation.write_fence().await?;
-                        (fence, Some(operation))
+                        (None, Some(operation.write_permit().await?))
                     }
                 };
                 // ADR-0073：标记必须在 fail_refresh 之前——后者 bump
@@ -314,7 +311,7 @@ impl AdminService {
                     .await?;
                 refresh_lease.disarm();
                 drop(fence);
-                drop(operation);
+                drop(_permit);
                 return Err(error.context("refresh provider OAuth credential"));
             }
         };

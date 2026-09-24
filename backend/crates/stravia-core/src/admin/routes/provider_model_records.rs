@@ -170,8 +170,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
-        let _write_fence = operation.write_fence().await?;
+        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
         let source = match input.template_id {
@@ -219,8 +218,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
-        let _write_fence = operation.write_fence().await?;
+        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -265,8 +263,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
-        let _write_fence = operation.write_fence().await?;
+        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         apply_provider_model_mutation(
             self,
@@ -291,8 +288,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
-        let _write_fence = operation.write_fence().await?;
+        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -350,8 +346,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let operation = self.gw.vendor_plugins.operations.begin(vendor)?;
-        let _write_fence = operation.write_fence().await?;
+        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         if self
             .gw

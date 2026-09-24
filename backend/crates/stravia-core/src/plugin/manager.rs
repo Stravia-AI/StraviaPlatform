@@ -16,7 +16,7 @@ use crate::db::models::Provider;
 
 use super::artifacts::{MAX_COMPONENT_BYTES, PluginArtifacts};
 use super::builtin::BundledPlugins;
-use super::lifecycle::{VendorOperation, VendorOperationTracker};
+use super::lifecycle::{VendorOperation, VendorOperationTracker, WritePermit};
 use super::permissions::resolve_permissions;
 use super::store::{
     DataReset, InstalledPlugin, PluginStore, ProviderReset, has_plugin_model_metadata,
@@ -80,7 +80,7 @@ struct ProviderState {
 pub(crate) struct VendorPlugins {
     pub(crate) runtime: VendorRuntime,
     pub(crate) store: PluginStore,
-    pub(crate) operations: VendorOperationTracker,
+    operations: VendorOperationTracker,
     entries: RwLock<HashMap<String, Entry>>,
     bundled: Arc<BundledPlugins>,
     artifacts: Option<PluginArtifacts>,
@@ -170,6 +170,19 @@ impl VendorPlugins {
             pending: Mutex::new(HashMap::new()),
             updates: Mutex::new(()),
         }))
+    }
+
+    /// Vendor 配置与状态写回的复合许可；持有期间该 Vendor 的插件更新无法完成排空。
+    pub(crate) async fn write_permit(&self, vendor_id: &str) -> anyhow::Result<WritePermit> {
+        self.operations.write_permit(vendor_id).await
+    }
+
+    /// 只串行化连接配置与包切换的管理写路径。
+    pub(crate) async fn configuration_guard(
+        &self,
+        vendor_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.operations.configuration_guard(vendor_id).await
     }
 
     pub(crate) fn acquire(

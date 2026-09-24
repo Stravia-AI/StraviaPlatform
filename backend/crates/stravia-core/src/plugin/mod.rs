@@ -19,9 +19,9 @@ mod types;
 pub(crate) use execution::{
     VendorCallContext, VendorEvent, VendorExecution, VendorRequest, VendorSessionScope,
 };
-pub(crate) use lifecycle::VendorPublicationFence;
 #[cfg(test)]
 pub(crate) use lifecycle::VendorOperationTracker;
+pub(crate) use lifecycle::VendorPublicationFence;
 pub use store::PluginStore;
 pub use types::{
     ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginNetworkPermission,

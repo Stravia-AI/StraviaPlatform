@@ -622,6 +622,11 @@ _避免使用_：Vendor、Vendor Plugin
 Vendor Private State 是 Vendor Plugin 为一条 Provider 保存的、必要时跨重启保留的供应商私有状态，例如设备注册标识与账户绑定信息；连接尚未保存时，其临时状态只归属于对应认证会话。它不替代连接配置、凭据或 Provider Model，也不表示活跃网络连接与请求可以跨重启恢复。
 _避免使用_：凭据存储、Provider Model、可恢复的网络会话
 
+## Vendor Write Permit
+
+Vendor Write Permit 是 Vendor 配置、凭据、发现结果与能力结果最终写回持有的复合许可，由 Vendor Operation 准入与该 Vendor 的写入围栏一次取得；持有期间该 Vendor 的插件更新无法完成排空与代际切换，更新起步后代际复检失败，写回必须中止。许可可由 VendorPlugins 直接签发（纯写回路径），也可由进行中的 Vendor Operation 派生（执行后写回路径）；它只约束写回时序，不授予插件执行资格，也不同于面向已完成操作结果的 Vendor Publication Fence。
+_避免使用_：写锁、Write Guard、把 Vendor Operation 当作写回许可
+
 ## Adapter Credentials
 
 Adapter Credentials 是一条 Provider 上由其 Vendor 声明的多字段上游凭据；它不同于客户端 API Key，也不同于 OAuth Credential。

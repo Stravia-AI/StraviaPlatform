@@ -461,21 +461,14 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is required"))?;
-        let _configuration = self
-            .gw
-            .vendor_plugins
-            .operations
-            .configuration_guard(vendor_id)
-            .await;
+        let _configuration = self.gw.vendor_plugins.configuration_guard(vendor_id).await;
         let (loaded, operation, _) = self.gw.vendor_plugins.acquire(vendor_id)?;
         anyhow::ensure!(
             loaded.descriptor().provider(vendor_id) == Some(&descriptor),
             "vendor plugin changed while validating provider configuration"
         );
-        let write_fence = operation.write_fence().await?;
+        let _permit = operation.write_permit().await?;
         let provider = self.gw.storage.providers().create(record).await?;
-        drop(write_fence);
-        drop(operation);
         Ok(provider)
     }
 
@@ -1015,18 +1008,13 @@ impl AdminService {
             .await?;
         ensure_configuration_accepted(&preview, &base_url)?;
 
-        let _configuration = self
-            .gw
-            .vendor_plugins
-            .operations
-            .configuration_guard(&vendor)
-            .await;
+        let _configuration = self.gw.vendor_plugins.configuration_guard(&vendor).await;
         let (loaded, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
         anyhow::ensure!(
             loaded.descriptor().provider(&vendor) == Some(&descriptor),
             "vendor plugin changed while validating provider configuration"
         );
-        let write_fence = operation.write_fence().await?;
+        let _permit = operation.write_permit().await?;
         let unchanged = self
             .gw
             .storage
@@ -1035,6 +1023,7 @@ impl AdminService {
             .await?
             .is_some_and(|provider| same_provider_generation(&provider, &current));
         anyhow::ensure!(unchanged, "provider changed while validating configuration");
+        _permit.ensure_current()?;
 
         let api_key = if auth_mode == "oauth" {
             String::new()
@@ -1085,8 +1074,6 @@ impl AdminService {
                 .await?;
         }
         self.bump_config_epoch().await?;
-        drop(write_fence);
-        drop(operation);
         Ok(provider)
     }
 
@@ -1104,20 +1091,11 @@ impl AdminService {
             .filter(|vendor| !vendor.is_empty());
         // 删除仅清理 Core 自有数据；旧连接的组件即使损坏或无法加载，也必须可清理。
         let _configuration = match vendor {
-            Some(vendor) => Some(
-                self.gw
-                    .vendor_plugins
-                    .operations
-                    .configuration_guard(vendor)
-                    .await,
-            ),
+            Some(vendor) => Some(self.gw.vendor_plugins.configuration_guard(vendor).await),
             None => None,
         };
-        let operation = vendor
-            .map(|vendor| self.gw.vendor_plugins.operations.begin(vendor))
-            .transpose()?;
-        let write_fence = match &operation {
-            Some(operation) => Some(operation.write_fence().await?),
+        let _permit = match vendor {
+            Some(vendor) => Some(self.gw.vendor_plugins.write_permit(vendor).await?),
             None => None,
         };
         let unchanged = self
@@ -1128,14 +1106,15 @@ impl AdminService {
             .await?
             .is_some_and(|current| same_provider_generation(&current, &provider));
         anyhow::ensure!(unchanged, "provider changed while preparing deletion");
+        if let Some(permit) = &_permit {
+            permit.ensure_current()?;
+        }
 
         // ProviderStore owns the backend transaction that removes this
         // Provider, prunes its Targets, and deletes Routes left empty.
         self.gw.storage.providers().delete(id).await?;
         super::routes::RouteModule::new(self).reload_cache().await?;
         self.bump_config_epoch().await?;
-        drop(write_fence);
-        drop(operation);
         Ok(())
     }
 

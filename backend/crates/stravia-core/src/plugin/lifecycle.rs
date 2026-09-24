@@ -69,7 +69,7 @@ struct UpdateAdmission {
 
 impl VendorOperationTracker {
     /// 只串行化连接配置与包切换，不等待兼容版本的推理或流式背压。
-    pub(crate) async fn configuration_guard(
+    pub(in crate::plugin) async fn configuration_guard(
         &self,
         vendor_id: &str,
     ) -> tokio::sync::OwnedMutexGuard<()> {
@@ -83,13 +83,14 @@ impl VendorOperationTracker {
         configuration.lock_owned().await
     }
 
-    pub(crate) fn active_count(&self, vendor_id: &str) -> usize {
+    pub(in crate::plugin) fn active_count(&self, vendor_id: &str) -> usize {
         self.vendors
             .lock()
             .get(vendor_id)
             .map_or(0, |activity| activity.state.lock().operations.len())
     }
 
+    /// 准入本身不构成写回能力；写协议由 write_fence 的可见性与私有 operations 守住。
     pub(crate) fn begin(&self, vendor_id: &str) -> anyhow::Result<Arc<VendorOperation>> {
         let activity = self
             .vendors
@@ -117,8 +118,13 @@ impl VendorOperationTracker {
         }))
     }
 
+    /// 纯写回入口：一次完成准入与围栏，返回的许可须持有到写回提交。
+    pub(crate) async fn write_permit(&self, vendor_id: &str) -> anyhow::Result<WritePermit> {
+        self.begin(vendor_id)?.write_permit().await
+    }
+
     /// 调用方必须在持久化重置和运行版本切换完成前持有返回值。
-    pub(crate) async fn cancel_and_drain(
+    pub(in crate::plugin) async fn cancel_and_drain(
         &self,
         vendor_id: &str,
     ) -> anyhow::Result<QuiescentVendor> {
@@ -186,7 +192,7 @@ impl VendorOperation {
     }
 
     /// 所有状态、凭据、发现结果和能力结果的最终写回均持有此许可。
-    pub(crate) async fn write_fence(&self) -> anyhow::Result<OwnedRwLockReadGuard<()>> {
+    pub(in crate::plugin) async fn write_fence(&self) -> anyhow::Result<OwnedRwLockReadGuard<()>> {
         let guard = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => {
@@ -196,6 +202,29 @@ impl VendorOperation {
         };
         self.ensure_current()?;
         Ok(guard)
+    }
+
+    /// 写回许可：准入与围栏一次取得，调用方不再组合 begin/write_fence/drop。
+    pub(crate) async fn write_permit(self: &Arc<Self>) -> anyhow::Result<WritePermit> {
+        Ok(WritePermit {
+            _guard: self.write_fence().await?,
+            operation: Arc::clone(self),
+        })
+    }
+}
+
+/// Vendor 配置与状态写回持有的复合许可：operation 准入与 writes 围栏一次取得。
+/// 字段顺序即释放顺序：先放围栏，再放 operation。
+pub(crate) struct WritePermit {
+    _guard: OwnedRwLockReadGuard<()>,
+    operation: Arc<VendorOperation>,
+}
+
+impl WritePermit {
+    /// 围栏持有期间插件更新可能已起步（epoch 递增先于 drain 等待）；
+    /// 多步写回在提交前复检。
+    pub(crate) fn ensure_current(&self) -> anyhow::Result<()> {
+        self.operation.ensure_current()
     }
 }
 
@@ -381,5 +410,43 @@ mod tests {
                 .is_err(),
             "lock deduplication must not skip a result's caller fence"
         );
+    }
+
+    #[tokio::test]
+    async fn write_permit_blocks_drain_until_released() {
+        let tracker = VendorOperationTracker::default();
+        let permit = tracker.write_permit("vendor").await.unwrap();
+        let mut update = std::pin::pin!(tracker.cancel_and_drain("vendor"));
+        assert!(futures::poll!(&mut update).is_pending());
+        // epoch 递增先于 drain 等待；陈旧写必须在提交前能被复检拦下。
+        assert!(permit.ensure_current().is_err());
+        drop(permit);
+        update.await.unwrap().resume();
+        tracker
+            .write_permit("vendor")
+            .await
+            .unwrap()
+            .ensure_current()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_permit_rejected_while_update_in_progress() {
+        let tracker = VendorOperationTracker::default();
+        let operation = tracker.begin("vendor").unwrap();
+        let mut update = std::pin::pin!(tracker.cancel_and_drain("vendor"));
+        assert!(futures::poll!(&mut update).is_pending());
+        assert!(tracker.write_permit("vendor").await.is_err());
+        drop(operation);
+        update.await.unwrap().resume();
+    }
+
+    #[tokio::test]
+    async fn write_permit_keeps_operation_registered() {
+        let tracker = VendorOperationTracker::default();
+        let permit = tracker.write_permit("vendor").await.unwrap();
+        assert_eq!(tracker.active_count("vendor"), 1);
+        drop(permit);
+        assert_eq!(tracker.active_count("vendor"), 0);
     }
 }
