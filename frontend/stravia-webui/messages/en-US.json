@@ -1567,7 +1567,7 @@
   "observation_filters": "Filters",
   "observation_filters_description": "When a step matches, its whole chain is shown. Earlier steps that do not match stay dimmed for context.",
   "observation_min_tokens": "Minimum tokens per chain",
-  "observation_min_tokens_hint": "Counts input, output, and cache tokens across the whole chain. Chains below this total stay hidden. Set to 0 to show all.",
+  "observation_min_tokens_hint": "Counts input, output, and cache tokens across the whole chain. Running requests temporarily use estimated input until usage is reported; chains may then be hidden again. Set to 0 to show all.",
   "observation_fit_all": "Load and show all chains",
   "observation_hide_minimap": "Hide minimap",
   "observation_history_cleared": "Cleared {interactions} interactions and {rejections} rejected request records; kept {skipped} active interactions.",

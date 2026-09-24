@@ -1564,7 +1564,7 @@
   "observation_filters": "筛选",
   "observation_filters_description": "任一环节命中即显示完整链路；未命中的前序环节将弱化显示。",
   "observation_min_tokens": "链路最小 Token 合计",
-  "observation_min_tokens_hint": "统计整条链路（含子调用）的输入、输出与缓存 Token。合计低于此值的链路不显示；设为 0 显示全部。",
+  "observation_min_tokens_hint": "统计整条链路（含子调用）的输入、输出与缓存 Token。运行中尚未报告用量时临时使用输入估算，真实用量返回后可能重新隐藏；设为 0 显示全部。",
   "observation_fit_all": "加载并显示全部链路",
   "observation_hide_minimap": "隐藏小地图",
   "observation_history_cleared": "已清除 {interactions} 个交互和 {rejections} 条被拒绝请求记录；保留 {skipped} 个活动交互。",

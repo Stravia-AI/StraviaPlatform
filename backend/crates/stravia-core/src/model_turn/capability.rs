@@ -42,6 +42,7 @@ impl CapabilityObservation {
     fn new(
         observer: Option<crate::interaction_observation::RunObserver>,
         route: &RouteConfig,
+        estimated_input_tokens: u64,
     ) -> Self {
         let id = observer
             .as_ref()
@@ -52,6 +53,7 @@ impl CapabilityObservation {
                 model_turn_id: id.clone(),
                 route_id: route.id.clone().into(),
                 model_display_name: route.display_name.clone(),
+                estimated_input_tokens: i64::try_from(estimated_input_tokens).ok(),
             });
         }
         Self {
@@ -190,8 +192,9 @@ impl Gateway {
         self.validate_vendor_route_capability(route, capability)
             .await?;
 
+        let estimated_input_tokens = estimated_input_tokens(&request);
         let mut capability_observation =
-            CapabilityObservation::new(context.observer.clone(), route);
+            CapabilityObservation::new(context.observer.clone(), route, estimated_input_tokens);
 
         let selector = RouteSelector::new(
             self.storage.clone(),
@@ -203,7 +206,7 @@ impl Gateway {
             .select_independent(
                 principal,
                 route,
-                estimated_input_tokens(&request),
+                estimated_input_tokens,
                 context.observer.as_ref(),
             )
             .await

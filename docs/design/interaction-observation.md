@@ -101,6 +101,10 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后更新持久化投影并推送 SSE。
 
+请求记录的链路 Token 阈值按整个根 DAG（含子孙）累计。已确认部分仍采用卡片的输入、输出、缓存读与缓存写合计；尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
+
+输入估算只作为筛选依据，不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求复用路由调度的输入 items JSON 字节数除以 4 向上取整口径；它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，旧记录保持未知，不从截断的输入预览或 Debug 内容回填。
+
 客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零，也不改变管理面的净输入和按字段汇总口径。
 
 首内容超时在取消执行 future 前标记原因，未正常结束的 attempt 记录 `first_token_timeout`；`attempt_aborted` 仅作为没有明确结束原因的释放兜底。两者均不伪造 usage，也不改变原有超时配置、重试预算或调度策略，每个 attempt 仍只有一个终态。

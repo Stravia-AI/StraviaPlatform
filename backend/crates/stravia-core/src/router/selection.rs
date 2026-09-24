@@ -72,6 +72,7 @@ impl RouteSelector {
         request: &AiRequest,
         media_plan: Option<&MediaRoutingPlan>,
         observer: Option<&RunObserver>,
+        estimated_input_tokens: u64,
     ) -> Result<RouteAttemptPolicy, SelectionError> {
         let conversation = conversation_identity(request);
         // Continuation evidence only exists for generation-parent conversations.
@@ -95,7 +96,7 @@ impl RouteSelector {
             cache_affinity_target: self
                 .cache_affinity
                 .preferred_target(principal, &route.id, request),
-            estimated_uncached_input_tokens: estimate_uncached_input_tokens(request),
+            estimated_uncached_input_tokens: estimated_input_tokens,
             now_ms: self.policy_state.now_ms(),
         };
         let mut policy = RouteAttemptPolicy::new(
@@ -219,7 +220,7 @@ impl RouteSelector {
     }
 }
 
-fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
+pub(crate) fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
     serde_json::to_vec(&request.items)
         .map(|bytes| bytes.len().div_ceil(4) as u64)
         .unwrap_or_default()
@@ -635,7 +636,14 @@ mod tests {
         let route = route(vec![target("low", 0), target("high", 10)]);
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("select");
 
@@ -652,7 +660,14 @@ mod tests {
 
         let mut first = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("first select");
         let failed = first.next_healthy().expect("cooling target selected first");
@@ -674,7 +689,14 @@ mod tests {
 
         let mut second = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("second select");
         assert_eq!(next_provider(&mut second).as_deref(), Some("healthy"));
@@ -706,7 +728,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request, None, None)
+            .select(
+                &principal(),
+                &route,
+                &request,
+                None,
+                None,
+                estimate_uncached_input_tokens(&request),
+            )
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("affinity"));
@@ -727,7 +756,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &seeded, None, None)
+            .select(
+                &principal(),
+                &route,
+                &seeded,
+                None,
+                None,
+                estimate_uncached_input_tokens(&seeded),
+            )
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("affinity"));
@@ -740,7 +776,14 @@ mod tests {
         }));
         let mut identified_policy = fixture
             .selector
-            .select(&principal(), &route, &identified, None, None)
+            .select(
+                &principal(),
+                &route,
+                &identified,
+                None,
+                None,
+                estimate_uncached_input_tokens(&identified),
+            )
             .await
             .expect("select with conversation");
         assert_eq!(
@@ -765,7 +808,14 @@ mod tests {
         }));
         fixture
             .selector
-            .select(&principal(), &route, &cache_key_only, None, None)
+            .select(
+                &principal(),
+                &route,
+                &cache_key_only,
+                None,
+                None,
+                estimate_uncached_input_tokens(&cache_key_only),
+            )
             .await
             .expect("select");
         assert_eq!(consultations.load(Ordering::SeqCst), 0);
@@ -774,7 +824,14 @@ mod tests {
         crate::router::stamp_previous_response_id(&mut parent, "parent-1");
         fixture
             .selector
-            .select(&principal(), &route, &parent, None, None)
+            .select(
+                &principal(),
+                &route,
+                &parent,
+                None,
+                None,
+                estimate_uncached_input_tokens(&parent),
+            )
             .await
             .expect("select with parent");
         assert_eq!(consultations.load(Ordering::SeqCst), 1);
@@ -817,7 +874,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request, None, None)
+            .select(
+                &principal(),
+                &route,
+                &request,
+                None,
+                None,
+                estimate_uncached_input_tokens(&request),
+            )
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("continued"));
@@ -835,7 +899,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request(), Some(&plan), None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                Some(&plan),
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("native"));
@@ -848,7 +919,14 @@ mod tests {
         };
         let error = fixture
             .selector
-            .select(&principal(), &route, &request(), Some(&empty_plan), None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                Some(&empty_plan),
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .err()
             .expect("plan without candidates");
@@ -864,7 +942,14 @@ mod tests {
 
         let error = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .err()
             .expect("no eligible target");
@@ -879,7 +964,14 @@ mod tests {
 
         let error = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .err()
             .expect("evidence failure");
@@ -901,7 +993,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("stale snapshot still selects");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("idle"));
@@ -966,7 +1065,14 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select(&principal(), &route, &request(), None, None)
+            .select(
+                &principal(),
+                &route,
+                &request(),
+                None,
+                None,
+                estimate_uncached_input_tokens(&request()),
+            )
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("output_heavy"));

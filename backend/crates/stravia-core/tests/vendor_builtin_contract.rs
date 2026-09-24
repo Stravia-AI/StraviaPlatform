@@ -2271,7 +2271,16 @@ fn devin_chat_fixture() -> Vec<u8> {
     payload.extend(proto_string(3, "devin answer"));
     payload.extend(proto_len(7, &metadata));
     payload.extend(proto_u64(5, 2));
-    let mut out = connect_frame(0, &payload);
+    let mut out = Vec::new();
+    // 同时覆盖重复标识去重与宿主独立接收超过旧上限的有效元数据更新。
+    for index in 0..64 {
+        let model = proto_string(9, &format!("resolved-model-{index}"));
+        let frame = connect_frame(0, &proto_len(7, &model));
+        for _ in 0..4 {
+            out.extend_from_slice(&frame);
+        }
+    }
+    out.extend(connect_frame(0, &payload));
     out.extend(connect_frame(2, b"{}"));
     out
 }

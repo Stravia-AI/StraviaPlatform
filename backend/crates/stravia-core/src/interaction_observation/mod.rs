@@ -2058,6 +2058,7 @@ mod snapshot_tests {
             model_turn_id: "turn".into(),
             route_id: "route".into(),
             model_display_name: None,
+            estimated_input_tokens: None,
         });
         run.record(RunEvent::TargetAttemptStarted {
             model_turn_id: "turn".into(),
@@ -2141,6 +2142,7 @@ mod snapshot_tests {
             model_turn_id: "turn".into(),
             route_id: "route".into(),
             model_display_name: None,
+            estimated_input_tokens: None,
         });
         for index in 0..4096 {
             parent.send_event(RunEvent::ModelThinkingDelta {

@@ -1895,6 +1895,7 @@ async fn apply_sqlite(
             model_turn_id,
             route_id,
             model_display_name,
+            estimated_input_tokens,
         } => {
             let key: (Option<String>, Option<String>) = sqlx::query_as(
                 "SELECT api_key_id,api_key_name FROM interaction_observations WHERE id=?",
@@ -1902,7 +1903,7 @@ async fn apply_sqlite(
             .bind(iid)
             .fetch_one(&mut **tx)
             .await?;
-            sqlx::query("INSERT INTO model_turn_observations (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,'running',?,?)").bind(model_turn_id).bind(rid).bind(iid).bind(route_id).bind(model_display_name).bind(key.0).bind(key.1).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO model_turn_observations (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,last_event_sequence,estimated_input_tokens) VALUES (?,?,?,?,?,?,?,'running',?,?,?)").bind(model_turn_id).bind(rid).bind(iid).bind(route_id).bind(model_display_name).bind(key.0).bind(key.1).bind(now).bind(seq).bind(estimated_input_tokens).execute(&mut **tx).await?;
             sqlx::query("UPDATE inference_run_observations SET background_active=background_active+1 WHERE id=?").bind(rid).execute(&mut **tx).await?;
         }
         RunEvent::ModelTurnFinished {
@@ -2001,6 +2002,7 @@ async fn apply_postgres(
             model_turn_id,
             route_id,
             model_display_name,
+            estimated_input_tokens,
         } => {
             let key: (Option<String>, Option<String>) = sqlx::query_as(
                 "SELECT api_key_id,api_key_name FROM interaction_observations WHERE id=$1",
@@ -2008,7 +2010,7 @@ async fn apply_postgres(
             .bind(iid)
             .fetch_one(&mut **tx)
             .await?;
-            sqlx::query("INSERT INTO model_turn_observations (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9)").bind(model_turn_id).bind(rid).bind(iid).bind(route_id).bind(model_display_name).bind(key.0).bind(key.1).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO model_turn_observations (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,last_event_sequence,estimated_input_tokens) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10)").bind(model_turn_id).bind(rid).bind(iid).bind(route_id).bind(model_display_name).bind(key.0).bind(key.1).bind(now).bind(seq).bind(estimated_input_tokens).execute(&mut **tx).await?;
             sqlx::query("UPDATE inference_run_observations SET background_active=background_active+1 WHERE id=$1").bind(rid).execute(&mut **tx).await?;
         }
         RunEvent::ModelTurnFinished {
@@ -2303,6 +2305,7 @@ mod tests {
                     model_turn_id: id.into(),
                     route_id: "route".into(),
                     model_display_name: None,
+                    estimated_input_tokens: None,
                 },
                 2,
                 i64::MAX,
@@ -2992,6 +2995,7 @@ mod tests {
                         model_turn_id: format!("{iid}-background"),
                         route_id: "route".into(),
                         model_display_name: None,
+                        estimated_input_tokens: None,
                     },
                     8,
                     i64::MAX,
@@ -3359,6 +3363,7 @@ mod tests {
                     model_turn_id: "duplicate".into(),
                     route_id: "route".into(),
                     model_display_name: None,
+                    estimated_input_tokens: None,
                 },
                 None,
                 4,
@@ -3368,6 +3373,7 @@ mod tests {
                     model_turn_id: "duplicate".into(),
                     route_id: "route".into(),
                     model_display_name: None,
+                    estimated_input_tokens: None,
                 },
                 None,
                 4,

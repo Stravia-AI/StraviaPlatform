@@ -75,6 +75,8 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
             }
         }
+        let estimated_input_tokens =
+            crate::router::selection::estimate_uncached_input_tokens(&input.request);
         let model_turn_id = stravia_runtime_contract::identifier::new_id();
         let operation_started = Instant::now();
         let standalone = input.purpose == super::ModelTurnPurpose::Compact;
@@ -111,6 +113,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 model_turn_id: model_turn_id.clone(),
                 route_id,
                 model_display_name,
+                estimated_input_tokens: i64::try_from(estimated_input_tokens).ok(),
             });
         }
         let mut terminal = Some(ModelTurnTerminal {
@@ -151,8 +154,15 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                         observer.publish_input_preview();
                     }
+                    // Redaction can change item bytes; otherwise reuse the serialized estimate
+                    // from Model Turn start instead of serializing a large prompt twice.
+                    let routing_estimate = if mappings.is_empty() {
+                        estimated_input_tokens
+                    } else {
+                        crate::router::selection::estimate_uncached_input_tokens(&input.request)
+                    };
                     let registrations = input.compaction_records.clone();
-                    let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
+                    let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
                     turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
                     let thinking_source = crate::history_marker::ThinkingSource {
                         namespace: turn.target.namespace.clone(),
@@ -571,7 +581,8 @@ fn execute_inner(
     executor: LiveModelTurnExecutor,
     mut input: TurnInput,
     model_turn_id: String,
-) -> impl std::future::Future<Output = Result<ModelTurn, ModelTurnError>> + Send {
+    routing_estimate: u64,
+) -> impl Future<Output = Result<ModelTurn, ModelTurnError>> + Send {
     // 在构造边界装箱，避免把准备、重试和派发状态逐层嵌入外层 select 的栈帧。
     Box::pin(async move {
         let gateway = &executor.gateway;
@@ -660,6 +671,7 @@ fn execute_inner(
                 &input.request,
                 input.request.meta.media_routing.as_ref(),
                 input.observer.as_ref(),
+                routing_estimate,
             )
             .await
             .map_err(|error| match error {
@@ -1498,6 +1510,139 @@ struct VendorPublishedResult {
 }
 
 const VENDOR_OUTPUT_BUFFER_SIZE: usize = 32;
+const PRECOMMIT_BUFFER_BUDGET: usize = 1024 * 1024;
+// 包含事件槽及 Vec 初始/倍增预留空间；预算是保守占用估算，不是进程 RSS。
+const PRECOMMIT_EVENT_OVERHEAD: usize =
+    4 * std::mem::size_of::<(AiStreamDelta, VendorPublicationFence)>();
+
+#[derive(Default)]
+struct PrecommitBuffer {
+    events: Vec<(AiStreamDelta, VendorPublicationFence)>,
+    bytes: usize,
+}
+
+impl PrecommitBuffer {
+    /// A committing delta is accepted regardless of its size: it releases the
+    /// buffered metadata instead of extending the precommit window.
+    fn push(
+        &mut self,
+        delta: AiStreamDelta,
+        publication: VendorPublicationFence,
+    ) -> Result<bool, AttemptFailure> {
+        let commits = is_first_output(&delta) || is_terminal_delta(&delta);
+        if !commits {
+            let bytes = PRECOMMIT_EVENT_OVERHEAD.saturating_add(precommit_payload_bytes(&delta));
+            if bytes > PRECOMMIT_BUFFER_BUDGET.saturating_sub(self.bytes) {
+                return Err(AttemptFailure::terminal(
+                    "vendor_event_limit_exceeded",
+                    "Vendor pre-output event buffer exceeded its 1 MiB budget",
+                ));
+            }
+            self.bytes += bytes;
+        }
+        self.events.push((delta, publication));
+        Ok(commits)
+    }
+
+    fn take(&mut self) -> Vec<(AiStreamDelta, VendorPublicationFence)> {
+        self.bytes = 0;
+        std::mem::take(&mut self.events)
+    }
+}
+
+/// Count owned payloads without producing a second serialized copy. Fixed
+/// event/fence storage is charged by `push`; capacity accounts for reserved but
+/// unused String/Vec bytes. JSON objects reserve a conservative per-entry
+/// allowance for their map nodes/index in addition to keys and child values.
+fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
+    use AiStreamDelta as D;
+    match delta {
+        D::MessageStart { id, model } => id.capacity().saturating_add(model.capacity()),
+        D::ResponseMetadata { metadata } => json_payload_bytes(metadata),
+        D::TextDelta(text)
+        | D::RefusalDelta(text)
+        | D::ThinkingDelta(text)
+        | D::ThinkingSignature(text) => text.capacity(),
+        D::TextDeltaWithMetadata {
+            text,
+            logprobs,
+            obfuscation,
+            ..
+        } => text
+            .capacity()
+            .saturating_add(
+                logprobs
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<serde_json::Value>()),
+            )
+            .saturating_add(
+                logprobs
+                    .iter()
+                    .map(json_payload_bytes)
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
+        D::RefusalDeltaWithIndex { text, .. } => text.capacity(),
+        D::ThinkingDeltaWithMetadata {
+            text, obfuscation, ..
+        }
+        | D::ReasoningSummaryDelta {
+            text, obfuscation, ..
+        } => text
+            .capacity()
+            .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
+        D::Unknown { raw } => raw.capacity(),
+        D::ProtectedThinkingStart { .. } | D::Usage(_) => 0,
+        // These variants always commit, and are never subject to this budget.
+        D::ToolCallStart { .. }
+        | D::ToolCallDelta { .. }
+        | D::ToolCallComplete { .. }
+        | D::ItemDone { .. }
+        | D::ResponseTerminal { .. }
+        | D::Done { .. }
+        | D::StreamError { .. }
+        | D::UnexpectedEof => 0,
+    }
+}
+
+fn json_payload_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => text.capacity(),
+        // The workspace enables serde_json's arbitrary_precision feature: a
+        // Number can own a large decimal String, not merely an inline float.
+        serde_json::Value::Number(number) => {
+            struct CountBytes(usize);
+            impl std::io::Write for CountBytes {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0 = self.0.saturating_add(bytes.len());
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut count = CountBytes(0);
+            serde_json::to_writer(&mut count, number).expect("counting writer cannot fail");
+            count.0.saturating_mul(2) // allow for String spare capacity
+        }
+        serde_json::Value::Array(values) => values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<serde_json::Value>())
+            .saturating_add(
+                values
+                    .iter()
+                    .map(json_payload_bytes)
+                    .fold(0usize, usize::saturating_add),
+            ),
+        serde_json::Value::Object(values) => values.iter().fold(0usize, |bytes, (key, value)| {
+            bytes
+                .saturating_add(1024) // includes sparsely occupied map nodes/index
+                .saturating_add(key.capacity())
+                .saturating_add(json_payload_bytes(value))
+        }),
+        _ => 0,
+    }
+}
 
 struct VendorOutputStream {
     inner: Pin<Box<dyn Stream<Item = Result<CanonicalEvent, ModelTurnError>> + Send>>,
@@ -2237,7 +2382,7 @@ async fn run_vendor_operation(
     tokio::pin!(execution);
     let mut operation_result = None;
     let mut pending_failure = None;
-    let mut precommit = Vec::new();
+    let mut precommit = PrecommitBuffer::default();
     let mut emitted_delta = false;
 
     loop {
@@ -2545,7 +2690,7 @@ async fn process_runtime_event(
     target: &SelectedTarget,
     reservation: &mut Option<RouteAttemptReservation>,
     emitted_delta: &mut bool,
-    precommit: &mut Vec<(AiStreamDelta, VendorPublicationFence)>,
+    precommit: &mut PrecommitBuffer,
     pending_failure: &mut Option<AttemptFailure>,
     last_publication: &mut Option<VendorPublicationFence>,
     first_token_ms: &mut Option<i64>,
@@ -2600,14 +2745,7 @@ async fn process_runtime_event(
                     *pending_failure = Some(stream_delta_failure(&delta, preserve_upstream_error));
                     return Ok(());
                 }
-                if precommit.len() >= 32 {
-                    return Err(AttemptFailure::terminal(
-                        "vendor_event_limit_exceeded",
-                        "Vendor emitted too many metadata events before canonical output",
-                    ));
-                }
-                let commits = is_first_output(&delta) || is_terminal_delta(&delta);
-                precommit.push((delta, publication));
+                let commits = precommit.push(delta, publication)?;
                 if commits {
                     commit_vendor_stream(
                         Vec::new(),
@@ -2677,7 +2815,7 @@ async fn commit_vendor_stream(
     policy: &AttemptRoutePolicy,
     target: &SelectedTarget,
     reservation: &mut Option<RouteAttemptReservation>,
-    precommit: &mut Vec<(AiStreamDelta, VendorPublicationFence)>,
+    precommit: &mut PrecommitBuffer,
     last_publication: &mut Option<VendorPublicationFence>,
     first_token_ms: &mut Option<i64>,
 ) -> Result<(), AttemptFailure> {
@@ -2690,7 +2828,7 @@ async fn commit_vendor_stream(
             policy.probe,
         ));
     }
-    let mut buffered = std::mem::take(precommit);
+    let mut buffered = precommit.take();
     buffered.extend(deltas);
     for (index, (delta, publication)) in buffered.into_iter().enumerate() {
         observe_and_send_delta(
@@ -3305,11 +3443,12 @@ fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptDeadlineGuard, UPSTREAM_FINISHED, UPSTREAM_NOT_STARTED, UPSTREAM_STARTED,
-        UpstreamLocalWork, VendorDriverHandle, prepare_canonical_thinking_replay,
-        thinking_replay_source_is_compatible,
+        AttemptDeadlineGuard, PRECOMMIT_BUFFER_BUDGET, PrecommitBuffer, UPSTREAM_FINISHED,
+        UPSTREAM_NOT_STARTED, UPSTREAM_STARTED, UpstreamLocalWork, VendorDriverHandle,
+        prepare_canonical_thinking_replay, thinking_replay_source_is_compatible,
     };
     use crate::history_marker::ThinkingSource;
+    use crate::plugin::{VendorOperationTracker, VendorPublicationFence};
     use crate::router::{RoutePolicyState, TargetRuntimeState};
     use std::sync::{Arc, atomic::AtomicU8};
     use std::time::{Duration, Instant};
@@ -3317,7 +3456,177 @@ mod tests {
     use stravia_runtime_contract::protocol::ids::{
         ANTHROPIC_MESSAGES_2023_06_01, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
     };
-    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, AiStreamDelta};
+
+    fn publication() -> VendorPublicationFence {
+        let operation = VendorOperationTracker::default()
+            .begin("buffer-test")
+            .unwrap();
+        operation.publication_fence(
+            stravia_runtime_contract::CancellationToken::new(),
+            Deadline::from_now(Duration::from_secs(60)),
+        )
+    }
+
+    #[test]
+    fn metadata_beyond_32_events_preserves_order_and_publication_fences() {
+        let first = publication();
+        let second = publication();
+        let mut buffer = PrecommitBuffer::default();
+        for index in 0..70 {
+            let fence = if index % 2 == 0 { &first } else { &second };
+            assert!(
+                !buffer
+                    .push(
+                        AiStreamDelta::ResponseMetadata {
+                            metadata: serde_json::json!({"model": format!("model-{index}")}),
+                        },
+                        fence.clone(),
+                    )
+                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+            );
+        }
+        assert!(
+            buffer
+                .push(AiStreamDelta::TextDelta("answer".into()), first.clone())
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        let events = buffer.take();
+        assert_eq!(events.len(), 71);
+        for (index, (delta, fence)) in events.iter().take(70).enumerate() {
+            let AiStreamDelta::ResponseMetadata { metadata } = delta else {
+                panic!("metadata event out of order");
+            };
+            assert_eq!(metadata["model"], format!("model-{index}"));
+            assert!(fence.same_activity(if index % 2 == 0 { &first } else { &second }));
+        }
+        assert!(matches!(&events[70].0, AiStreamDelta::TextDelta(text) if text == "answer"));
+        assert!(events[70].1.same_activity(&first));
+    }
+
+    #[test]
+    fn precommit_budget_accepts_exact_boundary_and_rejects_one_byte_more() {
+        let fixed = super::PRECOMMIT_EVENT_OVERHEAD;
+        let payload = PRECOMMIT_BUFFER_BUDGET - fixed;
+        let mut buffer = PrecommitBuffer::default();
+        let mut raw = String::with_capacity(payload);
+        raw.push('x');
+        assert_eq!(raw.capacity(), payload);
+        assert!(
+            !buffer
+                .push(AiStreamDelta::Unknown { raw }, publication())
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        let failure = buffer
+            .push(
+                AiStreamDelta::ProtectedThinkingStart { index: 0 },
+                publication(),
+            )
+            .unwrap_err();
+        assert_eq!(failure.error.code, "vendor_event_limit_exceeded");
+        assert_eq!(buffer.take().len(), 1);
+
+        let mut oversized = PrecommitBuffer::default();
+        let mut raw = String::with_capacity(payload + 1);
+        raw.push('x');
+        assert_eq!(raw.capacity(), payload + 1);
+        assert_eq!(
+            oversized
+                .push(AiStreamDelta::Unknown { raw }, publication())
+                .unwrap_err()
+                .error
+                .code,
+            "vendor_event_limit_exceeded"
+        );
+        assert!(oversized.take().is_empty());
+    }
+
+    #[test]
+    fn nested_json_and_logprobs_consume_the_precommit_budget() {
+        let values = vec![serde_json::Value::Null; PRECOMMIT_BUFFER_BUDGET / 16];
+        let mut buffer = PrecommitBuffer::default();
+        assert_eq!(
+            buffer
+                .push(
+                    AiStreamDelta::ResponseMetadata {
+                        metadata: serde_json::Value::Array(values),
+                    },
+                    publication(),
+                )
+                .unwrap_err()
+                .error
+                .code,
+            "vendor_event_limit_exceeded"
+        );
+        assert!(buffer.take().is_empty());
+
+        assert_eq!(
+            buffer
+                .push(
+                    AiStreamDelta::ResponseMetadata {
+                        metadata: serde_json::json!({
+                            "payload": "x".repeat(PRECOMMIT_BUFFER_BUDGET)
+                        }),
+                    },
+                    publication(),
+                )
+                .unwrap_err()
+                .error
+                .code,
+            "vendor_event_limit_exceeded"
+        );
+
+        let mut buffer = PrecommitBuffer::default();
+        assert_eq!(
+            buffer
+                .push(
+                    AiStreamDelta::TextDeltaWithMetadata {
+                        text: String::new(),
+                        logprobs: vec![serde_json::Value::Null; PRECOMMIT_BUFFER_BUDGET / 16],
+                        obfuscation: None,
+                        output_index: None,
+                        content_index: None,
+                    },
+                    publication(),
+                )
+                .unwrap_err()
+                .error
+                .code,
+            "vendor_event_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn first_output_and_normal_terminal_commit_even_with_a_full_buffer() {
+        for delta in [
+            AiStreamDelta::TextDelta("answer".repeat(PRECOMMIT_BUFFER_BUDGET)),
+            AiStreamDelta::Done {
+                stop_reason: "done".repeat(PRECOMMIT_BUFFER_BUDGET),
+            },
+        ] {
+            let mut buffer = PrecommitBuffer::default();
+            let fixed = super::PRECOMMIT_EVENT_OVERHEAD;
+            let mut raw = String::with_capacity(PRECOMMIT_BUFFER_BUDGET - fixed);
+            raw.push('x');
+            assert!(
+                !buffer
+                    .push(AiStreamDelta::Unknown { raw }, publication())
+                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+            );
+            assert!(
+                buffer
+                    .push(delta, publication())
+                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+            );
+            let events = buffer.take();
+            assert_eq!(events.len(), 2);
+            assert!(matches!(&events[0].0, AiStreamDelta::Unknown { .. }));
+            assert!(
+                matches!(&events[1].0, AiStreamDelta::TextDelta(text) if text.starts_with("answer"))
+                    || matches!(&events[1].0, AiStreamDelta::Done { stop_reason } if stop_reason.starts_with("done"))
+            );
+        }
+    }
 
     #[test]
     fn native_thinking_replay_requires_same_protocol_or_exact_source() {

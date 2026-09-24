@@ -214,7 +214,9 @@ CREATE TABLE model_turn_observations (
     input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
     cache_write_tokens INTEGER, reasoning_tokens INTEGER,
     last_event_sequence INTEGER NOT NULL
-);
+, estimated_input_tokens INTEGER
+        CHECK (estimated_input_tokens IS NULL OR
+               (typeof(estimated_input_tokens) = 'integer' AND estimated_input_tokens >= 0)));
 
 CREATE TABLE models (
     id           TEXT PRIMARY KEY,

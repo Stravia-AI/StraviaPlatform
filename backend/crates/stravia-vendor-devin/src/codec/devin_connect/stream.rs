@@ -127,6 +127,7 @@ struct UsageStats {
 pub struct DevinConnectStreamParser {
     reader: ConnectFrameReader,
     started: bool,
+    last_model: Option<String>,
     done: bool,
     saw_end_stream: bool,
     last_finish: Option<u64>,
@@ -150,6 +151,7 @@ impl DevinConnectStreamParser {
         Self {
             reader: ConnectFrameReader::new(),
             started: false,
+            last_model: None,
             done: false,
             saw_end_stream: false,
             last_finish: None,
@@ -405,9 +407,11 @@ impl DevinConnectStreamParser {
                 .iter()
                 .find(|f| f.number == number && f.wire_type == 2)
                 .and_then(|f| std::str::from_utf8(f.bytes).ok())
-                .map(str::to_string)
         };
-        if let Some(model) = string(9) {
+        if let Some(model) = string(9)
+            && self.last_model.as_deref() != Some(model)
+        {
+            self.last_model = Some(model.to_owned());
             if self.started {
                 deltas.push(AiStreamDelta::ResponseMetadata {
                     metadata: serde_json::json!({"model": model}),
@@ -416,7 +420,7 @@ impl DevinConnectStreamParser {
                 self.started = true;
                 deltas.push(AiStreamDelta::MessageStart {
                     id: String::new(),
-                    model,
+                    model: model.to_owned(),
                 });
             }
         }
@@ -842,6 +846,62 @@ mod tests {
             d,
             AiStreamDelta::MessageStart { model, .. } if model == "swe-1-7"
         )));
+    }
+
+    #[test]
+    fn repeated_model_metadata_preserves_changes_and_same_frame_usage() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut deltas = Vec::new();
+        for (model, completion) in [
+            ("swe-2", None),
+            ("swe-2", None),
+            ("swe-2-high", None),
+            ("swe-2-high", Some(42)),
+            ("swe-2", None),
+        ] {
+            let mut meta = Vec::new();
+            write_string_field(&mut meta, 9, model);
+            if let Some(completion) = completion {
+                write_varint_field(&mut meta, 2, 150);
+                write_varint_field(&mut meta, 3, completion);
+            }
+            let mut payload = Vec::new();
+            write_message_field(&mut payload, 7, &meta);
+            deltas.extend(parser.parse_chunk(&data_frame(&payload)).unwrap());
+        }
+        let models: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::MessageStart { model, .. } => Some(model.as_str()),
+                AiStreamDelta::ResponseMetadata { metadata } => metadata["model"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models, ["swe-2", "swe-2-high", "swe-2"]);
+        let usage = last_usage(&deltas);
+        assert_eq!(usage.prompt_tokens, 150);
+        assert_eq!(usage.completion_tokens, 42);
+    }
+
+    #[test]
+    fn model_metadata_after_text_still_reports_first_identity() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut wire = data_frame(&text_payload("answer"));
+        let mut meta = Vec::new();
+        write_string_field(&mut meta, 9, "swe-2");
+        let mut payload = Vec::new();
+        write_message_field(&mut payload, 7, &meta);
+        wire.extend(data_frame(&payload));
+        wire.extend(data_frame(&payload));
+        let deltas = parser.parse_chunk(&wire).unwrap();
+        let models: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::ResponseMetadata { metadata } => metadata["model"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models, ["swe-2"]);
     }
 
     /// UsageStats block (#28): UsageEntry { #4 dimension { #2 fixed32 float },

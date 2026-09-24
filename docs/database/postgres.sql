@@ -345,7 +345,9 @@ CREATE TABLE public.model_turn_observations (
     cache_read_tokens bigint,
     cache_write_tokens bigint,
     reasoning_tokens bigint,
-    last_event_sequence bigint NOT NULL
+    last_event_sequence bigint NOT NULL,
+    estimated_input_tokens bigint,
+    CONSTRAINT model_turn_observations_estimated_input_tokens_check CHECK ((estimated_input_tokens >= 0))
 );
 
 

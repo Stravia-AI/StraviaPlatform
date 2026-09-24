@@ -322,6 +322,8 @@ pub(crate) enum RunEvent {
         model_turn_id: String,
         route_id: String,
         model_display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimated_input_tokens: Option<i64>,
     },
     ModelTurnFinished {
         model_turn_id: String,
@@ -475,7 +477,8 @@ pub struct ForestQuery {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub status: Option<String>,
-    /// 隐藏根 DAG 合计 Token（展示口径的输入+输出+缓存读+缓存写，含子孙）低于此值的链路；0 或缺省表示不过滤。
+    /// 隐藏根 DAG 合计 Token（展示口径的输入+输出+缓存读+缓存写，含子孙）低于此值的链路；
+    /// 运行中的 Model Turn 尚无上游用量时临时计入输入估算，确认用量到达后不再计入估算；0 或缺省表示不过滤。
     pub min_tokens: Option<i64>,
 }
 

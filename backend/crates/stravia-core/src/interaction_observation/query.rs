@@ -8,11 +8,29 @@ use super::{store::ObservationStore, types::*};
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-// 与卡片四项展示合计一致：未知分项按 0，input 减 cache_read 夹 0，不另计 reasoning。
-// 按根 DAG（含子孙）合计，隐藏低于阈值的链路：按 root_id 一次聚合全部 target
-// attempts，IN 集合判定避免对每行 Interaction 重算同一根的合计。仅在调用方确认
-// min_tokens>0 时拼接，因此无 attempt 的根（聚合无行、按 0 计）必然被过滤。
-const CHAIN_TOKEN_ROOTS: &str = "i.root_id IN (SELECT m.root_id FROM interaction_observations m JOIN target_attempt_observations a ON a.interaction_id=m.id GROUP BY m.root_id HAVING SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0))>=";
+// 已确认部分沿用卡片四项合计，不另计 reasoning；估算只补充仍在运行且尚无
+// usage 报告的 Model Turn，每轮一次，不能因 Target 重试重复累计或冒充确认用量。
+// 按根 DAG（含子孙）一次聚合，列表、计数、分页与 SSE matched 共用同一判定。
+const CHAIN_TOKEN_ROOTS: &str = "i.root_id IN (
+SELECT tokens.root_id FROM (
+    SELECT m.root_id,
+        CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0
+             WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
+             ELSE 0 END
+        + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0)
+        + COALESCE(a.cache_write_tokens,0) AS token_count
+    FROM interaction_observations m
+    JOIN target_attempt_observations a ON a.interaction_id=m.id
+    UNION ALL
+    SELECT m.root_id,t.estimated_input_tokens AS token_count
+    FROM interaction_observations m
+    JOIN model_turn_observations t ON t.interaction_id=m.id
+    WHERE t.status='running' AND t.estimated_input_tokens IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM target_attempt_observations a
+            WHERE a.model_turn_id=t.id AND a.usage_recorded=TRUE
+        )
+) tokens GROUP BY tokens.root_id HAVING SUM(tokens.token_count)>=";
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
 CAST(SUM(CASE
@@ -1582,6 +1600,7 @@ mod tests {
                     model_turn_id: id.into(),
                     route_id: "route".into(),
                     model_display_name: None,
+                    estimated_input_tokens: None,
                 },
                 at,
                 i64::MAX,
@@ -1625,6 +1644,212 @@ mod tests {
                 i64::MAX,
             )
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forest_pending_input_estimate_sqlite() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        pending_input_estimate_scenario(&ObservationStore::Sqlite(pool)).await
+    }
+
+    #[tokio::test]
+    async fn forest_pending_input_estimate_postgres_when_configured() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("DB_URL") else {
+            eprintln!("跳过 PostgreSQL 动态验证：未显式设置 DB_URL");
+            return Ok(());
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        let schema = format!(
+            "stravia_obs_estimate_test_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await?;
+        let result = async {
+            let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.options([("search_path", schema.as_str())]))
+                .await?;
+            let result = async {
+                crate::migrations::migrate_postgres(&pool).await?;
+                pending_input_estimate_scenario(&ObservationStore::Postgres(pool.clone())).await
+            }
+            .await;
+            pool.close().await;
+            result
+        }
+        .await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    async fn pending_input_estimate_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_chain_node(store, "chain", "chain", None, 1).await?;
+        confirm_displayed_tokens(store, "chain", 4_000, 0, 0, 0, 2).await?;
+        admit_chain_node(store, "child", "chain", Some("chain"), 3).await?;
+        admit_chain_node(store, "pending", "pending", None, 3).await?;
+        admit_chain_node(store, "legacy", "legacy", None, 3).await?;
+        for (id, estimate) in [
+            ("child", Some(6_000)),
+            ("pending", Some(12_000)),
+            ("legacy", None),
+        ] {
+            store
+                .persist_run_event(
+                    id,
+                    id,
+                    &RunEvent::ModelTurnStarted {
+                        model_turn_id: id.into(),
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        estimated_input_tokens: estimate,
+                    },
+                    4,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let query = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            min_tokens: Some(10_000),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let first = store.query_forest(query.clone()).await?;
+        assert_eq!(first.root_total, 2);
+        assert_eq!(first.roots[0].id, "chain");
+        let second = store
+            .query_forest(ForestQuery {
+                cursor: first.next_cursor,
+                ..query.clone()
+            })
+            .await?;
+        assert_eq!(second.roots[0].id, "pending");
+        assert!(second.next_cursor.is_none());
+        let pending = store
+            .get_interaction_summary("pending", query.clone())
+            .await?
+            .expect("pending interaction");
+        assert!(pending.root.interactions[0].matched);
+        assert_eq!(pending.root.interactions[0].usage.input_tokens, None);
+
+        // 一个 Model Turn 的重试不能把输入估算加两遍。
+        for attempt_id in ["pending-a", "pending-retry"] {
+            store
+                .persist_run_event(
+                    "pending",
+                    "pending",
+                    &RunEvent::TargetAttemptStarted {
+                        model_turn_id: "pending".into(),
+                        attempt_id: attempt_id.into(),
+                        target_id: "target".into(),
+                        provider_id: "provider".into(),
+                        provider_name: "provider".into(),
+                        upstream_model: "model".into(),
+                        protocol: "responses".into(),
+                        upstream_url: "http://localhost".into(),
+                    },
+                    5,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        assert_eq!(store.query_forest(query.clone()).await?.root_total, 2);
+        assert_eq!(
+            store
+                .query_forest(ForestQuery {
+                    min_tokens: Some(20_000),
+                    ..query.clone()
+                })
+                .await?
+                .root_total,
+            0
+        );
+
+        // 明确报告零也必须替换估算；无需等待 Model Turn 或 Run 结束。
+        store
+            .persist_run_event(
+                "pending",
+                "pending",
+                &RunEvent::UsageConfirmed {
+                    model_turn_id: "pending".into(),
+                    attempt_id: "pending-a".into(),
+                    usage: ConfirmedUsage {
+                        input_tokens: Some(0),
+                        output_tokens: Some(0),
+                        cache_read_tokens: Some(0),
+                        cache_write_tokens: Some(0),
+                        ..Default::default()
+                    },
+                },
+                6,
+                i64::MAX,
+            )
+            .await?;
+        let page = store.query_forest(query.clone()).await?;
+        assert_eq!(page.root_total, 1);
+        assert_eq!(page.roots[0].id, "chain");
+        let pending = store
+            .get_interaction_summary("pending", query.clone())
+            .await?
+            .expect("pending interaction remains readable");
+        assert!(!pending.root.interactions[0].matched);
+        assert_eq!(pending.root.interactions[0].usage.input_tokens, Some(0));
+
+        // 终态未报告用量不能永久保留临时估算。
+        store
+            .persist_run_event(
+                "child",
+                "child",
+                &RunEvent::ModelTurnFinished {
+                    model_turn_id: "child".into(),
+                    status: "failed".into(),
+                },
+                7,
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(store.query_forest(query.clone()).await?.root_total, 0);
+
+        // 后续真实用量达到阈值时重新匹配，不依赖最初估算。
+        store
+            .persist_run_event(
+                "pending",
+                "pending",
+                &RunEvent::UsageConfirmed {
+                    model_turn_id: "pending".into(),
+                    attempt_id: "pending-retry".into(),
+                    usage: ConfirmedUsage {
+                        input_tokens: Some(10_000),
+                        output_tokens: Some(0),
+                        cache_read_tokens: Some(0),
+                        cache_write_tokens: Some(0),
+                        ..Default::default()
+                    },
+                },
+                8,
+                i64::MAX,
+            )
+            .await?;
+        let page = store.query_forest(query).await?;
+        assert_eq!(page.root_total, 1);
+        assert_eq!(page.roots[0].id, "pending");
         Ok(())
     }
 
