@@ -221,6 +221,8 @@ fn auth_candidate(vendor_id: &str, channel: &str, base_url: &str) -> AuthSession
 async fn concurrent_sessions_keep_independent_listener_lifetimes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await?;
     let manager = OAuthCallbackManager::new(gateway.clone());
 
     let first = manager
@@ -267,6 +269,8 @@ async fn invalid_callback_keeps_the_listener_and_session_available_for_retry() -
 {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await?;
     let init = gateway
         .admin()
         .init_oauth_session(

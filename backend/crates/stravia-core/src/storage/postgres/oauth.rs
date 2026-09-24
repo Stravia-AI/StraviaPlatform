@@ -168,7 +168,9 @@ fn bindable_timestamptz(value: Option<&str>) -> String {
         .or_else(|| {
             chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
                 .ok()
-                .map(|parsed| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(parsed, chrono::Utc))
+                .map(|parsed| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(parsed, chrono::Utc)
+                })
         })
         .map(|parsed| parsed.to_rfc3339())
         .unwrap_or_else(|| value.to_string())

@@ -1555,19 +1555,14 @@ mod tests {
         )));
         // 本地/插件失败不是上游证据
         assert!(!is_credential_rejection(&runtime(ErrorKind::Invalid, None)));
-        assert!(!is_credential_rejection(&runtime(
-            ErrorKind::Trapped,
-            None
-        )));
+        assert!(!is_credential_rejection(&runtime(ErrorKind::Trapped, None)));
         // 非 RuntimeError（如本地 anyhow）不算
         assert!(!is_credential_rejection(&anyhow::anyhow!("local")));
     }
 
     #[test]
     fn execution_interruption_covers_cancel_and_deadline() {
-        assert!(is_execution_interruption(
-            &RuntimeError::Cancelled.into()
-        ));
+        assert!(is_execution_interruption(&RuntimeError::Cancelled.into()));
         assert!(is_execution_interruption(
             &RuntimeError::DeadlineExceeded.into()
         ));

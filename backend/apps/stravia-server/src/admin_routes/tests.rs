@@ -207,6 +207,8 @@ async fn automatic_callback_accepts_english_and_falls_back_for_an_invalid_locale
 async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await?;
     let app = create_unprotected_router(gateway);
     let response = app
         .oneshot(
@@ -237,6 +239,8 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
 {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
+        .await?;
     let catalog = gateway.admin().catalog_choices().await;
     let fingerprint = catalog
         .providers
@@ -1206,6 +1210,8 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
 {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "command-code")
+        .await?;
     let app = create_unprotected_router(gateway);
 
     let catalog_response = app

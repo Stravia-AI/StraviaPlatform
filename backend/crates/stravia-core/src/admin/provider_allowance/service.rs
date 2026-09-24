@@ -289,9 +289,7 @@ async fn fetch_provider_allowance(
 
                     let context = VendorCallContext::new(
                         stravia_runtime_contract::CancellationToken::new(),
-                        stravia_runtime_contract::Deadline::fixed(
-                            Instant::now() + REQUEST_TIMEOUT,
-                        ),
+                        stravia_runtime_contract::Deadline::fixed(Instant::now() + REQUEST_TIMEOUT),
                     );
                     let prepared = admin
                         .gw

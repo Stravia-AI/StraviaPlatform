@@ -490,7 +490,7 @@ fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<V
                 .any(|block| matches!(block, ContentBlock::Thinking { .. }));
             if !has_thinking {
                 let text = encode_text_content(content)?;
-                return Ok((!text.is_empty()).then(|| Value::String(text)));
+                return Ok((!text.is_empty()).then_some(Value::String(text)));
             }
 
             let mut parts = Vec::new();
@@ -509,7 +509,7 @@ fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<V
                     ),
                 }
             }
-            Ok((!parts.is_empty()).then(|| Value::Array(parts)))
+            Ok((!parts.is_empty()).then_some(Value::Array(parts)))
         }
     }
 }

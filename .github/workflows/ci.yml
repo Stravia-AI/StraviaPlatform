@@ -312,6 +312,12 @@ jobs:
         if: matrix.suite == 'admin'
         run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
 
+      # test:e2e:* 的并行 dep 分支会重复执行 build:vendors；串行预建让 rustup
+      # 与 vendor 构建在测试任务内全部走 up-to-date 快路径，避免下载目录竞争。
+      - name: Prepare vendor components and test fixtures
+        if: matrix.suite != 'admin'
+        run: task build:vendor-fixtures
+
       - name: Run backend E2E suite
         if: matrix.suite != 'admin'
         run: task test:e2e:${{ matrix.suite }}
@@ -389,6 +395,10 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev python3
+
+      # 同 backend-e2e：串行预建 vendor 产物，避免并行 dep 分支并发 rustup/编译。
+      - name: Prepare vendor components and test fixtures
+        run: task build:vendor-fixtures
 
       - name: Run PostgreSQL E2E suite
         run: task test:e2e:storage:postgres

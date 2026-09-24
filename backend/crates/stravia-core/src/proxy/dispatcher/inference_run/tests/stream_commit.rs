@@ -1080,20 +1080,21 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
             "{path}: {body}"
         );
     }
-    let observed_live_responses = observed_live_responses.lock();
-    assert_eq!(observed_live_responses.len(), 1);
-    assert_eq!(observed_live_responses[0].output_text(), "original");
-    assert_eq!(
-        observed_live_responses[0].stop_reason.as_deref(),
-        Some("stop")
-    );
-    assert!(!observed_live_responses[0].id.is_empty());
-    assert_eq!(unary_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(forced_stream_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(live_stream_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(buffered_stream_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(*tool_calls.lock(), vec![1]);
-    drop(observed_live_responses);
+    {
+        let observed_live_responses = observed_live_responses.lock();
+        assert_eq!(observed_live_responses.len(), 1);
+        assert_eq!(observed_live_responses[0].output_text(), "original");
+        assert_eq!(
+            observed_live_responses[0].stop_reason.as_deref(),
+            Some("stop")
+        );
+        assert!(!observed_live_responses[0].id.is_empty());
+        assert_eq!(unary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(forced_stream_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(live_stream_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(buffered_stream_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(*tool_calls.lock(), vec![1]);
+    }
     shutdown_test_gateway(gateway).await;
     shutdown_test_gateway(live_gateway).await;
     shutdown_test_gateway(buffered_gateway).await;

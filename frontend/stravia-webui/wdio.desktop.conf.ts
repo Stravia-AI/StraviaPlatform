@@ -1,3 +1,6 @@
+// 本配置必须经 wdio bin 的 Node shim 运行（test:e2e:desktop 不得加 --bun）：
+// Bun 1.4.x 对 expect@30 的 CJS/ESM 封装解析有误，AsymmetricMatcher 为
+// undefined，expect-webdriverio 类继承会在加载期崩溃。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'

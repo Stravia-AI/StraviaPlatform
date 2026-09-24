@@ -735,7 +735,9 @@ test('remote sources remain usable while a selected Local browser is unavailable
 })
 
 for (const locale of ['en-US', 'zh-CN']) {
-  test(`Local browser editor retains drafts, reports partial saves, and resets to automatic (${locale})`, async ({ page }) => {
+  test(`Local browser editor retains drafts, reports partial saves, and resets to automatic (${locale})`, async ({
+    page,
+  }) => {
     const zh = locale === 'zh-CN'
     await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
     const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
@@ -761,7 +763,9 @@ for (const locale of ['en-US', 'zh-CN']) {
       }),
     )
     await page.route('**/api/v1/web-search/eligible-models', (route) =>
-      route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+      route.fulfill({
+        json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] },
+      }),
     )
     await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
     await page.route('**/api/v1/web-providers/source-local', async (route) => {
@@ -822,7 +826,9 @@ for (const locale of ['en-US', 'zh-CN']) {
     browserSaveFails = false
     await save.click()
     await expect(dialog.getByRole('alert')).toContainText(
-      zh ? '浏览器路径已保存，但服务设置保存失败' : 'The browser path was saved, but the service settings could not be saved',
+      zh
+        ? '浏览器路径已保存，但服务设置保存失败'
+        : 'The browser path was saved, but the service settings could not be saved',
     )
     await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
     expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe'])

@@ -24,10 +24,7 @@ fn distribution_directory() -> PathBuf {
         .join("target/vendor-plugins-all")
 }
 
-pub(crate) async fn install_distributed_vendor(
-    gateway: &Gateway,
-    vendor_id: &str,
-) -> anyhow::Result<()> {
+pub async fn install_distributed_vendor(gateway: &Gateway, vendor_id: &str) -> anyhow::Result<()> {
     let directory = distribution_directory();
     let manifest_path = directory.join("manifest.json");
     let records: Vec<DistributionRecord> =

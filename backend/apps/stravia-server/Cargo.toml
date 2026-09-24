@@ -44,3 +44,4 @@ rust-embed = { workspace = true, optional = true }
 [dev-dependencies]
 reqwest = { workspace = true }
 tower = { workspace = true }
+stravia-core = { workspace = true, features = ["test-support"] }

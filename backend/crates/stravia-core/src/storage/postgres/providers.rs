@@ -251,15 +251,13 @@ impl ProviderStore for PostgresProviderStore {
     async fn credential_invalid_provider_ids(
         &self,
     ) -> anyhow::Result<std::collections::HashSet<String>> {
-        Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT id FROM providers WHERE credential_status = 'invalid'",
-            )
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .collect(),
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT id FROM providers WHERE credential_status = 'invalid'",
         )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect())
     }
 }
 
@@ -277,7 +275,10 @@ mod tests {
             eprintln!("skip PostgreSQL provider credential verification: DB_URL is not set");
             return Ok(None);
         };
-        let admin = PgPoolOptions::new().max_connections(1).connect(&url).await?;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
         let schema = format!("stravia_provider_test_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)
@@ -296,16 +297,17 @@ mod tests {
         store: &PostgresProviderStore,
     ) -> anyhow::Result<()> {
         store.pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP SCHEMA {schema} CASCADE"
-        )))
-        .execute(&admin)
-        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await?;
         admin.close().await;
         Ok(())
     }
 
-    async fn create_provider(store: &PostgresProviderStore, name: &str) -> anyhow::Result<Provider> {
+    async fn create_provider(
+        store: &PostgresProviderStore,
+        name: &str,
+    ) -> anyhow::Result<Provider> {
         store
             .create(CreateProviderRecord {
                 name: name.into(),
@@ -407,10 +409,7 @@ mod tests {
                     },
                 )
                 .await?;
-            let provider = store
-                .get(&provider.id)
-                .await?
-                .expect("provider");
+            let provider = store.get(&provider.id).await?.expect("provider");
             let status_version = oauth
                 .get(&provider.id)
                 .await?

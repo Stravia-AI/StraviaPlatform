@@ -1746,7 +1746,7 @@
   "vendor_plugins_title": "Vendor plugins",
   "vendor_plugins_summary": "Review the vendor implementations used by this instance, import a local WebAssembly component, or restore a bundled version.",
   "vendor_plugins_import_title": "Import a plugin",
-  "vendor_plugins_import_tile_description": "Choose a WebAssembly component (.wasm, up to 64 MiB) from this device. It applies only after validation and your confirmation.",
+  "vendor_plugins_drop_hint": "Release to validate WebAssembly components (.wasm, up to 64 MiB each). Each applies only after your confirmation.",
   "vendor_plugins_importing": "Validating…",
   "vendor_plugins_refresh": "Refresh plugins",
   "vendor_plugins_file_too_large": "This file exceeds the 64 MiB upload limit. Choose a smaller plugin component.",

@@ -374,26 +374,27 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         .expect("returned response body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(String::from_utf8_lossy(&body).contains("resumed original target"));
-    let requests = origin_requests.lock();
-    let replay = captured_body(&requests[1]);
-    let encrypted = replay["input"]
-        .as_array()
-        .expect("Responses input")
-        .iter()
-        .filter_map(|item| item.get("encrypted_content").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        encrypted,
-        vec!["origin-visible-cipher", "origin-opaque-cipher"]
-    );
-    let replay_wire = replay.to_string();
-    assert!(replay_wire.contains("foreign Responses answer"));
-    assert!(replay_wire.contains("foreign Chat answer"));
-    assert!(!replay_wire.contains("__stravia_thinking_source"));
-    assert_eq!(origin_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
-    drop(requests);
+    {
+        let requests = origin_requests.lock();
+        let replay = captured_body(&requests[1]);
+        let encrypted = replay["input"]
+            .as_array()
+            .expect("Responses input")
+            .iter()
+            .filter_map(|item| item.get("encrypted_content").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encrypted,
+            vec!["origin-visible-cipher", "origin-opaque-cipher"]
+        );
+        let replay_wire = replay.to_string();
+        assert!(replay_wire.contains("foreign Responses answer"));
+        assert!(replay_wire.contains("foreign Chat answer"));
+        assert!(!replay_wire.contains("__stravia_thinking_source"));
+        assert_eq!(origin_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 
@@ -535,25 +536,26 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         .await;
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let requests = requests.lock();
-        assert_eq!(
-            requests.len(),
-            expected_calls,
-            "{}",
-            String::from_utf8_lossy(&body)
-        );
-        assert!(requests[0].to_string().contains("unusable-cipher"));
-        if expected_calls == 2 {
-            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-            assert!(String::from_utf8_lossy(&body).contains("recovered"));
-            assert!(!requests[1].to_string().contains("unusable-cipher"));
-            assert!(requests[1].to_string().contains("public summary"));
-            assert!(requests[1].get("previous_response_id").is_none());
-        } else if !output_before_rejection {
-            assert_ne!(status, StatusCode::OK);
+        {
+            let requests = requests.lock();
+            assert_eq!(
+                requests.len(),
+                expected_calls,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+            assert!(requests[0].to_string().contains("unusable-cipher"));
+            if expected_calls == 2 {
+                assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+                assert!(String::from_utf8_lossy(&body).contains("recovered"));
+                assert!(!requests[1].to_string().contains("unusable-cipher"));
+                assert!(requests[1].to_string().contains("public summary"));
+                assert!(requests[1].get("previous_response_id").is_none());
+            } else if !output_before_rejection {
+                assert_ne!(status, StatusCode::OK);
+            }
         }
         server.abort();
-        drop(requests);
         close_test_gateway(gateway, data_dir).await;
     }
 }
@@ -950,50 +952,51 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         .await
         .expect("third response body");
 
-    let requests = provider_requests.lock();
-    assert_eq!(requests.len(), 3);
-    assert!(
-        requests[1].get("previous_response_id").is_none(),
-        "{}",
-        requests[1]
-    );
-    assert_eq!(
-        requests[1]["input"]
-            .as_array()
-            .expect("second Open Responses input")
-            .iter()
-            .filter(|item| item["type"] == "function_call")
-            .filter_map(|item| item["call_id"].as_str())
-            .collect::<Vec<_>>(),
-        vec!["call_a", "call_b", "call_c", "call_d", "call_e", "call_f"]
-    );
-    assert_eq!(
-        requests[2]["input"]
-            .as_array()
-            .expect("third Open Responses input")
-            .iter()
-            .filter(|item| item["type"] == "function_call")
-            .filter_map(|item| item["call_id"].as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "call_a", "call_b", "call_c", "call_d", "call_e", "call_f", "call_g", "call_h",
-            "call_i", "call_j", "call_k", "call_l", "call_m", "call_n"
-        ]
-    );
-    assert_eq!(
-        requests[2]["input"]
-            .as_array()
-            .expect("third Open Responses input")
-            .iter()
-            .filter(|item| item["type"] == "function_call_output")
-            .filter_map(|item| item["call_id"].as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "call_a", "call_b", "call_c", "call_d", "call_e", "call_f", "call_g", "call_h",
-            "call_i", "call_j", "call_k", "call_l", "call_m", "call_n"
-        ]
-    );
-    drop(requests);
+    {
+        let requests = provider_requests.lock();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[1].get("previous_response_id").is_none(),
+            "{}",
+            requests[1]
+        );
+        assert_eq!(
+            requests[1]["input"]
+                .as_array()
+                .expect("second Open Responses input")
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .filter_map(|item| item["call_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["call_a", "call_b", "call_c", "call_d", "call_e", "call_f"]
+        );
+        assert_eq!(
+            requests[2]["input"]
+                .as_array()
+                .expect("third Open Responses input")
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .filter_map(|item| item["call_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "call_a", "call_b", "call_c", "call_d", "call_e", "call_f", "call_g", "call_h",
+                "call_i", "call_j", "call_k", "call_l", "call_m", "call_n"
+            ]
+        );
+        assert_eq!(
+            requests[2]["input"]
+                .as_array()
+                .expect("third Open Responses input")
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .filter_map(|item| item["call_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "call_a", "call_b", "call_c", "call_d", "call_e", "call_f", "call_g", "call_h",
+                "call_i", "call_j", "call_k", "call_l", "call_m", "call_n"
+            ]
+        );
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 
@@ -1233,19 +1236,20 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         "each provider round must run Request Hook exactly once"
     );
     assert_eq!(*tool_calls.lock(), vec![1, 2]);
-    let provider_requests = provider_requests.lock();
-    assert_eq!(provider_requests.len(), 2);
-    assert!(
-        provider_requests[1].contains("\"tool_call_id\":\"call-1\""),
-        "{}",
-        provider_requests[1]
-    );
-    assert!(
-        provider_requests[1].contains("\"tool_call_id\":\"call-2\""),
-        "{}",
-        provider_requests[1]
-    );
-    drop(provider_requests);
+    {
+        let provider_requests = provider_requests.lock();
+        assert_eq!(provider_requests.len(), 2);
+        assert!(
+            provider_requests[1].contains("\"tool_call_id\":\"call-1\""),
+            "{}",
+            provider_requests[1]
+        );
+        assert!(
+            provider_requests[1].contains("\"tool_call_id\":\"call-2\""),
+            "{}",
+            provider_requests[1]
+        );
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 
@@ -1293,11 +1297,12 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     }
 
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let requests = requests.lock();
-    assert!(requests[0].contains("\"reasoning_effort\":\"high\""));
-    assert!(!requests[1].contains("reasoning_effort"));
-    assert!(requests[2].contains("\"reasoning_effort\":\"none\""));
-    drop(requests);
+    {
+        let requests = requests.lock();
+        assert!(requests[0].contains("\"reasoning_effort\":\"high\""));
+        assert!(!requests[1].contains("reasoning_effort"));
+        assert!(requests[2].contains("\"reasoning_effort\":\"none\""));
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 
@@ -1534,8 +1539,9 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .expect("fallback response");
     assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
-    let fallback_requests = fallback_requests.lock();
-    assert!(fallback_requests[0].contains("\"reasoning_effort\":\"high\""));
-    drop(fallback_requests);
+    {
+        let fallback_requests = fallback_requests.lock();
+        assert!(fallback_requests[0].contains("\"reasoning_effort\":\"high\""));
+    }
     close_test_gateway(gateway, data_dir).await;
 }

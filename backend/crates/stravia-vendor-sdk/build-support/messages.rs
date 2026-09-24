@@ -13,6 +13,9 @@ use std::path::Path;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+// 本文件同时被 guest build.rs 独立编译和 stravia-vendor-sdk 测试模块引入；
+// 独立编译时 crate 根没有 language_tag，只能按路径重复装载，属有意共享。
+#[allow(clippy::duplicate_mod)]
 #[path = "../src/language_tag.rs"]
 mod language_tag;
 

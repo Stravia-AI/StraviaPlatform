@@ -172,9 +172,7 @@ impl AdminService {
             "vendor returned an invalid authentication refresh result"
         );
         // ADR-0073：vendor 侧刷新产出了被上游接受的新凭据——清除失效。
-        self.gw
-            .clear_provider_credential_invalid(provider_id)
-            .await;
+        self.gw.clear_provider_credential_invalid(provider_id).await;
         drop(publication);
         Ok(())
     }
@@ -358,9 +356,7 @@ impl AdminService {
             )
             .await?;
         // ADR-0073：刷新成功=上游已接受新凭据，清除失效标记。
-        self.gw
-            .clear_provider_credential_invalid(provider_id)
-            .await;
+        self.gw.clear_provider_credential_invalid(provider_id).await;
         self.gw
             .vendor_plugins
             .store

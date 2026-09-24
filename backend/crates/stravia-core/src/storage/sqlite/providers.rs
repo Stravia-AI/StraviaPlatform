@@ -257,6 +257,13 @@ impl ProviderStore for SqliteProviderStore {
     }
 }
 
+pub(super) fn normalize_provider_vendor(vendor: Option<&str>) -> Option<String> {
+    vendor
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
@@ -529,11 +536,4 @@ mod tests {
         assert!(!provider.credential_invalid());
         assert!(provider.credential_invalid_at.is_none());
     }
-}
-
-pub(super) fn normalize_provider_vendor(vendor: Option<&str>) -> Option<String> {
-    vendor
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_lowercase())
 }

@@ -9,6 +9,9 @@ description = "Core library for Stravia Agent infra — model access, tool execu
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 stravia-runtime-contract = { workspace = true }
 stravia-protocol-codec = { workspace = true }

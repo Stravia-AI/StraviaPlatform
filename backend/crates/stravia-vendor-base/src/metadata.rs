@@ -8,9 +8,11 @@ use stravia_vendor_sdk::{
     ProviderDescriptor,
 };
 
+type CustomProtocol = (&'static str, fn() -> LocalizedText);
+
 /// Selectable egress protocols merged into the `custom` profile. Values are
 /// protocol aliases, not endpoint IDs; `common::endpoint` resolves them.
-pub(crate) const CUSTOM_PROTOCOLS: &[(&str, fn() -> LocalizedText)] = &[
+pub(crate) const CUSTOM_PROTOCOLS: &[CustomProtocol] = &[
     (
         "openai-compatible",
         crate::messages::protocol_openai_compatible,

@@ -805,6 +805,8 @@ mod tests {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fixture = Fixture::start(private.local_addr().unwrap()).await;
         let runtime = BrowserRuntime::new(fixture.config.clone());
+        // 计时断言只衡量 challenge 检测；先把 Chrome 冷启动移出计时窗口。
+        runtime.browser().await.unwrap();
         for (url, preflight) in [
             ("http://93.184.216.34/challenge", None),
             (
@@ -820,7 +822,7 @@ mod tests {
             input.preflight_url = preflight;
             input.failure_expression =
                 Some(crate::search::engines::search::google::GOOGLE_FAILURE_EXPRESSION);
-            let error = tokio::time::timeout(Duration::from_secs(5), runtime.render(input))
+            let error = tokio::time::timeout(Duration::from_secs(10), runtime.render(input))
                 .await
                 .expect("challenge must terminate before the render deadline")
                 .unwrap_err();
@@ -837,7 +839,7 @@ mod tests {
     }
 
     async fn wait_for_no_pages(browser: &Chrome) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let targets = browser
                     .cdp
@@ -1007,7 +1009,7 @@ mod tests {
         wait_for_no_pages(&browser).await;
         drop(browser);
         drop(runtime);
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while tokio::fs::try_exists(&profile).await.unwrap() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }

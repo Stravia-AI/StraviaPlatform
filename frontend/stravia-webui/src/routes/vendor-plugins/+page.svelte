@@ -39,6 +39,8 @@ const pluginsQuery = createQuery(() => ({ queryKey: ['vendor-plugins'], queryFn:
 
 let fileInput = $state<HTMLInputElement | null>(null)
 let selectedFiles = $state<FileList>()
+let fileDragDepth = $state(0)
+let importQueue = $state<File[]>([])
 let importError = $state<string>()
 let importing = $state(false)
 let restoringVendorId = $state<string>()
@@ -56,7 +58,8 @@ let detailVendorId = $state<string>()
 let detailOpen = $state(false)
 
 const plugins = $derived(pluginsQuery.data ?? [])
-const selectedFile = $derived(selectedFiles?.item(0) ?? undefined)
+const fileDragActive = $derived(fileDragDepth > 0)
+const importBusy = $derived(importing || previewOpen || importQueue.length > 0)
 const detailPlugin = $derived(plugins.find((plugin) => plugin.vendor_id === detailVendorId))
 const pendingCount = $derived(plugins.filter((plugin) => plugin.pending_update).length)
 const failedCount = $derived(plugins.filter((plugin) => plugin.error || /error|fail/i.test(plugin.status)).length)
@@ -173,9 +176,40 @@ function canUninstall(plugin: PluginSummary): boolean {
 }
 
 function pickPluginFile(): void {
-  if (importing) return
+  if (importBusy) return
   importError = undefined
   fileInput?.click()
+}
+
+function dragHasFiles(event: DragEvent): boolean {
+  return Boolean(event.dataTransfer?.types.includes('Files'))
+}
+
+function guardFileDragDefault(event: DragEvent): void {
+  if (dragHasFiles(event)) event.preventDefault()
+}
+
+function handleFileDragEnter(event: DragEvent): void {
+  if (!dragHasFiles(event) || importBusy) return
+  fileDragDepth += 1
+}
+
+function handleFileDragOver(event: DragEvent): void {
+  if (!dragHasFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function handleFileDragLeave(event: DragEvent): void {
+  if (!dragHasFiles(event)) return
+  fileDragDepth = Math.max(0, fileDragDepth - 1)
+}
+
+function handleFileDrop(event: DragEvent): void {
+  if (!dragHasFiles(event)) return
+  event.preventDefault()
+  fileDragDepth = 0
+  importPluginFiles(Array.from(event.dataTransfer?.files ?? []))
 }
 
 function openDetails(plugin: PluginSummary): void {
@@ -197,27 +231,46 @@ function setPreviewOpen(open: boolean): void {
     preview = undefined
     allowDataDiscard = false
     confirmError = undefined
+    advanceImportQueue()
   }
 }
 
-async function importPlugin(): Promise<void> {
-  const file = selectedFile
+function importPluginFiles(files: File[]): void {
+  const [first, ...rest] = files
+  if (!first || importBusy) return
+  importError = undefined
+  importQueue = rest
+  void importPlugin(first)
+}
+
+function advanceImportQueue(): void {
+  const [next, ...rest] = importQueue
+  importQueue = rest
+  if (next) void importPlugin(next)
+}
+
+async function importPlugin(file: File | undefined): Promise<void> {
   selectedFiles = undefined
   if (fileInput) fileInput.value = ''
-  importError = undefined
-  if (!file) return
-  if (file.size > MAX_PLUGIN_BYTES) {
-    importError = m.vendor_plugins_file_too_large()
-    return
-  }
+  if (!file || importing) return
 
-  importing = true
-  try {
-    showPreview(await admin.vendorPlugins.import(file))
-  } catch (error) {
-    importError = localizeBackendErrorMessage(error)
-  } finally {
-    importing = false
+  let next: PluginPreview | undefined
+  if (file.size > MAX_PLUGIN_BYTES) {
+    importError = `${file.name}: ${m.vendor_plugins_file_too_large()}`
+  } else {
+    importing = true
+    try {
+      next = await admin.vendorPlugins.import(file)
+    } catch (error) {
+      importError = `${file.name}: ${localizeBackendErrorMessage(error)}`
+    } finally {
+      importing = false
+    }
+  }
+  if (next) {
+    showPreview(next)
+  } else {
+    advanceImportQueue()
   }
 }
 
@@ -307,6 +360,7 @@ async function confirmPreview(): Promise<void> {
     previewOpen = false
     preview = undefined
     toast.success(m.vendor_plugins_update_applied())
+    advanceImportQueue()
   } catch (error) {
     confirmError = localizeBackendErrorMessage(error)
   } finally {
@@ -328,7 +382,16 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 
 <svelte:head><title>{m.vendor_plugins_title()} · Stravia</title></svelte:head>
 
-<div class="route-page">
+<svelte:window ondragover={guardFileDragDefault} ondrop={guardFileDragDefault} />
+
+<div
+  class="route-page relative min-h-full"
+  role="group"
+  aria-label={m.vendor_plugins_title()}
+  ondragenter={handleFileDragEnter}
+  ondragover={handleFileDragOver}
+  ondragleave={handleFileDragLeave}
+  ondrop={handleFileDrop}>
   <PageHeader
     eyebrow={m.vendor_plugins_eyebrow()}
     title={m.vendor_plugins_title()}
@@ -349,10 +412,12 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   <input
     bind:this={fileInput}
     bind:files={selectedFiles}
+    id="vendor-plugin-file"
     type="file"
     accept=".wasm,application/wasm"
+    multiple
     class="hidden"
-    onchange={() => void importPlugin()} />
+    onchange={() => importPluginFiles(Array.from(selectedFiles ?? []))} />
 
   {#if pluginsQuery.error}
     <RequestFailure
@@ -497,18 +562,23 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
           </Card.Footer>
         </Card.Root>
       {/each}
+    </div>
+  {/if}
 
-      <button
-        type="button"
-        class="flex min-h-44 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-input p-6 text-center text-muted-foreground transition-colors hover:border-primary/60 hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50"
-        onclick={pickPluginFile}
-        disabled={importing}>
-        <span class="flex size-9 items-center justify-center rounded-lg border border-border">
-          {#if importing}<Spinner class="size-4" />{:else}<UploadIcon class="size-4" />{/if}
-        </span>
-        <span class="font-medium">{m.vendor_plugins_import_title()}</span>
-        <span class="max-w-64 text-xs text-balance">{m.vendor_plugins_import_tile_description()}</span>
-      </button>
+  {#if fileDragActive}
+    <div class="pointer-events-none absolute inset-0 z-40 bg-background/80">
+      <div class="sticky top-0 flex h-[calc(100svh-6rem)] items-center justify-center p-4">
+        <div
+          class="flex size-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary text-center">
+          <span class="flex size-9 items-center justify-center rounded-lg border border-border bg-background">
+            <UploadIcon class="size-4" />
+          </span>
+          <span class="font-medium">{m.vendor_plugins_import_title()}</span>
+          <span class="max-w-64 text-xs text-balance text-muted-foreground">
+            {m.vendor_plugins_drop_hint()}
+          </span>
+        </div>
+      </div>
     </div>
   {/if}
 </div>

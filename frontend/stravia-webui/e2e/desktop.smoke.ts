@@ -112,7 +112,9 @@ describe('Stravia desktop smoke', () => {
     await browser.refresh()
     await browser.tauri.switchWindow('main')
     await $('a[href="/web-search"]').click()
-    const localRow = await $('//*[@id="web-search-sources"]//div[contains(@class,"grid")][.//p[normalize-space()="Local"]]')
+    const localRow = await $(
+      '//*[@id="web-search-sources"]//div[contains(@class,"grid")][.//p[normalize-space()="Local"]]',
+    )
     await localRow.$('button=Edit').click()
     const chooser = await $('#web-provider-browser-choose')
     await expect(chooser).toBeDisplayed()
@@ -161,8 +163,8 @@ describe('Stravia desktop smoke', () => {
       if (!input) throw new Error('Plugin file input is missing')
       input.dispatchEvent(new Event('change', { bubbles: true }))
     })
-    await $('button=Review import').click()
     const preview = await $('[role="dialog"]')
+    await preview.waitForExist()
     await expect(preview).toHaveText(expect.stringContaining('fixture.lifecycle'))
     await preview.$('button=Apply plugin change').click()
     await preview.waitForExist({ reverse: true })
@@ -462,8 +464,8 @@ describe('Stravia desktop smoke', () => {
       await expect(incrementalPreview).not.toHaveText(expect.stringContaining('user-current-model'))
       await expect(incrementalPreview).not.toHaveText(expect.stringContaining('approval_policy'))
 
-      // 原生剪贴板拒绝未聚焦的文档。
-      await browser.execute(() => window.focus())
+      // 原生剪贴板拒绝未聚焦的文档；window.focus() 不能突破 Windows 前台锁，由驱动在宿主进程内激活窗口才可靠。
+      await browser.maximizeWindow()
       await copyConfiguration.click()
       await expect($('//*[@data-sonner-toast and contains(., "Copied to clipboard")]')).toBeDisplayed()
 

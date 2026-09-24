@@ -855,7 +855,8 @@ fn build_main_window(
     // 原生窗口必须带着位置创建；Windows 可能在 WebView 初始化时重置创建后的坐标。
     let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
         .data_directory(webview_dir)
-        .visible(false)
+        .visible(visible)
+        .focused(visible)
         .build()?;
     if app.try_state::<WindowGeometry>().is_none()
         && let Err(error) = window.center()

@@ -209,7 +209,11 @@ async function saveEditor(): Promise<void> {
     toast.success(m.web_access_configuration_search_service_saved())
   } catch (error) {
     const message = localizeBackendErrorMessage(error)
-    editorError = browserSaveFailed ? '' : browserSaved ? m.web_access_browser_saved_service_failed({ error: message }) : message
+    editorError = browserSaveFailed
+      ? ''
+      : browserSaved
+        ? m.web_access_browser_saved_service_failed({ error: message })
+        : message
     toast.error(editorError || message)
   } finally {
     savingEditor = false

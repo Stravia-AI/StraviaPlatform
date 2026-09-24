@@ -1743,7 +1743,7 @@
   "vendor_plugins_title": "供应商插件",
   "vendor_plugins_summary": "查看当前实例实际使用的供应商实现，也可导入本地 WebAssembly Component 或恢复程序随附版本。",
   "vendor_plugins_import_title": "导入插件",
-  "vendor_plugins_import_tile_description": "选择本机 WebAssembly Component（.wasm，最大 64 MiB）。上传校验并确认影响后才生效。",
+  "vendor_plugins_drop_hint": "松开后逐个校验 WebAssembly Component（.wasm，单个最大 64 MiB）。每个确认影响后才生效。",
   "vendor_plugins_importing": "正在校验…",
   "vendor_plugins_refresh": "刷新插件",
   "vendor_plugins_file_too_large": "文件超过 64 MiB 上传限制，请选择更小的插件 Component。",
