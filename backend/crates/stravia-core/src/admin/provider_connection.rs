@@ -871,7 +871,7 @@ impl AdminService {
         };
 
         if options.append_targets {
-            super::routes::RouteModule::new(self)
+            super::routes::RouteModule::new(&self.gw)
                 .copy_provider_targets(&original.id, &copied.id)
                 .await?;
         }
@@ -1073,7 +1073,7 @@ impl AdminService {
                 .recovered(id, "credentials")
                 .await?;
         }
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
     }
 
@@ -1113,8 +1113,10 @@ impl AdminService {
         // ProviderStore owns the backend transaction that removes this
         // Provider, prunes its Targets, and deletes Routes left empty.
         self.gw.storage.providers().delete(id).await?;
-        super::routes::RouteModule::new(self).reload_cache().await?;
-        self.bump_config_epoch().await?;
+        super::routes::RouteModule::new(&self.gw)
+            .reload_cache()
+            .await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(())
     }
 

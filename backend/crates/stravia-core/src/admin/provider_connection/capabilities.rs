@@ -2,7 +2,7 @@ use super::*;
 
 impl AdminService {
     pub async fn test_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        Ok(super::routes::RouteModule::new(self)
+        Ok(super::routes::RouteModule::new(&self.gw)
             .discover_provider_model_ids(id)
             .await?)
     }

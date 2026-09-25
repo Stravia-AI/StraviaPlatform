@@ -13,7 +13,8 @@ use crate::db::models::{
 use crate::plugin::PluginStore;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
+    ProviderModelRecord, ProviderModelReimport, ProviderModelSelectionPolicy,
+    ProviderModelSourceKind, ReimportProviderModel, SnapshotState, SourceStamp,
 };
 
 use super::traits::{
@@ -666,6 +667,118 @@ impl ProviderModelStore for MemoryStorage {
         Ok(ProviderModelMutation::Applied(Box::new(item.clone())))
     }
 
+    async fn reimport(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: ReimportProviderModel,
+        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<ProviderModelReimport> {
+        // 锁次序与既有路径一致：Provider 删除与插件内存后端都按
+        // providers → routes → provider_models → oauth → plugin data 加锁；
+        // settings 只被本路径与 SettingsStore 单独使用，永远最后获取。
+        let mut routes = self.models.write().await;
+        let mut provider_models = self.provider_models.write().await;
+        let mut settings = self.settings.write().await;
+
+        let Some(index) = provider_models
+            .iter()
+            .position(|item| item.provider_id == provider_id && item.model_id == model_id)
+        else {
+            return Ok(ProviderModelReimport::NotFound);
+        };
+        if provider_models[index].revision != input.expected_revision {
+            return Ok(ProviderModelReimport::Conflict);
+        }
+
+        // 全部变更先在克隆上准备好；任何失败都不留下半提交状态。
+        let mut model = provider_models[index].clone();
+        model.metadata = input.metadata;
+        model.snapshot_state = SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog {
+                provider_id: input.source_provider_id,
+            },
+        };
+        // metadata_source_provider_id 与 SQL 契约一致保持不变——目录来源
+        // 只记录在 snapshot_state 的 ProviderCatalog stamp 里。
+        model.cost_rules = model.metadata.cost_rules();
+        model.revision = model
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("provider model revision overflow"))?;
+        model.updated_at = now_rfc3339();
+
+        // 匹配目标与读取侧一致：Provider + 上游模型 ID 精确相等；禁用
+        // Target/Route 同样刷新。仅替换仍属 Generated 的行，Overridden
+        // 与无关字段保留；未变化的 map 不进入提交集。
+        let mut prepared = Vec::new();
+        for (route_index, route) in routes.iter().enumerate() {
+            for (target_index, target) in route.targets.iter().enumerate() {
+                if target.provider_id().as_str() != provider_id
+                    || target.model().map(|upstream| upstream.as_str()) != Some(model_id)
+                {
+                    continue;
+                }
+                let mut map = target.thinking_level_map.clone();
+                let changed = crate::thinking::refresh_generated_thinking_level_map(
+                    &mut map,
+                    &input.generated_thinking_level_map,
+                )?;
+                validate_map(&model.metadata, &map)?;
+                if changed {
+                    prepared.push((route_index, target_index, map));
+                }
+            }
+        }
+
+        let current_epoch: i64 = settings
+            .iter()
+            .find(|(key, _)| key == super::CONFIG_EPOCH_KEY)
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(0);
+        let next_epoch = current_epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("config epoch overflow"))?
+            .to_string();
+
+        before_commit()?;
+
+        // 自此无 await、无失败点：一次性写回快照、Target map 与配置通知。
+        provider_models[index] = model.clone();
+        let mut previous_route: Option<usize> = None;
+        for (route_index, target_index, map) in prepared {
+            if let Some(previous) = previous_route
+                && previous != route_index
+            {
+                routes[previous].refresh_supported_thinking_levels();
+            }
+            routes[route_index].targets[target_index].thinking_level_map = map;
+            previous_route = Some(route_index);
+        }
+        if let Some(route_index) = previous_route {
+            routes[route_index].refresh_supported_thinking_levels();
+        }
+        if let Some(entry) = settings
+            .iter_mut()
+            .find(|(key, _)| key == super::CONFIG_EPOCH_KEY)
+        {
+            entry.1 = next_epoch;
+        } else {
+            settings.push((super::CONFIG_EPOCH_KEY.to_string(), next_epoch));
+        }
+
+        let active_routes = routes
+            .iter()
+            .filter(|route| route.is_enabled)
+            .cloned()
+            .collect();
+        Ok(ProviderModelReimport::Applied {
+            model: Box::new(model),
+            active_routes,
+        })
+    }
+
     async fn update_selection_policy(
         &self,
         provider_id: &str,
@@ -894,6 +1007,7 @@ impl OAuthCredentialStore for MemoryOAuthCredentialStore {
 mod tests {
     use super::*;
     use crate::provider_models::ProviderModelPresence;
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
 
     fn provider(id: &str) -> Provider {
         Provider {
@@ -1614,5 +1728,454 @@ mod tests {
         let provider = store.get("p1").await.expect("get").expect("provider");
         assert!(!provider.credential_invalid());
         assert!(provider.credential_invalid_at.is_none());
+    }
+
+    // ── Provider Model reimport：快照 + 关联 Target Generated Mapping +
+    // config_epoch 必须同一提交，失败不得留下半写状态。
+
+    fn discovered_provider_model(model_id: &str) -> NewProviderModelRecord {
+        NewProviderModelRecord {
+            provider_id: "provider".into(),
+            model_id: model_id.into(),
+            source_kind: ProviderModelSourceKind::Discovered,
+            snapshot_state: SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into(),
+                },
+            },
+            metadata_source_provider_id: Some("catalog".into()),
+            presence: ProviderModelPresence::Present,
+            selection_policy: ProviderModelSelectionPolicy::Auto,
+            metadata: crate::provider_models::ProviderModelMetadata::bare(model_id),
+        }
+    }
+
+    /// 生成行 + 一条 Overridden 人工行，代表 reimport 前刚完成的手工 Mapping。
+    fn seeded_thinking_map() -> Vec<crate::thinking::ThinkingLevelMapping> {
+        let mut map = crate::thinking::generate_thinking_level_map(
+            &crate::provider_models::ProviderModelMetadata::bare("m1"),
+        );
+        let low = map
+            .iter_mut()
+            .find(|row| row.level == ThinkingLevel::Low)
+            .expect("generated map covers Low");
+        low.control = TargetThinkingControl::Effort {
+            value: "manual".into(),
+        };
+        low.source = crate::thinking::ThinkingMappingSource::Overridden;
+        map
+    }
+
+    fn reimport_metadata() -> crate::provider_models::ProviderModelMetadata {
+        crate::provider_models::ProviderModelMetadata {
+            reasoning_options: Some(vec![crate::provider_models::ReasoningOption::Effort {
+                values: vec![Some("minimal".into()), Some("high".into())],
+            }]),
+            cost: Some(crate::provider_models::ModelCost {
+                context_over_200k: Some(crate::provider_models::PriceComponents {
+                    input: Some(rust_decimal::Decimal::new(1, 6)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..crate::provider_models::ProviderModelMetadata::bare("m1")
+        }
+    }
+
+    fn reimport_input(
+        metadata: crate::provider_models::ProviderModelMetadata,
+        expected_revision: i64,
+    ) -> ReimportProviderModel {
+        ReimportProviderModel {
+            generated_thinking_level_map: crate::thinking::generate_thinking_level_map(&metadata),
+            metadata,
+            source_provider_id: "catalog".into(),
+            expected_revision,
+        }
+    }
+
+    #[tokio::test]
+    async fn reimport_commits_model_targets_and_epoch_atomically() {
+        let storage = MemoryStorage::new(
+            vec![provider("provider"), provider("other")],
+            Vec::new(),
+            vec![(crate::storage::CONFIG_EPOCH_KEY.to_string(), "41".into())],
+        );
+        let models = storage.provider_models();
+        models
+            .create(discovered_provider_model("m1"))
+            .await
+            .expect("insert model");
+
+        let unrelated_map = crate::thinking::generate_thinking_level_map(
+            &crate::provider_models::ProviderModelMetadata::bare("m9"),
+        );
+        let route = storage
+            .put(PutRoute {
+                id: None,
+                model_id: "r1".into(),
+                display_name: None,
+                selection_strategy: "traffic_equalization".into(),
+                is_enabled: true,
+                targets: Some(vec![
+                    crate::db::models::CreateTarget {
+                        thinking_level_map: seeded_thinking_map(),
+                        ..target("provider", "m1")
+                    },
+                    crate::db::models::CreateTarget {
+                        enabled: false,
+                        thinking_level_map: seeded_thinking_map(),
+                        ..target("provider", "m1")
+                    },
+                    crate::db::models::CreateTarget {
+                        thinking_level_map: unrelated_map.clone(),
+                        ..target("other", "m9")
+                    },
+                ]),
+                default_thinking_level: None,
+            })
+            .await
+            .expect("put enabled Route");
+        let unrelated_target_id = route.targets[2].id.clone();
+        // 禁用 Route 的关联 Target 同样刷新，但不进入 active_routes。
+        let disabled_route = storage
+            .put(PutRoute {
+                id: None,
+                model_id: "r2".into(),
+                display_name: None,
+                selection_strategy: "traffic_equalization".into(),
+                is_enabled: false,
+                targets: Some(vec![crate::db::models::CreateTarget {
+                    thinking_level_map: seeded_thinking_map(),
+                    ..target("provider", "m1")
+                }]),
+                default_thinking_level: None,
+            })
+            .await
+            .expect("put disabled Route");
+
+        let metadata = reimport_metadata();
+        let outcome = models
+            .reimport(
+                "provider",
+                "m1",
+                reimport_input(metadata.clone(), 1),
+                &|_, _| Ok(()),
+                &|| -> anyhow::Result<()> { Ok(()) },
+            )
+            .await
+            .expect("reimport");
+        let ProviderModelReimport::Applied {
+            model,
+            active_routes,
+        } = outcome
+        else {
+            panic!("reimport must apply");
+        };
+
+        assert_eq!(model.revision, 2);
+        assert_eq!(model.metadata, metadata);
+        assert_eq!(
+            model.snapshot_state,
+            SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into()
+                }
+            }
+        );
+        assert_eq!(
+            model.metadata_source_provider_id.as_deref(),
+            Some("catalog")
+        );
+        assert_eq!(model.cost_rules.len(), 1);
+        assert_eq!(
+            model.cost_rules[0].kind,
+            crate::provider_models::ProviderModelCostRuleKind::ContextOver200k
+        );
+        // 返回的 model 就是持久化后的记录。
+        let stored = models
+            .get("provider", "m1")
+            .await
+            .expect("get")
+            .expect("model");
+        assert_eq!(stored, *model);
+
+        // 配置通知与快照同一提交。
+        assert_eq!(
+            storage
+                .settings()
+                .get(crate::storage::CONFIG_EPOCH_KEY)
+                .await
+                .expect("epoch")
+                .as_deref(),
+            Some("42")
+        );
+
+        // active_routes 是提交后的完整快照：只含启用 Route，且 supported
+        // thinking levels 已按新 map 重算。
+        assert_eq!(active_routes.len(), 1);
+        let active = &active_routes[0];
+        assert_eq!(active.model_id.as_str(), "r1");
+        assert_eq!(active.targets.len(), 3);
+        let persisted = RouteStore::get(&storage, "r1")
+            .await
+            .expect("get route")
+            .expect("route");
+        assert_eq!(active.targets.len(), persisted.targets.len());
+        for (returned, stored) in active.targets.iter().zip(persisted.targets.iter()) {
+            assert_eq!(returned.id, stored.id);
+            assert_eq!(returned.thinking_level_map, stored.thinking_level_map);
+        }
+        assert_eq!(
+            active.supported_thinking_levels,
+            persisted.supported_thinking_levels
+        );
+
+        let low = crate::thinking::mapping_control(
+            &active.targets[0].thinking_level_map,
+            ThinkingLevel::Low,
+        );
+        assert_eq!(
+            low,
+            Some(&TargetThinkingControl::Effort {
+                value: "manual".into()
+            }),
+            "Overridden row survives reimport"
+        );
+        let medium = crate::thinking::mapping_control(
+            &active.targets[0].thinking_level_map,
+            ThinkingLevel::Medium,
+        );
+        assert_eq!(
+            medium,
+            Some(&TargetThinkingControl::Hidden),
+            "Generated row is refreshed"
+        );
+        assert_eq!(
+            crate::thinking::mapping_control(
+                &active.targets[0].thinking_level_map,
+                ThinkingLevel::High
+            ),
+            Some(&TargetThinkingControl::Effort {
+                value: "high".into()
+            })
+        );
+        // 禁用 Target 同样刷新。
+        assert_eq!(
+            crate::thinking::mapping_control(
+                &active.targets[1].thinking_level_map,
+                ThinkingLevel::Minimal
+            ),
+            Some(&TargetThinkingControl::Effort {
+                value: "minimal".into()
+            })
+        );
+        // 不相关 Target 完全不动：map、Target ID 与其他字段保留。
+        assert_eq!(active.targets[2].thinking_level_map, unrelated_map);
+        assert_eq!(active.targets[2].id, unrelated_target_id);
+        assert_eq!(active.targets[2].provider_id().as_str(), "other");
+
+        assert_eq!(
+            active.supported_thinking_levels,
+            vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::High
+            ]
+        );
+
+        let disabled = RouteStore::get(&storage, "r2")
+            .await
+            .expect("get disabled route")
+            .expect("route");
+        assert_eq!(
+            crate::thinking::mapping_control(
+                &disabled.targets[0].thinking_level_map,
+                ThinkingLevel::High
+            ),
+            Some(&TargetThinkingControl::Effort {
+                value: "high".into()
+            }),
+            "disabled Route's Target is refreshed too"
+        );
+        assert_eq!(disabled.targets[0].id, disabled_route.targets[0].id);
+        assert_eq!(
+            disabled.supported_thinking_levels,
+            vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::High
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reimport_before_commit_failure_leaves_no_partial_write() {
+        let storage = MemoryStorage::new(
+            vec![provider("provider")],
+            Vec::new(),
+            vec![(crate::storage::CONFIG_EPOCH_KEY.to_string(), "7".into())],
+        );
+        let models = storage.provider_models();
+        models
+            .create(discovered_provider_model("m1"))
+            .await
+            .expect("insert model");
+        storage
+            .put(PutRoute {
+                id: None,
+                model_id: "r1".into(),
+                display_name: None,
+                selection_strategy: "traffic_equalization".into(),
+                is_enabled: true,
+                targets: Some(vec![crate::db::models::CreateTarget {
+                    thinking_level_map: seeded_thinking_map(),
+                    ..target("provider", "m1")
+                }]),
+                default_thinking_level: None,
+            })
+            .await
+            .expect("put Route");
+
+        let metadata = reimport_metadata();
+        let result = models
+            .reimport(
+                "provider",
+                "m1",
+                reimport_input(metadata.clone(), 1),
+                &|_, _| Ok(()),
+                &|| -> anyhow::Result<()> { anyhow::bail!("vendor write permit revoked") },
+            )
+            .await;
+        assert_eq!(
+            result.expect_err("reimport must fail").to_string(),
+            "vendor write permit revoked"
+        );
+
+        // 整笔不变：metadata/revision/snapshot、Target map、epoch 全部保持原值。
+        let model = models
+            .get("provider", "m1")
+            .await
+            .expect("get")
+            .expect("model");
+        assert_eq!(model.revision, 1);
+        assert_eq!(
+            model.metadata,
+            crate::provider_models::ProviderModelMetadata::bare("m1")
+        );
+        assert_eq!(
+            model.snapshot_state,
+            SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into()
+                }
+            }
+        );
+        let route = RouteStore::get(&storage, "r1")
+            .await
+            .expect("get route")
+            .expect("route");
+        assert_eq!(route.targets[0].thinking_level_map, seeded_thinking_map());
+        assert_eq!(
+            storage
+                .settings()
+                .get(crate::storage::CONFIG_EPOCH_KEY)
+                .await
+                .expect("epoch")
+                .as_deref(),
+            Some("7")
+        );
+
+        // 失败不消耗 revision：重试仍可提交。
+        let retry = models
+            .reimport(
+                "provider",
+                "m1",
+                reimport_input(metadata, 1),
+                &|_, _| Ok(()),
+                &|| -> anyhow::Result<()> { Ok(()) },
+            )
+            .await
+            .expect("retry");
+        assert!(matches!(retry, ProviderModelReimport::Applied { .. }));
+    }
+
+    #[tokio::test]
+    async fn reimport_rejects_stale_revision_and_missing_model_without_writes() {
+        let storage = MemoryStorage::new(vec![provider("provider")], Vec::new(), Vec::new());
+        let models = storage.provider_models();
+        models
+            .create(discovered_provider_model("m1"))
+            .await
+            .expect("insert model");
+        storage
+            .put(PutRoute {
+                id: None,
+                model_id: "r1".into(),
+                display_name: None,
+                selection_strategy: "traffic_equalization".into(),
+                is_enabled: true,
+                targets: Some(vec![crate::db::models::CreateTarget {
+                    thinking_level_map: seeded_thinking_map(),
+                    ..target("provider", "m1")
+                }]),
+                default_thinking_level: None,
+            })
+            .await
+            .expect("put Route");
+
+        // before_commit 在冲突/缺失路径上不得被调用。
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let guard = || -> anyhow::Result<()> {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+
+        let conflict = models
+            .reimport(
+                "provider",
+                "m1",
+                reimport_input(reimport_metadata(), 99),
+                &|_, _| Ok(()),
+                &guard,
+            )
+            .await
+            .expect("conflict result");
+        assert!(matches!(conflict, ProviderModelReimport::Conflict));
+        let missing = models
+            .reimport(
+                "provider",
+                "absent",
+                reimport_input(reimport_metadata(), 1),
+                &|_, _| Ok(()),
+                &guard,
+            )
+            .await
+            .expect("missing result");
+        assert!(matches!(missing, ProviderModelReimport::NotFound));
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "before_commit must not run when the write is rejected"
+        );
+
+        let model = models
+            .get("provider", "m1")
+            .await
+            .expect("get")
+            .expect("model");
+        assert_eq!(model.revision, 1);
+        assert_eq!(
+            model.metadata,
+            crate::provider_models::ProviderModelMetadata::bare("m1")
+        );
+        assert!(
+            storage
+                .settings()
+                .get(crate::storage::CONFIG_EPOCH_KEY)
+                .await
+                .expect("epoch")
+                .is_none(),
+            "rejected reimport must not touch config_epoch"
+        );
     }
 }

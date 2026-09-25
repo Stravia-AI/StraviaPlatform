@@ -93,7 +93,10 @@ pub struct PostgresStorage {
 impl PostgresStorage {
     pub async fn connect(config: SqlBackendConfig) -> anyhow::Result<Self> {
         let adapter = PostgresAdapter::connect(config).await?;
-        let pool = adapter.pool().clone();
+        Ok(Self::from_pool(adapter.pool().clone()))
+    }
+
+    fn from_pool(pool: Pool<Postgres>) -> Self {
         let plugin_store = PluginStore::postgres(pool.clone());
         let provider_store = Arc::new(PostgresProviderStore { pool: pool.clone() });
         let web_provider_store = Arc::new(PostgresWebProviderStore { pool: pool.clone() });
@@ -107,8 +110,10 @@ impl PostgresStorage {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         });
-        let bootstrap = Arc::new(PostgresBootstrap { adapter });
-        Ok(Self {
+        let bootstrap = Arc::new(PostgresBootstrap {
+            adapter: PostgresAdapter { pool: pool.clone() },
+        });
+        Self {
             pool,
             plugin_store,
             provider_store,
@@ -121,7 +126,7 @@ impl PostgresStorage {
             oauth_credential_store,
             usage_stats_store,
             bootstrap,
-        })
+        }
     }
 
     pub fn pool(&self) -> &Pool<Postgres> {

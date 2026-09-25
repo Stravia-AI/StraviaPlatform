@@ -461,7 +461,7 @@ impl Gateway {
             gw.lifecycle.spawn(async move {
                 let initial_epoch = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    result = gw_poll.storage.settings().get(admin::settings::CONFIG_EPOCH_KEY) => result,
+                    result = gw_poll.storage.settings().get(crate::storage::CONFIG_EPOCH_KEY) => result,
                 };
                 let mut known_epoch: i64 = initial_epoch
                     .ok()
@@ -482,7 +482,7 @@ impl Gateway {
                     }
                     let current_result = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = gw_poll.storage.settings().get(admin::settings::CONFIG_EPOCH_KEY) => result,
+                        result = gw_poll.storage.settings().get(crate::storage::CONFIG_EPOCH_KEY) => result,
                     };
                     let current: i64 = match current_result {
                         Ok(val) => val.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0),

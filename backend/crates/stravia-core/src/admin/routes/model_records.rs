@@ -25,14 +25,59 @@ pub struct RouteTargetStatus {
 
 impl AdminService {
     pub async fn list_models(&self) -> anyhow::Result<Vec<RouteConfig>> {
-        RouteModule::new(self).list().await
+        RouteModule::new(&self.gw).list().await
     }
 
     pub async fn get_model(&self, route_id: &str) -> anyhow::Result<RouteConfig> {
-        RouteModule::new(self).get(route_id).await
+        RouteModule::new(&self.gw).get(route_id).await
     }
 
     pub async fn get_model_target_statuses(
+        &self,
+        route_id: &str,
+    ) -> anyhow::Result<Vec<RouteTargetStatus>> {
+        RouteModule::new(&self.gw).target_statuses(route_id).await
+    }
+
+    pub async fn create_model(&self, input: CreateRoute) -> anyhow::Result<RouteConfig> {
+        RouteModule::new(&self.gw).create(input).await
+    }
+
+    pub async fn update_model(
+        &self,
+        route_id: &str,
+        input: UpdateRoute,
+    ) -> anyhow::Result<RouteConfig> {
+        RouteModule::new(&self.gw).change(route_id, input).await
+    }
+
+    pub async fn delete_model(&self, route_id: &str) -> anyhow::Result<()> {
+        RouteModule::new(&self.gw).delete(route_id).await
+    }
+}
+
+impl RouteModule<'_> {
+    pub(crate) async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
+        let mut routes = self.gw.storage.routes().list().await?;
+        self.refresh_route_client_capabilities(&mut routes).await?;
+        Ok(routes)
+    }
+
+    pub(crate) async fn get(&self, route_id: &str) -> anyhow::Result<RouteConfig> {
+        let route_id = normalize_name(route_id, "model ID sent by clients")?;
+        let mut route = self
+            .gw
+            .storage
+            .routes()
+            .get(&route_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
+        self.refresh_route_client_capabilities(std::slice::from_mut(&mut route))
+            .await?;
+        Ok(route)
+    }
+
+    pub(crate) async fn target_statuses(
         &self,
         route_id: &str,
     ) -> anyhow::Result<Vec<RouteTargetStatus>> {
@@ -75,51 +120,12 @@ impl AdminService {
             .collect())
     }
 
-    pub async fn create_model(&self, input: CreateRoute) -> anyhow::Result<RouteConfig> {
-        RouteModule::new(self).create(input).await
-    }
-
-    pub async fn update_model(
-        &self,
-        route_id: &str,
-        input: UpdateRoute,
-    ) -> anyhow::Result<RouteConfig> {
-        RouteModule::new(self).change(route_id, input).await
-    }
-
-    pub async fn delete_model(&self, route_id: &str) -> anyhow::Result<()> {
-        RouteModule::new(self).delete(route_id).await
-    }
-}
-
-impl RouteModule<'_> {
-    pub(crate) async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
-        let mut routes = self.admin.gw.storage.routes().list().await?;
-        self.refresh_route_client_capabilities(&mut routes).await?;
-        Ok(routes)
-    }
-
-    pub(crate) async fn get(&self, route_id: &str) -> anyhow::Result<RouteConfig> {
-        let route_id = normalize_name(route_id, "model ID sent by clients")?;
-        let mut route = self
-            .admin
-            .gw
-            .storage
-            .routes()
-            .get(&route_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
-        self.refresh_route_client_capabilities(std::slice::from_mut(&mut route))
-            .await?;
-        Ok(route)
-    }
     pub(super) async fn create_record(&self, input: CreateRoute) -> anyhow::Result<RouteConfig> {
         let route_id = normalize_name(&input.model_id, "model ID sent by clients")?;
         let display_name = normalize_display_name(input.display_name.as_deref());
         let selection_strategy = normalize_model_balance(input.balance.as_deref())?;
         ensure_route_targets_valid(&input.targets)?;
         let route = self
-            .admin
             .gw
             .storage
             .routes()
@@ -164,7 +170,6 @@ impl RouteModule<'_> {
             ensure_route_targets_valid(targets)?;
         }
         let route = self
-            .admin
             .gw
             .storage
             .routes()
@@ -184,23 +189,22 @@ impl RouteModule<'_> {
 
     pub(super) async fn delete_record(&self, route_id: &str) -> anyhow::Result<()> {
         let route_id = normalize_name(route_id, "model ID sent by clients")?;
-        self.admin.gw.storage.routes().delete(&route_id).await?;
+        self.gw.storage.routes().delete(&route_id).await?;
         self.after_write().await
     }
 
     async fn after_write(&self) -> anyhow::Result<()> {
         self.reload_cache().await?;
-        self.admin.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(())
     }
 
     pub(crate) async fn reload_cache(&self) -> anyhow::Result<()> {
-        self.admin
-            .gw
+        self.gw
             .model_cache
             .write()
             .await
-            .reload(self.admin.gw.storage.routes())
+            .reload(self.gw.storage.routes())
             .await
     }
 
@@ -220,7 +224,6 @@ impl RouteModule<'_> {
                     continue;
                 }
                 let Some(record) = self
-                    .admin
                     .gw
                     .storage
                     .provider_models()

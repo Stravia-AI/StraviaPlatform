@@ -4,9 +4,10 @@ use super::*;
 use crate::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
     ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
-    ProviderModelReconciliation, ProviderModelSelectionPolicy, ProviderModelSourceKind,
-    ProviderModelSummary, ProviderModelSyncSummary, SnapshotState, SourceStamp,
-    UpdateProviderModel, UpdateProviderModelSelection, normalize_model_id,
+    ProviderModelReconciliation, ProviderModelReimport, ProviderModelSelectionPolicy,
+    ProviderModelSourceKind, ProviderModelSummary, ProviderModelSyncSummary, ReimportProviderModel,
+    SnapshotState, SourceStamp, UpdateProviderModel, UpdateProviderModelSelection,
+    normalize_model_id,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +25,99 @@ pub struct PreparedProviderModel {
 
 impl AdminService {
     pub async fn list_provider_models(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<ProviderModelList> {
+        RouteModule::new(&self.gw)
+            .list_provider_models(provider_id)
+            .await
+    }
+
+    pub async fn get_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> anyhow::Result<ProviderModelDetail> {
+        RouteModule::new(&self.gw)
+            .get_provider_model(provider_id, model_id)
+            .await
+    }
+
+    pub async fn prepare_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        template_id: Option<&str>,
+    ) -> anyhow::Result<PreparedProviderModel> {
+        RouteModule::new(&self.gw)
+            .prepare_provider_model(provider_id, model_id, template_id)
+            .await
+    }
+
+    pub async fn create_manual_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: CreateManualProviderModel,
+    ) -> anyhow::Result<ProviderModelDetail> {
+        RouteModule::new(&self.gw)
+            .add_provider_model(provider_id, model_id, input)
+            .await
+    }
+
+    pub async fn update_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: UpdateProviderModel,
+    ) -> anyhow::Result<ProviderModelDetail> {
+        RouteModule::new(&self.gw)
+            .update_provider_model(provider_id, model_id, input)
+            .await
+    }
+
+    pub async fn update_provider_model_selection(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: UpdateProviderModelSelection,
+    ) -> anyhow::Result<ProviderModelDetail> {
+        RouteModule::new(&self.gw)
+            .update_provider_model_selection(provider_id, model_id, input)
+            .await
+    }
+
+    pub async fn reimport_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        revision: i64,
+    ) -> anyhow::Result<ProviderModelDetail> {
+        RouteModule::new(&self.gw)
+            .reimport_provider_model(provider_id, model_id, revision)
+            .await
+    }
+
+    pub async fn delete_manual_provider_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> anyhow::Result<()> {
+        RouteModule::new(&self.gw)
+            .delete_manual_provider_model(provider_id, model_id)
+            .await
+    }
+
+    pub async fn sync_provider_models(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<ProviderModelSyncSummary> {
+        RouteModule::new(&self.gw).sync(provider_id).await
+    }
+}
+
+impl RouteModule<'_> {
+    pub(crate) async fn list_provider_models(
         &self,
         provider_id: &str,
     ) -> anyhow::Result<ProviderModelList> {
@@ -46,7 +140,7 @@ impl AdminService {
         Ok(ProviderModelList { models })
     }
 
-    pub async fn get_provider_model(
+    pub(crate) async fn get_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -62,7 +156,7 @@ impl AdminService {
             .map(ProviderModelDetail::from)
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         super::thinking_map::hide_unwritable_generated_controls(
-            self,
+            self.gw,
             &provider,
             &detail.metadata,
             &mut detail.thinking_level_map,
@@ -70,18 +164,7 @@ impl AdminService {
         Ok(detail)
     }
 
-    pub async fn prepare_provider_model(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-        template_id: Option<&str>,
-    ) -> anyhow::Result<PreparedProviderModel> {
-        RouteModule::new(self)
-            .prepare_provider_model(provider_id, model_id, template_id)
-            .await
-    }
-
-    pub(super) async fn prepare_provider_model_record(
+    pub(crate) async fn prepare_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -148,18 +231,7 @@ impl AdminService {
         })
     }
 
-    pub async fn create_manual_provider_model(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-        input: CreateManualProviderModel,
-    ) -> anyhow::Result<ProviderModelDetail> {
-        RouteModule::new(self)
-            .add_provider_model(provider_id, model_id, input)
-            .await
-    }
-
-    pub(super) async fn create_manual_provider_model_record(
+    pub(crate) async fn add_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -187,7 +259,7 @@ impl AdminService {
             None => None,
         };
         apply_provider_model_mutation(
-            self,
+            self.gw,
             self.gw
                 .storage
                 .provider_models()
@@ -207,7 +279,7 @@ impl AdminService {
         )
     }
 
-    pub async fn update_provider_model(
+    pub(crate) async fn update_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -233,7 +305,7 @@ impl AdminService {
         metadata.status = existing.metadata.status;
         metadata.extensions = existing.metadata.extensions;
         apply_provider_model_mutation(
-            self,
+            self.gw,
             self.gw
                 .storage
                 .provider_models()
@@ -252,7 +324,7 @@ impl AdminService {
         )
     }
 
-    pub async fn update_provider_model_selection(
+    pub(crate) async fn update_provider_model_selection(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -266,7 +338,7 @@ impl AdminService {
         let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         apply_provider_model_mutation(
-            self,
+            self.gw,
             self.gw
                 .storage
                 .provider_models()
@@ -277,7 +349,12 @@ impl AdminService {
         )
     }
 
-    pub async fn reimport_provider_model(
+    /// ADR-0057：一次显式 reimport 把 Provider Model 快照与全部关联 Target 的
+    /// Generated Mapping 原子提交。目录读取与 Generated Map 的可写性处理在
+    /// 事务前完成；事务读取提交时的最新 Route/Target，仅重算 Generated 行并
+    /// 保留 Overridden。`model_cache` 写锁跨存储调用持有，提交与本机发布之间
+    /// 没有可失败的等待；`before_commit` 在最终提交前复检 Vendor 写许可。
+    pub(crate) async fn reimport_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -288,7 +365,7 @@ impl AdminService {
             .vendor
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
+        let permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
         let existing = self
             .gw
@@ -299,44 +376,75 @@ impl AdminService {
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         let source_provider_id = existing
             .metadata_source_provider_id
-            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Provider Model has no Provider Catalog source"))?;
         let source = self
             .gw
             .catalog_sync
-            .catalog_model_source(source_provider_id, &model_id)
+            .catalog_model_source(&source_provider_id, &model_id)
             .await?;
         let metadata = ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
-        super::RouteModule::new(self)
-            .refresh_generated_thinking_maps(provider_id, &model_id, &metadata, false)
-            .await?;
-        let detail = apply_provider_model_mutation(
-            self,
-            self.gw
-                .storage
-                .provider_models()
-                .update_metadata(
-                    provider_id,
-                    &model_id,
-                    metadata.clone(),
-                    SnapshotState::Imported {
-                        source: SourceStamp::ProviderCatalog {
-                            provider_id: source_provider_id.to_owned(),
-                        },
-                    },
-                    revision,
-                )
-                .await?,
+        let mut generated = generate_thinking_level_map(&metadata);
+        super::thinking_map::hide_unwritable_generated_controls(
+            self.gw,
             &provider,
-            &model_id,
-        )?;
-        super::RouteModule::new(self)
-            .refresh_generated_thinking_maps(provider_id, &model_id, &metadata, true)
+            &metadata,
+            &mut generated,
+        );
+
+        let mut cache = self.gw.model_cache.write().await;
+        let validate_map =
+            |metadata: &ProviderModelMetadata, map: &[crate::thinking::ThinkingLevelMapping]| {
+                super::thinking_map::ensure_thinking_map_representable(
+                    self.gw, &provider, &model_id, metadata, map,
+                )
+            };
+        let before_commit = || permit.ensure_current();
+        let outcome = self
+            .gw
+            .storage
+            .provider_models()
+            .reimport(
+                provider_id,
+                &model_id,
+                ReimportProviderModel {
+                    metadata,
+                    source_provider_id,
+                    expected_revision: revision,
+                    generated_thinking_level_map: generated,
+                },
+                &validate_map,
+                &before_commit,
+            )
             .await?;
+        let mut detail = match outcome {
+            ProviderModelReimport::Applied {
+                model,
+                active_routes,
+            } => {
+                *cache = crate::router::RouteCache {
+                    models: active_routes,
+                };
+                ProviderModelDetail::from(*model)
+            }
+            ProviderModelReimport::NotFound => {
+                return Err(provider_model_not_found(provider_id, &model_id));
+            }
+            ProviderModelReimport::Conflict => {
+                return Err(provider_model_conflict(provider_id, &model_id));
+            }
+        };
+        super::thinking_map::hide_unwritable_generated_controls(
+            self.gw,
+            &provider,
+            &detail.metadata,
+            &mut detail.thinking_level_map,
+        );
+        drop(cache);
+        drop(permit);
         Ok(detail)
     }
 
-    pub async fn delete_manual_provider_model(
+    pub(crate) async fn delete_manual_provider_model(
         &self,
         provider_id: &str,
         model_id: &str,
@@ -361,17 +469,7 @@ impl AdminService {
         }
     }
 
-    pub async fn sync_provider_models(
-        &self,
-        provider_id: &str,
-    ) -> anyhow::Result<ProviderModelSyncSummary> {
-        RouteModule::new(self).sync(provider_id).await
-    }
-
-    pub(super) async fn sync_provider_models_record(
-        &self,
-        provider_id: &str,
-    ) -> anyhow::Result<ProviderModelSyncSummary> {
+    pub(crate) async fn sync(&self, provider_id: &str) -> anyhow::Result<ProviderModelSyncSummary> {
         let provider = self.get_provider(provider_id).await?;
         let (sources, _publication_guard) = self.discover_provider_model_sources(&provider).await?;
         if sources.is_empty() {
@@ -508,7 +606,7 @@ impl AdminService {
         tokio::sync::OwnedRwLockReadGuard<()>,
     )> {
         let discovered =
-            super::model_discovery::discover_provider_models(self, &provider.id).await?;
+            super::model_discovery::discover_provider_models(self.gw, &provider.id).await?;
         // Hold the vendor publication fence until the single Provider Model
         // reconciliation has committed.
         let publication_guard = discovered.write_fence().await?;
@@ -767,7 +865,7 @@ fn metadata_from_canonical_template(
 }
 
 fn apply_provider_model_mutation(
-    admin: &AdminService,
+    gw: &Gateway,
     mutation: ProviderModelMutation,
     provider: &Provider,
     model_id: &str,
@@ -776,7 +874,7 @@ fn apply_provider_model_mutation(
         ProviderModelMutation::Applied(model) => {
             let mut detail = ProviderModelDetail::from(*model);
             super::thinking_map::hide_unwritable_generated_controls(
-                admin,
+                gw,
                 provider,
                 &detail.metadata,
                 &mut detail.thinking_level_map,

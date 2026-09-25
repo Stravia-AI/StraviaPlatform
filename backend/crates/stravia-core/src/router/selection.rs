@@ -576,6 +576,25 @@ mod tests {
             .await
         }
 
+        async fn reimport(
+            &self,
+            provider_id: &str,
+            model_id: &str,
+            input: crate::provider_models::ReimportProviderModel,
+            validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+            before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+        ) -> anyhow::Result<crate::provider_models::ProviderModelReimport> {
+            ProviderModelStore::reimport(
+                &self.delegate,
+                provider_id,
+                model_id,
+                input,
+                validate_map,
+                before_commit,
+            )
+            .await
+        }
+
         async fn update_selection_policy(
             &self,
             provider_id: &str,

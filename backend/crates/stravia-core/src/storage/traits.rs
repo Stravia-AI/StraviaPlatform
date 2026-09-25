@@ -13,7 +13,8 @@ use crate::db::models::{
 };
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelSelectionPolicy, model_id_match_key,
+    ProviderModelRecord, ProviderModelReimport, ProviderModelSelectionPolicy,
+    ReimportProviderModel, model_id_match_key,
 };
 
 #[derive(Debug, Clone)]
@@ -208,6 +209,18 @@ pub trait ProviderModelStore: Send + Sync {
         snapshot_state: crate::provider_models::SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation>;
+    /// 原子写入快照、最新 Target 的 Generated Mapping 与配置变更通知。
+    /// 返回同一事务内准备好的完整运行时快照，提交后不再执行可失败的读取。
+    /// `validate_map` 使用新规格校验每个关联 Target，包括未变化的手工映射。
+    /// `before_commit` 在最终提交前复检 Vendor 许可；失败则全部回滚。
+    async fn reimport(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: ReimportProviderModel,
+        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<ProviderModelReimport>;
     async fn update_selection_policy(
         &self,
         provider_id: &str,

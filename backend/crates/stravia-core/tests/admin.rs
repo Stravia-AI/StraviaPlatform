@@ -440,8 +440,126 @@ async fn provider_configuration_preview_uses_real_cloudflare_validation() -> any
 }
 
 #[tokio::test]
-async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result<()> {
+async fn reimport_rejects_unwritable_overrides_without_changing_configuration() -> anyhow::Result<()>
+{
+    use stravia_core::thinking::ThinkingMappingSource;
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
     let (data_dir, gw) = build_gateway().await?;
+    let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
+    scope["gpt-5.4"]["reasoning"] = serde_json::json!(false);
+    scope["gpt-5.4"]["reasoning_options"] =
+        serde_json::json!([{"type": "effort", "values": ["low"]}]);
+    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    let provider = gw
+        .admin()
+        .create_provider(catalog_provider_input_for(&gw, "guarded-provider", "minimax").await?)
+        .await?;
+    gw.admin().sync_provider_models(&provider.id).await?;
+    let original = gw
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.4")
+        .await?;
+    let mut metadata = original.metadata.clone();
+    metadata.reasoning = Some(true);
+    let edited = gw
+        .admin()
+        .update_provider_model(
+            &provider.id,
+            "gpt-5.4",
+            UpdateProviderModel {
+                metadata: serde_json::to_value(metadata)?,
+                revision: original.revision,
+            },
+        )
+        .await?;
+    let mut mappings = edited.thinking_level_map.clone();
+    for row in &mut mappings {
+        if !row.control.is_hidden() {
+            row.control = TargetThinkingControl::Hidden;
+            row.source = ThinkingMappingSource::Overridden;
+        }
+    }
+    let high = mappings
+        .iter_mut()
+        .find(|row| row.level == ThinkingLevel::High)
+        .expect("high mapping");
+    high.control = TargetThinkingControl::Effort {
+        value: "low".into(),
+    };
+    high.source = ThinkingMappingSource::Overridden;
+    let route = gw
+        .admin()
+        .create_model(CreateRoute {
+            model_id: "guarded-model".into(),
+            display_name: None,
+            balance: None,
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: Some("gpt-5.4".into()),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: mappings,
+            }],
+            default_thinking_level: None,
+        })
+        .await?;
+    let error = gw
+        .admin()
+        .reimport_provider_model(&provider.id, "gpt-5.4", edited.revision)
+        .await
+        .expect_err("new specification cannot represent the manual override");
+    assert!(
+        error
+            .to_string()
+            .contains("THINKING_CONTROL_UNREPRESENTABLE")
+    );
+    let persisted = gw
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.4")
+        .await?;
+    assert_eq!(persisted.revision, edited.revision);
+    assert_eq!(persisted.metadata, edited.metadata);
+    assert_eq!(persisted.snapshot_state, edited.snapshot_state);
+    let persisted_route = gw
+        .admin()
+        .list_models()
+        .await?
+        .into_iter()
+        .find(|route| route.model_id == "guarded-model")
+        .expect("persisted Route");
+    assert_eq!(
+        persisted_route.targets[0].thinking_level_map,
+        route.targets[0].thinking_level_map
+    );
+    assert_eq!(
+        gw.model_cache
+            .read()
+            .await
+            .match_model("guarded-model")
+            .expect("active Route")
+            .targets[0]
+            .thinking_level_map,
+        route.targets[0].thinking_level_map
+    );
+    gw.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result<()> {
+    use stravia_core::thinking::ThinkingMappingSource;
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    let (data_dir, gw) = build_gateway().await?;
+    let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
+    scope["gpt-5.4"]["reasoning"] = serde_json::json!(true);
+    scope["gpt-5.4"]["reasoning_options"] =
+        serde_json::json!([{"type": "effort", "values": ["none", "low", "max"]}]);
+    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
     let provider = gw
         .admin()
         .create_provider(catalog_provider_input_for(&gw, "snapshot-provider", "minimax").await?)
@@ -467,6 +585,13 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
     );
     object.insert("reasoning".to_string(), serde_json::json!(true));
     object.insert("tool_call".to_string(), serde_json::json!(true));
+    object.insert(
+        "reasoning_options".to_string(),
+        serde_json::json!([{
+            "type": "effort",
+            "values": ["none", "low", "medium", "high", "xhigh"]
+        }]),
+    );
     object.insert(
         "cost".to_string(),
         serde_json::from_str(
@@ -585,6 +710,67 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         .await?;
     assert!(enabled.available);
 
+    let mut saved_targets = Vec::new();
+    for (route_id, is_enabled) in [("snapshot-active", true), ("snapshot-disabled", false)] {
+        let route = gw
+            .admin()
+            .create_model(CreateRoute {
+                model_id: route_id.into(),
+                display_name: None,
+                balance: None,
+                targets: vec![CreateTarget {
+                    provider_id: provider.id.clone(),
+                    model: Some(model.id.clone()),
+                    enabled: true,
+                    priority: Some(17),
+                    first_token_timeout_ms: Some(31_000),
+                    target_retry_budget: Some(3),
+                    target_cooldown_ms: Some(42_000),
+                    thinking_level_map: Vec::new(),
+                }],
+                default_thinking_level: None,
+            })
+            .await?;
+        let mut mappings = route.targets[0].thinking_level_map.clone();
+        mappings
+            .iter_mut()
+            .find(|row| row.level == ThinkingLevel::High)
+            .expect("high mapping")
+            .control = TargetThinkingControl::Effort {
+            value: "low".into(),
+        };
+        let route = gw
+            .admin()
+            .update_model(
+                route_id,
+                UpdateRoute {
+                    is_enabled: Some(is_enabled),
+                    targets: Some(vec![CreateTarget {
+                        provider_id: provider.id.clone(),
+                        model: Some(model.id.clone()),
+                        enabled: true,
+                        priority: Some(17),
+                        first_token_timeout_ms: Some(31_000),
+                        target_retry_budget: Some(3),
+                        target_cooldown_ms: Some(42_000),
+                        thinking_level_map: mappings,
+                    }]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        saved_targets.push((route_id, route.targets[0].clone()));
+    }
+
+    assert!(
+        gw.model_cache
+            .read()
+            .await
+            .match_model("snapshot-active")
+            .expect("active Route before reimport")
+            .supported_thinking_levels
+            .contains(&ThinkingLevel::Medium)
+    );
     let reimported = gw
         .admin()
         .reimport_provider_model(&provider.id, &model.id, enabled.revision)
@@ -599,6 +785,54 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
             source: SourceStamp::ProviderCatalog { .. }
         }
     ));
+    let routes = gw.admin().list_models().await?;
+    for (route_id, previous) in saved_targets {
+        let route = routes
+            .iter()
+            .find(|route| route.model_id == route_id)
+            .expect("existing Route");
+        let target = &route.targets[0];
+        assert_eq!(target.id, previous.id);
+        assert_eq!(target.priority, previous.priority);
+        assert_eq!(
+            target.first_token_timeout_ms,
+            previous.first_token_timeout_ms
+        );
+        assert_eq!(target.target_retry_budget, previous.target_retry_budget);
+        assert_eq!(target.target_cooldown_ms, previous.target_cooldown_ms);
+        let medium = target
+            .thinking_level_map
+            .iter()
+            .find(|row| row.level == ThinkingLevel::Medium)
+            .expect("medium mapping");
+        assert_eq!(medium.source, ThinkingMappingSource::Generated);
+        assert_eq!(medium.control, TargetThinkingControl::Hidden);
+        let high = target
+            .thinking_level_map
+            .iter()
+            .find(|row| row.level == ThinkingLevel::High)
+            .expect("high mapping");
+        assert_eq!(high.source, ThinkingMappingSource::Overridden);
+        assert_eq!(
+            high.control,
+            TargetThinkingControl::Effort {
+                value: "low".into()
+            }
+        );
+    }
+    {
+        let runtime = gw.model_cache.read().await;
+        let route = runtime
+            .match_model("snapshot-active")
+            .expect("new requests can resolve the active Route");
+        assert!(
+            !route
+                .supported_thinking_levels
+                .contains(&ThinkingLevel::Medium),
+            "reimport must publish the complete runtime configuration before returning"
+        );
+        assert!(runtime.match_model("snapshot-disabled").is_none());
+    }
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;

@@ -32,3 +32,17 @@ Stravia 将管理员侧的连接写入与 Target 绑定收成 `stravia-core` 里
 SQL 行、运行时 `RouteConfig` 与管理 `RouteView` 分离。SQL adapter 的 JSON 包装与查询列不进入运行时配置；管理投影可以附加展示信息，但不能成为第二份可写事实源。Route 存储主键、客户端 Route ID、Provider ID、上游模型 ID 与 Target ID 分属不同身份空间。
 
 `targets` 是唯一 Target 写入入口；`target_provider` / `target_model` 只保留为派生读投影，不接受调用方指定 Target ID。更新省略 `targets` 时，存储事务不得删除或重建 Target 行；显式提交时才原子替换。显示名称与默认思考级别省略表示不改，`null` 表示清除；非空字段和 `targets` 不接受 `null`。这让修改展示或启用状态不会意外改变运行策略与 Target 身份。
+
+### Provider Model reimport 的原子提交与生效
+
+Route module 拥有 Provider Model 写策略及其与 Target 的协调；外侧管理 adapter 只转交操作与结果，不通过 Route module 回调管理 adapter 执行领域写入。Provider 连接 module 保持独立。
+
+一次显式 reimport 必须将 Provider Model 快照与全部关联 Target 的 Generated Mapping 原子提交：任一持久化步骤失败，均不得留下部分更新。Provider Model 的 expected revision 检查继续有效，旧 revision 使整次操作失败。
+
+关联 Route 以提交时的最新状态为准。并发人工编辑形成的 Overridden Mapping 必须保留，仅重新计算仍属 Generated 的行；不因读取后发生 Route 编辑就自动重试整次操作，也不以旧 Target 集合覆盖最新编辑。该保证由 SQLite、PostgreSQL 与 Memory 三个存储 adapter 一致实现。
+
+既有 Thinking Control 可写性校验仍然有效。校验依据新规格和事务内最新的合并结果执行，包括 Generated 行未变化的情况；若手工映射已无法由新规格表示，整次 reimport 失败，不删除该映射，也不以放宽校验换取成功。
+
+Route module 同时拥有持久提交、配置变更通知与当前实例完整运行时快照的切换，不逐条发布关联 Route 的中间状态。reimport 成功返回后，当前实例的新请求必须使用更新后的完整配置；这不承诺多个实例同时切换，也不将数据库与内存描述为同一事务。不得把已经提交后的失败表述为已全部回滚。
+
+PostgreSQL 在该事务中串行化 Route 写入，以覆盖等待期间出现的新绑定；代价是事务期间其他 Route 写入需要等待。外部 Catalog 读取不在该事务内。普通同步保留人工快照、Vendor 写回许可及既有 Provider / Route 分工不因本次深化而改变。

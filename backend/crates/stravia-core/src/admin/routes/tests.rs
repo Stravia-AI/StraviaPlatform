@@ -429,7 +429,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let routes = RouteModule::new(&admin);
+    let routes = RouteModule::new(&admin.gw);
     let input = RouteBind::OneClick {
         provider_id: provider.id.clone(),
         provider_model_id: "upstream-model".into(),
@@ -474,7 +474,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
 async fn route_ids_are_compared_exactly_when_binding() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let routes = RouteModule::new(&admin);
+    let routes = RouteModule::new(&admin.gw);
 
     for route_id in ["CaseRoute", "caseroute"] {
         routes
@@ -611,7 +611,7 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
 {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let routes = RouteModule::new(&admin);
+    let routes = RouteModule::new(&admin.gw);
 
     for provider_model_id in ["upstream-model", "Upstream-Model"] {
         routes
@@ -640,7 +640,7 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
 async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let routes = RouteModule::new(&admin);
+    let routes = RouteModule::new(&admin.gw);
     let route = routes
         .bind(RouteBind::At {
             route_id: "ExactRoute".into(),
@@ -667,7 +667,7 @@ async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<
 async fn target_statuses_use_exact_route_id_and_never_storage_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let route = RouteModule::new(&admin)
+    let route = RouteModule::new(&admin.gw)
         .bind(RouteBind::At {
             route_id: "ExactRoute".into(),
             provider_id: provider.id,
@@ -771,7 +771,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
         )
         .await?;
 
-    let error = RouteModule::new(&admin)
+    let error = RouteModule::new(&admin.gw)
         .bind(RouteBind::OneClick {
             provider_id: provider.id.clone(),
             provider_model_id: "upstream-model".into(),
@@ -839,7 +839,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
 async fn unbinding_the_last_target_deletes_the_route() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    let routes = RouteModule::new(&admin);
+    let routes = RouteModule::new(&admin.gw);
     routes
         .bind(RouteBind::OneClick {
             provider_id: provider.id.clone(),
@@ -1536,89 +1536,6 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
     assert_eq!(
         regenerated.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
-    let (_data_dir, gateway, provider) = route_fixture().await?;
-    let admin = gateway.admin();
-    let route = admin
-        .create_model(CreateRoute {
-            model_id: "refresh-route".into(),
-            display_name: None,
-            balance: None,
-            targets: vec![CreateTarget {
-                provider_id: provider.id.clone(),
-                model: Some("upstream-model".into()),
-                enabled: true,
-                priority: None,
-                first_token_timeout_ms: None,
-                target_retry_budget: None,
-                target_cooldown_ms: None,
-                thinking_level_map: Vec::new(),
-            }],
-            default_thinking_level: None,
-        })
-        .await?;
-    let mut targets = route_targets_for_update(&route);
-    let high = targets[0]
-        .thinking_level_map
-        .iter_mut()
-        .find(|row| row.level == ThinkingLevel::High)
-        .expect("high row");
-    high.control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-        value: "custom-high".into(),
-    };
-    let route = admin
-        .update_model(
-            &route.model_id,
-            UpdateRoute {
-                targets: Some(targets),
-                ..UpdateRoute::default()
-            },
-        )
-        .await?;
-    let refreshed_metadata: crate::provider_models::ProviderModelMetadata =
-        serde_json::from_value(json!({
-            "id": "upstream-model",
-            "reasoning_options": [{
-                "type": "effort",
-                "values": ["none", "low", "max"]
-            }]
-        }))?;
-    RouteModule::new(&admin)
-        .refresh_generated_thinking_maps(&provider.id, "upstream-model", &refreshed_metadata, true)
-        .await?;
-
-    let refreshed = admin
-        .list_models()
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.id == route.id)
-        .expect("refreshed Route");
-    let medium = refreshed.targets[0]
-        .thinking_level_map
-        .iter()
-        .find(|row| row.level == ThinkingLevel::Medium)
-        .expect("medium row");
-    assert_eq!(medium.source, ThinkingMappingSource::Generated);
-    assert_eq!(
-        medium.control,
-        stravia_runtime_contract::thinking::TargetThinkingControl::Hidden
-    );
-    let high = refreshed.targets[0]
-        .thinking_level_map
-        .iter()
-        .find(|row| row.level == ThinkingLevel::High)
-        .expect("high row");
-    assert_eq!(high.source, ThinkingMappingSource::Overridden);
-    assert_eq!(
-        high.control,
-        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-            value: "custom-high".into()
-        }
     );
     Ok(())
 }

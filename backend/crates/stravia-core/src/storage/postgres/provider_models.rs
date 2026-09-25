@@ -4,14 +4,15 @@ use std::str::FromStr;
 use anyhow::Context;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sqlx::{Pool, Postgres, Transaction};
+use sqlx::{PgConnection, Postgres, Transaction};
 
 use super::PostgresStorage;
 use crate::provider_models::{
     NewProviderModelRecord, PriceComponents, ProviderModelCostRule, ProviderModelCostRuleKind,
     ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
     ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelRecord,
-    ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
+    ProviderModelReimport, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    ReimportProviderModel, SnapshotState, SourceStamp,
 };
 use crate::storage::traits::ProviderModelStore;
 
@@ -52,6 +53,7 @@ impl ProviderModelStore for PostgresStorage {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Vec<ProviderModelRecord>> {
+        let mut conn = self.pool.acquire().await?;
         let rows = sqlx::query_as::<_, ProviderModelRow>(
             r#"SELECT provider_id, model_id, source_kind, snapshot_state::text AS snapshot_state, metadata_source_provider_id,
                       presence, selection_policy, metadata_json::text AS metadata_json,
@@ -61,9 +63,9 @@ impl ProviderModelStore for PostgresStorage {
                ORDER BY LOWER(COALESCE(name, model_id)), model_id"#,
         )
         .bind(provider_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
-        let rules = load_rules_for_provider(&self.pool, provider_id).await?;
+        let rules = load_rules_for_provider(&mut conn, provider_id).await?;
         rows.into_iter()
             .map(|row| {
                 let cost_rules = rules.get(&row.model_id).cloned().unwrap_or_default();
@@ -77,7 +79,8 @@ impl ProviderModelStore for PostgresStorage {
         provider_id: &str,
         model_id: &str,
     ) -> anyhow::Result<Option<ProviderModelRecord>> {
-        get_record(&self.pool, provider_id, model_id).await
+        let mut conn = self.pool.acquire().await?;
+        get_record(&mut conn, provider_id, model_id).await
     }
 
     async fn apply_reconciliation(
@@ -173,8 +176,9 @@ impl ProviderModelStore for PostgresStorage {
         let model_id = input.model_id.clone();
         insert_record(&mut tx, input).await?;
         tx.commit().await?;
+        let mut conn = self.pool.acquire().await?;
         Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&self.pool, &provider_id, &model_id)
+            get_record(&mut conn, &provider_id, &model_id)
                 .await?
                 .context("created Provider Model not found")?,
         )))
@@ -208,11 +212,81 @@ impl ProviderModelStore for PostgresStorage {
         }
         replace_cost_rules(&mut tx, provider_id, model_id, &metadata.cost_rules()).await?;
         tx.commit().await?;
+        let mut conn = self.pool.acquire().await?;
         Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&self.pool, provider_id, model_id)
+            get_record(&mut conn, provider_id, model_id)
                 .await?
                 .context("updated Provider Model not found")?,
         )))
+    }
+
+    async fn reimport(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: ReimportProviderModel,
+        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<ProviderModelReimport> {
+        let mut tx = self.pool.begin().await?;
+        // 先冻结 Route 写集合，才能覆盖等待期间新绑定的 Target，并让
+        // 返回的完整快照处于同一写入边界。锁序与 RouteStore::put 一致。
+        sqlx::query("LOCK TABLE models, model_backends IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        // Every Provider Model writer takes this row lock before touching cost
+        // rules, so the locked read serializes the revision check.
+        let revision = sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM provider_models WHERE provider_id = $1 AND model_id = $2 FOR UPDATE",
+        )
+        .bind(provider_id)
+        .bind(model_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(revision) = revision else {
+            return Ok(ProviderModelReimport::NotFound);
+        };
+        if revision != input.expected_revision {
+            return Ok(ProviderModelReimport::Conflict);
+        }
+        let snapshot_state = SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog {
+                provider_id: input.source_provider_id,
+            },
+        };
+        let updated = update_record_metadata(
+            &mut tx,
+            provider_id,
+            model_id,
+            &input.metadata,
+            &snapshot_state,
+            input.expected_revision,
+        )
+        .await?;
+        anyhow::ensure!(updated, "Provider Model changed during reimport");
+        replace_cost_rules(&mut tx, provider_id, model_id, &input.metadata.cost_rules()).await?;
+        super::routes::refresh_generated_target_maps(
+            &mut tx,
+            provider_id,
+            model_id,
+            &input.metadata,
+            &input.generated_thinking_level_map,
+            validate_map,
+        )
+        .await?;
+        bump_config_epoch(&mut tx).await?;
+        // Prepare the full return snapshot inside the transaction: no fallible
+        // reads happen after commit.
+        let model = get_record(&mut tx, provider_id, model_id)
+            .await?
+            .context("reimported Provider Model not found")?;
+        let active_routes = super::routes::load_routes(&mut tx, true).await?;
+        before_commit()?;
+        tx.commit().await?;
+        Ok(ProviderModelReimport::Applied {
+            model: Box::new(model),
+            active_routes,
+        })
     }
 
     async fn update_selection_policy(
@@ -234,8 +308,9 @@ impl ProviderModelStore for PostgresStorage {
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
+            let mut conn = self.pool.acquire().await?;
             return Ok(
-                if get_record(&self.pool, provider_id, model_id)
+                if get_record(&mut conn, provider_id, model_id)
                     .await?
                     .is_some()
                 {
@@ -245,8 +320,9 @@ impl ProviderModelStore for PostgresStorage {
                 },
             );
         }
+        let mut conn = self.pool.acquire().await?;
         Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&self.pool, provider_id, model_id)
+            get_record(&mut conn, provider_id, model_id)
                 .await?
                 .context("updated Provider Model not found")?,
         )))
@@ -265,7 +341,7 @@ impl ProviderModelStore for PostgresStorage {
 }
 
 async fn get_record(
-    pool: &Pool<Postgres>,
+    conn: &mut PgConnection,
     provider_id: &str,
     model_id: &str,
 ) -> anyhow::Result<Option<ProviderModelRecord>> {
@@ -278,17 +354,17 @@ async fn get_record(
     )
     .bind(provider_id)
     .bind(model_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let rules = load_rules_for_model(pool, provider_id, model_id).await?;
+    let rules = load_rules_for_model(conn, provider_id, model_id).await?;
     decode_record(row, rules).map(Some)
 }
 
 async fn load_rules_for_provider(
-    pool: &Pool<Postgres>,
+    conn: &mut PgConnection,
     provider_id: &str,
 ) -> anyhow::Result<BTreeMap<String, Vec<ProviderModelCostRule>>> {
     let rows = sqlx::query_as::<_, CostRuleRow>(
@@ -300,7 +376,7 @@ async fn load_rules_for_provider(
            ORDER BY model_id, rule_index"#,
     )
     .bind(provider_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let mut rules = BTreeMap::<String, Vec<ProviderModelCostRule>>::new();
     for row in rows {
@@ -311,7 +387,7 @@ async fn load_rules_for_provider(
 }
 
 async fn load_rules_for_model(
-    pool: &Pool<Postgres>,
+    conn: &mut PgConnection,
     provider_id: &str,
     model_id: &str,
 ) -> anyhow::Result<Vec<ProviderModelCostRule>> {
@@ -325,7 +401,7 @@ async fn load_rules_for_model(
     )
     .bind(provider_id)
     .bind(model_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     .into_iter()
     .map(decode_rule)
@@ -590,8 +666,629 @@ async fn model_exists(
         > 0)
 }
 
+/// 持有 epoch 行锁直至整笔配置提交；解析与溢出行为与其他后端一致。
+async fn bump_config_epoch(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"INSERT INTO settings (name, value, updated_at)
+           VALUES ($1, '0', CURRENT_TIMESTAMP)
+           ON CONFLICT (name) DO NOTHING"#,
+    )
+    .bind(crate::storage::CONFIG_EPOCH_KEY)
+    .execute(&mut **tx)
+    .await?;
+    let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE name = $1 FOR UPDATE")
+        .bind(crate::storage::CONFIG_EPOCH_KEY)
+        .fetch_one(&mut **tx)
+        .await?;
+    let next_epoch = value
+        .parse::<i64>()
+        .unwrap_or(0)
+        .checked_add(1)
+        .context("config epoch overflow")?;
+    sqlx::query("UPDATE settings SET value = $1, updated_at = CURRENT_TIMESTAMP WHERE name = $2")
+        .bind(next_epoch.to_string())
+        .bind(crate::storage::CONFIG_EPOCH_KEY)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 fn to_i64(value: Option<u64>) -> Option<anyhow::Result<i64>> {
     value.map(|value| {
         i64::try_from(value).context("Provider Model token limit exceeds database range")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    use super::*;
+    use crate::provider_models::ModelCost;
+    use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
+
+    async fn postgres_storage() -> Option<(PgPool, PgPool, String, PostgresStorage)> {
+        let Ok(url) = std::env::var("DB_URL") else {
+            eprintln!("skip PostgreSQL reimport verification: DB_URL is not set");
+            return None;
+        };
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+        let schema = format!("stravia_reimport_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated PostgreSQL schema");
+        let options: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("PostgreSQL connection options");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .expect("isolated PostgreSQL pool");
+        crate::migrations::migrate_postgres(&pool)
+            .await
+            .expect("PostgreSQL migrations");
+        let storage = PostgresStorage::from_pool(pool.clone());
+        Some((admin, pool, schema, storage))
+    }
+
+    async fn cleanup(admin: PgPool, pool: PgPool, schema: &str) {
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .expect("drop isolated PostgreSQL schema");
+        admin.close().await;
+    }
+
+    async fn seed_provider_and_model(storage: &PostgresStorage, pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed Provider");
+        storage
+            .create(NewProviderModelRecord {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+                source_kind: ProviderModelSourceKind::Discovered,
+                snapshot_state: SnapshotState::Unregistered,
+                metadata_source_provider_id: Some("catalog".into()),
+                presence: ProviderModelPresence::Present,
+                selection_policy: ProviderModelSelectionPolicy::Auto,
+                metadata: ProviderModelMetadata::bare("model"),
+            })
+            .await
+            .expect("seed Provider Model");
+    }
+
+    async fn insert_route(pool: &PgPool, storage_id: &str, route_id: &str, enabled: bool) {
+        sqlx::query("INSERT INTO models (id, model_id, is_enabled) VALUES ($1, $2, $3)")
+            .bind(storage_id)
+            .bind(route_id)
+            .bind(enabled)
+            .execute(pool)
+            .await
+            .expect("insert Route");
+    }
+
+    async fn insert_target(
+        pool: &PgPool,
+        target_id: &str,
+        route_storage_id: &str,
+        model: Option<&str>,
+        priority: i32,
+        map: &[ThinkingLevelMapping],
+    ) {
+        sqlx::query(
+            "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, thinking_level_map) VALUES ($1, $2, 'provider', $3, true, $4, $5)",
+        )
+        .bind(target_id)
+        .bind(route_storage_id)
+        .bind(model)
+        .bind(priority)
+        .bind(sqlx::types::Json(map))
+        .execute(pool)
+        .await
+        .expect("insert Target");
+    }
+
+    async fn target_map_in_db(pool: &PgPool, target_id: &str) -> Vec<ThinkingLevelMapping> {
+        sqlx::query_scalar::<_, sqlx::types::Json<Vec<ThinkingLevelMapping>>>(
+            "SELECT thinking_level_map FROM model_backends WHERE id = $1",
+        )
+        .bind(target_id)
+        .fetch_one(pool)
+        .await
+        .expect("Target Thinking Level Map")
+        .0
+    }
+
+    async fn config_epoch(pool: &PgPool) -> Option<i64> {
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE name = $1")
+            .bind(crate::storage::CONFIG_EPOCH_KEY)
+            .fetch_optional(pool)
+            .await
+            .expect("config_epoch")
+            .map(|value| value.parse().expect("numeric config_epoch"))
+    }
+
+    /// Every level Generated+Hidden except the listed Overridden rows.
+    fn target_map(
+        overrides: &[(ThinkingLevel, TargetThinkingControl)],
+    ) -> Vec<ThinkingLevelMapping> {
+        ThinkingLevel::ALL
+            .into_iter()
+            .map(|level| {
+                if let Some((_, control)) =
+                    overrides.iter().find(|(candidate, _)| *candidate == level)
+                {
+                    ThinkingLevelMapping {
+                        level,
+                        control: control.clone(),
+                        source: ThinkingMappingSource::Overridden,
+                    }
+                } else {
+                    ThinkingLevelMapping {
+                        level,
+                        control: TargetThinkingControl::Hidden,
+                        source: ThinkingMappingSource::Generated,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// A catalog-fresh Generated map: `low` becomes Enabled, the rest Hidden.
+    fn fresh_generated_map() -> Vec<ThinkingLevelMapping> {
+        ThinkingLevel::ALL
+            .into_iter()
+            .map(|level| ThinkingLevelMapping {
+                level,
+                control: if level == ThinkingLevel::Low {
+                    TargetThinkingControl::Enabled
+                } else {
+                    TargetThinkingControl::Hidden
+                },
+                source: ThinkingMappingSource::Generated,
+            })
+            .collect()
+    }
+
+    fn reimport_input(expected_revision: i64) -> ReimportProviderModel {
+        ReimportProviderModel {
+            metadata: ProviderModelMetadata {
+                name: Some("Fresh catalog name".into()),
+                cost: Some(ModelCost {
+                    prices: PriceComponents::default(),
+                    context_over_200k: Some(PriceComponents {
+                        input: Some(Decimal::new(3, 0)),
+                        ..PriceComponents::default()
+                    }),
+                    tiers: Vec::new(),
+                }),
+                ..ProviderModelMetadata::bare("model")
+            },
+            source_provider_id: "catalog".into(),
+            expected_revision,
+            generated_thinking_level_map: fresh_generated_map(),
+        }
+    }
+
+    fn map_row(map: &[ThinkingLevelMapping], level: ThinkingLevel) -> &ThinkingLevelMapping {
+        map.iter().find(|row| row.level == level).expect("map row")
+    }
+
+    #[tokio::test]
+    async fn reimport_applies_snapshot_targets_and_epoch_atomically() {
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        seed_provider_and_model(&storage, &pool).await;
+        insert_route(&pool, "route-1", "route-a", true).await;
+        insert_route(&pool, "route-2", "route-b", false).await;
+        insert_target(
+            &pool,
+            "target-1",
+            "route-1",
+            Some("model"),
+            5,
+            &target_map(&[(
+                ThinkingLevel::High,
+                TargetThinkingControl::Effort {
+                    value: "high".into(),
+                },
+            )]),
+        )
+        .await;
+        insert_target(
+            &pool,
+            "target-2",
+            "route-2",
+            Some("model"),
+            0,
+            &target_map(&[]),
+        )
+        .await;
+        insert_target(
+            &pool,
+            "target-3",
+            "route-1",
+            Some("other-model"),
+            0,
+            &target_map(&[]),
+        )
+        .await;
+        insert_target(&pool, "target-4", "route-1", None, 0, &[]).await;
+
+        let result = storage
+            .reimport(
+                "provider",
+                "model",
+                reimport_input(1),
+                &|_, _| Ok(()),
+                &|| anyhow::Ok(()),
+            )
+            .await
+            .expect("reimport");
+        let ProviderModelReimport::Applied {
+            model,
+            active_routes,
+        } = result
+        else {
+            panic!("reimport must apply");
+        };
+
+        assert_eq!(model.revision, 2);
+        assert_eq!(model.metadata.name.as_deref(), Some("Fresh catalog name"));
+        assert_eq!(
+            model.metadata_source_provider_id.as_deref(),
+            Some("catalog")
+        );
+        assert_eq!(
+            model.snapshot_state,
+            SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into(),
+                },
+            }
+        );
+        assert_eq!(model.cost_rules.len(), 1);
+        assert_eq!(
+            model.cost_rules[0].kind,
+            ProviderModelCostRuleKind::ContextOver200k
+        );
+        assert_eq!(config_epoch(&pool).await, Some(1));
+
+        // The complete active Route snapshot was prepared inside the transaction.
+        assert_eq!(active_routes.len(), 1);
+        let route = &active_routes[0];
+        assert_eq!(route.model_id.as_str(), "route-a");
+        let target = route
+            .targets
+            .iter()
+            .find(|target| target.id.as_str() == "target-1")
+            .expect("matched Target");
+        // The Target row was updated in place: identity and priority survive.
+        assert_eq!(target.priority, 5);
+        let high = map_row(&target.thinking_level_map, ThinkingLevel::High);
+        assert_eq!(high.source, ThinkingMappingSource::Overridden);
+        assert_eq!(
+            high.control,
+            TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        );
+        let low = map_row(&target.thinking_level_map, ThinkingLevel::Low);
+        assert_eq!(low.source, ThinkingMappingSource::Generated);
+        assert_eq!(low.control, TargetThinkingControl::Enabled);
+
+        // Unrelated and provider-only Targets stay untouched; the disabled
+        // Route's matched Target was still refreshed in place.
+        let other = target_map_in_db(&pool, "target-3").await;
+        assert_eq!(
+            map_row(&other, ThinkingLevel::Low).control,
+            TargetThinkingControl::Hidden
+        );
+        assert!(target_map_in_db(&pool, "target-4").await.is_empty());
+        let disabled = target_map_in_db(&pool, "target-2").await;
+        assert_eq!(
+            map_row(&disabled, ThinkingLevel::Low).control,
+            TargetThinkingControl::Enabled
+        );
+
+        cleanup(admin, pool, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn reimport_conflict_and_not_found_leave_state_untouched() {
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        seed_provider_and_model(&storage, &pool).await;
+        insert_route(&pool, "route-1", "route-a", true).await;
+        insert_target(
+            &pool,
+            "target-1",
+            "route-1",
+            Some("model"),
+            0,
+            &target_map(&[]),
+        )
+        .await;
+
+        let conflict = storage
+            .reimport(
+                "provider",
+                "model",
+                reimport_input(99),
+                &|_, _| Ok(()),
+                &|| anyhow::Ok(()),
+            )
+            .await
+            .expect("stale revision check");
+        assert!(matches!(conflict, ProviderModelReimport::Conflict));
+        let missing = storage
+            .reimport(
+                "provider",
+                "ghost",
+                reimport_input(1),
+                &|_, _| Ok(()),
+                &|| anyhow::Ok(()),
+            )
+            .await
+            .expect("missing model check");
+        assert!(matches!(missing, ProviderModelReimport::NotFound));
+
+        let model = storage
+            .get("provider", "model")
+            .await
+            .unwrap()
+            .expect("Provider Model");
+        assert_eq!(model.revision, 1);
+        assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
+        assert_eq!(model.metadata.name.as_deref(), Some("model"));
+        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(
+            map_row(
+                &target_map_in_db(&pool, "target-1").await,
+                ThinkingLevel::Low
+            )
+            .control,
+            TargetThinkingControl::Hidden
+        );
+
+        cleanup(admin, pool, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn reimport_permit_failure_rolls_back_everything() {
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        seed_provider_and_model(&storage, &pool).await;
+        insert_route(&pool, "route-1", "route-a", true).await;
+        insert_target(
+            &pool,
+            "target-1",
+            "route-1",
+            Some("model"),
+            0,
+            &target_map(&[]),
+        )
+        .await;
+
+        // A permit rejection must surface verbatim, not as a storage/sqlx error.
+        let error = storage
+            .reimport(
+                "provider",
+                "model",
+                reimport_input(1),
+                &|_, _| Ok(()),
+                &|| anyhow::bail!("vendor write permit revoked"),
+            )
+            .await
+            .expect_err("permit failure must abort reimport");
+        assert!(
+            error.to_string().contains("vendor write permit revoked"),
+            "{error}"
+        );
+
+        let model = storage
+            .get("provider", "model")
+            .await
+            .unwrap()
+            .expect("Provider Model");
+        assert_eq!(model.revision, 1);
+        assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
+        assert_eq!(model.metadata.name.as_deref(), Some("model"));
+        assert!(model.cost_rules.is_empty());
+        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(
+            map_row(
+                &target_map_in_db(&pool, "target-1").await,
+                ThinkingLevel::Low
+            )
+            .control,
+            TargetThinkingControl::Hidden
+        );
+
+        cleanup(admin, pool, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn reimport_map_failure_rolls_back_everything() {
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        seed_provider_and_model(&storage, &pool).await;
+        insert_route(&pool, "route-1", "route-a", true).await;
+        let original_map = target_map(&[(
+            ThinkingLevel::High,
+            TargetThinkingControl::Effort {
+                value: "low".into(),
+            },
+        )]);
+        insert_target(
+            &pool,
+            "target-1",
+            "route-1",
+            Some("model"),
+            0,
+            &original_map,
+        )
+        .await;
+
+        // Generated 行未变，也必须按新规格检查现有 Overridden 行；
+        // 此时快照与成本规则已写入事务，校验失败必须全部回滚。
+        let mut input = reimport_input(1);
+        input.metadata.reasoning = Some(false);
+        input.generated_thinking_level_map = target_map(&[]);
+        let result = storage
+            .reimport(
+                "provider",
+                "model",
+                input,
+                &|metadata, map| {
+                    anyhow::ensure!(
+                        map.iter().all(|row| crate::thinking::control_is_writable(
+                            "openai-compatible",
+                            metadata,
+                            false,
+                            &row.control
+                        )),
+                        "unsupported manual control"
+                    );
+                    Ok(())
+                },
+                &|| Ok(()),
+            )
+            .await;
+        assert!(result.is_err());
+
+        let model = storage
+            .get("provider", "model")
+            .await
+            .unwrap()
+            .expect("Provider Model");
+        assert_eq!(model.revision, 1);
+        assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
+        assert!(model.cost_rules.is_empty());
+        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(target_map_in_db(&pool, "target-1").await, original_map);
+
+        cleanup(admin, pool, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn reimport_waits_for_route_writer_and_uses_latest_override() {
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        seed_provider_and_model(&storage, &pool).await;
+        insert_route(&pool, "route-1", "route-a", true).await;
+        insert_target(&pool, "target-1", "route-1", None, 0, &[]).await;
+
+        // 此前没有关联 Target；并发编辑将已有 Target 绑定到该模型，
+        // 同时手工覆盖一行。重导入必须等待并读取新的绑定集合。
+        let mut blocker = pool.begin().await.expect("blocker transaction");
+        sqlx::query("UPDATE models SET display_name = 'blocking writer' WHERE id = 'route-1'")
+            .execute(&mut *blocker)
+            .await
+            .expect("lock Route row");
+        sqlx::query("UPDATE model_backends SET model = 'model', thinking_level_map = $1 WHERE id = 'target-1'")
+            .bind(sqlx::types::Json(target_map(&[(
+                ThinkingLevel::High,
+                TargetThinkingControl::Effort {
+                    value: "high".into(),
+                },
+            )])))
+            .execute(&mut *blocker)
+            .await
+            .expect("edit Target map");
+        let blocker_xid: String = sqlx::query_scalar("SELECT txid_current()::text")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("blocker transaction id");
+
+        let reimport_storage = storage.clone();
+        let mut task = tokio::spawn(async move {
+            reimport_storage
+                .reimport(
+                    "provider",
+                    "model",
+                    reimport_input(1),
+                    &|_, _| Ok(()),
+                    &|| anyhow::Ok(()),
+                )
+                .await
+        });
+
+        // 根据实际锁等待释放并发写入，不用固定延迟猜测调度顺序。
+        let relation = format!("{schema}.models");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_locks WHERE NOT granted AND \
+                 ((locktype IN ('relation', 'tuple') AND relation = to_regclass($1)) OR \
+                  (locktype = 'transactionid' AND transactionid::text = $2))",
+            )
+            .bind(&relation)
+            .bind(&blocker_xid)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect pg_locks");
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reimport never waited on the Route row lock"
+            );
+        }
+        blocker.commit().await.expect("commit blocking write");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), &mut task)
+            .await
+            .expect("reimport finishes once the Route writer commits")
+            .expect("reimport task")
+            .expect("reimport result");
+        let ProviderModelReimport::Applied {
+            model: _,
+            active_routes,
+        } = result
+        else {
+            panic!("reimport must apply");
+        };
+
+        // The returned snapshot was read after the blocker committed.
+        assert_eq!(
+            active_routes[0].display_name.as_deref(),
+            Some("blocking writer")
+        );
+        let map = &active_routes[0].targets[0].thinking_level_map;
+        let high = map_row(map, ThinkingLevel::High);
+        assert_eq!(high.source, ThinkingMappingSource::Overridden);
+        assert_eq!(
+            high.control,
+            TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        );
+        assert_eq!(
+            map_row(map, ThinkingLevel::Low).control,
+            TargetThinkingControl::Enabled
+        );
+
+        cleanup(admin, pool, &schema).await;
+    }
 }

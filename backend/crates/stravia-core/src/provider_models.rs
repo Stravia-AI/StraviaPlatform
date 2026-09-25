@@ -531,6 +531,30 @@ pub enum ProviderModelMutation {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReimportProviderModel {
+    pub metadata: ProviderModelMetadata,
+    pub source_provider_id: String,
+    pub expected_revision: i64,
+    pub generated_thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
+}
+
+/// 在原子写入内，依据新规格校验最新 Target 的合并结果；失败则整笔回滚。
+pub type ReimportThinkingMapValidator<'a> = dyn Fn(&ProviderModelMetadata, &[crate::thinking::ThinkingLevelMapping]) -> anyhow::Result<()>
+    + Send
+    + Sync
+    + 'a;
+
+#[derive(Debug, Clone)]
+pub enum ProviderModelReimport {
+    Applied {
+        model: Box<ProviderModelRecord>,
+        active_routes: Vec<crate::db::models::RouteConfig>,
+    },
+    NotFound,
+    Conflict,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewProviderModelRecord {
     pub provider_id: String,
     pub model_id: String,

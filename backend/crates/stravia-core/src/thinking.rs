@@ -30,6 +30,31 @@ impl ThinkingLevelMapping {
     }
 }
 
+pub(crate) fn refresh_generated_thinking_level_map(
+    current: &mut [ThinkingLevelMapping],
+    generated: &[ThinkingLevelMapping],
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    for row in current {
+        if row.source != ThinkingMappingSource::Generated {
+            continue;
+        }
+        let replacement = generated
+            .iter()
+            .find(|candidate| candidate.level == row.level)
+            .ok_or_else(|| anyhow::anyhow!("generated Thinking Level Map is incomplete"))?;
+        anyhow::ensure!(
+            replacement.source == ThinkingMappingSource::Generated,
+            "replacement Thinking Level Mapping must be generated"
+        );
+        if row != replacement {
+            row.clone_from(replacement);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 pub fn generate_thinking_level_map(metadata: &ProviderModelMetadata) -> Vec<ThinkingLevelMapping> {
     let options = metadata.reasoning_options.as_deref().unwrap_or_default();
     if let Some(values) = options.iter().find_map(|option| match option {

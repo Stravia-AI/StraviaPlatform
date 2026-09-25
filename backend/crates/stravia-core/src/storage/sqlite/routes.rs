@@ -1,4 +1,4 @@
-use sqlx::Connection;
+use sqlx::{Connection, SqliteConnection};
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
 use super::*;
@@ -73,8 +73,19 @@ pub(super) struct SqliteRouteStore {
     pub(super) pool: SqlitePool,
 }
 
+/// Narrow projection for Generated Thinking Level Mapping refreshes; Target
+/// identity and every other column stay untouched.
+#[derive(sqlx::FromRow)]
+struct TargetMapRow {
+    id: String,
+    thinking_level_map: sqlx::types::Json<Vec<crate::thinking::ThinkingLevelMapping>>,
+}
+
 impl SqliteRouteStore {
-    async fn load_routes(&self, active_only: bool) -> anyhow::Result<Vec<RouteConfig>> {
+    pub(super) async fn load_routes(
+        connection: &mut SqliteConnection,
+        active_only: bool,
+    ) -> anyhow::Result<Vec<RouteConfig>> {
         let where_clause = if active_only {
             " WHERE is_enabled = 1"
         } else {
@@ -86,61 +97,106 @@ impl SqliteRouteStore {
              FROM models{where_clause} ORDER BY created_at DESC"
         );
         let mut routes = sqlx::query_as::<_, RouteRow>(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *connection)
             .await?
             .into_iter()
             .map(RouteRow::into_route)
             .collect::<Vec<_>>();
         for route in &mut routes {
-            route.targets = self.load_targets(&route.id).await?;
+            route.targets = Self::load_targets(&mut *connection, &route.id).await?;
             route.refresh_supported_thinking_levels();
         }
         Ok(routes)
     }
 
-    async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<TargetConfig>> {
+    async fn load_targets(
+        connection: &mut SqliteConnection,
+        route_storage_id: &str,
+    ) -> anyhow::Result<Vec<TargetConfig>> {
         Ok(sqlx::query_as::<_, TargetRow>(
             "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(TargetRow::into_target)
         .collect())
     }
 
-    async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<RouteConfig>> {
+    async fn load_route(
+        connection: &mut SqliteConnection,
+        route_id: &str,
+    ) -> anyhow::Result<Option<RouteConfig>> {
         let route = sqlx::query_as::<_, RouteRow>(
             "SELECT id, model_id, display_name, default_thinking_level, balance, \
              is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
         .bind(route_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(route) = route else {
             return Ok(None);
         };
         let mut route = route.into_route();
-        route.targets = self.load_targets(&route.id).await?;
+        route.targets = Self::load_targets(&mut *connection, &route.id).await?;
         route.refresh_supported_thinking_levels();
         Ok(Some(route))
+    }
+
+    /// Recompute the Generated Thinking Level Mapping rows of every Target bound
+    /// to `provider_id` + `provider_model_id`, inside the caller's transaction.
+    /// Overridden rows, Target IDs and all other columns are preserved.
+    pub(super) async fn refresh_generated_thinking_maps(
+        connection: &mut SqliteConnection,
+        provider_id: &str,
+        provider_model_id: &str,
+        metadata: &crate::provider_models::ProviderModelMetadata,
+        generated: &[crate::thinking::ThinkingLevelMapping],
+        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+    ) -> anyhow::Result<()> {
+        let rows = sqlx::query_as::<_, TargetMapRow>(
+            "SELECT id, thinking_level_map FROM model_backends \
+             WHERE provider_id = ? AND model = ? ORDER BY id",
+        )
+        .bind(provider_id)
+        .bind(provider_model_id)
+        .fetch_all(&mut *connection)
+        .await?;
+        for row in rows {
+            let mut map = row.thinking_level_map.0;
+            let changed =
+                crate::thinking::refresh_generated_thinking_level_map(&mut map, generated)?;
+            validate_map(metadata, &map)?;
+            if !changed {
+                continue;
+            }
+            sqlx::query("UPDATE model_backends SET thinking_level_map = ? WHERE id = ?")
+                .bind(sqlx::types::Json(map))
+                .bind(&row.id)
+                .execute(&mut *connection)
+                .await?;
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl RouteStore for SqliteRouteStore {
     async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
-        self.load_routes(false).await
+        let mut connection = self.pool.acquire().await?;
+        Self::load_routes(&mut connection, false).await
     }
 
     async fn list_active(&self) -> anyhow::Result<Vec<RouteConfig>> {
-        self.load_routes(true).await
+        let mut connection = self.pool.acquire().await?;
+        Self::load_routes(&mut connection, true).await
     }
 
     async fn get(&self, route_id: &str) -> anyhow::Result<Option<RouteConfig>> {
-        self.load_route(route_id).await
+        let mut connection = self.pool.acquire().await?;
+        Self::load_route(&mut connection, route_id).await
     }
 
     async fn put(&self, route: PutRoute) -> anyhow::Result<RouteConfig> {

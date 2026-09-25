@@ -59,13 +59,12 @@ impl DiscoveredModels {
 }
 
 pub(super) async fn discover_provider_models(
-    admin: &AdminService,
+    gw: &Gateway,
     provider_id: &str,
 ) -> Result<DiscoveredModels, RouteModelDiscoveryError> {
     let cancellation = stravia_runtime_contract::CancellationToken::new();
     let deadline = stravia_runtime_contract::Deadline::fixed(Instant::now() + DISCOVERY_TIMEOUT);
-    let prepared = admin
-        .gw
+    let prepared = gw
         .prepare_vendor_execution(
             provider_id,
             None,
@@ -102,8 +101,7 @@ pub(super) async fn discover_provider_models(
     let mut cursor = None;
 
     for _ in 0..MAX_DISCOVERY_PAGES {
-        let execution = match admin
-            .gw
+        let execution = match gw
             .execute_prepared_vendor(
                 prepared.clone(),
                 VendorRequest::Discover(stravia_vendor_sdk::DiscoverRequest {
@@ -118,12 +116,7 @@ pub(super) async fn discover_provider_models(
                 // ADR-0073：Discover 与 Infer 携带同一份凭据，上游拒绝同样
                 // 算失效证据；按准备时锁定的代际条件写。
                 if crate::plugin::execution::is_credential_rejection(&error) {
-                    admin
-                        .gw
-                        .mark_provider_credential_invalid(
-                            provider_id,
-                            prepared.credential_version(),
-                        )
+                    gw.mark_provider_credential_invalid(provider_id, prepared.credential_version())
                         .await;
                 }
                 return Err(RouteModelDiscoveryError::setup(provider_id, error));

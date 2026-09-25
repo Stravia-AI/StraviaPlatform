@@ -41,7 +41,7 @@ impl AdminService {
         self.gw
             .principal_admission
             .set_limit(&result.id, concurrency_limit);
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(result)
     }
 
@@ -109,14 +109,14 @@ impl AdminService {
             )
             .await?;
         self.gw.principal_admission.set_limit(id, concurrency_limit);
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(result)
     }
 
     pub async fn delete_api_key(&self, id: &str) -> anyhow::Result<()> {
         self.api_keys_store()?.delete(id).await?;
         self.gw.principal_admission.remove_principal(id);
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(())
     }
     async fn ensure_api_key_name_unique(

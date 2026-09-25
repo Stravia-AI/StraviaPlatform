@@ -1,8 +1,7 @@
 use super::*;
 use crate::provider_models::{
-    CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMutation,
-    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
-    ProviderModelSyncSummary, model_id_match_key, normalize_model_id,
+    NewProviderModelRecord, ProviderModelMutation, ProviderModelPresence,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, model_id_match_key, normalize_model_id,
 };
 use crate::thinking::ThinkingMappingSource;
 use crate::thinking::generate_thinking_level_map;
@@ -14,7 +13,6 @@ mod provider_model_records;
 mod thinking_map;
 use model_discovery::RouteModelDiscoveryError;
 pub use model_records::RouteTargetStatus;
-use provider_model_records::PreparedProviderModel;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,45 +58,30 @@ pub(crate) struct RouteUnbind {
 }
 
 pub(crate) struct RouteModule<'a> {
-    admin: &'a AdminService,
+    gw: &'a Gateway,
 }
 
 impl<'a> RouteModule<'a> {
-    pub(crate) fn new(admin: &'a AdminService) -> Self {
-        Self { admin }
+    pub(crate) fn new(gw: &'a Gateway) -> Self {
+        Self { gw }
     }
 
-    pub(crate) async fn add_provider_model(
-        &self,
-        provider_id: &str,
-        provider_model_id: &str,
-        input: CreateManualProviderModel,
-    ) -> anyhow::Result<ProviderModelDetail> {
-        self.admin
-            .create_manual_provider_model_record(provider_id, provider_model_id, input)
-            .await
-    }
-
-    pub(crate) async fn prepare_provider_model(
-        &self,
-        provider_id: &str,
-        provider_model_id: &str,
-        canonical_model_id: Option<&str>,
-    ) -> anyhow::Result<PreparedProviderModel> {
-        self.admin
-            .prepare_provider_model_record(provider_id, provider_model_id, canonical_model_id)
-            .await
-    }
-
-    pub(crate) async fn sync(&self, provider_id: &str) -> anyhow::Result<ProviderModelSyncSummary> {
-        self.admin.sync_provider_models_record(provider_id).await
+    /// Route module 唯一的 Provider 读投影入口；与 ProviderConnection::get
+    /// 共享「provider not found」错误契约。
+    async fn get_provider(&self, provider_id: &str) -> anyhow::Result<Provider> {
+        self.gw
+            .storage
+            .providers()
+            .get(provider_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider not found: {provider_id}"))
     }
 
     pub(crate) async fn discover_provider_model_ids(
         &self,
         provider_id: &str,
     ) -> Result<Vec<String>, RouteModelDiscoveryError> {
-        let discovered = model_discovery::discover_provider_models(self.admin, provider_id).await?;
+        let discovered = model_discovery::discover_provider_models(self.gw, provider_id).await?;
         let _publication_guard = discovered.write_fence().await.map_err(|error| {
             RouteModelDiscoveryError::DiscoverySetup {
                 provider_id: provider_id.to_owned(),
@@ -166,7 +149,6 @@ impl<'a> RouteModule<'a> {
             }
             let provider_model_id = provider_model_id.expect("checked model Target");
             let Some(provider_model) = self
-                .admin
                 .gw
                 .storage
                 .provider_models()
@@ -197,7 +179,7 @@ impl<'a> RouteModule<'a> {
     }
 
     async fn ensure_provider_only_search_target(&self, provider_id: &str) -> anyhow::Result<()> {
-        let provider = self.admin.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let vendor_id = provider
             .vendor
             .as_deref()
@@ -210,18 +192,13 @@ impl<'a> RouteModule<'a> {
                     serde_json::json!({ "provider_id": provider_id }),
                 )
             })?;
-        let descriptor = self
-            .admin
-            .gw
-            .vendor_plugins
-            .descriptor(vendor_id)
-            .map_err(|_| {
-                coded_error(
-                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
-                    "Provider-only Targets require an installed search Vendor",
-                    serde_json::json!({ "provider_id": provider_id, "vendor_id": vendor_id }),
-                )
-            })?;
+        let descriptor = self.gw.vendor_plugins.descriptor(vendor_id).map_err(|_| {
+            coded_error(
+                "PROVIDER_ONLY_TARGET_UNAVAILABLE",
+                "Provider-only Targets require an installed search Vendor",
+                serde_json::json!({ "provider_id": provider_id, "vendor_id": vendor_id }),
+            )
+        })?;
         let channel_id = provider.channel.as_deref().unwrap_or("default");
         let channel = descriptor
             .channels
@@ -261,7 +238,7 @@ impl<'a> RouteModule<'a> {
         original_provider_id: &str,
         copied_provider_id: &str,
     ) -> anyhow::Result<()> {
-        let routes = self.admin.list_models().await?;
+        let routes = self.list().await?;
         for route in routes.into_iter().filter(|route| {
             route
                 .targets
@@ -328,7 +305,7 @@ impl<'a> RouteModule<'a> {
         copied_provider_id: &str,
         provider_model_id: &str,
     ) -> anyhow::Result<()> {
-        let store = self.admin.gw.storage.provider_models();
+        let store = self.gw.storage.provider_models();
         if store
             .get(copied_provider_id, provider_model_id)
             .await?
@@ -433,7 +410,7 @@ impl<'a> RouteModule<'a> {
         };
         let route_id = normalize_name(&route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&provider_model_id)?;
-        let mut existing = self.admin.gw.storage.routes().get(&route_id).await?;
+        let mut existing = self.gw.storage.routes().get(&route_id).await?;
         if let Some(route) = existing.as_mut() {
             self.refresh_route_client_capabilities(std::slice::from_mut(route))
                 .await?;
@@ -452,9 +429,8 @@ impl<'a> RouteModule<'a> {
             return Ok(existing.clone());
         }
 
-        self.admin.get_provider(&provider_id).await?;
+        self.get_provider(&provider_id).await?;
         let provider_model = self
-            .admin
             .gw
             .storage
             .provider_models()
@@ -546,7 +522,6 @@ impl<'a> RouteModule<'a> {
         let route_id = normalize_name(&input.route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&input.provider_model_id)?;
         let route = self
-            .admin
             .gw
             .storage
             .routes()
@@ -614,14 +589,14 @@ impl AdminService {
                 provider_model_id: input.provider_model_id,
             },
         };
-        RouteModule::new(self).bind(bind).await
+        RouteModule::new(&self.gw).bind(bind).await
     }
 
     pub async fn unbind_route(
         &self,
         input: UnbindRouteInput,
     ) -> anyhow::Result<Option<RouteConfig>> {
-        RouteModule::new(self)
+        RouteModule::new(&self.gw)
             .unbind(RouteUnbind {
                 route_id: input.route_id,
                 provider_id: input.provider_id,
@@ -636,7 +611,7 @@ impl AdminService {
         target_id: &str,
         level: ThinkingLevel,
     ) -> anyhow::Result<RouteConfig> {
-        RouteModule::new(self)
+        RouteModule::new(&self.gw)
             .reset_thinking_mapping(route_id, target_id, level)
             .await
     }
@@ -646,7 +621,7 @@ impl AdminService {
         route_id: &str,
         target_id: &str,
     ) -> anyhow::Result<RouteConfig> {
-        RouteModule::new(self)
+        RouteModule::new(&self.gw)
             .regenerate_thinking_map(route_id, target_id)
             .await
     }

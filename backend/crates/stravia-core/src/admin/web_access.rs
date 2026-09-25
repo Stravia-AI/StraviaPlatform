@@ -52,7 +52,7 @@ impl AdminService {
             input.local_engines.as_mut(),
         )?;
         let provider = self.web_provider_store()?.create(input).await?;
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
     }
 
@@ -96,7 +96,7 @@ impl AdminService {
         input.name = Some(name);
         input.local_engines = local_engines_supplied.then_some(local_engines);
         let provider = self.web_provider_store()?.update(id, input).await?;
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
     }
 
@@ -110,7 +110,7 @@ impl AdminService {
             ));
         }
         self.web_provider_store()?.delete(id).await?;
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(())
     }
 
@@ -175,7 +175,7 @@ impl AdminService {
             ));
         }
         store.save_settings(&settings).await?;
-        self.bump_config_epoch().await?;
+        crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(settings)
     }
 

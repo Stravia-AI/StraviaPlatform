@@ -15,14 +15,13 @@ impl RouteModule<'_> {
                 continue;
             };
             let provider_model = self
-                .admin
                 .gw
                 .storage
                 .provider_models()
                 .find(target.provider_id.trim(), model.trim())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-            let provider = self.admin.get_provider(target.provider_id.trim()).await?;
+            let provider = self.get_provider(target.provider_id.trim()).await?;
             let current = existing.iter().find(|current| {
                 current.provider_id().as_str() == target.provider_id.trim()
                     && current.model().map(|model| model.as_str()) == Some(model.as_str())
@@ -75,7 +74,7 @@ impl RouteModule<'_> {
                         .collect();
                 }
                 hide_unwritable_generated_controls(
-                    self.admin,
+                    self.gw,
                     &provider,
                     &provider_model.metadata,
                     &mut target.thinking_level_map,
@@ -85,7 +84,7 @@ impl RouteModule<'_> {
 
             let mut generated = generate_thinking_level_map(&provider_model.metadata);
             hide_unwritable_generated_controls(
-                self.admin,
+                self.gw,
                 &provider,
                 &provider_model.metadata,
                 &mut generated,
@@ -122,55 +121,21 @@ impl RouteModule<'_> {
                 );
                 continue;
             };
-            let provider = self.admin.get_provider(target.provider_id.trim()).await?;
+            let provider = self.get_provider(target.provider_id.trim()).await?;
             let provider_model = self
-                .admin
                 .gw
                 .storage
                 .provider_models()
                 .find(target.provider_id.trim(), model.trim())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-            let toggle_declared =
-                thinking_toggle_declared(self.admin, &provider, &provider_model.metadata);
-            let mut levels = Vec::new();
-            let mut controls = Vec::new();
-            for row in &target.thinking_level_map {
-                if thinking_control_writable(
-                    &provider,
-                    &provider_model.metadata,
-                    toggle_declared,
-                    &row.control,
-                ) {
-                    continue;
-                }
-                levels.push(row.level.as_str());
-                let kind = row.control.kind();
-                if !controls.contains(&kind) {
-                    controls.push(kind);
-                }
-            }
-            if levels.is_empty() {
-                continue;
-            }
-            return Err(coded_error(
-                "THINKING_CONTROL_UNREPRESENTABLE",
-                "Target protocol cannot write this Target Thinking Control",
-                serde_json::json!({
-                    "provider_id": target.provider_id,
-                    "model_id": model,
-                    "level": levels[0],
-                    "levels": levels,
-                    "control": controls[0],
-                    "controls": controls,
-                    "supported_controls": writable_thinking_control_kinds(
-                        &provider,
-                        &provider_model.metadata,
-                        toggle_declared,
-                    ),
-                    "protocol": provider.protocol,
-                }),
-            ));
+            ensure_thinking_map_representable(
+                self.gw,
+                &provider,
+                model,
+                &provider_model.metadata,
+                &target.thinking_level_map,
+            )?;
         }
         Ok(())
     }
@@ -211,20 +176,16 @@ impl RouteModule<'_> {
             .map(|model| model.as_str())
             .ok_or_else(|| anyhow::anyhow!("Provider-only Target has no Thinking Level Map"))?;
         let provider_model = self
-            .admin
             .gw
             .storage
             .provider_models()
             .find(target.provider_id().as_str(), model)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
-        let provider = self
-            .admin
-            .get_provider(target.provider_id().as_str())
-            .await?;
+        let provider = self.get_provider(target.provider_id().as_str()).await?;
         let mut generated = generate_thinking_level_map(&provider_model.metadata);
         hide_unwritable_generated_controls(
-            self.admin,
+            self.gw,
             &provider,
             &provider_model.metadata,
             &mut generated,
@@ -257,58 +218,49 @@ impl RouteModule<'_> {
         )
         .await
     }
+}
 
-    pub(crate) async fn refresh_generated_thinking_maps(
-        &self,
-        provider_id: &str,
-        provider_model_id: &str,
-        metadata: &crate::provider_models::ProviderModelMetadata,
-        apply: bool,
-    ) -> anyhow::Result<()> {
-        let provider = self.admin.get_provider(provider_id).await?;
-        let mut generated = generate_thinking_level_map(metadata);
-        hide_unwritable_generated_controls(self.admin, &provider, metadata, &mut generated);
-        let mut changes = Vec::new();
-        for route in self.admin.list_models().await? {
-            if !route.targets.iter().any(|target| {
-                target.provider_id().as_str() == provider_id
-                    && target.model().map(|model| model.as_str()) == Some(provider_model_id)
-            }) {
-                continue;
-            }
-            let mut targets = route_targets_for_update(&route);
-            for target in targets.iter_mut().filter(|target| {
-                target.provider_id == provider_id
-                    && target.model.as_deref() == Some(provider_model_id)
-            }) {
-                for row in &mut target.thinking_level_map {
-                    if row.source == ThinkingMappingSource::Generated {
-                        *row = generated
-                            .iter()
-                            .find(|generated_row| generated_row.level == row.level)
-                            .cloned()
-                            .expect("generated map contains every Thinking Level");
-                    }
-                }
-            }
-            self.ensure_thinking_controls_representable(&targets)
-                .await?;
-            changes.push((route.model_id, targets));
+pub(super) fn ensure_thinking_map_representable(
+    gw: &Gateway,
+    provider: &crate::db::models::Provider,
+    model_id: &str,
+    metadata: &crate::provider_models::ProviderModelMetadata,
+    map: &[crate::thinking::ThinkingLevelMapping],
+) -> anyhow::Result<()> {
+    let toggle_declared = thinking_toggle_declared(gw, provider, metadata);
+    let mut levels = Vec::new();
+    let mut controls = Vec::new();
+    for row in map {
+        if thinking_control_writable(provider, metadata, toggle_declared, &row.control) {
+            continue;
         }
-        if apply {
-            for (route_id, targets) in changes {
-                self.change_record(
-                    &route_id,
-                    UpdateRoute {
-                        targets: Some(targets),
-                        ..UpdateRoute::default()
-                    },
-                )
-                .await?;
-            }
+        levels.push(row.level.as_str());
+        let kind = row.control.kind();
+        if !controls.contains(&kind) {
+            controls.push(kind);
         }
-        Ok(())
     }
+    if levels.is_empty() {
+        return Ok(());
+    }
+    Err(coded_error(
+        "THINKING_CONTROL_UNREPRESENTABLE",
+        "Target protocol cannot write this Target Thinking Control",
+        serde_json::json!({
+            "provider_id": provider.id,
+            "model_id": model_id,
+            "level": levels[0],
+            "levels": levels,
+            "control": controls[0],
+            "controls": controls,
+            "supported_controls": writable_thinking_control_kinds(
+                provider,
+                metadata,
+                toggle_declared,
+            ),
+            "protocol": provider.protocol,
+        }),
+    ))
 }
 
 /// Generated rows never block a Route: when the catalog declares a Thinking
@@ -316,12 +268,12 @@ impl RouteModule<'_> {
 /// guessing a wire shape. Rows the user explicitly submits stay fail-closed in
 /// `ensure_thinking_controls_representable`.
 pub(super) fn hide_unwritable_generated_controls(
-    admin: &AdminService,
+    gw: &Gateway,
     provider: &crate::db::models::Provider,
     metadata: &crate::provider_models::ProviderModelMetadata,
     map: &mut [crate::thinking::ThinkingLevelMapping],
 ) {
-    let toggle_declared = thinking_toggle_declared(admin, provider, metadata);
+    let toggle_declared = thinking_toggle_declared(gw, provider, metadata);
     for row in map.iter_mut() {
         if row.source == ThinkingMappingSource::Generated
             && !thinking_control_writable(provider, metadata, toggle_declared, &row.control)
@@ -341,7 +293,7 @@ fn thinking_control_writable(
 }
 
 fn thinking_toggle_declared(
-    admin: &AdminService,
+    gw: &Gateway,
     provider: &crate::db::models::Provider,
     metadata: &crate::provider_models::ProviderModelMetadata,
 ) -> bool {
@@ -371,9 +323,7 @@ fn thinking_toggle_declared(
     else {
         return false;
     };
-    admin
-        .gw
-        .vendor_plugins
+    gw.vendor_plugins
         .descriptor(vendor_id)
         .ok()
         .and_then(|descriptor| {

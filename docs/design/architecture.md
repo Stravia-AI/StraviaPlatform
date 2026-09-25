@@ -817,6 +817,10 @@ Provider discovery 只负责提供当前可见的模型 ID。动态端点响应�
 
 `provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。`snapshot_state` 区分 `unregistered`、带来源的 `imported` 和保留可知来源的 `edited`；来源可为 Provider Catalog、Canonical Model 或 Discovery。ID-only discovery 不填充虚假的能力、模态或上下文默认值；只有未登记快照可在普通同步中首次获取真实规格。已导入和人工编辑规格保持不变，插件拥有的执行 metadata、presence 与生命周期仍按各自契约刷新。管理员显式 re-import 才整体替换规格。对账写入使用 expected revision 防止覆盖并发编辑；旧行保守迁移为来源未知的 edited，不重写 `metadata_json`。未知字段仍保存在完整 metadata 中，常用查询列与分档成本规则继续规范化到关系列。
 
+显式 re-import 由 Route module 统一协调。新快照、规范化成本规则、全部关联 Target 的 Generated Mapping 与 `config_epoch` 在同一存储原子操作中提交，禁用的 Route / Target 也在范围内。事务读取最新绑定与映射，只替换仍为 Generated 的行，保留 Overridden、Target ID 与其他策略字段。旧 revision、不可写的手工映射或最终 Vendor 写许可失效均阻止提交；提交前的持久化错误回滚整笔变更。映射未发生变化也不能跳过新规格下的可写性校验。数据库提交确认丢失时不推断已经回滚，调用方应重新读取状态，不自动重试。
+
+Catalog 读取与 Generated Mapping 的准备在事务前完成，事务中的校验回调不重新进入 Storage。SQLite 使用 `BEGIN IMMEDIATE`；PostgreSQL 按 `models` → `model_backends` 顺序获取事务级 `SHARE ROW EXCLUSIVE` 表锁，串行化期间的 Route 写入，避免漏掉并发新绑定的 Target；Memory 在统一锁序下先准备再写回。存储在提交前准备完整启用 Route 快照。Route module 跨存储调用持有当前实例的缓存写锁，提交后不再执行可失败的读取或逐条发布：成功返回后，新请求使用完整的新配置。其他实例仍通过 epoch 异步刷新，不承诺同时切换，也不把数据库与内存描述为同一事务。
+
 管理列表的每个 Provider Model 返回 `specification`，替代原有不完整的 `capabilities` 摘要。Core 从已保存 metadata 投影 `limit`（`context`、`input`、`output`）、`modalities`（`input`、`output`），以及 `reasoning`、`tool_call`、`structured_output`、`attachment`、`temperature` 五项可空声明；缺失功能保持 `null`，不补 `false`，缺失限额与模态组保持 `null`。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。此管理契约变更不修改持久化 schema、推理接口或运行时能力判定。
 
 WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开完整限额和三态功能。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格列在既有列筛选状态中保存五类 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中模态与功能已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。

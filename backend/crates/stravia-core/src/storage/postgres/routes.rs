@@ -74,56 +74,112 @@ pub(super) struct PostgresRouteStore {
 
 impl PostgresRouteStore {
     async fn load_routes(&self, active_only: bool) -> anyhow::Result<Vec<RouteConfig>> {
-        let where_clause = if active_only { " WHERE is_enabled" } else { "" };
-        let sql = format!(
-            "SELECT id, model_id, display_name, default_thinking_level, balance, \
-             is_enabled, \
-             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
-             FROM models{where_clause} ORDER BY created_at DESC"
-        );
-        let mut routes = sqlx::query_as::<_, RouteRow>(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(RouteRow::into_route)
-            .collect::<Vec<_>>();
-        for route in &mut routes {
-            route.targets = self.load_targets(&route.id).await?;
-            route.refresh_supported_thinking_levels();
-        }
-        Ok(routes)
-    }
-
-    async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<TargetConfig>> {
-        Ok(sqlx::query_as::<_, TargetRow>(
-            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority DESC, created_at ASC",
-        )
-        .bind(route_storage_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(TargetRow::into_target)
-        .collect())
+        let mut conn = self.pool.acquire().await?;
+        load_routes(&mut conn, active_only).await
     }
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<RouteConfig>> {
-        let route = sqlx::query_as::<_, RouteRow>(
-            "SELECT id, model_id, display_name, default_thinking_level, balance, \
-             is_enabled, \
-             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
-             FROM models WHERE model_id = $1",
-        )
-        .bind(route_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(route) = route else {
-            return Ok(None);
-        };
-        let mut route = route.into_route();
-        route.targets = self.load_targets(&route.id).await?;
-        route.refresh_supported_thinking_levels();
-        Ok(Some(route))
+        let mut conn = self.pool.acquire().await?;
+        load_route(&mut conn, route_id).await
     }
+}
+
+/// Load Route rows together with their Targets on an existing connection, so a
+/// caller transaction reads the same snapshot it is about to commit.
+pub(super) async fn load_routes(
+    conn: &mut sqlx::PgConnection,
+    active_only: bool,
+) -> anyhow::Result<Vec<RouteConfig>> {
+    let where_clause = if active_only { " WHERE is_enabled" } else { "" };
+    let sql = format!(
+        "SELECT id, model_id, display_name, default_thinking_level, balance, \
+         is_enabled, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
+         FROM models{where_clause} ORDER BY created_at DESC"
+    );
+    let mut routes = sqlx::query_as::<_, RouteRow>(sqlx::AssertSqlSafe(sql))
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(RouteRow::into_route)
+        .collect::<Vec<_>>();
+    for route in &mut routes {
+        route.targets = load_targets(conn, &route.id).await?;
+        route.refresh_supported_thinking_levels();
+    }
+    Ok(routes)
+}
+
+async fn load_targets(
+    conn: &mut sqlx::PgConnection,
+    route_storage_id: &str,
+) -> anyhow::Result<Vec<TargetConfig>> {
+    Ok(sqlx::query_as::<_, TargetRow>(
+        "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority DESC, created_at ASC",
+    )
+    .bind(route_storage_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .map(TargetRow::into_target)
+    .collect())
+}
+
+pub(super) async fn load_route(
+    conn: &mut sqlx::PgConnection,
+    route_id: &str,
+) -> anyhow::Result<Option<RouteConfig>> {
+    let route = sqlx::query_as::<_, RouteRow>(
+        "SELECT id, model_id, display_name, default_thinking_level, balance, \
+         is_enabled, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
+         FROM models WHERE model_id = $1",
+    )
+    .bind(route_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let mut route = route.into_route();
+    route.targets = load_targets(conn, &route.id).await?;
+    route.refresh_supported_thinking_levels();
+    Ok(Some(route))
+}
+
+/// 调用方已在事务中按 models → model_backends 顺序阻止并发 Route 写入；
+/// 此处读取最新绑定（含禁用项），只更新 Generated 行，不重建 Target。
+pub(super) async fn refresh_generated_target_maps(
+    conn: &mut sqlx::PgConnection,
+    provider_id: &str,
+    provider_model_id: &str,
+    metadata: &crate::provider_models::ProviderModelMetadata,
+    generated: &[crate::thinking::ThinkingLevelMapping],
+    validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+) -> anyhow::Result<()> {
+    let targets = sqlx::query_as::<_, (
+        String,
+        sqlx::types::Json<Vec<crate::thinking::ThinkingLevelMapping>>,
+    )>(
+        "SELECT id, thinking_level_map FROM model_backends WHERE provider_id = $1 AND model = $2 ORDER BY id",
+    )
+    .bind(provider_id)
+    .bind(provider_model_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, map) in targets {
+        let mut map = map.0;
+        let changed = crate::thinking::refresh_generated_thinking_level_map(&mut map, generated)?;
+        validate_map(metadata, &map)?;
+        if changed {
+            sqlx::query("UPDATE model_backends SET thinking_level_map = $1 WHERE id = $2")
+                .bind(sqlx::types::Json(&map))
+                .bind(&id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
