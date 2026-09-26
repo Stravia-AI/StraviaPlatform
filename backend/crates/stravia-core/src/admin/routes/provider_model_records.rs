@@ -514,8 +514,7 @@ impl RouteModule<'_> {
                 // 插件托管的运行时字段与既有 provenance。
                 let follows_upstream = matches!(incoming_state, SnapshotState::Imported { .. })
                     && !matches!(current.snapshot_state, SnapshotState::Edited { .. });
-                let first_import =
-                    follows_upstream && current.snapshot_state == SnapshotState::Unregistered;
+                let refresh_source = follows_upstream && current.snapshot_state != incoming_state;
                 let mut merged = if follows_upstream {
                     metadata.clone()
                 } else {
@@ -526,7 +525,7 @@ impl RouteModule<'_> {
                 merged.experimental = metadata.experimental.clone();
                 merged.extensions = metadata.extensions.clone();
                 let refreshed_metadata =
-                    (first_import || merged != current.metadata).then_some(merged);
+                    (refresh_source || merged != current.metadata).then_some(merged);
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
                     || current.metadata_source_provider_id != source.metadata_source_provider_id
@@ -535,7 +534,7 @@ impl RouteModule<'_> {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
                         expected_revision: current.revision,
-                        snapshot_state: first_import.then_some(incoming_state),
+                        snapshot_state: refresh_source.then_some(incoming_state),
                         metadata_source_provider_id: source.metadata_source_provider_id,
                         presence: ProviderModelPresence::Present,
                         lifecycle_status: metadata.status.clone(),
@@ -611,7 +610,11 @@ impl RouteModule<'_> {
         // reconciliation has committed.
         let publication_guard = discovered.write_fence().await?;
         let mut catalog_sources = BTreeMap::new();
-        if let Some(catalog_provider_id) = provider.preset_key.as_deref() {
+        if let Some(catalog_provider_id) = provider
+            .preset_key
+            .as_deref()
+            .or(discovered.catalog_id.as_deref())
+        {
             let scope = match self
                 .gw
                 .catalog_sync

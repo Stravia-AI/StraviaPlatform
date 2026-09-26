@@ -503,27 +503,12 @@ impl AdminService {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Provider profile `{}` is not installed", provider.id)
                     })?;
-                let declared_channel = descriptor
-                    .channels
-                    .iter()
-                    .find(|declared| declared.id == channel.id);
-                let declared_models_source = declared_channel
-                    .and_then(|declared| declared.default_models_source)
-                    .map(|source| source.as_str().to_owned());
-                let uses_catalog_scope = match provider.catalog_id.as_deref() {
-                    Some(catalog_id) => {
-                        self.gw.provider_catalog.contains_provider(catalog_id).await
-                    }
-                    None => false,
-                };
-                // Persisting the catalog marker is only meaningful for
-                // channels that consume the injected scope; account-discovery
-                // channels resolve it back into a live upstream request, so
-                // storing it would misreport the model source.
-                let models_source = (uses_catalog_scope
-                    && declared_channel.is_some_and(|declared| declared.consumes_catalog_models))
-                .then(|| stravia_vendor_sdk::MODELS_SOURCE_CATALOG.to_owned())
-                .or(declared_models_source);
+                let models_source = self
+                    .gw
+                    .provider_catalog
+                    .resolve_models_source(&descriptor, &channel.id, None)
+                    .await
+                    .map(str::to_owned);
                 let name =
                     normalize_name(name.as_deref().unwrap_or(&provider.name), "provider name")?;
                 let (credentials, auth_mode) = match (channel.auth_mode, credential) {
@@ -646,11 +631,12 @@ impl AdminService {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Vendor `{vendor}` does not declare channel `{channel}`")
                     })?;
-                let models_source = models_source.or_else(|| {
-                    channel
-                        .default_models_source
-                        .map(|source| source.as_str().to_owned())
-                });
+                let models_source = self
+                    .gw
+                    .provider_catalog
+                    .resolve_models_source(&descriptor, &channel.id, models_source.as_deref())
+                    .await
+                    .map(str::to_owned);
                 let oauth_requested = channel.auth.is_some();
                 if oauth_requested && !allow_oauth {
                     anyhow::bail!(
@@ -725,7 +711,7 @@ impl AdminService {
                         vendor: Some(vendor),
                         protocol,
                         base_url,
-                        preset_key: None,
+                        preset_key: descriptor.catalog_id.clone(),
                         channel: Some(channel.id.clone()),
                         models_source,
                         static_models,

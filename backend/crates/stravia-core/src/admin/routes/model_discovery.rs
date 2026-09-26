@@ -34,6 +34,7 @@ impl RouteModelDiscoveryError {
 
 pub(super) struct DiscoveredModels {
     pub(super) models: Vec<stravia_vendor_sdk::DiscoveredModel>,
+    pub(super) catalog_id: Option<String>,
     publications: Vec<VendorPublicationFence>,
 }
 
@@ -168,6 +169,7 @@ pub(super) async fn discover_provider_models(
             }
             return Ok(DiscoveredModels {
                 models: models.into_values().collect(),
+                catalog_id: prepared.descriptor().catalog_id.clone(),
                 publications,
             });
         };

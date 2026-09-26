@@ -169,6 +169,29 @@ impl ProviderCatalog {
             .is_some()
     }
 
+    /// 创建与运行时共用来源规则；缺省值由 Profile 决定，不取决于管理请求的创建分支。
+    pub(crate) async fn resolve_models_source<'a>(
+        &self,
+        descriptor: &'a stravia_vendor_sdk::ProviderDescriptor,
+        channel_id: &str,
+        saved: Option<&'a str>,
+    ) -> Option<&'a str> {
+        if let Some(source) = saved.map(str::trim).filter(|source| !source.is_empty()) {
+            return Some(source);
+        }
+        let channel = descriptor
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)?;
+        if channel.consumes_catalog_models
+            && let Some(catalog_id) = descriptor.catalog_id.as_deref()
+            && self.contains_provider(catalog_id).await
+        {
+            return Some(stravia_vendor_sdk::MODELS_SOURCE_CATALOG);
+        }
+        channel.default_models_source.map(|source| source.as_str())
+    }
+
     /// Render the catalog against the provider profiles actually available in
     /// this instance. A profile's `provider_id` is the selectable connection
     /// identity; `catalog_id` only links it to upstream branding and model

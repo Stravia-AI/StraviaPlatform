@@ -15,9 +15,15 @@ use stravia_core::Gateway;
 use stravia_core::admin::ProviderConfigurationPreviewInput;
 use stravia_core::config::GatewayConfig;
 use stravia_core::db::models::{
-    CreateProvider, ProviderCredentialInput, ProviderSourceInput, UpdateProvider,
+    CreateProvider, CreateProviderRecord, ProviderCredentialInput, ProviderSourceInput,
+    UpdateProvider,
 };
 use stravia_core::provider_catalog::CatalogError;
+use stravia_core::provider_models::{
+    NewProviderModelRecord, ProviderModelMetadata, ProviderModelPresence,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState, SourceStamp,
+};
+use stravia_runtime_contract::thinking::ThinkingLevel;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -54,6 +60,10 @@ impl FakeCatalog {
             .route("/providers.json", get(index))
             .route("/models.json", get(canonical))
             .route("/providers/{id}/models.json", get(scope))
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "glm-5.3"}]})) }),
+            )
             .with_state(Arc::clone(&state));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
@@ -182,6 +192,245 @@ fn create_catalog_provider(
         vendor_options: Default::default(),
         use_proxy: false,
     }
+}
+
+async fn reasoning_catalog() -> anyhow::Result<FakeCatalog> {
+    let catalog = FakeCatalog::start().await?;
+    catalog
+        .set_index(
+            "rev-1",
+            json!({
+                "zhipuai-coding-plan": catalog_entry(
+                    "zhipuai-coding-plan", "Zhipu AI Coding Plan",
+                    "@ai-sdk/openai-compatible", Some(&format!("{}/v1", catalog.base_url()))
+                ),
+                "openai": catalog_entry(
+                    "openai", "OpenAI", "@ai-sdk/openai",
+                    Some(&format!("{}/v1", catalog.base_url()))
+                )
+            }),
+        )
+        .await;
+    catalog.state.write().await.canonical = json!({
+        "zhipuai/glm-5.3": {
+            "id": "zhipuai/glm-5.3", "name": "GLM-5.3", "reasoning": true
+        }
+    });
+    let models = json!({
+        "glm-5.3": {
+            "id": "glm-5.3", "name": "GLM-5.3", "reasoning": true,
+            "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}]
+        },
+        "glm-4.6v": {
+            "id": "glm-4.6v", "name": "GLM-4.6V", "reasoning": true,
+            "reasoning_options": [{"type": "toggle"}]
+        }
+    });
+    catalog
+        .set_scope("zhipuai-coding-plan", 200, models.clone())
+        .await;
+    catalog.set_scope("openai", 200, models).await;
+    Ok(catalog)
+}
+
+fn editor_provider(catalog: &FakeCatalog, vendor: &str) -> CreateProvider {
+    CreateProvider {
+        name: Some(vendor.to_owned()),
+        source: ProviderSourceInput::Custom {
+            vendor: vendor.to_owned(),
+            channel: "default".to_owned(),
+            protocol: None,
+            base_url: format!("{}/v1", catalog.base_url()),
+            models_source: None,
+            static_models: None,
+        },
+        credential: ProviderCredentialInput::None,
+        vendor_options: Default::default(),
+        use_proxy: false,
+    }
+}
+
+#[tokio::test]
+async fn editor_created_provider_imports_scoped_reasoning_levels() -> anyhow::Result<()> {
+    let catalog = reasoning_catalog().await?;
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    let provider = gw
+        .admin()
+        .create_provider(editor_provider(&catalog, "zhipuai-coding-plan"))
+        .await?;
+    gw.admin().sync_provider_models(&provider.id).await?;
+    let model = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.3")
+        .await?;
+    assert_eq!(
+        stravia_core::thinking::visible_levels(&model.thinking_level_map),
+        [ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
+    );
+    let toggle = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-4.6v")
+        .await?;
+    assert_eq!(
+        stravia_core::thinking::visible_levels(&toggle.thinking_level_map),
+        [ThinkingLevel::Off, ThinkingLevel::Medium]
+    );
+    gw.shutdown().await;
+    drop(gw);
+    let reopened = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    let persisted = reopened
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.3")
+        .await?;
+    assert_eq!(
+        persisted.metadata.reasoning_options,
+        model.metadata.reasoning_options
+    );
+    reopened.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
+-> anyhow::Result<()> {
+    let catalog = reasoning_catalog().await?;
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    // 重现旧版编辑器已保存的连接，而不是通过修复后的创建入口造数据。
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "unlinked".to_owned(),
+            vendor: Some("zhipuai-coding-plan".to_owned()),
+            protocol: "openai-compatible".to_owned(),
+            base_url: format!("{}/v1", catalog.base_url()),
+            preset_key: None,
+            channel: Some("default".to_owned()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".to_owned(),
+            vendor_options: "{}".to_owned(),
+            auth_mode: "apikey".to_owned(),
+            use_proxy: false,
+        })
+        .await?;
+    for (model_id, edited) in [("glm-5.3", false), ("glm-4.6v", true)] {
+        let source = SourceStamp::Canonical {
+            model_id: format!("zhipuai/{model_id}"),
+        };
+        let mut metadata = json!({"id": model_id, "reasoning": true});
+        if edited {
+            metadata["reasoning_options"] = json!([{"type": "effort", "values": ["high"]}]);
+        }
+        gw.storage
+            .provider_models()
+            .create(NewProviderModelRecord {
+                provider_id: provider.id.clone(),
+                model_id: model_id.to_owned(),
+                source_kind: ProviderModelSourceKind::Discovered,
+                snapshot_state: if edited {
+                    SnapshotState::Edited {
+                        source: Some(source),
+                    }
+                } else {
+                    SnapshotState::Imported { source }
+                },
+                metadata_source_provider_id: None,
+                presence: ProviderModelPresence::Present,
+                selection_policy: ProviderModelSelectionPolicy::Auto,
+                metadata: ProviderModelMetadata::from_value(model_id, metadata)?,
+            })
+            .await?;
+    }
+    gw.admin().sync_provider_models(&provider.id).await?;
+    let model = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.3")
+        .await?;
+    assert_eq!(
+        stravia_core::thinking::visible_levels(&model.thinking_level_map),
+        [ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
+    );
+    assert!(model.can_reimport);
+    assert_eq!(
+        model.snapshot_state,
+        SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog {
+                provider_id: "zhipuai-coding-plan".to_owned()
+            }
+        }
+    );
+    let edited = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-4.6v")
+        .await?;
+    assert_eq!(
+        stravia_core::thinking::visible_levels(&edited.thinking_level_map),
+        [ThinkingLevel::High]
+    );
+    gw.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn profile_catalog_preserves_explicit_and_account_model_inventories() -> anyhow::Result<()> {
+    let catalog = reasoning_catalog().await?;
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    for (name, vendor, source, models) in [
+        (
+            "explicit",
+            "zhipuai-coding-plan",
+            Some(format!("{}/v1/models", catalog.base_url())),
+            None,
+        ),
+        (
+            "static",
+            "zhipuai-coding-plan",
+            None,
+            Some("glm-5.3".to_owned()),
+        ),
+        ("account", "openai", None, None),
+    ] {
+        let mut input = editor_provider(&catalog, vendor);
+        input.name = Some(name.to_owned());
+        if let ProviderSourceInput::Custom {
+            models_source,
+            static_models,
+            ..
+        } = &mut input.source
+        {
+            *models_source = source;
+            *static_models = models;
+        }
+        let provider = gw.admin().create_provider(input).await?;
+        gw.admin().sync_provider_models(&provider.id).await?;
+        let inventory = gw.admin().list_provider_models(&provider.id).await?;
+        assert_eq!(
+            inventory
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["glm-5.3"]
+        );
+        let model = gw
+            .admin()
+            .get_provider_model(&provider.id, "glm-5.3")
+            .await?;
+        assert_eq!(
+            stravia_core::thinking::visible_levels(&model.thinking_level_map),
+            [ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
+        );
+    }
+    gw.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

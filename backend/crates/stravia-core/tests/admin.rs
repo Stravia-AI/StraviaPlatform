@@ -550,6 +550,52 @@ async fn reimport_rejects_unwritable_overrides_without_changing_configuration() 
 }
 
 #[tokio::test]
+async fn synced_records_follow_upstream_reasoning_options() -> anyhow::Result<()> {
+    let (data_dir, gw) = build_gateway().await?;
+    let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
+    // 旧版目录只声明 reasoning，没有 reasoning_options：记录已带完整规格，
+    // 不能再被当成待补全的占位快照。
+    scope["gpt-5.4"]["reasoning"] = serde_json::json!(true);
+    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    let provider = gw
+        .admin()
+        .create_provider(catalog_provider_input_for(&gw, "spec-provider", "minimax").await?)
+        .await?;
+    gw.admin().sync_provider_models(&provider.id).await?;
+    let imported = gw
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.4")
+        .await?;
+    assert!(imported.metadata.reasoning_options.is_none());
+
+    scope["gpt-5.4"]["reasoning_options"] =
+        serde_json::json!([{"type": "effort", "values": ["low", "high", "max"]}]);
+    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    gw.admin().sync_provider_models(&provider.id).await?;
+
+    let refreshed = gw
+        .admin()
+        .get_provider_model(&provider.id, "gpt-5.4")
+        .await?;
+    assert_eq!(
+        refreshed
+            .metadata
+            .reasoning_options
+            .as_deref()
+            .and_then(|options| options.iter().find_map(|option| match option {
+                stravia_core::provider_models::ReasoningOption::Effort { values } => {
+                    Some(values.clone())
+                }
+                _ => None,
+            }))
+            .expect("effort reasoning option"),
+        vec![Some("low".to_string()), Some("high".to_string()), Some("max".to_string())]
+    );
+    gw.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result<()> {
     use stravia_core::thinking::ThinkingMappingSource;
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};

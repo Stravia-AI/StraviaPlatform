@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Provider connections created through the service picker now retain their profile's catalog association and discover scoped model metadata, including reasoning effort levels. Existing connections with missing associations recover through model synchronization without a schema migration; explicit inventories, account-level discovery, and manually edited specifications remain intact.
 - Explicit Provider Model re-import now atomically updates its snapshot, cost rules, generated Target mappings, and configuration notification while preserving current manual mappings and Target identities. Stale revisions, unsupported manual controls, and errors during transactional writes no longer leave partially updated snapshots or Target mappings; successful responses make the complete update available to new requests on the current instance.
 - Current tool continuations keep the same Interaction and follow the actual source Run when edited history makes strict Generation matching fall back to an earlier parent. Generation links and model input remain unchanged; historical tool-result replay and ambiguous sources still cannot trigger a merge. Existing observations are not regrouped.
 - Request-record token filters now temporarily include estimated input for running model turns before upstream usage arrives, including standalone system instructions and tool definitions rather than only message history, so large requests can appear immediately. Confirmed usage replaces the estimate; estimates never enter usage totals or billing.

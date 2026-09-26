@@ -386,14 +386,17 @@ impl Gateway {
             let descriptor = plugin.descriptor().provider(vendor_id).ok_or_else(|| {
                 anyhow::anyhow!("loaded vendor plugin does not support the provider")
             })?;
-            let effective_models_source =
-                connection.provider.channel.as_deref().and_then(|channel| {
-                    effective_discovery_source(
+            let effective_models_source = if kind == Operation::Discover {
+                self.provider_catalog
+                    .resolve_models_source(
                         descriptor,
-                        channel,
+                        connection.provider.channel.as_deref().unwrap_or_default(),
                         connection.provider.models_source.as_deref(),
                     )
-                });
+                    .await
+            } else {
+                None
+            };
             let catalog_models = if kind == Operation::Discover
                 && effective_models_source == Some(MODELS_SOURCE_CATALOG)
                 // Only channels that consume the injected scope warrant a
@@ -463,8 +466,14 @@ impl Gateway {
                     .as_ref()
                     .map(|credential| credential.status_version),
             };
-            let (mut provider, use_proxy, origins) =
-                provider_snapshot(descriptor, connection, model, kind, context)?;
+            let (mut provider, use_proxy, origins) = provider_snapshot(
+                descriptor,
+                &connection,
+                model,
+                kind,
+                effective_models_source,
+                context,
+            )?;
             if let Some(models) = catalog_models {
                 provider
                     .operation_metadata
@@ -810,28 +819,12 @@ impl Gateway {
     }
 }
 
-fn effective_discovery_source<'a>(
-    descriptor: &'a stravia_vendor_sdk::ProviderDescriptor,
-    channel: &str,
-    saved: Option<&'a str>,
-) -> Option<&'a str> {
-    let declared = descriptor
-        .channels
-        .iter()
-        .find(|candidate| candidate.id == channel)
-        .and_then(|channel| channel.default_models_source)
-        .map(|source| source.as_str());
-    match saved.map(str::trim).filter(|source| !source.is_empty()) {
-        Some(source) => Some(source),
-        None => declared,
-    }
-}
-
 fn provider_snapshot(
     descriptor: &stravia_vendor_sdk::ProviderDescriptor,
-    connection: ConnectionSnapshot,
+    connection: &ConnectionSnapshot,
     model: Option<&str>,
     kind: Operation,
+    discovery_source: Option<&str>,
     context: &VendorCallContext,
 ) -> anyhow::Result<(ProviderSnapshot, bool, BTreeSet<String>)> {
     let use_proxy = connection.provider.use_proxy;
@@ -853,15 +846,6 @@ fn provider_snapshot(
             .to_owned();
     }
     anyhow::ensure!(!base_url.trim().is_empty(), "provider base URL is missing");
-    let discovery_source = (kind == Operation::Discover)
-        .then(|| {
-            effective_discovery_source(
-                descriptor,
-                &channel,
-                connection.provider.models_source.as_deref(),
-            )
-        })
-        .flatten();
     // OAuth/Guest 返回值不能成为新的目的地址授权来源。
     let origins = resolve_permissions(
         descriptor,
