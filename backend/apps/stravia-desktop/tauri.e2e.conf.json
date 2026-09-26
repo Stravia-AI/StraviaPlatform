@@ -1,5 +1,5 @@
 {
-  "identifier": "com.stravia.ai-gateway.desktop-e2e",
+  "identifier": "cn.stravia.agent-infra.desktop-e2e",
   "build": {
     "beforeBuildCommand": {
       "script": "bun run build:web:desktop-e2e",
