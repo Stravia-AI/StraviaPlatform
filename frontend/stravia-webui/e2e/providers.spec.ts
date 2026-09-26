@@ -260,6 +260,69 @@ test('provider editor selects a service before validating its configuration', as
   await expect(apiKey).toHaveValue('')
 })
 
+test('Provider draft submission locks editing and dismissal until a failed write settles', async ({ page }) => {
+  const previewGate = Promise.withResolvers<void>()
+  const writeGate = Promise.withResolvers<void>()
+  let previewStarted = false
+  let writes = 0
+  await page.route('**/api/v1/providers/configuration-preview', async (route) => {
+    previewStarted = true
+    const input = route.request().postDataJSON() as { base_url: string }
+    await previewGate.promise
+    await route.fulfill({ json: { data: { base_url: input.base_url, issues: [], network_permissions: [] } } })
+  })
+  await page.route('**/api/v1/providers', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    writes += 1
+    await writeGate.promise
+    await route.fulfill({ status: 500, json: { error: 'Fixture write rejected' } })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Connect (first )?service/ }).click()
+  await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
+  const name = page.getByLabel('Connection name', { exact: true })
+  const baseUrl = page.getByLabel('Base URL', { exact: true })
+  const secret = page.getByLabel('API key', { exact: true })
+  await name.fill('Unsubmitted fixture')
+  await baseUrl.fill('https://fixture.example/v1')
+  await secret.fill('fixture-only-provider-secret')
+  await page.getByRole('button', { name: 'Connect', exact: true }).click()
+  try {
+    await expect.poll(() => previewStarted).toBe(true)
+    await expect(name).toBeDisabled()
+    await expect(baseUrl).toBeDisabled()
+    await expect(secret).toBeDisabled()
+    await expect(page.getByRole('switch')).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Back', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Close service setup' })).toBeDisabled()
+    await expect(page.getByRole('tab', { name: 'Choose service' })).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
+    await page.mouse.click(5, 400)
+    await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
+    expect(writes).toBe(0)
+
+    previewGate.resolve()
+    await expect.poll(() => writes).toBe(1)
+    await expect(name).toBeDisabled()
+    await expect(page.locator('form button[type="submit"]')).toBeDisabled()
+    writeGate.resolve()
+    await expect(name).toBeEnabled()
+    await expect(name).toHaveValue('Unsubmitted fixture')
+    await expect(baseUrl).toHaveValue('https://fixture.example/v1')
+    await expect(secret).toHaveValue('fixture-only-provider-secret')
+    await expect(page.getByText(/Fixture write rejected/)).toBeVisible()
+    expect(writes).toBe(1)
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Connection details' })).toHaveCount(0)
+  } finally {
+    previewGate.resolve()
+    writeGate.resolve()
+  }
+})
+
 test('editing a Provider keeps saved credentials write-only', async ({ page }) => {
   const credentialProvider = {
     id: 'credential-provider',
@@ -518,6 +581,84 @@ test('OAuth Provider connection view saves and binds automatically when authoriz
   await expect.poll(() => updateBody).toMatchObject({ base_url: provider.base_url })
   await expect.poll(() => bindBody).toEqual({ session_id: 'oauth-session-1' })
   await expect(page.locator('[data-sonner-toast]')).toContainText('Connection settings saved')
+})
+
+test('Provider draft keeps partial save failure visible and blocks navigation during OAuth binding', async ({
+  page,
+}) => {
+  const provider = {
+    id: 'partial-provider',
+    name: 'Original account',
+    vendor: 'openai-codex',
+    protocol: 'open-responses',
+    base_url: 'https://api.openai.com/v1',
+    use_proxy: false,
+    channel: 'codex',
+    vendor_options: {},
+    configured_credential_fields: [],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  const bindGate = Promise.withResolvers<void>()
+  let saved = provider
+  let writes = 0
+  let binds = 0
+  let authorizations = 0
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [saved] } }))
+  await page.route('**/api/v1/providers/partial-provider', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    writes += 1
+    saved = { ...provider, ...route.request().postDataJSON(), base_url: 'https://normalized.example/v1' }
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.route('**/api/v1/providers/partial-provider/oauth/bind', async (route) => {
+    binds += 1
+    await bindGate.promise
+    await route.fulfill({ status: 400, json: { error: 'Fixture authorization rejected' } })
+  })
+  await page.route('**/api/v1/oauth/sessions/init', async (route) => {
+    authorizations += 1
+    await route.fallback()
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', (route) =>
+    route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } }),
+  )
+
+  await page.goto('/providers/partial-provider?view=connection')
+  const name = page.getByLabel('Connection name', { exact: true })
+  const baseUrl = page.getByLabel('Base URL', { exact: true })
+  await name.fill('Updated account')
+  await baseUrl.fill('https://draft.example/v1')
+  const popupPromise = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Sign in again' }).click()
+  await (await popupPromise).close()
+  try {
+    await expect.poll(() => binds).toBe(1)
+    await expect(name).toBeDisabled()
+    await expect(baseUrl).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Use another account' })).toBeDisabled()
+    await page.getByRole('link', { name: 'Available models', exact: true }).click()
+    await expect(page).toHaveURL('/providers/partial-provider?view=connection')
+    await expect(page.getByRole('button', { name: 'Save connection' })).toBeDisabled()
+    expect(writes).toBe(1)
+    expect(authorizations).toBe(1)
+
+    bindGate.resolve()
+    await expect(
+      page.getByText(/Connection settings were saved, but the authorization could not be attached:/),
+    ).toBeVisible()
+    await expect(name).toBeEnabled()
+    await expect(name).toHaveValue('Updated account')
+    await expect(baseUrl).toHaveValue('https://draft.example/v1')
+    expect(saved.name).toBe('Updated account')
+    expect(writes).toBe(1)
+    expect(binds).toBe(1)
+    await page.getByRole('link', { name: 'Available models', exact: true }).click()
+    await expect(page).toHaveURL('/providers/partial-provider?view=models')
+  } finally {
+    bindGate.resolve()
+  }
 })
 
 test('Provider Model specifications preserve direction, precision, and unknown states without per-row requests', async ({
@@ -1462,6 +1603,48 @@ test('completed OAuth satisfies session credential fields and submits the provid
   expect(JSON.stringify(createBody)).not.toContain(fixtureSecret)
   createGate.resolve()
   await expect(page).toHaveURL(/\/providers\/devin-provider\?view=connection/)
+})
+
+test('Provider draft discards OAuth initialization completed after configuration changes', async ({ page }) => {
+  const initGate = Promise.withResolvers<void>()
+  let initializing = false
+  let cancelled = false
+  let writes = 0
+  await page.route('**/api/v1/oauth/sessions/init', async (route) => {
+    initializing = true
+    await initGate.promise
+    await route.fallback()
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/cancel', async (route) => {
+    cancelled = true
+    await route.fulfill({ json: { data: null } })
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', (route) =>
+    route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } }),
+  )
+  await page.route('**/api/v1/providers/oauth', async (route) => {
+    writes += 1
+    await route.fulfill({ status: 400, json: { error: 'Stale authorization must not save' } })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Connect (first )?service/ }).click()
+  await page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ }).click()
+  const popupPromise = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Sign in with OAuth' }).click()
+  const popup = await popupPromise
+  try {
+    await expect.poll(() => initializing).toBe(true)
+    await page.getByLabel('Base URL', { exact: true }).fill('https://new-draft.example/v1')
+    initGate.resolve()
+    await expect.poll(() => cancelled).toBe(true)
+    await expect(page.getByRole('button', { name: 'Sign in with OAuth' })).toBeEnabled()
+    await expect(page.getByLabel('Base URL', { exact: true })).toHaveValue('https://new-draft.example/v1')
+    expect(writes).toBe(0)
+  } finally {
+    initGate.resolve()
+    if (!popup.isClosed()) await popup.close()
+  }
 })
 
 test('manual OAuth fallback shows one full callback URL field', async ({ page }) => {

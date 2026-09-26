@@ -26,6 +26,7 @@ interface Props {
   useProxy: boolean
   mode: 'connect' | 'reconnect'
   providerName?: string
+  disabled?: boolean
   onStateChange?: (sessionId: string | undefined, ready: boolean) => void
   class?: string
 }
@@ -38,6 +39,7 @@ let {
   useProxy,
   mode,
   providerName = '',
+  disabled = false,
   onStateChange,
   class: className = '',
 }: Props = $props()
@@ -137,7 +139,7 @@ export async function cancel(): Promise<void> {
 }
 
 async function begin(): Promise<void> {
-  if (starting) return
+  if (disabled || starting) return
   if (!vendorId || !channel) {
     toast.error(m.provider_oauth_authorization_unavailable())
     return
@@ -169,7 +171,7 @@ async function begin(): Promise<void> {
     )
     if (generation !== sessionGeneration) {
       popup?.close()
-      void admin.oauth.cancel(session.session_id).catch(() => undefined)
+      void admin.oauth.cancel(session.session_id).catch((error) => toast.error(localizeBackendErrorMessage(error)))
       return
     }
     oauthSession = session
@@ -188,10 +190,12 @@ async function begin(): Promise<void> {
 }
 
 async function reopen(): Promise<void> {
+  if (disabled) return
   if (currentAuthUrl) await openExternalUrl(currentAuthUrl)
 }
 
 async function completeManual(): Promise<void> {
+  if (disabled || completing) return
   const sessionId = oauthSession?.session_id
   const value = callbackUrl.trim()
   if (!sessionId || !value) return
@@ -210,6 +214,7 @@ async function completeManual(): Promise<void> {
 }
 
 async function completeManualInput(): Promise<void> {
+  if (disabled || completing) return
   const sessionId = oauthSession?.session_id
   const inputType = manualInput?.type
   const value = manualValue.trim()
@@ -230,6 +235,12 @@ async function completeManualInput(): Promise<void> {
 }
 
 export async function updateProxy(nextUseProxy: boolean): Promise<void> {
+  if (disabled) return
+  // 初始化尚未返回时没有可更新的会话；废弃以旧代理发起的授权。
+  if (starting && !oauthSession) {
+    await cancel()
+    return
+  }
   const sessionId = oauthSession?.session_id
   if (!sessionId) return
   if (oauthStatus?.status === 'ready' || oauthStatus?.status === 'error') {
@@ -256,7 +267,7 @@ onDestroy(() => {
   sessionGeneration += 1
   starting = false
   const sessionId = resetLocalSession()
-  if (sessionId) void admin.oauth.cancel(sessionId).catch(() => undefined)
+  if (sessionId) void admin.oauth.cancel(sessionId).catch((error) => toast.error(localizeBackendErrorMessage(error)))
 })
 </script>
 
@@ -277,7 +288,7 @@ onDestroy(() => {
                 : m.provider_oauth_authorization_reconnect_warning()}
           </p>
         </div>
-        <Button type="button" onclick={() => void begin()} disabled={starting}>
+        <Button type="button" onclick={() => void begin()} disabled={disabled || starting}>
           {#if starting}<Spinner data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
               data-icon="inline-start" />{/if}
           {flow === 'manual'
@@ -324,23 +335,23 @@ onDestroy(() => {
         </div>
         <div class="flex flex-wrap justify-end gap-2">
           {#if oauthStatus?.status === 'error' || oauthStatusQuery.isError}
-            <Button type="button" variant="outline" onclick={() => void begin()}>
+            <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
               <RefreshCwIcon data-icon="inline-start" />{m.common_try_again()}
             </Button>
           {:else if oauthStatus?.status === 'ready'}
-            <Button type="button" variant="outline" onclick={() => void begin()}>
+            <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
               {m.provider_oauth_authorization_use_another_account()}
             </Button>
           {:else}
             {#if currentAuthUrl}
-              <Button type="button" variant="outline" onclick={() => void reopen()}>
+              <Button type="button" variant="outline" {disabled} onclick={() => void reopen()}>
                 <ExternalLinkIcon data-icon="inline-start" />{oauthStatus?.status === 'pending' &&
                 oauthStatus.last_error
                   ? m.provider_oauth_authorization_try_sign_again()
                   : m.provider_oauth_authorization_reopen_sign_page()}
               </Button>
             {/if}
-            <Button type="button" variant="ghost" onclick={() => void cancel()}>
+            <Button type="button" variant="ghost" {disabled} onclick={() => void cancel()}>
               {m.provider_oauth_authorization_cancel_sign()}
             </Button>
           {/if}
@@ -375,6 +386,7 @@ onDestroy(() => {
                   id={manualInputId}
                   class="font-technical"
                   bind:value={manualValue}
+                  {disabled}
                   resetKey={oauthSession.session_id}
                   autocomplete="off"
                   oninput={() => (callbackError = '')} />
@@ -383,6 +395,7 @@ onDestroy(() => {
                   id={manualInputId}
                   class="font-technical"
                   bind:value={manualValue}
+                  {disabled}
                   autocomplete="off"
                   oninput={() => (callbackError = '')} />
               {/if}
@@ -391,7 +404,7 @@ onDestroy(() => {
               type="button"
               variant="outline"
               onclick={() => void completeManualInput()}
-              disabled={completing || !manualValue.trim()}>
+              disabled={disabled || completing || !manualValue.trim()}>
               {#if completing}<Spinner data-icon="inline-start" />{/if}
               {m.provider_oauth_authorization_complete()}
             </Button>
@@ -410,13 +423,14 @@ onDestroy(() => {
               id={callbackInputId}
               class="font-technical"
               bind:value={callbackUrl}
+              {disabled}
               oninput={() => (callbackError = '')}
               placeholder="http://localhost:1457/auth/callback?code=…&state=…" />
             <Button
               type="button"
               variant="outline"
               onclick={() => void completeManual()}
-              disabled={completing || !callbackUrl.trim()}>
+              disabled={disabled || completing || !callbackUrl.trim()}>
               {#if completing}<Spinner data-icon="inline-start" />{/if}
               {m.provider_oauth_authorization_complete()}
             </Button>

@@ -567,6 +567,13 @@ _避免使用_：Egress Wire Value、Native Reasoning Option、Mapped Effort
 Provider 是管理员保存的一条上游连接，引用一个 Vendor、供应商身份及其 channel，并保存 Protocol、已确认的服务地址、普通选项和连接范围的上游凭据。供应商身份表示这条连接属于哪类上游接入；保存连接的 UUID 区分具体连接记录，同一供应商身份可以有多条连接，两者不得互换。Provider 是调用与凭据信任的连接边界，不是 Vendor Plugin、Provider Catalog Entry 或客户端 Route。
 _避免使用_：Vendor（当指这条保存记录）、把供应商身份当作连接 UUID
 
+## Provider Connection Draft
+
+Provider Connection Draft 是 WebUI 新建与编辑 Provider 共用的未提交连接状态，由 `provider-connection-draft.ts` 的 controller 与 `.svelte.ts` 响应式壳拥有。它统一管理配置预览失效、提交互斥、OAuth ready 自动保存，以及配置写入后绑定授权的顺序；配置已保存但绑定失败是部分成功，保留草稿并明确提示。创建与更新的写入差异、保存后刷新与导航留在适配器；OAuth 弹窗与会话操作、字段呈现和离开拦截留在视图。Core 仍拥有配置验证、凭据权限和持久化规则，Provider 写入与 Route 绑定不合并。
+
+提交从预览到写入及绑定结束期间禁止编辑、重复授权、关闭面板和应用内导航；等待交互式 OAuth 登录时不锁定。刷新或关闭浏览器页签只能触发原生离开提示，不能保证阻止强制退出或取消已发出的写入。
+_避免使用_：通用表单状态机、Core 草稿、把部分成功当作全部失败
+
 ## Provider Allowance
 
 Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不改变 Provider 的路由资格或健康状态。

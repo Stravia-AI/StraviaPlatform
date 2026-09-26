@@ -20,6 +20,7 @@ interface Props {
   satisfiedSecretFields?: string[]
   issues?: ProviderValidationIssue[]
   idPrefix: string
+  disabled?: boolean
   onChanged?: () => void
 }
 
@@ -31,6 +32,7 @@ let {
   satisfiedSecretFields = [],
   issues = [],
   idPrefix,
+  disabled = false,
   onChanged,
 }: Props = $props()
 
@@ -118,6 +120,7 @@ function setText(field: VendorConfigField, value: string): void {
             <Switch
               id={controlId}
               checked={fieldValue(field) === true}
+              {disabled}
               aria-invalid={invalid || undefined}
               onCheckedChange={(checked: boolean) => setValue(field, checked)} />
             {#each currentIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
@@ -134,6 +137,7 @@ function setText(field: VendorConfigField, value: string): void {
               <Select.Root
                 type="single"
                 value={typeof fieldValue(field) === 'boolean' ? String(fieldValue(field)) : ''}
+                {disabled}
                 onValueChange={(value: string) => setValue(field, value === 'true')}>
                 <Select.Trigger id={controlId} class="w-full" aria-invalid={invalid || undefined}>
                   {typeof fieldValue(field) === 'boolean'
@@ -156,6 +160,7 @@ function setText(field: VendorConfigField, value: string): void {
               <Select.Root
                 type="single"
                 value={stringValue(field)}
+                {disabled}
                 onValueChange={(value: string) => setValue(field, value)}>
                 <Select.Trigger id={controlId} class="w-full" aria-invalid={invalid || undefined}>
                   {field.secret && availableSecretFields.has(field.key) && !stringValue(field)
@@ -179,6 +184,7 @@ function setText(field: VendorConfigField, value: string): void {
                 value={stringValue(field)}
                 resetKey={`${idPrefix}:${field.key}`}
                 required={field.required && !availableSecretFields.has(field.key)}
+                {disabled}
                 maxlength={field.max_length ?? undefined}
                 aria-invalid={invalid || undefined}
                 autocomplete="off"
@@ -193,6 +199,7 @@ function setText(field: VendorConfigField, value: string): void {
                 class="min-h-28 font-technical"
                 value={stringValue(field)}
                 required={field.required}
+                {disabled}
                 maxlength={field.max_length ?? undefined}
                 aria-invalid={invalid || undefined}
                 oninput={(event: Event & { currentTarget: HTMLTextAreaElement }) =>
@@ -204,6 +211,7 @@ function setText(field: VendorConfigField, value: string): void {
                 value={stringValue(field)}
                 resetKey={`${idPrefix}:${field.key}`}
                 required={field.required && !availableSecretFields.has(field.key)}
+                {disabled}
                 maxlength={field.max_length ?? undefined}
                 pattern={field.pattern ?? undefined}
                 aria-invalid={invalid || undefined}
@@ -220,6 +228,7 @@ function setText(field: VendorConfigField, value: string): void {
                 type={field.kind.type === 'int' || field.kind.type === 'decimal' ? 'number' : 'text'}
                 value={stringValue(field)}
                 required={field.required}
+                {disabled}
                 min={field.min ?? undefined}
                 max={field.max ?? undefined}
                 step={field.kind.type === 'int' ? 1 : field.kind.type === 'decimal' ? 'any' : undefined}
