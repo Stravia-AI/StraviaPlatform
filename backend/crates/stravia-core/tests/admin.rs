@@ -589,7 +589,11 @@ async fn synced_records_follow_upstream_reasoning_options() -> anyhow::Result<()
                 _ => None,
             }))
             .expect("effort reasoning option"),
-        vec![Some("low".to_string()), Some("high".to_string()), Some("max".to_string())]
+        vec![
+            Some("low".to_string()),
+            Some("high".to_string()),
+            Some("max".to_string())
+        ]
     );
     gw.shutdown().await;
     Ok(())

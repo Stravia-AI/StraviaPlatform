@@ -1589,10 +1589,15 @@ async fn target_thinking_explicit_level_rejects_all_hidden_targets_without_upstr
         .model_turn
         .execute(TurnInput::new(Principal::new(key.id), request))
         .await;
-    let error = result.err().expect("an explicit level must not be silently dropped");
+    let error = result
+        .err()
+        .expect("an explicit level must not be silently dropped");
     assert_eq!(error.code, "thinking_level_unsupported");
     assert!(captured.lock().is_empty(), "no upstream call is permitted");
-    assert!(second_capture.lock().is_empty(), "no upstream call is permitted");
+    assert!(
+        second_capture.lock().is_empty(),
+        "no upstream call is permitted"
+    );
 }
 
 #[tokio::test]
