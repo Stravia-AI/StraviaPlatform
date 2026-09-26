@@ -1521,10 +1521,12 @@ fn redact_text_token_without_markers(token: &str, report: &mut RedactionReport) 
     let trimmed = trimmed_start.trim_end_matches(text_wrapper);
     if let Some(marker) = trimmed.find("://") {
         let url_start = trimmed[..marker]
-            .rfind(|character: char| {
+            .char_indices()
+            .rev()
+            .find(|(_, character)| {
                 !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
             })
-            .map_or(0, |boundary| boundary + 1);
+            .map_or(0, |(index, character)| index + character.len_utf8());
         let candidate = &trimmed[url_start..];
         let (redacted, url_report) = redact_url(candidate);
         if !url_report.kinds.is_empty() {
@@ -1617,6 +1619,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn input_preview_preserves_unicode_url_prefixes_while_redacting_credentials() {
+        let text = concat!(
+            "接口https://example.test/cb?api_key=never-persist&safe=yes ",
+            "🔗https://example.test/public ",
+            "éhttps://user:never-persist@example.test/private ",
+            "地址：https://example.test/path?token=never-persist"
+        );
+
+        let preview = input_preview(text.to_owned(), &ProtectedSecrets::default());
+
+        assert_eq!(
+            preview,
+            concat!(
+                "接口https://example.test/cb?api_key=***&safe=yes ",
+                "🔗https://example.test/public ",
+                "éhttps://***:***@example.test/private ",
+                "地址：https://example.test/path?token=***"
+            )
+        );
+    }
 
     #[test]
     fn credentials_are_removed_from_every_supported_location() {
