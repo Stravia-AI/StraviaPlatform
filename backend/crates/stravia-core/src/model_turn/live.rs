@@ -579,7 +579,7 @@ fn completion_stream(spec: CompletionStreamSpec) -> super::CanonicalEventStream 
 
 fn execute_inner(
     executor: LiveModelTurnExecutor,
-    mut input: TurnInput,
+    input: TurnInput,
     model_turn_id: String,
     routing_estimate: u64,
 ) -> impl Future<Output = Result<ModelTurn, ModelTurnError>> + Send {
@@ -593,47 +593,6 @@ fn execute_inner(
             .resolve(&input.request.model)
             .cloned()
             .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
-
-        // 与 generation_chain 的推理继承判定同口径：客户端给出任何推理指令
-        // （level/effort/budget/display/enabled）都算「已指定」，Route 默认档不介入。
-        let mut default_level_applied = false;
-        if !input.request.reasoning.enabled
-            && input.request.reasoning.level.is_none()
-            && input.request.reasoning.effort.is_none()
-            && input.request.reasoning.budget_tokens.is_none()
-            && input.request.reasoning.display.is_none()
-            && let Some(value) = route.default_thinking_level.as_deref()
-        {
-            match ThinkingLevel::from_wire(value) {
-                Ok(level) => {
-                    input.request.reasoning.level = Some(level);
-                    default_level_applied = true;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        route = %route.model_id,
-                        value,
-                        "ignoring invalid Route default Thinking Level"
-                    );
-                }
-            }
-        }
-
-        if let Some(requested) = input.request.reasoning.level {
-            input.request.reasoning.level = match requested.clamp(&route.supported_thinking_levels)
-            {
-                Some(level) => Some(level),
-                // 默认档是管理员偏好而非客户端要求：配置漂移导致支持集为空时
-                // 退回未指定，不打断整条 Route 的流量。
-                None if default_level_applied => None,
-                None => {
-                    return Err(ModelTurnError::new(
-                        "thinking_level_unsupported",
-                        "Route has no Supported Thinking Level for this request",
-                    ));
-                }
-            };
-        }
 
         if input.authorization == ModelTurnAuthorization::CapabilityGrant
             && stravia_media::contains_images(&input.request)
@@ -1135,8 +1094,57 @@ async fn prepare_attempt(
         ));
     }
 
+    // 每次尝试都从原请求解析，避免前一个 Target 的钳制结果污染 failover。
+    let mut provider_request = input.request.clone();
+    let mut default_level_applied = false;
+    // 与 generation_chain 的继承判定一致：任何显式推理指令都阻止默认档介入。
+    if !provider_request.reasoning.enabled
+        && provider_request.reasoning.level.is_none()
+        && provider_request.reasoning.effort.is_none()
+        && provider_request.reasoning.budget_tokens.is_none()
+        && provider_request.reasoning.display.is_none()
+        && let Some(value) = route.default_thinking_level.as_deref()
+    {
+        match ThinkingLevel::from_wire(value) {
+            Ok(level) => {
+                provider_request.reasoning.level = Some(level);
+                default_level_applied = true;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    route = %route.model_id,
+                    value,
+                    "ignoring invalid Route default Thinking Level"
+                );
+            }
+        }
+    }
+    if let Some(requested) = provider_request.reasoning.level {
+        let mut supported = ThinkingLevel::ALL;
+        let mut count = 0;
+        for level in ThinkingLevel::ALL {
+            if crate::thinking::mapping_control(&target.thinking_level_map, level)
+                .is_some_and(|control| !control.is_hidden())
+            {
+                supported[count] = level;
+                count += 1;
+            }
+        }
+        provider_request.reasoning.level = match requested.clamp(&supported[..count]) {
+            Some(level) => Some(level),
+            // 默认档只是偏好；显式要求则必须换到有可用档位的 Target。
+            None if default_level_applied => None,
+            None => {
+                return Err(AttemptFailure::reroutable(
+                    "thinking_level_unsupported",
+                    "Target has no Supported Thinking Level for this request",
+                ));
+            }
+        };
+    }
+
     gateway
-        .select_vendor_protocol(&mut execution, &input.request, &preparation_context)
+        .select_vendor_protocol(&mut execution, &provider_request, &preparation_context)
         .await
         .map_err(classify_vendor_error)?;
     let protocol_hint = execution.protocol().trim().to_owned();
@@ -1164,7 +1172,6 @@ async fn prepare_attempt(
         &actual_model,
         execution.use_proxy(),
     );
-    let mut provider_request = input.request.clone();
     let thinking_source = crate::history_marker::ThinkingSource {
         namespace: target_namespace.clone(),
         protocol: protocol_identity.clone(),

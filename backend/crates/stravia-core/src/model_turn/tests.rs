@@ -1202,6 +1202,75 @@ async fn execute_forwards_extra_headers_without_overriding_authorization() {
     assert!(!head.contains("attacker-key"));
 }
 
+fn restricted_thinking_map(levels: &[ThinkingLevel]) -> Vec<crate::thinking::ThinkingLevelMapping> {
+    ThinkingLevel::ALL
+        .into_iter()
+        .map(|level| crate::thinking::ThinkingLevelMapping {
+            level,
+            control: if levels.contains(&level) {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                    value: level.as_str().into(),
+                }
+            } else {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Hidden
+            },
+            source: crate::thinking::ThinkingMappingSource::Overridden,
+        })
+        .collect()
+}
+
+fn thinking_target(provider_id: &str, levels: &[ThinkingLevel], priority: i32) -> CreateTarget {
+    CreateTarget {
+        provider_id: provider_id.into(),
+        model: Some("upstream-model".into()),
+        enabled: true,
+        priority: Some(priority),
+        first_token_timeout_ms: None,
+        target_retry_budget: Some(0),
+        target_cooldown_ms: None,
+        thinking_level_map: restricted_thinking_map(levels),
+    }
+}
+
+async fn set_thinking_targets(gateway: &Gateway, model: &str, targets: Vec<CreateTarget>) {
+    gateway
+        .admin()
+        .update_model(
+            model,
+            crate::db::models::UpdateRoute {
+                targets: Some(targets),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update thinking Targets");
+}
+
+async fn add_captured_thinking_provider(gateway: &Gateway, base_url: String) -> String {
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Second capture".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "custom".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await
+        .expect("second Provider");
+    add_test_provider_model(gateway, &provider.id).await;
+    provider.id
+}
+
 async fn captured_reasoning_effort(
     gateway: &crate::Gateway,
     captured: &Arc<Mutex<Vec<u8>>>,
@@ -1326,6 +1395,204 @@ async fn route_default_thinking_level_clamps_to_the_nearest_supported_level() {
             .and_then(|value| value.as_str()),
         Some("high")
     );
+}
+
+#[tokio::test]
+async fn target_thinking_uses_selected_mapping_instead_of_route_intersection() {
+    // Distinct cases: no shared levels, a shared level below the request, and a
+    // Hidden first Target that must reroute with the original requested level.
+    for (first_levels, second_levels, requested, first_selected, expected) in [
+        (
+            vec![ThinkingLevel::Low],
+            vec![ThinkingLevel::High],
+            ThinkingLevel::Low,
+            true,
+            "low",
+        ),
+        (
+            vec![ThinkingLevel::Low, ThinkingLevel::High],
+            vec![ThinkingLevel::Low],
+            ThinkingLevel::High,
+            true,
+            "high",
+        ),
+        (
+            Vec::new(),
+            vec![ThinkingLevel::Low, ThinkingLevel::High],
+            ThinkingLevel::Medium,
+            false,
+            "high",
+        ),
+    ] {
+        let (_data_dir, gateway, first_capture, key) =
+            gateway_with_captured_thinking("target-thinking-model", true, "ok", None).await;
+        let first_provider = gateway
+            .admin()
+            .get_model("target-thinking-model")
+            .await
+            .expect("Route")
+            .targets[0]
+            .provider_id()
+            .to_string();
+        let (second_url, second_capture) = serve_openai_capture_text("ok").await;
+        let second_provider = add_captured_thinking_provider(&gateway, second_url).await;
+        set_thinking_targets(
+            &gateway,
+            "target-thinking-model",
+            vec![
+                thinking_target(&first_provider, &first_levels, 20),
+                thinking_target(&second_provider, &second_levels, 10),
+            ],
+        )
+        .await;
+        let mut request = AiRequest::new("target-thinking-model", Vec::new());
+        request.reasoning.level = Some(requested);
+        let selected_capture = if first_selected {
+            &first_capture
+        } else {
+            &second_capture
+        };
+        let body = captured_reasoning_effort(
+            &gateway,
+            selected_capture,
+            &key.id,
+            "target-thinking-model",
+            request,
+        )
+        .await;
+        assert_eq!(body["reasoning_effort"], expected, "request {requested:?}");
+        let unselected_capture = if first_selected {
+            &second_capture
+        } else {
+            &first_capture
+        };
+        assert!(
+            unselected_capture.lock().is_empty(),
+            "unselected Target must not receive an upstream request"
+        );
+    }
+}
+
+#[tokio::test]
+async fn target_thinking_prefers_upward_then_falls_back_downward() {
+    for (requested, expected) in [
+        (ThinkingLevel::Medium, "high"),
+        (ThinkingLevel::Xhigh, "high"),
+    ] {
+        let (_data_dir, gateway, captured, key) =
+            gateway_with_captured_thinking("nearest-thinking-model", true, "ok", None).await;
+        let provider = gateway
+            .admin()
+            .get_model("nearest-thinking-model")
+            .await
+            .expect("Route")
+            .targets[0]
+            .provider_id()
+            .to_string();
+        set_thinking_targets(
+            &gateway,
+            "nearest-thinking-model",
+            vec![thinking_target(
+                &provider,
+                &[ThinkingLevel::Low, ThinkingLevel::High],
+                10,
+            )],
+        )
+        .await;
+        let mut request = AiRequest::new("nearest-thinking-model", Vec::new());
+        request.reasoning.level = Some(requested);
+        let body = captured_reasoning_effort(
+            &gateway,
+            &captured,
+            &key.id,
+            "nearest-thinking-model",
+            request,
+        )
+        .await;
+        assert_eq!(body["reasoning_effort"], expected, "request {requested:?}");
+    }
+}
+
+#[tokio::test]
+async fn target_thinking_failover_restarts_from_original_level() {
+    let (_data_dir, gateway, captured, key) =
+        gateway_with_captured_thinking("failover-thinking-model", true, "ok", None).await;
+    let success_provider = gateway
+        .admin()
+        .get_model("failover-thinking-model")
+        .await
+        .expect("Route")
+        .targets[0]
+        .provider_id()
+        .to_string();
+    let (failure_url, failure_calls) = serve_openai_status(
+        429,
+        serde_json::json!({
+            "error": {"message": "quota exhausted", "type": "insufficient_quota"}
+        }),
+    )
+    .await;
+    let failure_provider = add_captured_thinking_provider(&gateway, failure_url).await;
+    set_thinking_targets(
+        &gateway,
+        "failover-thinking-model",
+        vec![
+            thinking_target(&failure_provider, &[ThinkingLevel::Low], 20),
+            thinking_target(
+                &success_provider,
+                &[ThinkingLevel::Low, ThinkingLevel::High],
+                10,
+            ),
+        ],
+    )
+    .await;
+    let mut request = AiRequest::new("failover-thinking-model", Vec::new());
+    request.reasoning.level = Some(ThinkingLevel::High);
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "failover-thinking-model",
+        request,
+    )
+    .await;
+    assert_eq!(failure_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(body["reasoning_effort"], "high");
+}
+
+#[tokio::test]
+async fn target_thinking_explicit_level_rejects_all_hidden_targets_without_upstream_call() {
+    let (_data_dir, gateway, captured, key) =
+        gateway_with_captured_thinking("hidden-thinking-model", true, "ok", None).await;
+    let provider = gateway
+        .admin()
+        .get_model("hidden-thinking-model")
+        .await
+        .expect("Route")
+        .targets[0]
+        .provider_id()
+        .to_string();
+    let (second_url, second_capture) = serve_openai_capture_text("ok").await;
+    let second_provider = add_captured_thinking_provider(&gateway, second_url).await;
+    set_thinking_targets(
+        &gateway,
+        "hidden-thinking-model",
+        vec![
+            thinking_target(&provider, &[], 20),
+            thinking_target(&second_provider, &[], 10),
+        ],
+    )
+    .await;
+    let mut request = AiRequest::new("hidden-thinking-model", Vec::new());
+    request.reasoning.level = Some(ThinkingLevel::High);
+    let result = gateway
+        .model_turn
+        .execute(TurnInput::new(Principal::new(key.id), request))
+        .await;
+    let error = result.err().expect("an explicit level must not be silently dropped");
+    assert_eq!(error.code, "thinking_level_unsupported");
+    assert!(captured.lock().is_empty(), "no upstream call is permitted");
+    assert!(second_capture.lock().is_empty(), "no upstream call is permitted");
 }
 
 #[tokio::test]

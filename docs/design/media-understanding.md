@@ -102,7 +102,7 @@ Media Understanding 使用 `id = "media-understanding"`、Revision 3 的 interna
 - `MediaOutputValidator` 的 Artifact provenance；
 - `TurnChainStore` 的 continuation 和 branch。
 
-管理员配置的逻辑 Model 必须启用，且每个 Target 都必须支持图片输入。管理员还必须从该逻辑 Model 的 `supported_thinking_levels` 中选择思考等级；每次内部 Model Turn 都携带该等级。隐藏 Media Model 不需要出现在 API Key 的普通 `model_ids` 中；平台 Gate 开启后，有效 Key 通过 capability-owned authorization 间接执行它，但不能把该隐藏 Model 当普通客户端 Model 直接调用。
+管理员配置的逻辑 Model 必须启用，且每个 Target 都必须支持图片输入。管理员还必须从该逻辑 Model 的 `supported_thinking_levels` 中选择思考等级；这是媒体配置沿用的保守共同能力校验，并非普通 Model Turn 的执行准入或 Route 钳制。每次内部 Model Turn 都携带配置的原档位，由实际选中的 Target 按其非 Hidden Mapping 独立匹配；Target failover 仍从该原档位重新匹配。隐藏 Media Model 不需要出现在 API Key 的普通 `model_ids` 中；平台 Gate 开启后，有效 Key 通过 capability-owned authorization 间接执行它，但不能把该隐藏 Model 当普通客户端 Model 直接调用。
 
 ## 6. 当前图片与文档处理边界
 
