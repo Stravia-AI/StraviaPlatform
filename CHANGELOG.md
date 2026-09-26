@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Command Code and other known plugin-owned protocols now apply target-specific thinking-history replay independently of host codec registration. Client-replayed Responses reasoning no longer causes a local HTTP 400 after history compaction or edits; readable reasoning and tool-result associations are preserved without relaxing protocol validation or history matching.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

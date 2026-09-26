@@ -1178,7 +1178,10 @@ async fn prepare_attempt(
         actual_model: actual_model.clone(),
         target_id: target_key.clone(),
     };
-    let thinking_replayed = if let Some(egress) = egress {
+    // 私有 codec 由 guest 持有；历史转换使用共享协议身份，不要求宿主注册对应 codec。
+    let replay_endpoint =
+        stravia_runtime_contract::protocol::ids::ProtocolEndpoint::from_identifier(&protocol_hint);
+    let thinking_replayed = if let Some(egress) = replay_endpoint {
         stravia_protocol_codec::transform::prepare_thinking_replay(
             &mut provider_request,
             egress,
@@ -2091,15 +2094,16 @@ async fn drive_vendor_attempt(
                     .take()
                     .unwrap_or_else(|| request.clone());
                 crate::router::clear_previous_response_id(&mut replay);
-                let stripped = stravia_protocol_codec::registry::ProtocolRegistry::global()
-                    .resolve_alias(&prepared.protocol_hint)
-                    .is_some_and(|egress| {
-                        stravia_protocol_codec::transform::prepare_thinking_replay(
-                            &mut replay,
-                            egress,
-                            |_| false,
-                        )
-                    });
+                let stripped = stravia_runtime_contract::protocol::ids::ProtocolEndpoint::from_identifier(
+                    &prepared.protocol_hint,
+                )
+                .is_some_and(|egress| {
+                    stravia_protocol_codec::transform::prepare_thinking_replay(
+                        &mut replay,
+                        egress,
+                        |_| false,
+                    )
+                });
                 if stripped
                     && policy.state.try_record_recovery_failure(
                         &selected_target_key(&target),

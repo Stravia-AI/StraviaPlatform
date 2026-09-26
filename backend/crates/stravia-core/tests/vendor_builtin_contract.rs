@@ -2034,6 +2034,108 @@ async fn command_code_legacy_catalog_marker_still_discovers_from_the_connection_
 }
 
 #[tokio::test]
+async fn command_code_replays_unmatched_responses_reasoning_before_tool_continuation()
+-> anyhow::Result<()> {
+    let (base_url, server) = local_upstream(3, |request| {
+        if request.path == "/alpha/generate" {
+            MockResponse::bytes(
+                "text/event-stream",
+                b"{\"type\":\"text-delta\",\"text\":\"continued\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n".to_vec(),
+            )
+        } else {
+            MockResponse::json(json!({"ok": true}))
+        }
+    })
+    .await?;
+    let (_directory, gateway) = gateway().await?;
+    install_distributed_vendor_plugin(&gateway, "command-code").await?;
+    let (route, token) = provider_route_and_key(
+        &gateway,
+        "command-code-replay",
+        ProviderSourceInput::Custom {
+            vendor: "command-code".into(),
+            channel: "default".into(),
+            protocol: Some("command-code".into()),
+            base_url,
+            models_source: None,
+            static_models: None,
+        },
+        "deepseek/deepseek-v4.1-flash",
+        ProviderCredentialInput::Fields {
+            values: BTreeMap::from([("apiKey".into(), json!("local-replay-key"))]),
+        },
+        Default::default(),
+        json!({"id": "deepseek/deepseek-v4.1-flash", "reasoning": true, "tool_call": true}),
+    )
+    .await?;
+    // 压缩或编辑后的历史没有可复用父链；可读思考仍须进入后续工具轮的上下文。
+    let request = json!({
+        "model": route,
+        "stream": false,
+        "store": false,
+        "input": [
+            {"role": "user", "content": "Continue the repository investigation."},
+            {"type": "reasoning",
+             "summary": [{"type": "summary_text", "text": "Check the selected branch."}],
+             "content": [{"type": "reasoning_text", "text": "Read its build configuration first."}],
+             "encrypted_content": "foreign-reasoning-state"},
+            {"type": "function_call", "call_id": "call_read", "name": "read",
+             "arguments": "{\"path\":\"build.conf\"}"},
+            {"type": "function_call_output", "call_id": "call_read", "output": "KERNEL_BRANCH=6.18"}
+        ],
+        "tools": [{"type": "function", "name": "read", "parameters": {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]
+        }}]
+    });
+    let response = stravia_core::proxy::server::create_router(gateway)
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request)?))?,
+        )
+        .await?;
+    let status = response.status();
+    let response: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024 * 1024).await?)?;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], "completed");
+    assert_eq!(response["output"][0]["content"][0]["text"], "continued");
+
+    let requests = server.await??;
+    let generated = requests
+        .iter()
+        .find(|request| request.path == "/alpha/generate")
+        .expect("continuation reached the local upstream");
+    let body: Value = serde_json::from_slice(&generated.body)?;
+    let messages = body["params"]["messages"].as_array().expect("messages");
+    let parts = messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    for text in [
+        "Check the selected branch.",
+        "Read its build configuration first.",
+    ] {
+        assert!(
+            parts
+                .iter()
+                .any(|part| part["type"] == "text" && part["text"] == text)
+        );
+    }
+    assert!(
+        parts
+            .iter()
+            .any(|part| part["type"] == "tool-call" && part["toolCallId"] == "call_read")
+    );
+    assert!(parts.iter().any(|part| part["type"] == "tool-result"
+        && part["toolCallId"] == "call_read"
+        && part["output"]["value"] == "KERNEL_BRANCH=6.18"));
+    assert!(!String::from_utf8_lossy(&generated.body).contains("foreign-reasoning-state"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn command_code_admin_option_reaches_initialization_and_inference_headers()
 -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(3, |request| {
