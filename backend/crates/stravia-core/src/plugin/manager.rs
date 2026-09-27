@@ -890,8 +890,14 @@ impl VendorPlugins {
                 continue;
             }
             if let Some(old) = &old
-                && Version::parse(&old.version)
-                    .is_ok_and(|version| bundle.loaded.descriptor().version <= version)
+                && Version::parse(&old.version).is_ok_and(|version| {
+                    let bundled_version = &bundle.loaded.descriptor().version;
+                    bundled_version < &version
+                        || (bundled_version == &version
+                            && stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                                &Sha256::digest(bundle.component).into(),
+                            ) == old.digest)
+                })
             {
                 continue;
             }

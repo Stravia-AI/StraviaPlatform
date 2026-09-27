@@ -133,28 +133,51 @@ async fn a_newer_bundle_automatically_updates_a_trusted_installation_and_its_ori
 }
 
 #[tokio::test]
-async fn a_bundle_does_not_replace_equal_version_bytes_or_downgrade_a_trusted_installation()
+async fn a_bundle_replaces_equal_version_bytes_even_without_the_previous_artifact()
 -> anyhow::Result<()> {
-    for artifact in ["lifecycle-base-same.wasm", "lifecycle-base-local.wasm"] {
+    for remove_artifact in [false, true] {
         let directory = tempfile::tempdir()?;
         let first = gateway(directory.path()).await?;
         let bundled = installed(&first).await?;
-        let previous = install(&first, artifact).await?;
+        let previous = install(&first, "lifecycle-base-same.wasm").await?;
+        assert_eq!(previous.version, bundled.version);
         assert_ne!(previous.name, bundled.name);
-        assert!(
-            semver::Version::parse(&previous.version)? >= semver::Version::parse(&bundled.version)?
-        );
         drop(first);
         seed_previous_builtin(directory.path()).await?;
+        if remove_artifact {
+            // 内嵌安装不会保存旧字节；模拟更新宿主后只有旧摘要的真实启动状态。
+            std::fs::remove_dir_all(DataPaths::new(directory.path()).plugins().join("artifacts"))?;
+        }
 
         let restarted = gateway(directory.path()).await?;
-        let retained = installed(&restarted).await?;
-        assert_eq!(retained.source, PluginSource::Builtin);
-        assert_eq!(retained.version, previous.version);
-        assert_eq!(retained.name, previous.name);
-        assert_eq!(retained.status, "ready");
-        assert!(retained.pending_update.is_none());
+        let updated = installed(&restarted).await?;
+        assert_eq!(updated.source, PluginSource::Builtin);
+        assert_eq!(updated.version, bundled.version);
+        assert_eq!(updated.name, bundled.name);
+        assert_eq!(updated.status, "ready");
+        assert!(updated.pending_update.is_none());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bundle_does_not_downgrade_a_trusted_installation() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let first = gateway(directory.path()).await?;
+    let bundled = installed(&first).await?;
+    let previous = install(&first, "lifecycle-base-local.wasm").await?;
+    assert_ne!(previous.name, bundled.name);
+    assert!(semver::Version::parse(&previous.version)? > semver::Version::parse(&bundled.version)?);
+    drop(first);
+    seed_previous_builtin(directory.path()).await?;
+
+    let restarted = gateway(directory.path()).await?;
+    let retained = installed(&restarted).await?;
+    assert_eq!(retained.source, PluginSource::Builtin);
+    assert_eq!(retained.version, previous.version);
+    assert_eq!(retained.name, previous.name);
+    assert_eq!(retained.status, "ready");
+    assert!(retained.pending_update.is_none());
     Ok(())
 }
 
@@ -183,7 +206,7 @@ struct Connection {
 }
 
 #[tokio::test]
-async fn restoring_unavailable_plugin_preserves_data_across_display_contract_changes()
+async fn an_unavailable_builtin_is_automatically_restored_preserving_data_across_display_contract_changes()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let first = gateway(directory.path()).await?;
@@ -217,19 +240,6 @@ async fn restoring_unavailable_plugin_preserves_data_across_display_contract_cha
     pool.close().await;
 
     let restarted = gateway(directory.path()).await?;
-    assert_eq!(installed(&restarted).await?.status, "unavailable");
-    let preview = restarted
-        .admin()
-        .preview_builtin_vendor_plugin("base")
-        .await?;
-    assert!(preview.discarded_data.is_empty());
-    restarted
-        .admin()
-        .confirm_vendor_plugin(ConfirmPluginUpdate {
-            preview_id: preview.id,
-            allow_data_discard: false,
-        })
-        .await?;
     let after = restarted
         .admin()
         .get_provider(&connected.provider_id)
