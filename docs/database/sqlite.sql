@@ -667,6 +667,8 @@ CREATE INDEX model_turns_analytics_idx ON model_turn_observations(started_at, ro
 
 CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_id, started_at, id);
 
+CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
+
 CREATE INDEX observation_events_expiry_idx ON observation_events(expires_at, sequence);
 
 CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id, sequence);
@@ -695,6 +697,8 @@ CREATE INDEX rejected_requests_started_idx
 CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occurred_at DESC, id);
 
 CREATE INDEX target_attempts_analytics_idx ON target_attempt_observations(started_at, provider_id, upstream_model, target_id, status);
+
+CREATE INDEX target_attempts_run_status_idx ON target_attempt_observations(run_id, status);
 
 CREATE INDEX target_attempts_turn_idx ON target_attempt_observations(model_turn_id, started_at, id);
 

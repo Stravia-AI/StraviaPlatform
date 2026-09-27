@@ -1544,6 +1544,13 @@ CREATE INDEX model_turns_interaction_idx ON public.model_turn_observations USING
 
 
 --
+-- Name: model_turns_run_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX model_turns_run_status_idx ON public.model_turn_observations USING btree (run_id, status);
+
+
+--
 -- Name: observation_events_expiry_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1625,6 +1632,13 @@ CREATE INDEX rejected_requests_window_idx ON public.rejected_request_observation
 --
 
 CREATE INDEX target_attempts_analytics_idx ON public.target_attempt_observations USING btree (started_at, provider_id, upstream_model, target_id, status);
+
+
+--
+-- Name: target_attempts_run_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX target_attempts_run_status_idx ON public.target_attempt_observations USING btree (run_id, status);
 
 
 --
