@@ -52,11 +52,7 @@ fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
     })).unwrap();
     let before = serde_json::to_value(&original).unwrap();
     let mut compatible = original.clone();
-    assert!(!super::prepare_thinking_replay(
-        &mut compatible,
-        OPEN_RESPONSES_2026_04_24,
-        |_| true
-    ));
+    assert!(!super::prepare_thinking_replay(&mut compatible, |_| true));
     assert_eq!(
         native.encode_request(&compatible).unwrap().body["input"][0]["encrypted_content"],
         "secret"
@@ -69,9 +65,7 @@ fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
         GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
     ] {
         let mut replay = original.clone();
-        assert!(super::prepare_thinking_replay(&mut replay, target, |_| {
-            false
-        }));
+        assert!(super::prepare_thinking_replay(&mut replay, |_| { false }));
         let pair = ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, target)
             .unwrap();
@@ -121,11 +115,7 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
         2,
         AiItem::function_call_output("call_1", json!("lookup result")),
     );
-    assert!(super::prepare_thinking_replay(
-        &mut request,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        |_| false
-    ));
+    assert!(super::prepare_thinking_replay(&mut request, |_| false));
     assert_eq!(request.items.len(), 3);
     assert_eq!(
         request.items[0]
@@ -148,11 +138,7 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     blocks.push(ContentBlock::Compaction {
         encrypted_content: "compaction-secret".into(),
     });
-    assert!(!super::prepare_thinking_replay(
-        &mut request,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        |_| false
-    ));
+    assert!(!super::prepare_thinking_replay(&mut request, |_| false));
     assert!(matches!(
         pair.encode_request(&request),
         Err(TransformError::Unrepresentable { .. })
@@ -178,20 +164,12 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
         },
     );
     let mut same = original.clone();
-    assert!(!super::prepare_thinking_replay(
-        &mut same,
-        ANTHROPIC_MESSAGES_2023_06_01,
-        |_| true
-    ));
+    assert!(!super::prepare_thinking_replay(&mut same, |_| true));
     let encoded = native.encode_request(&same).unwrap().body.to_string();
     assert!(encoded.contains("signed"));
     assert!(encoded.contains("hidden"));
     let mut foreign = original.clone();
-    assert!(super::prepare_thinking_replay(
-        &mut foreign,
-        ANTHROPIC_MESSAGES_2023_06_01,
-        |_| false
-    ));
+    assert!(super::prepare_thinking_replay(&mut foreign, |_| false));
     let body = native.encode_request(&foreign).unwrap().body;
     assert_eq!(
         body["messages"][0]["content"][0],
@@ -208,19 +186,17 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         )
         .unwrap();
+    // 来源可证明时保留签名；Chat 承载不了签名与 redacted，由 codec 忽略，
+    // 明文仍走原生 reasoning_content，不混入正文。
     let mut replay = original;
-    assert!(super::prepare_thinking_replay(
-        &mut replay,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        |_| true
-    ));
+    assert!(!super::prepare_thinking_replay(&mut replay, |_| true));
     let body = chat.encode_request(&replay).unwrap().body;
+    assert_eq!(body["messages"][0]["reasoning_content"], "visible");
     assert!(
-        body["messages"][0]["content"]
+        !body["messages"][0]["content"]
             .to_string()
             .contains("visible")
     );
-    assert!(body["messages"][0].get("reasoning_content").is_none());
     assert!(!body.to_string().contains("signed"));
     assert!(!body.to_string().contains("hidden"));
 }
@@ -239,11 +215,8 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
         name: "lookup".into(),
         arguments: "{}".into(),
     }]);
-    assert!(super::prepare_thinking_replay(
-        &mut request,
-        OPEN_RESPONSES_2026_04_24,
-        |_| true
-    ));
+    // 可证明来源的混合条目原样交给 codec；Responses encoder 自行拆出独立 reasoning item。
+    assert!(!super::prepare_thinking_replay(&mut request, |_| true));
     let body = native.encode_request(&request).unwrap().body;
     assert_eq!(body["input"][0]["encrypted_content"], "secret");
     assert_eq!(body["input"][0]["content"][0]["text"], "detail");
@@ -256,19 +229,11 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         )
         .unwrap();
-    assert!(super::prepare_thinking_replay(
-        &mut request,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        |_| false
-    ));
-    request.items[2].content = MessageContent::Blocks(vec![ContentBlock::Unknown {
+    assert!(super::prepare_thinking_replay(&mut request, |_| false));
+    request.items[1].content = MessageContent::Blocks(vec![ContentBlock::Unknown {
         raw: json!({"type":"future_hard_content"}),
     }]);
-    assert!(!super::prepare_thinking_replay(
-        &mut request,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        |_| false
-    ));
+    assert!(!super::prepare_thinking_replay(&mut request, |_| false));
     assert!(matches!(
         pair.encode_request(&request),
         Err(TransformError::Unrepresentable { .. })

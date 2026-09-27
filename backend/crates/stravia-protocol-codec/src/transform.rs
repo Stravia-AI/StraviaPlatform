@@ -98,6 +98,12 @@ pub struct ThinkingCarrierFacts {
     pub stream_unprotected_summaries: bool,
 }
 
+/// 受保护推理是否只能回放给签发它的同一模型。Anthropic 同一部署内跨模型的签名
+/// 交由上游自行校验；Gemini thought signature 未承诺跨模型可用，保守按模型绑定。
+pub fn protected_thinking_binds_model(protocol: Protocol) -> bool {
+    matches!(protocol, Protocol::GoogleGemini)
+}
+
 pub struct ProtocolTransform;
 
 impl ProtocolTransform {
@@ -940,7 +946,7 @@ fn request_loss_paths(
             continue;
         };
         for (block_index, block) in blocks.iter().enumerate() {
-            if !request_block_representable(pair.egress.protocol, message.role, block) {
+            if !request_block_representable(pair.egress.protocol, block) {
                 lost.push(format!("messages[{message_index}].content[{block_index}]"));
             }
             if matches!(
@@ -1022,18 +1028,25 @@ fn gemini_drops_schema_constraint(value: &Value) -> bool {
 
 fn request_block_representable(
     target: Protocol,
-    role: stravia_runtime_contract::protocol::ir::Role,
     block: &stravia_runtime_contract::protocol::ir::ContentBlock,
 ) -> bool {
     use stravia_runtime_contract::protocol::ir::ContentBlock;
 
+    // 思考块由 thinking replay 按来源剥离受保护载荷，再由出口 codec 决定原生承载或
+    // 降级为正文；无法承载的受保护载荷按契约忽略，不属于意外丢失。
+    if matches!(
+        block,
+        ContentBlock::Thinking { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::RedactedThinking { .. }
+    ) {
+        return true;
+    }
     match target {
         Protocol::AnthropicMessages => matches!(
             block,
             ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
-                | ContentBlock::Thinking { .. }
-                | ContentBlock::RedactedThinking { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
                 | ContentBlock::ServerToolUse { .. }
@@ -1045,7 +1058,6 @@ fn request_block_representable(
                 | ContentBlock::Image { .. }
                 | ContentBlock::File { .. }
                 | ContentBlock::Video { .. }
-                | ContentBlock::Thinking { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
                 | ContentBlock::ExecutableCode { .. }
@@ -1059,25 +1071,15 @@ fn request_block_representable(
                 | ContentBlock::File { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
-                | ContentBlock::Thinking {
-                    signature: None,
-                    ..
-                }
         ),
-        Protocol::OpenResponses => {
-            matches!(
-                block,
-                ContentBlock::Text { .. }
-                    | ContentBlock::Image { .. }
-                    | ContentBlock::File { .. }
-                    | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. }
-            ) || (role == stravia_runtime_contract::protocol::ir::Role::Assistant
-                && matches!(
-                    block,
-                    ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
-                ))
-        }
+        Protocol::OpenResponses => matches!(
+            block,
+            ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::File { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. }
+        ),
         Protocol::BedrockConverse => matches!(
             block,
             ContentBlock::Text { .. }
@@ -1085,7 +1087,6 @@ fn request_block_representable(
                     source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 { .. },
                     ..
                 }
-                | ContentBlock::Thinking { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
         ),
@@ -1093,7 +1094,6 @@ fn request_block_representable(
             block,
             ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
-                | ContentBlock::Thinking { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
         ),
@@ -1103,10 +1103,6 @@ fn request_block_representable(
                 | ContentBlock::Image { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
-                | ContentBlock::Thinking {
-                    signature: None,
-                    ..
-                }
         ),
         Protocol::GatewayLanguageModel => matches!(
             block,
@@ -1116,10 +1112,6 @@ fn request_block_representable(
                 | ContentBlock::Video { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
-                | ContentBlock::Thinking {
-                    signature: None,
-                    ..
-                }
         ),
         Protocol::CommandCode => matches!(
             block,
@@ -1127,12 +1119,7 @@ fn request_block_representable(
                 | ContentBlock::Image { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
-                | ContentBlock::Thinking {
-                    signature: None,
-                    ..
-                }
         ),
-        // 来源约束由 thinking replay 处理；Devin 原生思考可携带签名回放。
         // 图片仍必须是 inline base64。
         Protocol::DevinConnect => matches!(
             block,
@@ -1143,9 +1130,6 @@ fn request_block_representable(
                 }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
-                | ContentBlock::Thinking { .. }
-                | ContentBlock::Reasoning { .. }
-                | ContentBlock::RedactedThinking { .. }
         ),
     }
 }

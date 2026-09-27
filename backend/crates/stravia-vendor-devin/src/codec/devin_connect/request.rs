@@ -952,7 +952,9 @@ fn encode_assistant_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Resul
                         push_message(out, std::mem::take(&mut msg));
                         msg.source = SOURCE_ASSISTANT;
                     }
-                    push_message(out, encode_thinking(block)?);
+                    if let Some(thinking) = encode_thinking(block) {
+                        push_message(out, thinking);
+                    }
                 }
                 ContentBlock::ToolUse {
                     id, name, input, ..
@@ -987,7 +989,9 @@ fn encode_assistant_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Resul
     Ok(())
 }
 
-fn encode_thinking(block: &ContentBlock) -> anyhow::Result<ChatMsg> {
+/// 无承载能力的思考块返回 None（跳过整条消息），永不报错：
+/// 回放契约要求 codec 静默处理异源或损坏的受保护载荷。
+fn encode_thinking(block: &ContentBlock) -> Option<ChatMsg> {
     let (text, signature, redacted) = match block {
         ContentBlock::Thinking {
             thinking,
@@ -1001,6 +1005,7 @@ fn encode_thinking(block: &ContentBlock) -> anyhow::Result<ChatMsg> {
             summary
                 .iter()
                 .chain(content)
+                .filter(|text| !text.is_empty())
                 .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -1011,20 +1016,27 @@ fn encode_thinking(block: &ContentBlock) -> anyhow::Result<ChatMsg> {
         _ => unreachable!("thinking block"),
     };
     let Some(signature) = signature.filter(|value| !value.is_empty()) else {
-        // 没有签名的历史仍保留可读内容，但不能伪装成上游原生签名思考。
-        return Ok(ChatMsg {
+        // 没有签名的历史仍保留可读内容，但不能伪装成上游原生签名思考；
+        // 明文降级为普通助手正文，全空则整块丢弃。
+        return (!text.is_empty()).then(|| ChatMsg {
             source: SOURCE_ASSISTANT,
             text,
             ..ChatMsg::default()
         });
     };
-    let mut replay = ThinkingReplay::decode(signature)?;
+    // #12 是 opaque 字符串：异源 blob 与损坏的 devin-thinking-v1 载荷都
+    // 无法解析出重放状态，按原生格式原样上送由上游裁决（乐观回放，
+    // 被拒绝时由宿主剥离重试），codec 不判断来源也不报错。
+    let mut replay = ThinkingReplay::decode(signature).unwrap_or_else(|_| ThinkingReplay {
+        signature: signature.to_owned(),
+        ..ThinkingReplay::default()
+    });
     let thinking = if redacted {
         std::mem::take(&mut replay.redacted_text)
     } else {
         text
     };
-    Ok(ChatMsg {
+    Some(ChatMsg {
         source: SOURCE_ASSISTANT,
         thinking,
         thinking_replay: Some(replay),
@@ -1966,6 +1978,152 @@ mod tests {
             );
         }
         assert!(!prompts[call_index].iter().any(|field| field.number == 15));
+    }
+
+    // 无签名/无密文的明文思考：原生 #11/#12/#13 只承载签名形态，明文按契约
+    // 降级为普通助手正文（summary 在前、content 在后，空段跳过）；
+    // 明文与载荷全空的块不产生任何 prompt。
+    #[test]
+    fn unsigned_thinking_degrades_to_assistant_text() {
+        let request = AiRequest::new(
+            "swe-2",
+            vec![
+                text_item(Role::User, "go"),
+                AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![
+                        ContentBlock::Thinking {
+                            thinking: "unsigned draft".into(),
+                            signature: None,
+                        },
+                        ContentBlock::Reasoning {
+                            summary: vec!["summary".into(), String::new()],
+                            content: vec!["body".into()],
+                            encrypted_content: None,
+                        },
+                    ]),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                },
+                AiItem::thinking("", None),
+                text_item(Role::User, "continue"),
+            ],
+        );
+        let prompts: Vec<_> = top_level(&request)
+            .iter()
+            .filter(|field| field.number == 3)
+            .map(|field| parse_fields(field.bytes).unwrap())
+            .collect();
+        let sources: Vec<u64> = prompts
+            .iter()
+            .map(|prompt| {
+                prompt
+                    .iter()
+                    .find(|field| field.number == 2)
+                    .unwrap()
+                    .scalar
+            })
+            .collect();
+        assert_eq!(sources, [SOURCE_USER, SOURCE_ASSISTANT, SOURCE_USER]);
+        let assistant = &prompts[1];
+        assert!(
+            assistant
+                .iter()
+                .any(|field| field.number == 3 && field.bytes == b"unsigned draft\n\nsummary\nbody")
+        );
+        for number in [11, 12, 13] {
+            assert!(!assistant.iter().any(|field| field.number == number));
+        }
+    }
+
+    // #12 是 opaque 字符串：异源 blob 与损坏的 devin-thinking-v1 载荷都按原生
+    // 格式原样上送，codec 不判断来源也不报错；上游拒绝时由宿主剥离重试。
+    #[test]
+    fn opaque_or_corrupt_signature_still_rides_native_field() {
+        let request = AiRequest::new(
+            "swe-2",
+            vec![
+                text_item(Role::User, "go"),
+                AiItem::thinking("foreign draft", Some("anthropic-blob".into())),
+                AiItem::thinking("corrupt draft", Some("devin-thinking-v1:{oops".into())),
+            ],
+        );
+        let prompts: Vec<_> = top_level(&request)
+            .iter()
+            .filter(|field| field.number == 3)
+            .map(|field| parse_fields(field.bytes).unwrap())
+            .collect();
+        // 两个签名块各占一条 prompt：独立签名不能合并进同一 #12。
+        assert_eq!(prompts.len(), 3);
+        for (index, thinking, signature) in [
+            (1, "foreign draft", "anthropic-blob"),
+            (2, "corrupt draft", "devin-thinking-v1:{oops"),
+        ] {
+            let prompt = &prompts[index];
+            assert!(
+                prompt
+                    .iter()
+                    .any(|field| field.number == 11 && field.bytes == thinking.as_bytes())
+            );
+            assert!(
+                prompt
+                    .iter()
+                    .any(|field| field.number == 12 && field.bytes == signature.as_bytes())
+            );
+            // 受保护载荷只出现在 #12，绝不写进正文 #3。
+            assert!(
+                !prompt
+                    .iter()
+                    .any(|field| field.number == 3 && field.bytes == signature.as_bytes())
+            );
+        }
+    }
+
+    // redacted 有原生载体（#12 载荷 + #13 标记）：独立成条的 redacted 历史
+    // 原生保留为一条 prompt，不会降级也不会丢成空消息。
+    #[test]
+    fn redacted_only_item_keeps_native_prompt() {
+        let request = AiRequest::new(
+            "swe-2",
+            vec![
+                text_item(Role::User, "go"),
+                AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                        data: "sealed-blob".into(),
+                    }]),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                },
+            ],
+        );
+        let prompts: Vec<_> = top_level(&request)
+            .iter()
+            .filter(|field| field.number == 3)
+            .map(|field| parse_fields(field.bytes).unwrap())
+            .collect();
+        assert_eq!(prompts.len(), 2);
+        let redacted = &prompts[1];
+        assert!(
+            redacted
+                .iter()
+                .any(|field| field.number == 2 && field.scalar == SOURCE_ASSISTANT)
+        );
+        assert!(
+            redacted
+                .iter()
+                .any(|field| field.number == 12 && field.bytes == b"sealed-blob")
+        );
+        assert!(
+            redacted
+                .iter()
+                .any(|field| field.number == 13 && field.scalar == 1)
+        );
+        for number in [3, 11] {
+            assert!(!redacted.iter().any(|field| field.number == number));
+        }
     }
 
     /// The upstream rejects "all calls, then all results" groupings and

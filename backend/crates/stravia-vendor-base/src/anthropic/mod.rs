@@ -252,10 +252,19 @@ fn infer(
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("Anthropic request could not be encoded"))?,
     })?;
-    ensure_success(&response, "Anthropic inference")?;
-    common::decode_ai_response(host, &ANTHROPIC_MESSAGES_2023_06_01.to_string(), response)
-        .map(Box::new)
-        .map(OperationOutput::Infer)
+    ensure_success(
+        &response,
+        "Anthropic inference",
+        Some(crate::generic::classify_anthropic_error),
+    )?;
+    common::decode_ai_response_with_error_classifier(
+        host,
+        &ANTHROPIC_MESSAGES_2023_06_01.to_string(),
+        response,
+        crate::generic::classify_anthropic_error,
+    )
+    .map(Box::new)
+    .map(OperationOutput::Infer)
 }
 
 fn discover(
@@ -316,7 +325,7 @@ fn discover(
         headers,
         body: Vec::new(),
     })?;
-    ensure_success(&response, "Anthropic model discovery")?;
+    ensure_success(&response, "Anthropic model discovery", None)?;
     let bytes = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|_| retryable("Anthropic model discovery returned invalid JSON"))?;
@@ -477,6 +486,7 @@ pub(super) fn secret<'a>(
 fn ensure_success(
     response: &stravia_vendor_sdk::HttpResponse,
     label: &str,
+    classify: Option<fn(&Value, bool) -> Option<PluginError>>,
 ) -> Result<u16, PluginError> {
     let status = response.status()?;
     if (200..300).contains(&status) {
@@ -484,6 +494,15 @@ fn ensure_success(
     }
     let headers = response.headers()?;
     let bytes = stravia_vendor_sdk::read_http_body(response, MAX_ERROR_BODY)?;
+    // 受保护推理回放被拒是可恢复错误：交给分类器标记为
+    // ProtectedReasoningRejected，宿主剥离签名/密文后重试。
+    if let Some(classify) = classify
+        && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(mut error) = classify(&value, false)
+    {
+        error.upstream_status.get_or_insert(status);
+        return Err(error);
+    }
     let mut error = common::upstream_error(status, &headers, &bytes);
     error.message = format!("{label} failed: {}", error.message);
     Err(error)

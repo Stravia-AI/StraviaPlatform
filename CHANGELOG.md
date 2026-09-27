@@ -12,6 +12,12 @@
 
 - Command Code and other known plugin-owned protocols now apply target-specific thinking-history replay independently of host codec registration. Client-replayed Responses reasoning no longer causes a local HTTP 400 after history compaction or edits; readable reasoning and tool-result associations are preserved without relaxing protocol validation or history matching.
 
+- Replayed reasoning is no longer turned into ordinary assistant text on targets whose native reasoning field accepts unsigned reasoning, such as Chat Completions `reasoning_content` and Command Code. Previously the model could treat that reasoning as text it had already said and stop producing reasoning. Anthropic, Bedrock, and Responses history without a replayable reasoning id still falls back to text.
+
+- Protected reasoning (signatures and encrypted reasoning) is now bound to its issuer (protocol, deployment, credential, and model for Gemini). Changing a Target's proxy, options, or Route wiring no longer discards it. Reasoning of unknown origin is replayed as-is; if the upstream rejects it, the retry first removes only unverified reasoning, then all protected reasoning. Anthropic, Bedrock, and Gemini signature rejections now trigger this retry.
+
+- Chat Completions upstream requests no longer include internal gateway request fields (`__stravia_*`, such as the generation session ID) in the request body.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

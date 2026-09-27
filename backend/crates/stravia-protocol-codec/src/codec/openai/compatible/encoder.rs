@@ -116,10 +116,12 @@ impl OpenAIEncoder {
 
         // Passthrough any remaining unknown extra fields.
         // Skip cross-protocol internal keys (e.g. __anthropic_*, __google_*)
-        // that are only meaningful to their respective codecs.
+        // that are only meaningful to their respective codecs, and gateway-owned
+        // __stravia_* state that must never reach an upstream.
         for (k, v) in ingress {
             if k == "reasoning"
                 || k == "reasoning_effort"
+                || k.starts_with("__stravia_")
                 || k.starts_with("__anthropic_")
                 || k.starts_with("__google_")
                 || (responses_ingress
@@ -289,15 +291,20 @@ fn normalize_messages_for_openai(
         if has_calls {
             return true;
         }
+        // 只有明文 reasoning 才有可回放的载体：受保护载荷（signature /
+        // encrypted_content / redacted）在 chat 协议上无处可去，条目若只剩
+        // 这些载荷就必须整条丢弃，否则会编码出既无 content 也无 tool_calls 的
+        // 空 assistant 消息，被严格上游 400。
         let has_reasoning = matches!(
             &msg.content,
             MessageContent::Blocks(blocks)
-                if blocks.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::Thinking { .. }
-                        | ContentBlock::Reasoning { .. }
-                        | ContentBlock::RedactedThinking { .. }
-                ))
+                if blocks.iter().any(|block| match block {
+                    ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+                    ContentBlock::Reasoning { summary, content, .. } => {
+                        summary.iter().chain(content).any(|text| !text.is_empty())
+                    }
+                    _ => false,
+                })
         );
         has_reasoning || !msg.content.to_text().trim().is_empty()
     });
@@ -314,8 +321,11 @@ fn normalize_messages_for_openai(
 /// sibling function-call items, so after the tool-call split such an item
 /// sits right before the first assistant turn it belongs to. Fold its text
 /// into that turn's `reasoning_content` (chronologically first) and drop the
-/// carrier; without a following assistant turn there is no chat-completions
-/// shape that can carry it, so drop it there as well.
+/// carrier. Without a following assistant turn the text has no
+/// `reasoning_content` host (strict upstreams reject content-less assistant
+/// messages), so it falls back to the carrier's own `content`, like every
+/// codec does when no native carrier exists. Carriers with no plaintext at
+/// all (only signatures / ciphertext / redacted data) are dropped entirely.
 fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
     for idx in (0..out.len()).rev() {
         if !is_standalone_reasoning_item(&out[idx]) {
@@ -340,11 +350,22 @@ fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
                 (false, true) => text,
                 (false, false) => format!("{text}\n{existing}"),
             };
-            next_meta
-                .insert_extension("reasoning_content", Value::String(merged))
-                .expect("reasoning content is not reserved");
+            // 只含受保护载荷的 carrier 没有明文可合并，不应凭空写出空的
+            // `reasoning_content` 字段。
+            if !merged.is_empty() {
+                next_meta
+                    .insert_extension("reasoning_content", Value::String(merged))
+                    .expect("reasoning content is not reserved");
+            }
+            out.remove(idx);
+        } else if text.is_empty() {
+            out.remove(idx);
+        } else {
+            // 明文降级为 content；清空 meta，避免来源侧扩展（如
+            // `__open_responses_item_fields` 或推理签名副本）泄漏到消息字段。
+            out[idx].content = MessageContent::Text(text);
+            out[idx].meta = None;
         }
-        out.remove(idx);
     }
 }
 
@@ -373,11 +394,11 @@ fn is_standalone_reasoning_item(item: &AiItem) -> bool {
         }
 }
 
-/// Reasoning text of a standalone carrier, in encode order. Thinking blocks
-/// win: `promote_reasoning_meta` mirrors them into `meta.reasoning_content`
-/// during the split loop, so the blocks are the single authoritative source.
-/// Reasoning blocks are not promoted, so read their summary/content directly.
-/// `meta.reasoning_content` is the fallback for meta-only carriers.
+/// Reasoning text of a standalone carrier, in encode order. The blocks win:
+/// `promote_reasoning_meta` mirrors Thinking and Reasoning plaintext into
+/// `meta.reasoning_content` during the split loop, so the blocks are the
+/// single authoritative source. `meta.reasoning_content` is the fallback for
+/// meta-only carriers.
 fn standalone_reasoning_text(item: &AiItem) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let MessageContent::Blocks(blocks) = &item.content {
@@ -669,15 +690,29 @@ fn promote_reasoning_meta(message: &mut AiItem) {
     let MessageContent::Blocks(blocks) = &message.content else {
         return;
     };
+    // Thinking 与 Reasoning 的明文都进入 `reasoning_content`，按块顺序拼接；
+    // signature / encrypted_content / redacted 是受保护载荷，绝不进正文。
     let mut reasoning = String::new();
+    let push_segment = |reasoning: &mut String, text: &str| {
+        if text.is_empty() {
+            return;
+        }
+        if !reasoning.is_empty() {
+            reasoning.push('\n');
+        }
+        reasoning.push_str(text);
+    };
     for block in blocks {
-        if let ContentBlock::Thinking { thinking, .. } = block
-            && !thinking.is_empty()
-        {
-            if !reasoning.is_empty() {
-                reasoning.push('\n');
+        match block {
+            ContentBlock::Thinking { thinking, .. } => push_segment(&mut reasoning, thinking),
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } => {
+                for text in summary.iter().chain(content) {
+                    push_segment(&mut reasoning, text);
+                }
             }
-            reasoning.push_str(thinking);
+            _ => {}
         }
     }
     if reasoning.is_empty() {
@@ -726,10 +761,11 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         MessageContent::Blocks(blocks) => {
             // For assistant messages, strip blocks that are already expressed
             // elsewhere in the OpenAI shape:
-            //   - Thinking / RedactedThinking: surfaced via the top-level
-            //     `reasoning_content` field carried in `meta` (see the Anthropic
-            //     messages decoder). Emitting them as plain text would duplicate
-            //     reasoning and break strict thinking-mode upstreams.
+            //   - Thinking / Reasoning / RedactedThinking: plaintext is surfaced
+            //     via the top-level `reasoning_content` field carried in `meta`
+            //     (see `promote_reasoning_meta`). Emitting them as plain text
+            //     would duplicate reasoning and break strict thinking-mode
+            //     upstreams; their protected payloads have no chat carrier.
             //   - ToolUse: already expressed via the `tool_calls` array below.
             //     Encoding it into `content` would produce `{type:"function"}`,
             //     which OpenAI chat/completions rejects with
@@ -745,6 +781,7 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
                         && matches!(
                             b,
                             ContentBlock::Thinking { .. }
+                                | ContentBlock::Reasoning { .. }
                                 | ContentBlock::RedactedThinking { .. }
                                 | ContentBlock::ToolUse { .. }
                         ))
@@ -787,10 +824,12 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
     // Internal canonical metadata participates in local semantics but must never
     // become an upstream vendor field.
     if let Some(extra) = msg.meta.as_ref().and_then(|meta| meta.object_extensions()) {
-        for (key, value) in extra
-            .iter()
-            .filter(|(key, _)| !key.starts_with("__stravia_"))
-        {
+        for (key, value) in extra.iter().filter(|(key, _)| {
+            !key.starts_with("__stravia_")
+                // `reasoning_signature` 是受保护载荷的来源侧载体，chat 协议无法
+                // 承载，静默丢弃而不是作为可读字段透传。
+                && key.as_str() != "reasoning_signature"
+        }) {
             map.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
@@ -879,6 +918,14 @@ fn encode_content_block_for_openai(b: &ContentBlock) -> Value {
             // OpenAI does not support thinking blocks; pass as plain text
             serde_json::json!({"type": "text", "text": thinking})
         }
+        // 非 assistant 角色的 Reasoning 没有 reasoning_content 载体，明文降级为
+        // text；encrypted_content 是受保护载荷，一并丢弃。
+        ContentBlock::Reasoning {
+            summary, content, ..
+        } => serde_json::json!({
+            "type": "text",
+            "text": summary.iter().chain(content).cloned().collect::<String>()
+        }),
         ContentBlock::RedactedThinking { .. } => {
             serde_json::json!({"type": "text", "text": ""})
         }

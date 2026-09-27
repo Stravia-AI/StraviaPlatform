@@ -95,31 +95,14 @@ pub(crate) struct GenerationChainWrite {
 
 #[derive(Clone)]
 pub(crate) enum GenerationSource {
-    Target {
-        namespace: String,
-        protocol: Option<ProtocolIdentity>,
-        actual_model: String,
-        selected_target_key: String,
-    },
-    Hook {
-        protocol: ProtocolId,
-    },
+    Target(crate::history_marker::ThinkingSource),
+    Hook { protocol: ProtocolId },
 }
 
 impl GenerationSource {
     pub(crate) fn thinking_source(&self) -> Option<crate::history_marker::ThinkingSource> {
         match self {
-            Self::Target {
-                namespace,
-                protocol,
-                actual_model,
-                selected_target_key,
-            } => Some(crate::history_marker::ThinkingSource {
-                namespace: namespace.clone(),
-                protocol: protocol.clone(),
-                actual_model: actual_model.clone(),
-                target_id: selected_target_key.clone(),
-            }),
+            Self::Target(source) => Some(source.clone()),
             Self::Hook { .. } => None,
         }
     }

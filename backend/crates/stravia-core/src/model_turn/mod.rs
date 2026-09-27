@@ -182,6 +182,7 @@ pub struct TargetIdentity {
     pub provider_id: String,
     pub target_id: String,
     pub(crate) namespace: String,
+    pub(crate) thinking_authority: String,
     pub(crate) protocol_hint: String,
     pub(crate) response_continuation_available: Arc<AtomicBool>,
     pub(crate) publication: Option<VendorPublication>,
@@ -192,6 +193,16 @@ impl TargetIdentity {
         &self,
     ) -> Option<stravia_runtime_contract::protocol::ids::ProtocolIdentity> {
         (!self.protocol_hint.is_empty()).then(|| self.protocol_hint.clone().into())
+    }
+
+    pub(crate) fn thinking_source(&self) -> crate::history_marker::ThinkingSource {
+        crate::history_marker::ThinkingSource {
+            namespace: self.namespace.clone(),
+            protocol: self.protocol_identity(),
+            actual_model: self.actual_model.clone(),
+            target_id: self.target_id.clone(),
+            authority: Some(self.thinking_authority.clone()),
+        }
     }
 }
 
@@ -218,6 +229,7 @@ impl ModelTurn {
                 provider_id: route.provider_id.clone(),
                 target_id: route.target_id.clone(),
                 namespace: String::new(),
+                thinking_authority: String::new(),
                 protocol_hint: String::new(),
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
                 publication: None,

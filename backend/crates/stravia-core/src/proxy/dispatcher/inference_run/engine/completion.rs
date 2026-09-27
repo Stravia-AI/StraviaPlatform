@@ -142,12 +142,7 @@ impl CompletionContext {
         let prior_publications = generation.vendor_publications.clone();
         let generation_chain = generation.write.map(|write| GenerationChainCompletion {
             write,
-            source: crate::generation_chain::GenerationSource::Target {
-                namespace: target.namespace.clone(),
-                protocol: target.protocol_identity(),
-                actual_model: target.actual_model.clone(),
-                selected_target_key: target.target_id.clone(),
-            },
+            source: crate::generation_chain::GenerationSource::Target(target.thinking_source()),
             owns_response_identity,
             response_continuation_available: target.response_continuation_available.clone(),
             prior_publications: prior_publications.clone(),
@@ -156,12 +151,7 @@ impl CompletionContext {
         Self {
             gateway,
             actual_model: target.actual_model.clone(),
-            thinking_source: crate::history_marker::ThinkingSource {
-                namespace: target.namespace.clone(),
-                protocol: target.protocol_identity(),
-                actual_model: target.actual_model.clone(),
-                target_id: target.target_id.clone(),
-            },
+            thinking_source: target.thinking_source(),
             logical_model,
             principal: generation.principal,
             generation_chain,

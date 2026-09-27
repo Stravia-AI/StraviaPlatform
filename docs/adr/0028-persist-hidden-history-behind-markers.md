@@ -35,9 +35,11 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 
 ## Target and storage boundaries
 
-历史推理采用以继续会话为目标的 Thinking Replay，而不是将密文可表示性作为 Target 准入硬约束。平台为新产生的 Thinking 保存实际 Target、Provider 账号/配置 namespace、模型和协议来源；只有来源绑定兼容且协议可承载时才原生回放密文或签名。其他 Target 的请求副本只保留可见摘要/正文为普通文本，省略不可用的密文与纯 redacted block；这不是解密，也不声称摘要等价于完整推理。
+历史推理采用以继续会话为目标的 Thinking Replay，而不是将密文可表示性作为 Target 准入硬约束。平台为新产生的 Thinking 保存实际 Target、Provider 账号/配置 namespace、模型、协议来源和签发作用域。签发作用域只包含能影响签名/密文校验的事实：出口协议、部署（base URL）、凭据身份（OAuth 连接或凭据指纹），以及协议要求时的模型（目前仅 Gemini）；路由 Target、代理开关和 vendor 选项变化不使签名失效。
 
-权威历史和 History Marker payload 不因 Target 降级而改写。客户端保留原历史引用且记录未过期时，即使经过其他 Target、分支或 Gateway 重启，切回兼容来源仍可再次回放原密文。旧记录或外部原生历史缺少来源时不伪造来源：同 ingress/egress 协议可以尝试原生回放，跨协议保守降级。上游在任何 canonical 输出前以 HTTP 400/422 或未携带 HTTP 状态的结构化流错误明确拒绝 encrypted content 或 thinking signature 时，仅对当前 Target 做一次去除受保护推理的完整回放；普通错误、输出已开始或原生压缩操作不触发这一修正。发生推理降级后不使用旧 `previous_response_id` 代替改写过的完整历史。
+职责按来源与表示拆分。Core 只按来源决定受保护载荷（签名、`encrypted_content`、redacted block、Responses 原生 reasoning id）能否回放：签发作用域一致时保留，证明属于其它作用域时剥离；可读的摘要/正文始终保留为思考块。出口 codec（内置或插件）决定表示：原生推理载体能合法承载无签名明文时原生编码（如 Chat `reasoning_content`、Command Code `reasoning` part、Gemini thought part），只有原生载体会拒绝时才降级为普通 assistant 文本（Anthropic、Bedrock、缺少 id 与密文的 Responses reasoning）；承载不了的受保护载荷由 codec 忽略。这不是解密，也不声称摘要等价于完整推理。
+
+权威历史和 History Marker payload 不因 Target 降级而改写。客户端保留原历史引用且记录未过期时，即使经过其他 Target、分支或 Gateway 重启，切回兼容来源仍可再次回放原密文。客户端提供的外部原生历史、来源记录已丢失的历史，或拆不出签发作用域的旧记录，不伪造来源，按来源不明乐观原生回放：这些载荷由客户端自己提交给它选择的路由，发给上游不构成额外披露，错误由上游校验暴露。上游在任何 canonical 输出前以 HTTP 400/422 或未携带 HTTP 状态的结构化流错误明确拒绝 encrypted content、thinking signature 或 Gemini thought signature 时，对当前 Target 分级做完整回放：先只剥离来源未证实的受保护载荷，没有可剥离的或再次被拒才剥离全部受保护载荷；普通错误、输出已开始或原生压缩操作不触发这一修正。发生推理降级后不使用旧 `previous_response_id` 代替改写过的完整历史。
 
 以上只适用于历史推理。普通消息、公开及隐藏工具调用/结果、原生 compaction state 和其他硬约束继续严格校验。DeepSeek Chat 在携带 tools 时为缺失推理的 assistant 历史提供空 `reasoning_content`，不伪造占位推理，也不覆盖已有原生推理。
 

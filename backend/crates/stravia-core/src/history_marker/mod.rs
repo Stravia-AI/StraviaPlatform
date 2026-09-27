@@ -37,6 +37,22 @@ pub struct ThinkingSource {
     pub protocol: Option<stravia_runtime_contract::protocol::ids::ProtocolIdentity>,
     pub actual_model: String,
     pub target_id: String,
+    /// 能验证受保护推理的签发方作用域指纹：只含协议、部署、凭据身份，以及协议
+    /// 要求时的模型。代理、路由 Target、vendor 选项等不影响签名有效性，不参与比较。
+    /// 旧记录没有该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+}
+
+/// 历史条目的受保护推理能否回放给当前 Target。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThinkingProvenance {
+    /// 来源记录证明由同一签发作用域产生。
+    Verified,
+    /// 无来源记录（客户端提供或记录已丢失），或旧记录无法拆出签发作用域。
+    Unknown,
+    /// 来源记录证明属于其它签发作用域，或私有记录已损坏。
+    Foreign,
 }
 
 impl ThinkingSource {
@@ -46,12 +62,30 @@ impl ThinkingSource {
         serde_json::from_value(item.meta.as_ref()?.get(Self::ITEM_META_KEY)?.clone()).ok()
     }
 
-    pub(crate) fn item_has_source_stamp(
+    pub(crate) fn provenance(
+        &self,
         item: &stravia_runtime_contract::protocol::ir::AiItem,
-    ) -> bool {
-        item.meta
+    ) -> ThinkingProvenance {
+        let Some(stamp) = item
+            .meta
             .as_ref()
-            .is_some_and(|meta| meta.get(Self::ITEM_META_KEY).is_some())
+            .and_then(|meta| meta.get(Self::ITEM_META_KEY))
+        else {
+            return ThinkingProvenance::Unknown;
+        };
+        let Ok(source) = serde_json::from_value::<Self>(stamp.clone()) else {
+            return ThinkingProvenance::Foreign;
+        };
+        match &source.authority {
+            Some(authority) if self.authority.as_ref() == Some(authority) => {
+                ThinkingProvenance::Verified
+            }
+            Some(_) => ThinkingProvenance::Foreign,
+            // 旧记录只有整体 namespace：相等仍可证明；不等时拆不出签发作用域，
+            // 按来源不明处理，交给上游校验与拒绝恢复。
+            None if source.namespace == self.namespace => ThinkingProvenance::Verified,
+            None => ThinkingProvenance::Unknown,
+        }
     }
 
     pub(crate) fn stamp_response(

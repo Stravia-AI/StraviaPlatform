@@ -112,13 +112,14 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
         {
             prompt.push(json!({"role": "system", "content": instructions}));
         }
-        prompt.extend(
-            request
-                .items
-                .iter()
-                .map(|item| encode_message(item, &tool_names))
-                .collect::<anyhow::Result<Vec<_>>>()?,
-        );
+        for item in &request.items {
+            // 只含无法承载的受保护推理载荷（且无 tool call）的 assistant 条目
+            // 编码为空；上游不接受空 assistant 消息，整条跳过。被跳过的条目
+            // 必然没有 tool call，不会破坏 tool-result 配对。
+            if let Some(message) = encode_message(item, &tool_names)? {
+                prompt.push(message);
+            }
+        }
 
         let mut body = Map::from_iter([("prompt".into(), Value::Array(prompt))]);
         insert_optional(&mut body, "maxOutputTokens", request.generation.max_tokens);
@@ -272,6 +273,20 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
                             }
                             ContentBlock::Thinking { thinking, .. } => {
                                 content.push(json!({"type": "reasoning", "text": thinking}));
+                            }
+                            ContentBlock::Reasoning {
+                                summary,
+                                content: segments,
+                                ..
+                            } => {
+                                // 受保护的 encrypted_content 无载体，只输出明文段。
+                                for text in summary
+                                    .iter()
+                                    .chain(segments)
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    content.push(json!({"type": "reasoning", "text": text}));
+                                }
                             }
                             _ => {}
                         }
@@ -500,14 +515,18 @@ fn decode_gateway_response_format(
     }
 }
 
-fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyhow::Result<Value> {
+/// `None` 表示条目编码后没有任何线上内容；调用方整条跳过该消息。
+fn encode_message(
+    item: &AiItem,
+    tool_names: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<Value>> {
     match item.role {
-        Role::System | Role::Developer => {
-            Ok(json!({"role": "system", "content": text_content(&item.content)?}))
-        }
-        Role::User => {
-            Ok(json!({"role": "user", "content": encode_content_parts(&item.content, false)?}))
-        }
+        Role::System | Role::Developer => Ok(Some(
+            json!({"role": "system", "content": text_content(&item.content)?}),
+        )),
+        Role::User => Ok(Some(
+            json!({"role": "user", "content": encode_content_parts(&item.content, false)?}),
+        )),
         Role::Assistant => {
             let mut content = encode_content_parts(&item.content, true)?;
             for call in item.tool_calls.as_deref().unwrap_or_default() {
@@ -519,7 +538,7 @@ fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyho
                         .unwrap_or_else(|_| Value::String(call.arguments.clone())),
                 }));
             }
-            Ok(json!({"role": "assistant", "content": content}))
+            Ok((!content.is_empty()).then_some(json!({"role": "assistant", "content": content})))
         }
         Role::Tool => {
             let tool_call_id = item
@@ -529,7 +548,7 @@ fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyho
             let tool_name = tool_names
                 .get(tool_call_id)
                 .context("Gateway tool result has no matching preceding tool call")?;
-            Ok(json!({
+            Ok(Some(json!({
                 "role": "tool",
                 "content": [{
                     "type": "tool-result",
@@ -537,7 +556,7 @@ fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyho
                     "toolName": tool_name,
                     "output": {"type": "text", "value": tool_result_text(&item.content)?},
                 }],
-            }))
+            })))
         }
     }
 }
@@ -547,17 +566,36 @@ fn encode_content_parts(content: &MessageContent, assistant: bool) -> anyhow::Re
         MessageContent::Text(text) => return Ok(vec![json!({"type": "text", "text": text})]),
         MessageContent::Blocks(blocks) => blocks,
     };
-    blocks
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text, .. } => Ok(json!({"type": "text", "text": text})),
+    let mut parts = Vec::new();
+    for block in blocks {
+        let part = match block {
+            ContentBlock::Text { text, .. } => json!({"type": "text", "text": text}),
             ContentBlock::Thinking { thinking, .. } if assistant => {
-                Ok(json!({"type": "reasoning", "text": thinking}))
+                if thinking.is_empty() {
+                    continue;
+                }
+                json!({"type": "reasoning", "text": thinking})
             }
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } if assistant => {
+                // reasoning 部分只有明文字段：signature / encrypted_content
+                // 无原生载体，静默忽略；每段非空文本一个 reasoning part。
+                for text in summary
+                    .iter()
+                    .chain(content)
+                    .filter(|text| !text.is_empty())
+                {
+                    parts.push(json!({"type": "reasoning", "text": text}));
+                }
+                continue;
+            }
+            // redacted_thinking 是纯密文载荷，Gateway v4 没有对应载体。
+            ContentBlock::RedactedThinking { .. } if assistant => continue,
             ContentBlock::ToolUse {
                 id, name, input, ..
             } if assistant => {
-                Ok(json!({"type": "tool-call", "toolCallId": id, "toolName": name, "input": input}))
+                json!({"type": "tool-call", "toolCallId": id, "toolName": name, "input": input})
             }
             ContentBlock::Image { source, .. }
             | ContentBlock::File {
@@ -567,7 +605,7 @@ fn encode_content_parts(content: &MessageContent, assistant: bool) -> anyhow::Re
             | ContentBlock::Video {
                 source,
                 media_type: None,
-            } => encode_file_part(source, "application/octet-stream"),
+            } => encode_file_part(source, "application/octet-stream")?,
             ContentBlock::File {
                 source,
                 media_type: Some(media_type),
@@ -575,7 +613,7 @@ fn encode_content_parts(content: &MessageContent, assistant: bool) -> anyhow::Re
             | ContentBlock::Video {
                 source,
                 media_type: Some(media_type),
-            } => encode_file_part(source, media_type),
+            } => encode_file_part(source, media_type)?,
             ContentBlock::Audio { .. } => {
                 bail!("Gateway v4 codec does not represent audio content")
             }
@@ -583,8 +621,10 @@ fn encode_content_parts(content: &MessageContent, assistant: bool) -> anyhow::Re
                 "Gateway v4 cannot represent content block `{}`",
                 content_block_name(other)
             ),
-        })
-        .collect()
+        };
+        parts.push(part);
+    }
+    Ok(parts)
 }
 
 fn encode_file_part(source: &MediaSource, media_type: &str) -> anyhow::Result<Value> {

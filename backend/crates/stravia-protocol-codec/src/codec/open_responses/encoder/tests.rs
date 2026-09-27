@@ -28,7 +28,7 @@ fn target_effort_maps_to_responses_shape() {
 }
 
 #[test]
-fn chat_reasoning_content_preserves_tool_call_before_its_output() {
+fn chat_reasoning_content_degrades_to_output_text_before_its_tool_call() {
     let request = OpenAIDecoder
         .decode_request(serde_json::json!({
             "model": "gpt",
@@ -59,8 +59,14 @@ fn chat_reasoning_content_preserves_tool_call_before_its_output() {
         .encode_request(&request)
         .expect("encode Responses reasoning tool history");
 
-    assert_eq!(body["input"][0]["type"], "reasoning");
-    assert_eq!(body["input"][0]["content"], serde_json::json!([]));
+    // Chat 的 `reasoning_content` 没有签名，上游不会
+    // 接受裸 reasoning item，明文降级为 assistant message 的 output_text。
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(body["input"][0]["role"], "assistant");
+    assert_eq!(
+        body["input"][0]["content"],
+        serde_json::json!([{"type": "output_text", "text": "inspect repository"}])
+    );
     assert_eq!(body["input"][1]["type"], "function_call");
     assert_eq!(body["input"][1]["call_id"], "call_glob");
     assert_eq!(body["input"][2]["type"], "function_call_output");
@@ -70,8 +76,8 @@ fn chat_reasoning_content_preserves_tool_call_before_its_output() {
 #[test]
 fn empty_reasoning_content_is_always_encoded_as_an_array() {
     for item in [
-        AiItem::reasoning(vec!["summary".into()], Vec::new(), None),
-        AiItem::thinking("summary", None),
+        AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("opaque".into())),
+        AiItem::thinking("summary", Some("signature".into())),
     ] {
         let request = AiRequest::new("gpt", vec![item]);
 
@@ -488,4 +494,231 @@ fn tool_output_parts_follow_dated_request_and_response_media_shapes() {
     ] {
         assert!(!response_tool_output_part(&invalid));
     }
+}
+
+#[test]
+fn unsigned_thinking_degrades_to_output_text_message() {
+    let request = AiRequest::new("gpt", vec![AiItem::thinking("why", None)]);
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode unsigned thinking");
+
+    // 无签名：上游不接受裸 reasoning item，明文进 output_text。
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(body["input"][0]["role"], "assistant");
+    assert_eq!(
+        body["input"][0]["content"],
+        serde_json::json!([{"type": "output_text", "text": "why"}])
+    );
+}
+
+#[test]
+fn signed_thinking_encodes_native_reasoning_with_encrypted_content() {
+    let request = AiRequest::new(
+        "gpt",
+        vec![AiItem::thinking("why", Some("signature".into()))],
+    );
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode signed thinking");
+
+    assert_eq!(body["input"][0]["type"], "reasoning");
+    assert_eq!(body["input"][0]["summary"][0]["text"], "why");
+    assert_eq!(body["input"][0]["encrypted_content"], "signature");
+}
+
+#[test]
+fn reasoning_without_id_or_encrypted_content_degrades_to_output_text() {
+    let request = AiRequest::new(
+        "gpt",
+        vec![AiItem::reasoning(
+            vec!["summary".into()],
+            vec!["detail".into()],
+            None,
+        )],
+    );
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode unprotected reasoning");
+
+    // summary 各段在前、content 各段在后，每段一个 output_text 部件。
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(body["input"][0]["role"], "assistant");
+    assert_eq!(
+        body["input"][0]["content"],
+        serde_json::json!([
+            {"type": "output_text", "text": "summary"},
+            {"type": "output_text", "text": "detail"},
+        ])
+    );
+}
+
+#[test]
+fn mixed_assistant_item_splits_native_reasoning_in_order() {
+    let mut item = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "before".into(),
+                cache_control: None,
+            },
+            ContentBlock::Reasoning {
+                summary: vec!["summary".into()],
+                content: vec!["detail".into()],
+                encrypted_content: Some("opaque".into()),
+            },
+            ContentBlock::Text {
+                text: "after".into(),
+                cache_control: None,
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    item.tool_calls = Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
+        id: "call_1".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    }]);
+    let request = AiRequest::new("gpt", vec![item]);
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode mixed assistant item");
+
+    let input = body["input"].as_array().unwrap();
+    // 前面的普通块 flush 成 message，Reasoning 独立成 item，剩余文本与
+    // tool_calls 依次跟上。
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(
+        input[0]["content"],
+        serde_json::json!([{"type": "output_text", "text": "before"}])
+    );
+    assert_eq!(input[1]["type"], "reasoning");
+    assert_eq!(input[1]["summary"][0]["text"], "summary");
+    assert_eq!(input[1]["content"][0]["text"], "detail");
+    assert_eq!(input[1]["encrypted_content"], "opaque");
+    assert_eq!(input[2]["type"], "message");
+    assert_eq!(
+        input[2]["content"],
+        serde_json::json!([{"type": "output_text", "text": "after"}])
+    );
+    assert_eq!(input[3]["type"], "function_call");
+    assert_eq!(input[3]["call_id"], "call_1");
+}
+
+#[test]
+fn mixed_assistant_item_merges_degraded_reasoning_into_message() {
+    let item = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "before".into(),
+                cache_control: None,
+            },
+            ContentBlock::Reasoning {
+                summary: vec!["summary".into()],
+                content: vec!["detail".into()],
+                encrypted_content: None,
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let request = AiRequest::new("gpt", vec![item]);
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode mixed assistant item");
+
+    // 无 id/密文的 Reasoning 降级为 output_text，与前后文本合并在同一 message。
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(
+        input[0]["content"],
+        serde_json::json!([
+            {"type": "output_text", "text": "before"},
+            {"type": "output_text", "text": "summary"},
+            {"type": "output_text", "text": "detail"},
+        ])
+    );
+}
+
+#[test]
+fn redacted_thinking_is_silently_dropped() {
+    let request = AiRequest::new(
+        "gpt",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::RedactedThinking {
+                        data: "redacted-payload".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".into(),
+                        cache_control: None,
+                    },
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+
+    let (body, _) = ResponsesEncoder.encode_request(&request).expect("encode");
+
+    assert_eq!(body["input"][1]["type"], "message");
+    assert_eq!(
+        body["input"][1]["content"],
+        serde_json::json!([{"type": "output_text", "text": "answer"}])
+    );
+    assert!(!body.to_string().contains("redacted-payload"));
+}
+
+#[test]
+fn assistant_item_with_only_redacted_thinking_emits_nothing() {
+    let request = AiRequest::new(
+        "gpt",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                    data: "redacted-payload".into(),
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+
+    let (body, _) = ResponsesEncoder.encode_request(&request).expect("encode");
+
+    // 只剩承载不了的受保护载荷的 assistant 条目整条跳过，不发出空 message。
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["role"], "user");
+    assert!(!body.to_string().contains("redacted-payload"));
 }

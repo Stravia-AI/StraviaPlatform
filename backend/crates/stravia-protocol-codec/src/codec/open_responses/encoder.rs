@@ -47,31 +47,9 @@ impl ResponsesEncoder {
                 }));
                 continue;
             }
-            if let Some((summary, content, signature)) = item.reasoning_ref() {
-                let mut reasoning = serde_json::json!({
-                    "type": "reasoning",
-                    "summary": summary.iter().map(|text| serde_json::json!({
-                        "type": "summary_text",
-                        "text": text
-                    })).collect::<Vec<_>>(),
-                    "content": if content.is_empty() {
-                        Value::Array(Vec::new())
-                    } else {
-                        Value::Array(content.iter().map(|text| serde_json::json!({
-                            "type": "reasoning_text",
-                            "text": text
-                        })).collect())
-                    }
-                });
-                insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
-                if let Some(signature) = signature {
-                    reasoning["encrypted_content"] = Value::String(signature.to_owned());
-                }
-                input.push(reasoning);
-                continue;
-            }
-            // Chat `reasoning_content` and tool calls share one assistant item. Handle that
-            // combination before the single-Thinking fast path, which would omit the calls.
+            // Chat `reasoning_content` 与 tool calls 共享同一条 assistant 条目，
+            // Reasoning 也可能与 tool_calls / 普通块混合。混合拆分必须先于单块
+            // 快路径，否则 tool_calls 会被丢掉。
             if item
                 .tool_calls
                 .as_ref()
@@ -81,20 +59,45 @@ impl ResponsesEncoder {
                 input.extend(items);
                 continue;
             }
-            if let Some((text, signature)) = item.thinking_ref() {
-                let mut reasoning = serde_json::json!({
-                    "type": "reasoning",
-                    "summary": [{
-                        "type": "summary_text",
-                        "text": text,
-                    }],
-                    "content": [],
-                });
-                insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
-                if let Some(signature) = signature {
-                    reasoning["encrypted_content"] = Value::String(signature.to_owned());
+            if let Some((summary, content, encrypted_content)) = item.reasoning_ref() {
+                let encrypted_content = encrypted_content.filter(|value| !value.is_empty());
+                // reasoning 输入条目须携带上游 id 或 encrypted_content 才被接受；
+                // 条目上的图 id 可能是网关本地 id，不能作为依据。无密文时明文降级为
+                // assistant message 的 output_text。
+                if encrypted_content.is_some() {
+                    input.push(encode_native_reasoning_item(
+                        item,
+                        summary,
+                        content,
+                        encrypted_content,
+                    ));
+                } else {
+                    let mut degraded =
+                        degraded_reasoning_parts(summary.iter().chain(content.iter()));
+                    push_assistant_message(&mut input, &mut degraded, item);
                 }
-                input.push(reasoning);
+                continue;
+            }
+            if let Some((text, signature)) = item.thinking_ref() {
+                let signature = signature.filter(|value| !value.is_empty());
+                if signature.is_some() {
+                    let mut reasoning = serde_json::json!({
+                        "type": "reasoning",
+                        "summary": [{
+                            "type": "summary_text",
+                            "text": text,
+                        }],
+                        "content": [],
+                    });
+                    insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
+                    if let Some(signature) = signature {
+                        reasoning["encrypted_content"] = Value::String(signature.to_owned());
+                    }
+                    input.push(reasoning);
+                } else {
+                    let mut degraded = degraded_reasoning_parts(std::iter::once(text));
+                    push_assistant_message(&mut input, &mut degraded, item);
+                }
                 continue;
             }
             if let Some(raw) = item.unknown_ref() {
@@ -469,6 +472,41 @@ fn insert_reasoning_metadata(
     }
 }
 
+/// 编码一条原生 reasoning 输入条目。`encrypted_content` 非空时按现有规则移除
+/// `id`：密文绑定来源上游保存的条目身份，回放出的本地 id 不安全。
+fn encode_native_reasoning_item(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+    summary: &[String],
+    content: &[String],
+    encrypted_content: Option<&str>,
+) -> Value {
+    let mut reasoning = serde_json::json!({
+        "type": "reasoning",
+        "summary": summary.iter().map(|text| serde_json::json!({
+            "type": "summary_text",
+            "text": text
+        })).collect::<Vec<_>>(),
+        "content": content.iter().map(|text| serde_json::json!({
+            "type": "reasoning_text",
+            "text": text
+        })).collect::<Vec<_>>(),
+    });
+    insert_reasoning_metadata(&mut reasoning, item, encrypted_content.is_some());
+    if let Some(encrypted_content) = encrypted_content {
+        reasoning["encrypted_content"] = Value::String(encrypted_content.to_owned());
+    }
+    reasoning
+}
+
+/// 无原生载体的明文推理降级为 assistant message 的 output_text 部件：
+/// 每段非空文本一个部件，保持在原位置顺序。
+fn degraded_reasoning_parts<S: AsRef<str>>(texts: impl Iterator<Item = S>) -> Vec<Value> {
+    texts
+        .filter(|text| !text.as_ref().is_empty())
+        .map(|text| serde_json::json!({"type": "output_text", "text": text.as_ref()}))
+        .collect()
+}
+
 fn encode_mixed_assistant_items(
     item: &stravia_runtime_contract::protocol::ir::AiItem,
 ) -> Result<Option<Vec<Value>>> {
@@ -476,9 +514,14 @@ fn encode_mixed_assistant_items(
         return Ok(None);
     };
     if item.role != Role::Assistant
-        || !blocks
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Thinking { .. }))
+        || !blocks.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Thinking { .. }
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::RedactedThinking { .. }
+            )
+        })
     {
         return Ok(None);
     }
@@ -487,6 +530,7 @@ fn encode_mixed_assistant_items(
     let mut message_content = Vec::new();
     for block in blocks {
         match block {
+            ContentBlock::Text { text, .. } if text.is_empty() => {}
             ContentBlock::Text { .. } | ContentBlock::Refusal { .. } => {
                 message_content.push(encode_responses_content_block(block, "output_text")?);
             }
@@ -494,26 +538,59 @@ fn encode_mixed_assistant_items(
                 thinking,
                 signature,
             } => {
-                push_assistant_message(&mut items, &mut message_content, item);
-                let summary = if thinking.is_empty() {
-                    Vec::new()
+                let signature = signature.as_deref().filter(|value| !value.is_empty());
+                if signature.is_some() {
+                    // 思考块必须成为独立的 reasoning item，前后普通内容 flush
+                    // 为各自 message，保持原顺序。
+                    push_assistant_message(&mut items, &mut message_content, item);
+                    let summary = if thinking.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![serde_json::json!({
+                            "type": "summary_text",
+                            "text": thinking,
+                        })]
+                    };
+                    let mut reasoning = serde_json::json!({
+                        "type": "reasoning",
+                        "summary": summary,
+                        "content": [],
+                    });
+                    insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
+                    if let Some(signature) = signature {
+                        reasoning["encrypted_content"] = Value::String(signature.to_owned());
+                    }
+                    items.push(reasoning);
                 } else {
-                    vec![serde_json::json!({
-                        "type": "summary_text",
-                        "text": thinking,
-                    })]
-                };
-                let mut reasoning = serde_json::json!({
-                    "type": "reasoning",
-                    "summary": summary,
-                    "content": [],
-                });
-                insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
-                if let Some(signature) = signature {
-                    reasoning["encrypted_content"] = Value::String(signature.clone());
+                    // 无签名思考没有原生载体：明文降级为 output_text，合入当前 message。
+                    message_content
+                        .extend(degraded_reasoning_parts(std::iter::once(thinking.as_str())));
                 }
-                items.push(reasoning);
             }
+            ContentBlock::Reasoning {
+                summary,
+                content,
+                encrypted_content,
+            } => {
+                let encrypted_content = encrypted_content
+                    .as_deref()
+                    .filter(|value| !value.is_empty());
+                if encrypted_content.is_some() {
+                    push_assistant_message(&mut items, &mut message_content, item);
+                    items.push(encode_native_reasoning_item(
+                        item,
+                        summary,
+                        content,
+                        encrypted_content,
+                    ));
+                } else {
+                    message_content.extend(degraded_reasoning_parts(
+                        summary.iter().chain(content.iter()),
+                    ));
+                }
+            }
+            // redacted 数据没有 Responses 输入载体，静默忽略，绝不落到可读字段。
+            ContentBlock::RedactedThinking { .. } => {}
             ContentBlock::ToolUse {
                 id, name, input, ..
             } => {

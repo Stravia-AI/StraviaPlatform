@@ -61,7 +61,14 @@ impl GoogleEncoder {
             if matches!(msg.role, Role::System | Role::Developer) {
                 continue;
             }
-            contents.push(encode_content(msg, &call_names)?);
+            let content = encode_content(msg, &call_names)?;
+            // 乐观回放可能让条目只剩 Gemini 承载不了的受保护载荷（如 redacted）：
+            // 编码后没有 part 的 model 条目整条跳过，不发出空 content。
+            if msg.role == Role::Assistant && content["parts"].as_array().is_some_and(Vec::is_empty)
+            {
+                continue;
+            }
+            contents.push(content);
         }
 
         let mut body = serde_json::json!({ "contents": contents });
@@ -277,7 +284,7 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
             let parts = blocks
                 .iter()
                 .filter(|block| !matches!(block, ContentBlock::Text { .. }))
-                .map(|block| encode_content_block_for_gemini(block, call_names))
+                .filter_map(|block| encode_content_block_for_gemini(block, call_names))
                 .collect::<Vec<_>>();
             if !parts.is_empty() {
                 function_response["parts"] = Value::Array(parts);
@@ -286,18 +293,19 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
         }
         MessageContent::Blocks(blocks) => blocks
             .iter()
-            .map(|block| encode_content_block_for_gemini(block, call_names))
+            .filter_map(|block| encode_content_block_for_gemini(block, call_names))
             .collect(),
     };
 
     Ok(serde_json::json!({"role": role, "parts": parts}))
 }
 
+/// 返回 `None` 表示该块在 Gemini 上没有可承载的载体（如 redacted 数据），整块忽略。
 pub(super) fn encode_content_block_for_gemini(
     b: &ContentBlock,
     call_names: &HashMap<&str, &str>,
-) -> Value {
-    match b {
+) -> Option<Value> {
+    Some(match b {
         ContentBlock::Text { text, .. } => serde_json::json!({"text": text}),
         ContentBlock::Image { source, .. } => match source {
             MediaSource::Base64 { media_type, data } => serde_json::json!({
@@ -337,6 +345,9 @@ pub(super) fn encode_content_block_for_gemini(
                 }
             })
         }
+        // Gemini 接受无 thoughtSignature 的 thought part（可能只是忽略它），所以
+        // 无签名明文保持原生 thought part，不降级为正文：降级会让模型把自己的
+        // 推理当成已经说出口的话。
         ContentBlock::Thinking {
             thinking,
             signature,
@@ -347,9 +358,25 @@ pub(super) fn encode_content_block_for_gemini(
             }
             part
         }
+        ContentBlock::Reasoning {
+            summary,
+            content,
+            encrypted_content,
+        } => {
+            let mut part = serde_json::json!({
+                "text": summary.iter().chain(content).cloned().collect::<String>(),
+                "thought": true,
+            });
+            if let Some(signature) = encrypted_content {
+                part["thoughtSignature"] = Value::String(signature.clone());
+            }
+            part
+        }
+        // redacted 数据没有 Gemini 原生载体，静默忽略，绝不能落到可读文本里。
+        ContentBlock::RedactedThinking { .. } => return None,
         ContentBlock::Unknown { raw } => raw.clone(),
         other => crate::codec::content_block_wire_value(other),
-    }
+    })
 }
 
 fn encode_media_source(source: &MediaSource, media_type: Option<&str>) -> Value {

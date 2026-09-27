@@ -381,12 +381,7 @@ impl ModelLegConsume {
         projection.begin_model_leg(
             super::thinking_carrier_facts(ingress, turn.route.egress),
             run.exposed_tool_names(),
-            Some(crate::history_marker::ThinkingSource {
-                namespace: turn.target.namespace.clone(),
-                protocol: turn.target.protocol_identity(),
-                actual_model: turn.target.actual_model.clone(),
-                target_id: turn.target.target_id.clone(),
-            }),
+            Some(turn.target.thinking_source()),
         );
         Self {
             completion: CompletionContext::from_model_turn(

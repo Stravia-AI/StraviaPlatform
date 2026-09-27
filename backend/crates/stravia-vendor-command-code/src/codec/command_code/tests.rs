@@ -187,6 +187,81 @@ fn bare_tool_calls_without_input_stream_get_distinct_slots() {
     assert_eq!(slots, vec![(0, "a".into()), (1, "b".into())]);
 }
 
+// 客户端回传的明文推理和平台自身的签名推理，回放给 Command Code 时都必须仍是
+// reasoning 部件：改成正文会让模型把推理当作自己说过的话。受保护载荷无法承载，只能省略。
+#[test]
+fn thinking_replay_keeps_readable_reasoning_native_and_omits_protected_payloads() {
+    let user = |text: &str| AiItem {
+        role: Role::User,
+        content: MessageContent::Text(text.into()),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let redacted = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+            data: "redacted-secret".into(),
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let original = AiRequest::new(
+        "deepseek/deepseek-v4.1-flash",
+        vec![
+            user("go"),
+            AiItem::reasoning(
+                vec!["summary text".into()],
+                vec!["client reasoning".into()],
+                Some("encrypted-secret".into()),
+            ),
+            AiItem::thinking("signed reasoning", Some("signature-secret".into())),
+            redacted,
+            user("continue"),
+        ],
+    );
+
+    for preserve in [false, true] {
+        let mut request = original.clone();
+        stravia_protocol_codec::transform::prepare_thinking_replay(&mut request, |_| preserve);
+        let (body, _) = CommandCodeGenerateV1.encode_request(&request).unwrap();
+        let messages = body["params"]["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1]["content"],
+            json!([
+                {"type": "reasoning", "text": "summary text"},
+                {"type": "reasoning", "text": "client reasoning"}
+            ])
+        );
+        assert_eq!(
+            messages[2]["content"],
+            json!([{"type": "reasoning", "text": "signed reasoning"}])
+        );
+        // 只剩 RedactedThinking 的条目编码后无部件：本协议没有可承载的部件
+        // 类型，整条跳过，body 中绝不应出现空 assistant 消息或 redacted data。
+        assert!(
+            messages.iter().all(|message| {
+                message["role"] != "assistant" || !message["content"].as_array().unwrap().is_empty()
+            }),
+            "{messages:?}"
+        );
+        assert_eq!(messages[3]["content"][0]["text"], "continue");
+        // 明文推理只能以 reasoning 部件出现，绝不降级为 text 正文。
+        let text_parts: Vec<&str> = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect();
+        for leaked in ["summary text", "client reasoning", "signed reasoning"] {
+            assert!(!text_parts.contains(&leaked), "{text_parts:?}");
+        }
+        let serialized = body.to_string();
+        assert!(!serialized.contains("secret"), "{serialized}");
+    }
+}
+
 // 裸 `tool-call` 先到、`tool-input-end` 后到:echo 已终结调用,尾随 end 不能报错。
 #[test]
 fn trailing_tool_input_end_after_bare_tool_call_is_tolerated() {

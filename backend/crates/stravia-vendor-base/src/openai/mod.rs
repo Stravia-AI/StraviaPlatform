@@ -3,7 +3,7 @@ use stravia_vendor_common::common;
 
 use serde_json::Value;
 use stravia_protocol_codec::registry::ProtocolRegistry;
-use stravia_protocol_codec::transform::{ProtocolTransform, prepare_thinking_replay};
+use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::protocol::ids::{
     OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
     OPENAI_COMPATIBLE_EMBEDDINGS_V1,
@@ -138,17 +138,9 @@ pub(crate) fn select_protocol(
     let Ok(pair) = ProtocolTransform::global().bind(ingress, OPEN_RESPONSES_2026_04_24) else {
         return Ok(provider.protocol.clone());
     };
+    // 思考块无论来源都可由 Responses codec 表示（受保护载荷由 Core 按来源剥离），
+    // 这里的严格编码只拒绝其它硬要求。
     if pair.encode_request(request).is_ok() {
-        return Ok(OPEN_RESPONSES_2026_04_24.to_string());
-    }
-
-    // Protocol choice runs before Core prepares Target-owned thinking replay. Probe only the
-    // codec's explicit thinking downgrade on a copy; its strict loss audit still rejects every
-    // unrelated hard requirement, and the canonical request remains untouched for execution.
-    let mut probe = request.clone();
-    if prepare_thinking_replay(&mut probe, OPEN_RESPONSES_2026_04_24, |_| false)
-        && pair.encode_request(&probe).is_ok()
-    {
         return Ok(OPEN_RESPONSES_2026_04_24.to_string());
     }
 

@@ -156,6 +156,34 @@ fn internal_artifact_identity_is_not_sent_upstream() {
 }
 
 #[test]
+fn gateway_request_state_is_not_passed_through_upstream() {
+    let mut request = AiRequest::new(
+        "model",
+        vec![AiItem {
+            role: Role::User,
+            content: MessageContent::Text("hello".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+    let ingress = &mut request.meta.vendor.ingress;
+    ingress.insert(
+        "__stravia_generation_session_id".into(),
+        serde_json::json!("session-secret"),
+    );
+    ingress.insert(
+        stravia_runtime_contract::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META.into(),
+        serde_json::Value::Bool(true),
+    );
+    ingress.insert("client_extension".into(), serde_json::json!("kept"));
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    assert_eq!(body["client_extension"], "kept");
+    assert!(!body.to_string().contains("__stravia_"), "{body}");
+}
+
+#[test]
 fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
     let request = AiRequest::new(
         "model",
@@ -344,4 +372,163 @@ fn unknown_reasoning_effort_is_rejected() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn thinking_and_reasoning_plaintext_joins_into_reasoning_content() {
+    let request = AiRequest::new(
+        "deepseek-flash",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Thinking {
+                        thinking: "first thought".into(),
+                        signature: Some("opaque-sig".into()),
+                    },
+                    ContentBlock::Reasoning {
+                        summary: vec!["summary".into()],
+                        content: vec!["detail".into()],
+                        encrypted_content: Some("cipher-text".into()),
+                    },
+                    ContentBlock::RedactedThinking {
+                        data: "redacted-payload".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".into(),
+                        cache_control: None,
+                    },
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+
+    let assistant = &body["messages"][1];
+    // 明文推理按块顺序进入 reasoning_content；受保护载荷没有任何载体。
+    assert_eq!(
+        assistant["reasoning_content"],
+        "first thought\nsummary\ndetail"
+    );
+    assert_eq!(
+        assistant["content"],
+        serde_json::json!([{"type": "text", "text": "answer"}])
+    );
+    let wire = body.to_string();
+    assert!(!wire.contains("opaque-sig"), "{wire}");
+    assert!(!wire.contains("cipher-text"), "{wire}");
+    assert!(!wire.contains("redacted-payload"), "{wire}");
+    assert!(!wire.contains("reasoning\""), "{wire}");
+}
+
+#[test]
+fn protected_only_assistant_item_is_dropped_entirely() {
+    for blocks in [
+        vec![ContentBlock::RedactedThinking {
+            data: "redacted-payload".into(),
+        }],
+        vec![ContentBlock::Reasoning {
+            summary: Vec::new(),
+            content: Vec::new(),
+            encrypted_content: Some("cipher-text".into()),
+        }],
+        vec![ContentBlock::Thinking {
+            thinking: String::new(),
+            signature: Some("opaque-sig".into()),
+        }],
+    ] {
+        let request = AiRequest::new(
+            "deepseek-flash",
+            vec![
+                AiItem {
+                    role: Role::User,
+                    content: MessageContent::Text("hello".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                },
+                AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(blocks),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                },
+                AiItem {
+                    role: Role::User,
+                    content: MessageContent::Text("continue".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                },
+            ],
+        );
+
+        let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+
+        // 条目只剩承载不了的受保护载荷：整条跳过，不能发出空 assistant 消息。
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.iter().all(|m| m["role"] == "user"));
+        let wire = body.to_string();
+        assert!(!wire.contains("redacted-payload"), "{wire}");
+        assert!(!wire.contains("cipher-text"), "{wire}");
+        assert!(!wire.contains("opaque-sig"), "{wire}");
+    }
+}
+
+#[test]
+fn signed_thinking_with_tool_calls_keeps_reasoning_content_and_drops_signature() {
+    let request = AiRequest::new(
+        "deepseek-flash",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::Thinking {
+                    thinking: "inspect the repo".into(),
+                    signature: Some("opaque-sig".into()),
+                }]),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "glob".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("listing".into()),
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                meta: None,
+            },
+        ],
+    );
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+
+    let assistant = &body["messages"][1];
+    assert_eq!(assistant["reasoning_content"], "inspect the repo");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+    // 有 tool_calls 时 content 可缺省，但绝不能把签名写进任何字段。
+    assert!(!body.to_string().contains("opaque-sig"));
 }

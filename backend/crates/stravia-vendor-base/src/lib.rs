@@ -12,7 +12,7 @@ mod openai;
 
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_protocol_codec::transform::{EncodedRequest, ProtocolTransform};
-use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest};
+use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest, AiStreamDelta};
 use stravia_vendor_common::common;
 #[cfg(test)]
 use stravia_vendor_sdk::DefaultModelsSource;
@@ -270,12 +270,28 @@ pub(crate) fn decode_inference(
     response: stravia_vendor_sdk::HttpResponse,
 ) -> Result<OperationOutput, PluginError> {
     let Some(adapter) = codec::adapter(protocol) else {
-        return common::decode_inference(host, protocol, response);
+        // 协议级错误识别只认受保护推理拒绝（签名/密文被上游拒收），
+        // 宿主据此剥离受保护载荷重试；其余错误保持原分类。
+        let classify = common::endpoint(protocol)
+            .map(|endpoint| generic::inference_error_classifier_for(endpoint.protocol))
+            .unwrap_or(generic::no_inference_error_classification);
+        return common::decode_ai_response_with_error_classifier(
+            host, protocol, response, classify,
+        )
+        .map(Box::new)
+        .map(OperationOutput::Infer);
     };
+    let classify = generic::inference_error_classifier_for(adapter.id().protocol);
     let status = response.status()?;
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
         let body = stravia_vendor_sdk::read_http_body(&response, 256 * 1024)?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body)
+            && let Some(mut error) = classify(&value, false)
+        {
+            error.upstream_status.get_or_insert(status);
+            return Err(error);
+        }
         return Err(common::upstream_error(status, &headers, &body));
     }
     let streaming = headers.iter().any(|(name, value)| {
@@ -292,15 +308,20 @@ pub(crate) fn decode_inference(
         let mut decoder = ProtocolTransform::decode_stream_with(adapter)
             .map_err(common::map_response_transform_error)?;
         let mut accumulator = StreamResponseAccumulator::default();
+        // 与 vendor-common 的 saw_response_event 语义一致：推理拒绝只允许
+        // 发生在任何响应输出之前，否则剥离重试会重放已发出的内容。
+        let mut saw_response_event = false;
         while let Some(chunk) = response.read_body()? {
             let deltas = decoder
                 .decode_chunk(&chunk)
                 .map_err(common::map_response_transform_error)?;
+            classify_stream_deltas(&deltas, &mut saw_response_event, classify)?;
             common::emit_deltas(host, &mut accumulator, &deltas)?;
         }
         let deltas = decoder
             .finish()
             .map_err(common::map_response_transform_error)?;
+        classify_stream_deltas(&deltas, &mut saw_response_event, classify)?;
         common::emit_deltas(host, &mut accumulator, &deltas)?;
         let complete = accumulator.into_ai_response();
         host.emit_completed(&complete)?;
@@ -317,6 +338,28 @@ pub(crate) fn decode_inference(
             .map_err(common::map_response_transform_error)?
     };
     Ok(OperationOutput::Infer(Box::new(complete)))
+}
+
+/// 在 emit 前扫描一批流 delta：StreamError 携带的原始上游错误体交给分类器
+/// （识别受保护推理被拒），同时跟踪是否已经出现过响应性输出。
+fn classify_stream_deltas(
+    deltas: &[AiStreamDelta],
+    saw_response_event: &mut bool,
+    classify: fn(&serde_json::Value, bool) -> Option<PluginError>,
+) -> Result<(), PluginError> {
+    for delta in deltas {
+        if let AiStreamDelta::StreamError { error } = delta
+            && let Some(raw) = &error.raw
+            && let Some(classified) = classify(raw, *saw_response_event)
+        {
+            return Err(classified);
+        }
+        *saw_response_event |= !matches!(
+            delta,
+            AiStreamDelta::StreamError { .. } | AiStreamDelta::UnexpectedEof
+        );
+    }
+    Ok(())
 }
 
 fn validate_target(provider: &ProviderSnapshot, channel: &str) -> Result<(), PluginError> {

@@ -1172,18 +1172,13 @@ mod tests {
             DevinClientPlatform, encode_get_chat_message_request_with_platform, session_shape,
         };
         use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
-        use stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1;
         use stravia_runtime_contract::protocol::ir::AiRequest;
 
         let mut accumulator = StreamResponseAccumulator::default();
         accumulator.apply_all(deltas);
         let response = accumulator.into_ai_response();
         let mut request = AiRequest::new("swe-2-high", response.items);
-        stravia_protocol_codec::transform::prepare_thinking_replay(
-            &mut request,
-            DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
-            |_| true,
-        );
+        stravia_protocol_codec::transform::prepare_thinking_replay(&mut request, |_| true);
         let body = encode_get_chat_message_request_with_platform(
             &request,
             "test-token",
@@ -1325,11 +1320,7 @@ mod tests {
         let mut request = responses
             .decode_request(serde_json::json!({"model":"swe-2","input":input}))
             .unwrap();
-        stravia_protocol_codec::transform::prepare_thinking_replay(
-            &mut request,
-            stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
-            |_| true,
-        );
+        stravia_protocol_codec::transform::prepare_thinking_replay(&mut request, |_| true);
         let body = super::super::request::encode_get_chat_message_request_with_platform(
             &request,
             "test-token",
@@ -1395,9 +1386,7 @@ mod tests {
                 .any(|f| f.number == 13 && f.scalar == 1)
         );
         use stravia_protocol_codec::registry::ProtocolRegistry;
-        use stravia_runtime_contract::protocol::ids::{
-            ANTHROPIC_MESSAGES_2023_06_01, DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
-        };
+        use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
         let anthropic = ProtocolRegistry::global()
             .adapter(&ANTHROPIC_MESSAGES_2023_06_01)
             .unwrap();
@@ -1417,11 +1406,7 @@ mod tests {
                 "messages": [{"role": "assistant", "content": [redacted]}],
             }))
             .unwrap();
-        stravia_protocol_codec::transform::prepare_thinking_replay(
-            &mut request,
-            DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
-            |_| true,
-        );
+        stravia_protocol_codec::transform::prepare_thinking_replay(&mut request, |_| true);
         assert!(
             matches!(&request.items[0].content, MessageContent::Blocks(blocks)
             if matches!(&blocks[0], ContentBlock::RedactedThinking { .. }))

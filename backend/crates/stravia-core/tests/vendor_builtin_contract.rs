@@ -2068,7 +2068,7 @@ async fn command_code_replays_unmatched_responses_reasoning_before_tool_continua
         json!({"id": "deepseek/deepseek-v4.1-flash", "reasoning": true, "tool_call": true}),
     )
     .await?;
-    // 压缩或编辑后的历史没有可复用父链；可读思考仍须进入后续工具轮的上下文。
+    // 压缩或编辑后的历史没有可复用父链；可读思考仍须以原生推理进入后续工具轮的上下文。
     let request = json!({
         "model": route,
         "stream": false,
@@ -2119,6 +2119,11 @@ async fn command_code_replays_unmatched_responses_reasoning_before_tool_continua
     ] {
         assert!(
             parts
+                .iter()
+                .any(|part| part["type"] == "reasoning" && part["text"] == text)
+        );
+        assert!(
+            !parts
                 .iter()
                 .any(|part| part["type"] == "text" && part["text"] == text)
         );

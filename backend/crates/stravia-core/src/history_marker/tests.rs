@@ -959,6 +959,7 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
         protocol: Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24.into()),
         actual_model: "actual-model".into(),
         target_id: "original-target".into(),
+        authority: Some("provider:deployment".into()),
     };
     let encrypted = store
         .create_thinking(
@@ -1282,6 +1283,7 @@ fn thinking_source_round_trips_unknown_guest_protocol_identity() {
         ),
         actual_model: "model".into(),
         target_id: "target".into(),
+        authority: Some("opaque-deployment".into()),
     };
 
     let encoded = serde_json::to_value(&source).expect("serialize Thinking source");

@@ -1,13 +1,15 @@
-use stravia_runtime_contract::protocol::ids::{Protocol, ProtocolEndpoint};
 use stravia_runtime_contract::protocol::ir::{
     AiItem, AiRequest, ContentBlock, MessageContent, Role,
 };
 
 /// Prepare a caller-owned request copy; canonical history and strict encoding stay untouched.
-/// The caller decides whether each item's protected payload belongs to this exact Target.
+/// The caller decides whether each item's protected payload may be replayed to this Target.
+///
+/// 宿主只负责来源约束：不可回放的签名、`encrypted_content` 与 redacted 块在此剥离。
+/// 明文思考保持为思考块，由出口 codec 决定原生承载还是降级为正文；受保护载荷
+/// 若出口协议无法承载，也由 codec 忽略。这里不按协议分支，插件协议同样适用。
 pub fn prepare_thinking_replay(
     request: &mut AiRequest,
-    target: ProtocolEndpoint,
     preserve_protected: impl Fn(&AiItem) -> bool,
 ) -> bool {
     let mut changed = false;
@@ -18,38 +20,60 @@ pub fn prepare_thinking_replay(
         if !blocks.iter().any(is_thinking) {
             return true;
         }
-        let preserve = preserve_protected(item);
-        if !blocks
-            .iter()
-            .any(|block| needs_replay(block, item.role, target.protocol, preserve))
-        {
+        let assistant = item.role == Role::Assistant;
+        let preserve = assistant && preserve_protected(item);
+        if preserve {
             return true;
         }
         let thinking_only = blocks.iter().all(is_thinking)
             && item.tool_calls.as_ref().is_none_or(Vec::is_empty)
             && item.tool_call_id.is_none();
+        let native_fields = thinking_only
+            && item
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.get(NATIVE_ITEM_FIELDS).is_some());
+        if assistant && !native_fields && !blocks.iter().any(is_protected) {
+            return true;
+        }
         let MessageContent::Blocks(blocks) = &mut item.content else {
             unreachable!();
         };
         let mut replay = Vec::with_capacity(blocks.len());
         for block in blocks.drain(..) {
-            if !needs_replay(&block, item.role, target.protocol, preserve) {
-                replay.push(block);
-                continue;
-            }
             match block {
+                // 没有协议承载非 assistant 角色的推理，只能作为普通文本保留。
+                ContentBlock::Thinking { thinking, .. } if !assistant => {
+                    push_text(&mut replay, thinking);
+                }
+                ContentBlock::Reasoning {
+                    summary, content, ..
+                } if !assistant => {
+                    for text in summary.into_iter().chain(content) {
+                        push_text(&mut replay, text);
+                    }
+                }
                 ContentBlock::Thinking { thinking, .. } => {
-                    push_readable(&mut replay, thinking);
+                    if !thinking.is_empty() {
+                        replay.push(ContentBlock::Thinking {
+                            thinking,
+                            signature: None,
+                        });
+                    }
                 }
                 ContentBlock::Reasoning {
                     summary, content, ..
                 } => {
-                    for text in summary.into_iter().chain(content) {
-                        push_readable(&mut replay, text);
+                    if summary.iter().chain(&content).any(|text| !text.is_empty()) {
+                        replay.push(ContentBlock::Reasoning {
+                            summary,
+                            content,
+                            encrypted_content: None,
+                        });
                     }
                 }
                 ContentBlock::RedactedThinking { .. } => {}
-                _ => unreachable!("only thinking blocks need replay"),
+                other => replay.push(other),
             }
         }
         *blocks = replay;
@@ -61,83 +85,19 @@ pub fn prepare_thinking_replay(
                     .expect("reasoning keys are not reserved");
             }
         }
-        // These extras belong to the original native reasoning item, not its text fallback.
-        // Mixed items may carry hard fields for ordinary content/tools: keep those strict.
+        // 原生条目字段（如 Responses reasoning id）指向来源上游保存的推理，与签名同样绑定来源。
+        // 混合条目可能携带普通内容/工具的硬字段：保持严格。
         if thinking_only && let Some(meta) = item.meta.as_mut() {
-            meta.remove_extension("__open_responses_item_fields")
+            meta.remove_extension(NATIVE_ITEM_FIELDS)
                 .expect("native item fields key is not reserved");
         }
         changed = true;
-        !(item.role == Role::Assistant && blocks.is_empty() && thinking_only)
+        !(assistant && blocks.is_empty() && thinking_only)
     });
-
-    // The Responses encoder recognizes native Reasoning only as a standalone item. Split
-    // mixed native items rather than dropping tools or flattening summary/content boundaries.
-    if target.protocol == Protocol::OpenResponses {
-        let mut index = 0;
-        while index < request.items.len() {
-            let item = &request.items[index];
-            let MessageContent::Blocks(blocks) = &item.content else {
-                index += 1;
-                continue;
-            };
-            let mixed = blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
-                && (blocks.len() > 1
-                    || item
-                        .tool_calls
-                        .as_ref()
-                        .is_some_and(|calls| !calls.is_empty()));
-            if !mixed {
-                index += 1;
-                continue;
-            }
-            let mut item = request.items.remove(index);
-            let MessageContent::Blocks(blocks) = &mut item.content else {
-                unreachable!()
-            };
-            let mut ordinary = Vec::new();
-            let mut parts = Vec::new();
-            for block in std::mem::take(blocks) {
-                if matches!(block, ContentBlock::Reasoning { .. }) {
-                    if !ordinary.is_empty() {
-                        parts.push(AiItem {
-                            content: MessageContent::Blocks(std::mem::take(&mut ordinary)),
-                            role: item.role,
-                            tool_calls: None,
-                            tool_call_id: item.tool_call_id.clone(),
-                            meta: item.meta.clone(),
-                        });
-                    }
-                    parts.push(AiItem {
-                        content: MessageContent::Blocks(vec![block]),
-                        role: item.role,
-                        tool_calls: None,
-                        tool_call_id: item.tool_call_id.clone(),
-                        meta: item.meta.clone(),
-                    });
-                } else {
-                    ordinary.push(block);
-                }
-            }
-            if !ordinary.is_empty()
-                || item
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| !calls.is_empty())
-            {
-                item.content = MessageContent::Blocks(ordinary);
-                parts.push(item);
-            }
-            let count = parts.len();
-            request.items.splice(index..index, parts);
-            index += count;
-            changed = true;
-        }
-    }
     changed
 }
+
+const NATIVE_ITEM_FIELDS: &str = "__open_responses_item_fields";
 
 fn is_thinking(block: &ContentBlock) -> bool {
     matches!(
@@ -148,51 +108,24 @@ fn is_thinking(block: &ContentBlock) -> bool {
     )
 }
 
-fn needs_replay(block: &ContentBlock, role: Role, target: Protocol, preserve: bool) -> bool {
-    match block {
-        ContentBlock::Thinking { signature, .. } => {
-            if role != Role::Assistant {
-                return true;
-            }
-            match target {
-                Protocol::AnthropicMessages
-                | Protocol::BedrockConverse
-                | Protocol::OpenResponses
-                | Protocol::DevinConnect => {
-                    !(preserve
-                        && signature
-                            .as_ref()
-                            .is_some_and(|signature| !signature.trim().is_empty()))
-                }
-                Protocol::GoogleGemini => !preserve,
-                Protocol::OpenAICompatible
-                | Protocol::WatsonxTextChat
-                | Protocol::CohereChat
-                | Protocol::GatewayLanguageModel
-                | Protocol::CommandCode => !preserve || signature.is_some(),
-            }
-        }
-        ContentBlock::Reasoning { .. } => {
-            !(preserve
-                && role == Role::Assistant
-                && matches!(target, Protocol::OpenResponses | Protocol::DevinConnect))
-        }
-        ContentBlock::RedactedThinking { .. } => {
-            !(preserve
-                && role == Role::Assistant
-                && matches!(target, Protocol::AnthropicMessages | Protocol::DevinConnect))
-        }
-        _ => false,
-    }
+fn is_protected(block: &ContentBlock) -> bool {
+    matches!(
+        block,
+        ContentBlock::Thinking {
+            signature: Some(_),
+            ..
+        } | ContentBlock::Reasoning {
+            encrypted_content: Some(_),
+            ..
+        } | ContentBlock::RedactedThinking { .. }
+    )
 }
 
-fn push_readable(blocks: &mut Vec<ContentBlock>, text: String) {
-    if text.is_empty() {
-        return;
+fn push_text(blocks: &mut Vec<ContentBlock>, text: String) {
+    if !text.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text,
+            cache_control: None,
+        });
     }
-    // 某些上游接受外国 thinking 字段却不将其放入上下文；普通文本才能保留可读内容。
-    blocks.push(ContentBlock::Text {
-        text,
-        cache_control: None,
-    });
 }

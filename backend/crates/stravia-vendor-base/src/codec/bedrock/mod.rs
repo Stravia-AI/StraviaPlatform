@@ -18,6 +18,8 @@ use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
 use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 use stravia_runtime_contract::protocol::ids::StreamCaps;
 use stravia_runtime_contract::protocol::ids::VendorFieldPolicy;
+use stravia_runtime_contract::protocol::ir::AiError;
+use stravia_runtime_contract::protocol::ir::AiErrorKind;
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
@@ -151,6 +153,14 @@ impl ProtocolAdapter for BedrockConverseV1 {
                     thinking,
                     signature,
                 } => response.push_reasoning(thinking, signature),
+                // 密文块没有明文可读，作为独立 assistant 条目保留以便回放。
+                ContentBlock::RedactedThinking { data } => response.items.push(AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking { data }]),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }),
                 ContentBlock::ToolUse {
                     id, name, input, ..
                 } => response.push_tool_call(ToolCall {
@@ -190,20 +200,21 @@ impl ProtocolAdapter for BedrockConverseV1 {
                                 thinking,
                                 signature,
                             } => {
-                                let mut reasoning = Map::from_iter([(
-                                    "text".into(),
-                                    Value::String(thinking.clone()),
-                                )]);
-                                if let Some(signature) = signature {
-                                    reasoning.insert(
-                                        "signature".into(),
-                                        Value::String(signature.clone()),
-                                    );
-                                }
+                                content.push(reasoning_text_block(thinking, signature.as_deref()));
+                            }
+                            ContentBlock::Reasoning {
+                                summary,
+                                content: segments,
+                                encrypted_content,
+                            } => {
+                                content.push(reasoning_text_block(
+                                    &reasoning_plaintext(summary, segments),
+                                    encrypted_content.as_deref(),
+                                ));
+                            }
+                            ContentBlock::RedactedThinking { data } => {
                                 content.push(json!({
-                                    "reasoningContent": {
-                                        "reasoningText": Value::Object(reasoning)
-                                    }
+                                    "reasoningContent": {"redactedContent": data}
                                 }));
                             }
                             _ => {}
@@ -326,6 +337,12 @@ impl BedrockStreamParser {
                 .and_then(Value::as_str)
             {
                 deltas.push(AiStreamDelta::ThinkingDelta(reasoning.into()));
+            } else if let Some(signature) = content
+                .pointer("/reasoningContent/signature")
+                .and_then(Value::as_str)
+            {
+                // 签名是回放必需的受保护载荷，丢了它下一轮只能剥离思考。
+                deltas.push(AiStreamDelta::ThinkingSignature(signature.into()));
             } else if let Some(input) = content.pointer("/toolUse/input").and_then(Value::as_str) {
                 let call = self
                     .tools
@@ -370,12 +387,28 @@ impl BedrockStreamParser {
             }
             return Ok(());
         }
-        if payload.get("internalServerException").is_some()
-            || payload.get("modelStreamErrorException").is_some()
-            || payload.get("validationException").is_some()
-            || payload.get("throttlingException").is_some()
+        // 异常帧保留原始 payload 在 StreamError.raw 里：validationException
+        // 可能携带 Claude 的 thinking 签名拒绝文案，出口侧据此识别为
+        // 受保护推理回放失败（仅限任何输出之前），其余仍是普通流内错误。
+        if let Some(exception) = [
+            "internalServerException",
+            "modelStreamErrorException",
+            "validationException",
+            "throttlingException",
+        ]
+        .iter()
+        .find_map(|key| payload.get(*key))
         {
-            bail!("Bedrock streaming error: {payload}");
+            self.done = true;
+            let message = exception
+                .get("message")
+                .or_else(|| exception.get("Message"))
+                .and_then(Value::as_str)
+                .unwrap_or("Bedrock streaming error");
+            deltas.push(AiStreamDelta::StreamError {
+                error: AiError::new(AiErrorKind::StreamMidError, message).with_raw(payload.clone()),
+            });
+            return Ok(());
         }
         deltas.push(AiStreamDelta::Unknown {
             raw: payload.to_string(),
@@ -436,8 +469,15 @@ fn encode_messages(request: &AiRequest) -> anyhow::Result<Vec<Value>> {
             Role::Developer => bail!("Bedrock Converse cannot represent developer messages"),
             Role::User => messages
                 .push(json!({"role": "user", "content": encode_user_content(&item.content)?})),
-            Role::Assistant => messages
-                .push(json!({"role": "assistant", "content": encode_assistant_content(item)?})),
+            Role::Assistant => {
+                let content = encode_assistant_content(item)?;
+                // 只含无法承载的受保护推理载荷（且无 tool call）的条目编码为空；
+                // 空 assistant 消息会被上游拒绝，整条跳过。tool 结果只依赖其它
+                // 条目的 tool call，跳过不会破坏配对。
+                if !content.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": content}));
+                }
+            }
             Role::Tool => {
                 messages.push(json!({"role": "user", "content": encode_tool_result(item)?}))
             }
@@ -468,30 +508,72 @@ fn encode_user_content(content: &MessageContent) -> anyhow::Result<Vec<Value>> {
 fn encode_assistant_content(item: &AiItem) -> anyhow::Result<Vec<Value>> {
     let mut content = match &item.content {
         MessageContent::Text(text) => vec![json!({"text": text})],
-        MessageContent::Blocks(blocks) => blocks
-            .iter()
-            .map(|block| match block {
-                ContentBlock::Text { text, .. } => Ok(json!({"text": text})),
-                ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                } => {
-                    let mut reasoning =
-                        Map::from_iter([("text".into(), Value::String(thinking.clone()))]);
-                    if let Some(signature) = signature {
-                        reasoning.insert("signature".into(), Value::String(signature.clone()));
+        MessageContent::Blocks(blocks) => {
+            let mut parts = Vec::new();
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text, .. } => parts.push(json!({"text": text})),
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => match signature
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        // 有签名的思考走原生 reasoningText 载体，签名原样透传。
+                        Some(signature) => {
+                            parts.push(reasoning_text_block(thinking, Some(signature)))
+                        }
+                        // Claude on Bedrock 拒绝无签名 reasoningContent；
+                        // 无签名明文只能降级为普通 text 块，否则整个请求被拒。
+                        None if !thinking.is_empty() => parts.push(json!({"text": thinking})),
+                        None => {}
+                    },
+                    ContentBlock::Reasoning {
+                        summary,
+                        content: segments,
+                        encrypted_content,
+                    } => match encrypted_content
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        // encrypted_content 是来源上游的不透明载荷；Converse 的
+                        // reasoningText.signature 能原生承载这类密文，乐观回放，
+                        // 被上游拒绝时由宿主剥离重试。
+                        Some(encrypted) => parts.push(reasoning_text_block(
+                            &reasoning_plaintext(summary, segments),
+                            Some(encrypted),
+                        )),
+                        // 与无签名 Thinking 同理降级：每段非空文本一个 text 块，
+                        // 保持在原位置顺序。
+                        None => {
+                            for text in summary
+                                .iter()
+                                .chain(segments)
+                                .filter(|text| !text.is_empty())
+                            {
+                                parts.push(json!({"text": text}));
+                            }
+                        }
+                    },
+                    // redactedContent 是 Converse 原生载体（blob，JSON 中为 base64
+                    // 字符串）；IR 的 data 已是 base64，原样透传。
+                    ContentBlock::RedactedThinking { data } if !data.is_empty() => {
+                        parts.push(json!({"reasoningContent": {"redactedContent": data}}))
                     }
-                    Ok(json!({"reasoningContent": {"reasoningText": Value::Object(reasoning)}}))
+                    ContentBlock::RedactedThinking { .. } => {}
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => parts
+                        .push(json!({"toolUse": {"toolUseId": id, "name": name, "input": input}})),
+                    other => bail!(
+                        "Bedrock cannot represent assistant content block `{}`",
+                        content_block_name(other)
+                    ),
                 }
-                ContentBlock::ToolUse {
-                    id, name, input, ..
-                } => Ok(json!({"toolUse": {"toolUseId": id, "name": name, "input": input}})),
-                other => bail!(
-                    "Bedrock cannot represent assistant content block `{}`",
-                    content_block_name(other)
-                ),
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
+            }
+            parts
+        }
     };
     content.extend(item.tool_calls.as_deref().unwrap_or(&[]).iter().map(|call| json!({"toolUse": {
         "toolUseId": call.id,
@@ -499,6 +581,26 @@ fn encode_assistant_content(item: &AiItem) -> anyhow::Result<Vec<Value>> {
         "input": serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| Value::String(call.arguments.clone())),
     }})));
     Ok(content)
+}
+
+/// 一个 `reasoningContent.reasoningText` 块；signature 仅在调用方确认非空时给出。
+fn reasoning_text_block(text: &str, signature: Option<&str>) -> Value {
+    let mut reasoning = Map::from_iter([("text".into(), Value::String(text.to_owned()))]);
+    if let Some(signature) = signature {
+        reasoning.insert("signature".into(), Value::String(signature.to_owned()));
+    }
+    json!({"reasoningContent": {"reasoningText": Value::Object(reasoning)}})
+}
+
+/// Reasoning 的明文按 summary → content 顺序、跳过空串后拼接为单段文本。
+fn reasoning_plaintext(summary: &[String], content: &[String]) -> String {
+    summary
+        .iter()
+        .chain(content)
+        .filter(|text| !text.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn encode_tool_result(item: &AiItem) -> anyhow::Result<Vec<Value>> {
@@ -641,6 +743,15 @@ fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
                 .get("signature")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+        });
+    }
+    // redactedContent 是 blob：JSON 线上即 base64 字符串，与 IR 的 data 字段对应。
+    if let Some(data) = block
+        .pointer("/reasoningContent/redactedContent")
+        .and_then(Value::as_str)
+    {
+        return Ok(ContentBlock::RedactedThinking {
+            data: data.to_string(),
         });
     }
     bail!("unsupported Bedrock content block")

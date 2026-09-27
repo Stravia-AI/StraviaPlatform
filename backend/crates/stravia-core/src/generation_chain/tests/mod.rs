@@ -15,12 +15,13 @@ fn principal(id: &str) -> Principal {
 }
 
 fn generation_source() -> GenerationSource {
-    GenerationSource::Target {
+    GenerationSource::Target(crate::history_marker::ThinkingSource {
         namespace: "provider:model".into(),
         protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
         actual_model: "model".into(),
-        selected_target_key: "provider:model".into(),
-    }
+        target_id: "provider:model".into(),
+        authority: Some("provider:model".into()),
+    })
 }
 
 async fn generation_store() -> GenerationChainStore {

@@ -7,7 +7,7 @@ use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
     GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1,
+    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, Protocol,
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
@@ -165,6 +165,147 @@ fn classify_open_responses_error(value: &Value, saw_response_event: bool) -> Opt
             "upstream rejected protected reasoning replay",
         )
     })
+}
+
+/// 选择该协议上游错误体的受保护推理拒绝识别器。返回值是 `fn` 指针，
+/// 与 `decode_ai_response_with_error_classifier` 的参数形状一致；
+/// 不识别该形态的协议返回恒 `None` 的占位实现。
+pub(crate) fn inference_error_classifier_for(
+    protocol: Protocol,
+) -> fn(&Value, bool) -> Option<PluginError> {
+    match protocol {
+        Protocol::AnthropicMessages => classify_anthropic_error,
+        Protocol::GoogleGemini => classify_gemini_error,
+        Protocol::BedrockConverse => classify_bedrock_error,
+        _ => no_inference_error_classification,
+    }
+}
+
+pub(crate) fn no_inference_error_classification(_: &Value, _: bool) -> Option<PluginError> {
+    None
+}
+
+fn protected_reasoning_rejected(vendor: &str) -> PluginError {
+    common::plugin_error(
+        ErrorKind::ProtectedReasoningRejected,
+        format!("{vendor} rejected protected reasoning replay"),
+    )
+}
+
+/// Anthropic Messages：`{"type":"error","error":{"type":"invalid_request_error",
+/// "message":..}}`。只有推理签名校验失败可剥离重试——官方文案为
+/// ``messages.N: Invalid `signature` in `thinking` block``（docs.claude.com
+/// thinking 文档与 anthropics/skills error-codes.md，新版还会追加
+/// "bound to a different conversation"），或 redacted_thinking 数据无效。
+/// 其它 400（角色交替、参数形状等）与推理载荷无关，保持原分类。
+pub(crate) fn classify_anthropic_error(
+    value: &Value,
+    saw_response_event: bool,
+) -> Option<PluginError> {
+    if saw_response_event {
+        return None;
+    }
+    if value.pointer("/error/type").and_then(Value::as_str) != Some("invalid_request_error") {
+        return None;
+    }
+    let message = value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    anthropic_protected_reasoning_message(message)
+        .then(|| protected_reasoning_rejected("Anthropic"))
+}
+
+/// Bedrock Converse：校验失败有两种外形——HTTP 错误体
+/// `{"message": .., "__type"/"code": "..ValidationException"}`（异常类型常在
+/// `x-amzn-ErrorType` 头里，body 可能不带类型字段），以及流内异常事件
+/// `{"validationException": {"message": ..}}`。Bedrock 原样转发 Claude 的
+/// thinking 签名校验文案，message 命中同一组特征即可判定；若 body 带了
+/// 异常类型却不是 ValidationException，则不归类为受保护推理拒绝。
+pub(crate) fn classify_bedrock_error(
+    value: &Value,
+    saw_response_event: bool,
+) -> Option<PluginError> {
+    if saw_response_event {
+        return None;
+    }
+    let mut candidates: Vec<(Option<&str>, &str)> = Vec::new();
+    if let Some(message) = value
+        .get("message")
+        .or_else(|| value.get("Message"))
+        .and_then(Value::as_str)
+    {
+        let exception_type = ["__type", "code", "errorType", "type"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str));
+        candidates.push((exception_type, message));
+    }
+    if let Some(object) = value.as_object() {
+        for (key, inner) in object {
+            // ConverseStream 异常事件以异常名为键、内嵌 message。
+            if !key.to_ascii_lowercase().ends_with("exception") {
+                continue;
+            }
+            if let Some(message) = inner
+                .get("message")
+                .or_else(|| inner.get("Message"))
+                .and_then(Value::as_str)
+            {
+                candidates.push((Some(key.as_str()), message));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .any(|(exception_type, message)| {
+            exception_type.is_none_or(|ty| {
+                ty.to_ascii_lowercase()
+                    .replace(['_', '-', '.', '#'], "")
+                    .contains("validationexception")
+            }) && anthropic_protected_reasoning_message(message)
+        })
+        .then(|| protected_reasoning_rejected("Bedrock"))
+}
+
+/// Anthropic 系推理签名校验文案：`thinking` 签名无效（包括新版
+/// "bound to a different conversation" 变体），或 `redacted_thinking` 数据无效。
+fn anthropic_protected_reasoning_message(message: &str) -> bool {
+    message.contains("Invalid `signature` in `thinking` block")
+        || (message.contains("redacted_thinking") && message.to_lowercase().contains("invalid"))
+}
+
+/// Gemini generateContent / Vertex：400 错误体
+/// `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":..}}`。
+/// 官方文档（ai.google.dev/gemini-api/docs/thought-signatures）与社区实录的
+/// 拒绝文案为 "Invalid thought signature" / "Corrupted thought signature" /
+/// "Thought signature is not valid"；大小写不敏感地匹配 thought signature
+/// （含 thought_signature）+ invalid/not valid/corrupt。缺失签名
+/// （missing_thought_signature）不是回放载荷被拒，不在此列。
+pub(crate) fn classify_gemini_error(
+    value: &Value,
+    saw_response_event: bool,
+) -> Option<PluginError> {
+    if saw_response_event {
+        return None;
+    }
+    let error = value.get("error")?;
+    let status = error.get("status").and_then(Value::as_str);
+    let code = error.get("code").and_then(Value::as_u64);
+    let invalid_argument =
+        status == Some("INVALID_ARGUMENT") || (status.is_none() && code == Some(400));
+    if !invalid_argument {
+        return None;
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let mentions_signature =
+        message.contains("thought signature") || message.contains("thought_signature");
+    let rejected =
+        message.contains("invalid") || message.contains("not valid") || message.contains("corrupt");
+    (mentions_signature && rejected).then(|| protected_reasoning_rejected("Gemini"))
 }
 
 pub(crate) fn select_protocol(provider: &ProviderSnapshot, request: &AiRequest) -> String {
@@ -1083,5 +1224,195 @@ mod tests {
         );
         assert!(catalog_models[1].capabilities.is_empty());
         assert_eq!(catalog_models[1].metadata["capabilities"], json!([]));
+    }
+
+    fn assert_protected_reasoning(error: Option<PluginError>) {
+        assert!(matches!(
+            error.expect("expected ProtectedReasoningRejected").kind,
+            ErrorKind::ProtectedReasoningRejected
+        ));
+    }
+
+    #[test]
+    fn classifies_anthropic_thinking_signature_rejection() {
+        // Anthropic 官方文案（含新版 bound-to-conversation 变体的前缀）。
+        assert_protected_reasoning(classify_anthropic_error(
+            &json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "messages.0.content.0: Invalid `signature` in `thinking` block"
+                }
+            }),
+            false,
+        ));
+        assert_protected_reasoning(classify_anthropic_error(
+            &json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "messages.0.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."
+                }
+            }),
+            false,
+        ));
+        assert_protected_reasoning(classify_anthropic_error(
+            &json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "messages.0.content.1: Invalid `data` in `redacted_thinking` block"
+                }
+            }),
+            false,
+        ));
+    }
+
+    #[test]
+    fn ignores_anthropic_errors_unrelated_to_reasoning() {
+        for message in [
+            "messages: roles must alternate between \"user\" and \"assistant\"",
+            "model: invalid model ID",
+        ] {
+            assert!(
+                classify_anthropic_error(
+                    &json!({
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": message}
+                    }),
+                    false,
+                )
+                .is_none()
+            );
+        }
+        // 非 invalid_request_error 类型不参与剥离重试。
+        assert!(
+            classify_anthropic_error(
+                &json!({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "Invalid `signature` in `thinking` block"}
+                }),
+                false,
+            )
+            .is_none()
+        );
+        // 已有输出之后的错误不能触发剥离重试。
+        assert!(
+            classify_anthropic_error(
+                &json!({
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "Invalid `signature` in `thinking` block"}
+                }),
+                true,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn classifies_bedrock_validation_exception_signature_rejection() {
+        // HTTP 错误体：异常类型在 __type，文案由 Claude 透传。
+        assert_protected_reasoning(classify_bedrock_error(
+            &json!({
+                "__type": "com.amazonaws.bedrock.runtime.ValidationException",
+                "message": "Invalid `signature` in `thinking` block"
+            }),
+            false,
+        ));
+        // 异常类型也可只在响应头里，body 仅带 message。
+        assert_protected_reasoning(classify_bedrock_error(
+            &json!({"message": "Invalid `signature` in `thinking` block"}),
+            false,
+        ));
+        // ConverseStream 流内异常事件外形。
+        assert_protected_reasoning(classify_bedrock_error(
+            &json!({
+                "validationException": {
+                    "message": "Invalid `signature` in `thinking` block"
+                }
+            }),
+            false,
+        ));
+    }
+
+    #[test]
+    fn ignores_bedrock_errors_unrelated_to_reasoning() {
+        assert!(
+            classify_bedrock_error(
+                &json!({
+                    "__type": "ValidationException",
+                    "message": "The model is missing required parameters"
+                }),
+                false,
+            )
+            .is_none()
+        );
+        // 异常类型不是 ValidationException 时不归类。
+        assert!(
+            classify_bedrock_error(
+                &json!({
+                    "__type": "AccessDeniedException",
+                    "message": "Invalid `signature` in `thinking` block"
+                }),
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            classify_bedrock_error(
+                &json!({"message": "Invalid `signature` in `thinking` block"}),
+                true,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn classifies_gemini_thought_signature_rejection() {
+        for message in [
+            "Invalid thought signature",
+            "Corrupted thought signature",
+            "Thought signature is not valid",
+        ] {
+            assert_protected_reasoning(classify_gemini_error(
+                &json!({
+                    "error": {"code": 400, "status": "INVALID_ARGUMENT", "message": message}
+                }),
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn ignores_gemini_errors_unrelated_to_thought_signatures() {
+        // 普通 INVALID_ARGUMENT 不误判。
+        assert!(
+            classify_gemini_error(
+                &json!({
+                    "error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Request is missing required field"}
+                }),
+                false,
+            )
+            .is_none()
+        );
+        // 非 400/INVALID_ARGUMENT 不归类。
+        assert!(
+            classify_gemini_error(
+                &json!({
+                    "error": {"code": 500, "status": "INTERNAL", "message": "Invalid thought signature"}
+                }),
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            classify_gemini_error(
+                &json!({
+                    "error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Corrupted thought signature"}
+                }),
+                true,
+            )
+            .is_none()
+        );
     }
 }

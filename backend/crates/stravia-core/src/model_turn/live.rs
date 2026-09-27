@@ -164,12 +164,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
                     turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
-                    let thinking_source = crate::history_marker::ThinkingSource {
-                        namespace: turn.target.namespace.clone(),
-                        protocol: turn.target.protocol_identity(),
-                        actual_model: turn.target.actual_model.clone(),
-                        target_id: turn.target.target_id.clone(),
-                    };
+                    let thinking_source = turn.target.thinking_source();
                     {
                         use futures::StreamExt;
                         turn.output = Box::pin(turn.output.map(move |mut event| {
@@ -834,6 +829,7 @@ struct PreparedAttempt {
     dispatch_model: String,
     actual_model: String,
     namespace: String,
+    thinking_source: crate::history_marker::ThinkingSource,
     protocol_hint: String,
     egress_base_url: String,
     metadata: BTreeMap<String, serde_json::Value>,
@@ -965,7 +961,6 @@ async fn prepare_attempt(
     transport_preference: TransportPreference,
 ) -> Result<PreparedAttempt, AttemptFailure> {
     let gateway = &executor.gateway;
-    let omit_protected_thinking = false;
     let target_key = selected_target_key(target);
     let actual_model = match target.model().map(|model| model.as_str().trim()) {
         Some("*") => route.model_id.to_string(),
@@ -1177,30 +1172,18 @@ async fn prepare_attempt(
         protocol: protocol_identity.clone(),
         actual_model: actual_model.clone(),
         target_id: target_key.clone(),
+        authority: Some(thinking_authority(
+            &protocol_hint,
+            &provider_snapshot,
+            execution.oauth_connection_id(),
+            &actual_model,
+        )),
     };
-    // 私有 codec 由 guest 持有；历史转换使用共享协议身份，不要求宿主注册对应 codec。
-    let replay_endpoint =
-        stravia_runtime_contract::protocol::ids::ProtocolEndpoint::from_identifier(&protocol_hint);
-    let thinking_replayed = if let Some(egress) = replay_endpoint {
-        stravia_protocol_codec::transform::prepare_thinking_replay(
-            &mut provider_request,
-            egress,
-            |item| {
-                thinking_replay_source_is_compatible(
-                    item,
-                    ingress,
-                    &thinking_source,
-                    omit_protected_thinking,
-                )
-            },
-        )
-    } else {
-        prepare_canonical_thinking_replay(
-            &mut provider_request,
-            &thinking_source,
-            omit_protected_thinking,
-        )
-    };
+    // 来源不明的受保护载荷乐观回放：上游拒绝时由 `protected_reasoning_rejected` 恢复分级剥离。
+    let thinking_replayed =
+        stravia_protocol_codec::transform::prepare_thinking_replay(&mut provider_request, |item| {
+            thinking_source.provenance(item) != crate::history_marker::ThinkingProvenance::Foreign
+        });
     let native_compaction_requested =
         stravia_protocol_codec::codec::compaction::native_compaction_requested(&provider_request);
     let binding = crate::compaction::CompactionTarget {
@@ -1367,6 +1350,7 @@ async fn prepare_attempt(
         dispatch_model: route.model_id.to_string(),
         actual_model,
         namespace: target_namespace,
+        thinking_source,
         protocol_hint: protocol_hint.to_owned(),
         egress_base_url,
         metadata,
@@ -1761,6 +1745,11 @@ async fn begin_attempt(
         provider_id: prepared.route.provider_id.clone(),
         target_id: prepared.route.target_id.clone(),
         namespace: prepared.namespace.clone(),
+        thinking_authority: prepared
+            .thinking_source
+            .authority
+            .clone()
+            .expect("prepared Target always has a thinking authority"),
         protocol_hint: prepared
             .route
             .egress
@@ -1903,7 +1892,8 @@ async fn drive_vendor_attempt(
     let mut continuation_fallback = prepared.continuation_fallback.take();
     let mut request = prepared.request.clone();
     let mut auth_recovered = false;
-    let mut protected_reasoning_recovered = false;
+    // 分级见 `strip_rejected_protected_reasoning`。
+    let mut protected_reasoning_recovery = 0u8;
 
     loop {
         let attempt = AttemptObservation::new(
@@ -2088,30 +2078,22 @@ async fn drive_vendor_attempt(
                 if !committed
                     && failure.error.code == "protected_reasoning_rejected"
                     && prepared.allow_recovery
-                    && !protected_reasoning_recovered =>
+                    && protected_reasoning_recovery < 2 =>
             {
                 let mut replay = continuation_fallback
                     .take()
                     .unwrap_or_else(|| request.clone());
                 crate::router::clear_previous_response_id(&mut replay);
-                let stripped = stravia_runtime_contract::protocol::ids::ProtocolEndpoint::from_identifier(
-                    &prepared.protocol_hint,
-                )
-                .is_some_and(|egress| {
-                    stravia_protocol_codec::transform::prepare_thinking_replay(
-                        &mut replay,
-                        egress,
-                        |_| false,
-                    )
-                });
-                if stripped
-                    && policy.state.try_record_recovery_failure(
-                        &selected_target_key(&target),
-                        policy.epoch,
-                        target.target_retry_budget,
-                        target.target_cooldown_ms,
-                    )
-                {
+                if strip_rejected_protected_reasoning(
+                    &mut replay,
+                    &mut protected_reasoning_recovery,
+                    &prepared.thinking_source,
+                ) && policy.state.try_record_recovery_failure(
+                    &selected_target_key(&target),
+                    policy.epoch,
+                    target.target_retry_budget,
+                    target.target_cooldown_ms,
+                ) {
                     attempt.finish(
                         "failed",
                         failure.diagnostic.status_code,
@@ -2119,7 +2101,6 @@ async fn drive_vendor_attempt(
                         None,
                     );
                     request = replay;
-                    protected_reasoning_recovered = true;
                     continue;
                 }
                 finish_vendor_failure(
@@ -3242,100 +3223,49 @@ fn target_namespace(
     ))
 }
 
-fn thinking_replay_source_is_compatible(
-    item: &stravia_runtime_contract::protocol::ir::AiItem,
-    ingress: Option<stravia_runtime_contract::protocol::ids::ProtocolEndpoint>,
-    target: &crate::history_marker::ThinkingSource,
-    omit_protected: bool,
+/// 上游拒绝受保护推理后的分级剥离。`stage` 0：首发；1：已剥离来源未证实的载荷；
+/// 2：已剥离全部载荷。先保住同一签发作用域的推理链；没有可剥离的未证实载荷，
+/// 或剥离后再次被拒，才剥离全部。返回是否改动了请求。
+fn strip_rejected_protected_reasoning(
+    request: &mut AiRequest,
+    stage: &mut u8,
+    source: &crate::history_marker::ThinkingSource,
 ) -> bool {
-    if omit_protected {
-        return false;
+    if *stage == 0 {
+        *stage = 1;
+        if stravia_protocol_codec::transform::prepare_thinking_replay(request, |item| {
+            source.provenance(item) == crate::history_marker::ThinkingProvenance::Verified
+        }) {
+            return true;
+        }
     }
-    if let Some(source) = crate::history_marker::ThinkingSource::from_item(item) {
-        return source == *target;
-    }
-    if crate::history_marker::ThinkingSource::item_has_source_stamp(item) {
-        return false;
-    }
-
-    // External native history has no private source stamp. It can retain its
-    // native carrier only across the same protocol; a stamped item must match
-    // the exact Target identity above so protected history cannot use this path.
-    ingress.is_some_and(|ingress| {
-        target
-            .protocol
-            .as_ref()
-            .is_some_and(|protocol| protocol.matches_endpoint(ingress))
-    })
+    *stage = 2;
+    stravia_protocol_codec::transform::prepare_thinking_replay(request, |_| false)
 }
 
-fn prepare_canonical_thinking_replay(
-    request: &mut AiRequest,
-    target: &crate::history_marker::ThinkingSource,
-    omit_protected: bool,
-) -> bool {
-    let mut replayed = false;
-    request.items.retain_mut(|item| {
-        let preserve = !omit_protected
-            && crate::history_marker::ThinkingSource::from_item(item)
-                .is_some_and(|source| source == *target);
-        let has_calls = item
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-            || item.tool_call_id.is_some();
-        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
-            &mut item.content
-        else {
-            return true;
-        };
-        let protected_only =
-            !blocks.is_empty()
-                && blocks.iter().all(|block| {
-                    matches!(
-                block,
-                stravia_runtime_contract::protocol::ir::ContentBlock::Thinking { .. }
-                    | stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { .. }
-                    | stravia_runtime_contract::protocol::ir::ContentBlock::RedactedThinking { .. }
-            )
-                });
-        blocks.retain_mut(|block| match block {
-            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
-                signature, ..
-            } => {
-                if signature.is_some() {
-                    if preserve {
-                        replayed = true;
-                    } else {
-                        *signature = None;
-                    }
-                }
-                true
-            }
-            stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning {
-                encrypted_content,
-                ..
-            } => {
-                if encrypted_content.is_some() {
-                    if preserve {
-                        replayed = true;
-                    } else {
-                        *encrypted_content = None;
-                    }
-                }
-                true
-            }
-            stravia_runtime_contract::protocol::ir::ContentBlock::RedactedThinking { .. } => {
-                if preserve {
-                    replayed = true;
-                }
-                preserve
-            }
-            _ => true,
-        });
-        !(protected_only && blocks.is_empty() && !has_calls)
-    });
-    replayed
+/// 受保护推理签发作用域：签名/密文由部署按凭据签发，是否再绑定模型由出口协议决定。
+/// 不含路由 Target、代理开关与 vendor 选项——它们变化不会让签名失效。
+fn thinking_authority(
+    protocol_hint: &str,
+    provider: &stravia_vendor_sdk::ProviderSnapshot,
+    oauth_connection_id: Option<&str>,
+    actual_model: &str,
+) -> String {
+    let credential_identity = oauth_connection_id
+        .map(|connection_id| namespace_fingerprint(&("oauth", connection_id)))
+        .unwrap_or_else(|| namespace_fingerprint(&provider.credentials));
+    let model =
+        stravia_runtime_contract::protocol::ids::ProtocolEndpoint::from_identifier(protocol_hint)
+            .filter(|endpoint| {
+                stravia_protocol_codec::transform::protected_thinking_binds_model(endpoint.protocol)
+            })
+            .map(|_| actual_model);
+    namespace_fingerprint(&(
+        protocol_hint,
+        provider.base_url.trim(),
+        credential_identity,
+        model,
+    ))
 }
 
 fn request_requires_affinity(request: &AiRequest) -> bool {
@@ -3456,16 +3386,16 @@ mod tests {
     use super::{
         AttemptDeadlineGuard, PRECOMMIT_BUFFER_BUDGET, PrecommitBuffer, UPSTREAM_FINISHED,
         UPSTREAM_NOT_STARTED, UPSTREAM_STARTED, UpstreamLocalWork, VendorDriverHandle,
-        prepare_canonical_thinking_replay, thinking_replay_source_is_compatible,
+        strip_rejected_protected_reasoning, thinking_authority,
     };
-    use crate::history_marker::ThinkingSource;
+    use crate::history_marker::{ThinkingProvenance, ThinkingSource};
     use crate::plugin::{VendorOperationTracker, VendorPublicationFence};
     use crate::router::{RoutePolicyState, TargetRuntimeState};
     use std::sync::{Arc, atomic::AtomicU8};
     use std::time::{Duration, Instant};
     use stravia_runtime_contract::Deadline;
     use stravia_runtime_contract::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
     };
     use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, AiStreamDelta};
 
@@ -3640,151 +3570,172 @@ mod tests {
     }
 
     #[test]
-    fn native_thinking_replay_requires_same_protocol_or_exact_source() {
+    fn thinking_provenance_trusts_signing_scope_not_target_wiring() {
         let target = ThinkingSource {
             namespace: "target-namespace".into(),
-            protocol: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.into()),
+            protocol: Some(ANTHROPIC_MESSAGES_2023_06_01.into()),
             actual_model: "target-model".into(),
             target_id: "target-id".into(),
+            authority: Some("deployment-a".into()),
         };
-        let native = AiItem::thinking("native reasoning", None);
+        let native = AiItem::thinking("reasoning", Some("signature".into()));
+        assert_eq!(target.provenance(&native), ThinkingProvenance::Unknown);
 
-        assert!(thinking_replay_source_is_compatible(
-            &native,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &target,
-            false,
-        ));
-        assert!(!thinking_replay_source_is_compatible(
-            &native,
-            Some(ANTHROPIC_MESSAGES_2023_06_01),
-            &target,
-            false,
-        ));
-
-        let mut matching = native.clone();
-        target.stamp_item(&mut matching);
-        assert!(thinking_replay_source_is_compatible(
-            &matching,
-            Some(ANTHROPIC_MESSAGES_2023_06_01),
-            &target,
-            false,
-        ));
+        // 路由 Target、代理或选项不同，只要签发作用域相同仍可证明。
+        let mut rewired = native.clone();
+        ThinkingSource {
+            namespace: "other-namespace".into(),
+            actual_model: "other-model".into(),
+            target_id: "other-target".into(),
+            ..target.clone()
+        }
+        .stamp_item(&mut rewired);
+        assert_eq!(target.provenance(&rewired), ThinkingProvenance::Verified);
 
         let mut foreign = native.clone();
         ThinkingSource {
-            namespace: "foreign-namespace".into(),
+            authority: Some("deployment-b".into()),
             ..target.clone()
         }
         .stamp_item(&mut foreign);
-        assert!(!thinking_replay_source_is_compatible(
-            &foreign,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &target,
-            false,
-        ));
+        assert_eq!(target.provenance(&foreign), ThinkingProvenance::Foreign);
 
-        let opaque_target = ThinkingSource {
-            namespace: "opaque-namespace".into(),
-            protocol: Some(
-                stravia_runtime_contract::protocol::ids::ProtocolIdentity::new(
-                    "acme/private-inference-v7",
-                ),
-            ),
-            actual_model: "opaque-model".into(),
-            target_id: "opaque-target".into(),
-        };
-        let mut opaque = native.clone();
-        opaque_target.stamp_item(&mut opaque);
-        assert!(thinking_replay_source_is_compatible(
-            &opaque,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &opaque_target,
-            false,
-        ));
-        assert!(!thinking_replay_source_is_compatible(
-            &native,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &opaque_target,
-            false,
-        ));
+        let mut legacy_same = native.clone();
+        ThinkingSource {
+            authority: None,
+            ..target.clone()
+        }
+        .stamp_item(&mut legacy_same);
+        assert_eq!(
+            target.provenance(&legacy_same),
+            ThinkingProvenance::Verified
+        );
 
-        let mut malformed = native.clone();
+        let mut legacy_other = native.clone();
+        ThinkingSource {
+            namespace: "other-namespace".into(),
+            authority: None,
+            ..target.clone()
+        }
+        .stamp_item(&mut legacy_other);
+        assert_eq!(
+            target.provenance(&legacy_other),
+            ThinkingProvenance::Unknown
+        );
+
+        let mut malformed = native;
         malformed.meta = Some(
             stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
                 serde_json::json!({"__stravia_thinking_source": "invalid"}),
             ),
         );
-        assert!(!thinking_replay_source_is_compatible(
-            &malformed,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &target,
-            false,
-        ));
-        assert!(!thinking_replay_source_is_compatible(
-            &native,
-            Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            &target,
-            true,
-        ));
+        assert_eq!(target.provenance(&malformed), ThinkingProvenance::Foreign);
     }
 
     #[test]
-    fn opaque_protocol_replays_only_exact_source_protected_payloads() {
-        let target = ThinkingSource {
-            namespace: "opaque-namespace".into(),
-            protocol: Some(
-                stravia_runtime_contract::protocol::ids::ProtocolIdentity::new(
-                    "acme/private-inference-v7",
-                ),
-            ),
-            actual_model: "opaque-model".into(),
-            target_id: "opaque-target".into(),
+    fn rejected_protected_reasoning_strips_unverified_before_verified() {
+        let source = ThinkingSource {
+            namespace: "target-namespace".into(),
+            protocol: Some(ANTHROPIC_MESSAGES_2023_06_01.into()),
+            actual_model: "target-model".into(),
+            target_id: "target-id".into(),
+            authority: Some("deployment-a".into()),
         };
-        let mut signed = AiItem::thinking("private thought", Some("opaque-signature".into()));
-        target.stamp_item(&mut signed);
-        let mut encrypted = AiItem::reasoning(
-            vec!["summary".into()],
-            vec!["content".into()],
-            Some("opaque-encrypted".into()),
-        );
-        target.stamp_item(&mut encrypted);
-        let mut matching = AiRequest::new("model", vec![signed, encrypted]);
-
-        assert!(prepare_canonical_thinking_replay(
-            &mut matching,
-            &target,
-            false
-        ));
-        assert_eq!(
-            matching.items[0].thinking_ref(),
-            Some(("private thought", Some("opaque-signature")))
-        );
-        assert!(matches!(
-            matching.items[1].reasoning_ref(),
-            Some((_, _, Some("opaque-encrypted")))
-        ));
-
-        let foreign = ThinkingSource {
-            namespace: "different-namespace".into(),
-            ..target.clone()
+        let mut verified = AiItem::thinking("own reasoning", Some("own-signature".into()));
+        verified.role = stravia_runtime_contract::protocol::ir::Role::Assistant;
+        source.stamp_item(&mut verified);
+        let mut unknown = AiItem::thinking("client reasoning", Some("client-signature".into()));
+        unknown.role = stravia_runtime_contract::protocol::ir::Role::Assistant;
+        let signatures = |request: &AiRequest| {
+            request
+                .items
+                .iter()
+                .filter_map(|item| item.thinking_ref().and_then(|(_, signature)| signature))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         };
-        for item in &mut matching.items {
-            foreign.stamp_item(item);
-        }
-        assert!(!prepare_canonical_thinking_replay(
-            &mut matching,
-            &target,
-            false
+        let mut request = AiRequest::new("model", vec![verified.clone(), unknown]);
+        let mut stage = 0;
+
+        assert!(strip_rejected_protected_reasoning(
+            &mut request,
+            &mut stage,
+            &source
         ));
+        assert_eq!(stage, 1);
+        assert_eq!(signatures(&request), vec!["own-signature"]);
+
+        assert!(strip_rejected_protected_reasoning(
+            &mut request,
+            &mut stage,
+            &source
+        ));
+        assert_eq!(stage, 2);
+        assert!(signatures(&request).is_empty());
+
+        // 只有已证实载荷时直接进入全剥离，不浪费一次重试。
+        let mut request = AiRequest::new("model", vec![verified]);
+        let mut stage = 0;
+        assert!(strip_rejected_protected_reasoning(
+            &mut request,
+            &mut stage,
+            &source
+        ));
+        assert_eq!(stage, 2);
+        assert!(signatures(&request).is_empty());
+    }
+
+    #[test]
+    fn thinking_authority_changes_only_with_signing_scope() {
+        let provider = stravia_vendor_sdk::ProviderSnapshot {
+            provider_id: "provider".into(),
+            channel: "default".into(),
+            base_url: "https://api.example.test".into(),
+            protocol: ANTHROPIC_MESSAGES_2023_06_01.to_string(),
+            options: Default::default(),
+            credentials: [("api_key".to_string(), serde_json::json!("key-a"))].into(),
+            model: None,
+            model_metadata: None,
+            client_headers: Vec::new(),
+            operation_metadata: Default::default(),
+        };
+        let anthropic = ANTHROPIC_MESSAGES_2023_06_01.to_string();
+        let base = thinking_authority(&anthropic, &provider, None, "model-a");
+
+        let mut rewired = provider.clone();
+        rewired.provider_id = "other-provider".into();
+        rewired
+            .options
+            .insert("zdr".into(), serde_json::json!(true));
         assert_eq!(
-            matching.items[0].thinking_ref(),
-            Some(("private thought", None))
+            thinking_authority(&anthropic, &rewired, None, "model-b"),
+            base
         );
-        assert!(matches!(
-            matching.items[1].reasoning_ref(),
-            Some((_, _, None))
-        ));
+
+        let mut moved = provider.clone();
+        moved.base_url = "https://other.example.test".into();
+        assert_ne!(
+            thinking_authority(&anthropic, &moved, None, "model-a"),
+            base
+        );
+        let mut rekeyed = provider.clone();
+        rekeyed
+            .credentials
+            .insert("api_key".into(), serde_json::json!("key-b"));
+        assert_ne!(
+            thinking_authority(&anthropic, &rekeyed, None, "model-a"),
+            base
+        );
+        assert_ne!(
+            thinking_authority(&anthropic, &provider, Some("connection"), "model-a"),
+            base
+        );
+
+        let gemini = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.to_string();
+        assert_ne!(
+            thinking_authority(&gemini, &provider, None, "model-a"),
+            thinking_authority(&gemini, &provider, None, "model-b")
+        );
     }
 
     fn armed_deadline_guard(

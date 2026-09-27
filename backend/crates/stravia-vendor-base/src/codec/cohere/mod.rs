@@ -216,6 +216,20 @@ impl ProtocolAdapter for CohereChatV2 {
                             ContentBlock::Thinking { thinking, .. } => {
                                 content.push(json!({"type": "thinking", "thinking": thinking}));
                             }
+                            ContentBlock::Reasoning {
+                                summary,
+                                content: segments,
+                                ..
+                            } => {
+                                // 受保护的 encrypted_content 无载体，只输出明文段。
+                                for text in summary
+                                    .iter()
+                                    .chain(segments)
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    content.push(json!({"type": "thinking", "thinking": text}));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -435,10 +449,19 @@ impl Default for CohereStreamParser {
 }
 
 fn encode_messages(request: &AiRequest) -> anyhow::Result<Vec<Value>> {
-    request.items.iter().map(encode_message).collect()
+    let mut messages = Vec::new();
+    for item in &request.items {
+        if let Some(message) = encode_message(item)? {
+            messages.push(message);
+        }
+    }
+    Ok(messages)
 }
 
-fn encode_message(item: &AiItem) -> anyhow::Result<Value> {
+/// `None` 表示该条目编码后没有任何线上内容（如只含无法承载的受保护推理
+/// 载荷、且无 tool call 的 assistant 条目）；上游不接受空 assistant 消息，
+/// 必须整条跳过。被跳过的条目必然没有 tool call，不会破坏 tool 结果配对。
+fn encode_message(item: &AiItem) -> anyhow::Result<Option<Value>> {
     let role = match item.role {
         Role::System | Role::Developer => "system",
         Role::User => "user",
@@ -450,9 +473,10 @@ fn encode_message(item: &AiItem) -> anyhow::Result<Value> {
         Role::Assistant => {
             let calls = encode_tool_calls(item);
             if calls.is_empty() {
-                if let Some(content) = encode_assistant_content(&item.content)? {
-                    message.insert("content".into(), content);
-                }
+                let Some(content) = encode_assistant_content(&item.content)? else {
+                    return Ok(None);
+                };
+                message.insert("content".into(), content);
             } else {
                 message.insert("tool_calls".into(), Value::Array(calls));
             }
@@ -478,17 +502,22 @@ fn encode_message(item: &AiItem) -> anyhow::Result<Value> {
             );
         }
     };
-    Ok(Value::Object(message))
+    Ok(Some(Value::Object(message)))
 }
 
 fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<Value>> {
     match content {
         MessageContent::Text(text) => Ok((!text.is_empty()).then(|| Value::String(text.clone()))),
         MessageContent::Blocks(blocks) => {
-            let has_thinking = blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::Thinking { .. }));
-            if !has_thinking {
+            let has_reasoning = blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::RedactedThinking { .. }
+                )
+            });
+            if !has_reasoning {
                 let text = encode_text_content(content)?;
                 return Ok((!text.is_empty()).then_some(Value::String(text)));
             }
@@ -499,9 +528,25 @@ fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<V
                     ContentBlock::Text { text, .. } if !text.is_empty() => {
                         parts.push(json!({"type": "text", "text": text}));
                     }
-                    ContentBlock::Thinking { thinking, .. } => {
+                    // Cohere 的 thinking 部分只有明文字段：signature /
+                    // encrypted_content 无原生载体，静默忽略而不是写进正文。
+                    ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
                         parts.push(json!({"type": "thinking", "thinking": thinking}));
                     }
+                    ContentBlock::Thinking { .. } => {}
+                    ContentBlock::Reasoning {
+                        summary, content, ..
+                    } => {
+                        for text in summary
+                            .iter()
+                            .chain(content)
+                            .filter(|text| !text.is_empty())
+                        {
+                            parts.push(json!({"type": "thinking", "thinking": text}));
+                        }
+                    }
+                    // redacted_thinking 是纯密文载荷，Cohere 没有对应载体。
+                    ContentBlock::RedactedThinking { .. } => {}
                     ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => {}
                     other => bail!(
                         "Cohere cannot represent assistant content block `{}`",

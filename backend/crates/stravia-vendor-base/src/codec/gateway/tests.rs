@@ -98,3 +98,59 @@ fn parses_ai_sdk_v4_stream_events() {
     ));
     assert!(matches!(&deltas[3], AiStreamDelta::Done { stop_reason } if stop_reason == "stop"));
 }
+
+#[test]
+fn replays_reasoning_natively_and_drops_protected_only_assistant() {
+    let block = |block: ContentBlock| AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![block]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let request = AiRequest::new(
+        "ignored-by-gateway",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            block(ContentBlock::Thinking {
+                thinking: "let me think".into(),
+                signature: Some("sig_protected".into()),
+            }),
+            block(ContentBlock::Reasoning {
+                summary: vec!["summary".into()],
+                content: vec![String::new(), "detail".into()],
+                encrypted_content: Some("enc_protected".into()),
+            }),
+            // 只含密文载荷、编码为空且无 tool call：整条跳过。
+            block(ContentBlock::RedactedThinking {
+                data: "redacted".into(),
+            }),
+        ],
+    );
+
+    let (body, _) = GatewayLanguageModelV4.encode_request(&request).unwrap();
+    let prompt = body["prompt"].as_array().unwrap();
+    assert_eq!(prompt.len(), 3);
+    assert_eq!(
+        prompt[1]["content"],
+        json!([{"type": "reasoning", "text": "let me think"}])
+    );
+    assert_eq!(
+        prompt[2]["content"],
+        json!([
+            {"type": "reasoning", "text": "summary"},
+            {"type": "reasoning", "text": "detail"},
+        ])
+    );
+    // 受保护载荷无原生载体，绝不能出现在线上 body 里。
+    let body_text = serde_json::to_string(&body).unwrap();
+    assert!(!body_text.contains("sig_protected"));
+    assert!(!body_text.contains("enc_protected"));
+    assert!(!body_text.contains("redacted"));
+}

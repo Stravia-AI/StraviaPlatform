@@ -28,47 +28,69 @@ fn openai_to_anthropic_thinking_blocks() {
 }
 #[test]
 fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
-    let mut extra = std::collections::HashMap::new();
-    extra.insert(
-        "reasoning_content".to_string(),
-        serde_json::Value::String("I should run a shell command.".to_string()),
-    );
+    for signature in [None, Some("opaque-signature")] {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String("I should run a shell command.".to_string()),
+        );
+        if let Some(signature) = signature {
+            extra.insert(
+                "reasoning_signature".to_string(),
+                serde_json::Value::String(signature.to_string()),
+            );
+        }
 
-    let messages = vec![AiItem {
-        role: IrRole::Assistant,
-        content: IrMessageContent::Text("".to_string()),
-        tool_calls: Some(vec![ToolCall {
-            id: ("call_1".to_string()).into(),
-            name: "exec_command".to_string(),
-            arguments: "{\"cmd\":\"echo hello\"}".to_string(),
-        }]),
-        tool_call_id: None,
-        meta: Some(
-            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
-                serde_json::Value::Object(extra.into_iter().collect()),
+        let messages = vec![AiItem {
+            role: IrRole::Assistant,
+            content: IrMessageContent::Text("".to_string()),
+            tool_calls: Some(vec![ToolCall {
+                id: ("call_1".to_string()).into(),
+                name: "exec_command".to_string(),
+                arguments: "{\"cmd\":\"echo hello\"}".to_string(),
+            }]),
+            tool_call_id: None,
+            meta: Some(
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                    serde_json::Value::Object(extra),
+                ),
             ),
-        ),
-    }];
-    let mut req = AiRequest::new("deepseek-v4-flash", messages);
-    req.stream = StreamConfig {
-        enabled: false,
-        include_usage: false,
-    };
-    req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+        }];
+        let mut req = AiRequest::new("deepseek-v4-flash", messages);
+        req.stream = StreamConfig {
+            enabled: false,
+            include_usage: false,
+        };
+        req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
-    let (body, _) = AnthropicEncoder
-        .encode_request(&req)
-        .expect("encode anthropic body");
-    let blocks = body["messages"][0]["content"]
-        .as_array()
-        .expect("assistant content blocks");
+        let (body, _) = AnthropicEncoder
+            .encode_request(&req)
+            .expect("encode anthropic body");
+        let blocks = body["messages"][0]["content"]
+            .as_array()
+            .expect("assistant content blocks");
 
-    assert_eq!(blocks[0]["type"].as_str(), Some("thinking"));
-    assert_eq!(
-        blocks[0]["thinking"].as_str(),
-        Some("I should run a shell command.")
-    );
-    assert_eq!(blocks[1]["type"].as_str(), Some("tool_use"));
+        match signature {
+            // 有签名的明文原生回放为 thinking 块。
+            Some(signature) => {
+                assert_eq!(blocks[0]["type"].as_str(), Some("thinking"));
+                assert_eq!(
+                    blocks[0]["thinking"].as_str(),
+                    Some("I should run a shell command.")
+                );
+                assert_eq!(blocks[0]["signature"].as_str(), Some(signature));
+            }
+            // Anthropic 拒绝无签名 thinking：明文降级为 text 块。
+            None => {
+                assert_eq!(blocks[0]["type"].as_str(), Some("text"));
+                assert_eq!(
+                    blocks[0]["text"].as_str(),
+                    Some("I should run a shell command.")
+                );
+            }
+        }
+        assert_eq!(blocks[1]["type"].as_str(), Some("tool_use"));
+    }
 }
 #[test]
 fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {

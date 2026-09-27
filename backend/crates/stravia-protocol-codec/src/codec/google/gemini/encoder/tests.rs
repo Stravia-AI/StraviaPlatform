@@ -91,3 +91,131 @@ fn target_controls_replace_raw_gemini_thinking_config() {
         serde_json::json!({"thinkingLevel": "HIGH"})
     );
 }
+
+fn assistant_blocks_request(blocks: Vec<ContentBlock>) -> AiRequest {
+    AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(blocks),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    )
+}
+
+#[test]
+fn signed_thinking_keeps_thought_part_with_signature() {
+    let request = assistant_blocks_request(vec![ContentBlock::Thinking {
+        thinking: "visible reasoning".into(),
+        signature: Some("opaque-sig".into()),
+    }]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        serde_json::json!({
+            "text": "visible reasoning",
+            "thought": true,
+            "thoughtSignature": "opaque-sig",
+        })
+    );
+}
+
+#[test]
+fn unsigned_thinking_stays_a_thought_part_not_plain_text() {
+    let request = assistant_blocks_request(vec![ContentBlock::Thinking {
+        thinking: "unsigned reasoning".into(),
+        signature: None,
+    }]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    // Gemini 接受无 thoughtSignature 的 thought part；明文推理不能降级为正文，
+    // 否则模型会把推理当成已说出口的话。
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        serde_json::json!({"text": "unsigned reasoning", "thought": true})
+    );
+}
+
+#[test]
+fn reasoning_encodes_as_thought_part_with_encrypted_signature() {
+    let request = assistant_blocks_request(vec![ContentBlock::Reasoning {
+        summary: vec!["summary".into()],
+        content: vec!["detail".into()],
+        encrypted_content: Some("ciphertext".into()),
+    }]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        serde_json::json!({
+            "text": "summarydetail",
+            "thought": true,
+            "thoughtSignature": "ciphertext",
+        })
+    );
+}
+
+#[test]
+fn unencrypted_reasoning_stays_a_thought_part() {
+    let request = assistant_blocks_request(vec![ContentBlock::Reasoning {
+        summary: vec!["summary".into()],
+        content: vec!["detail".into()],
+        encrypted_content: None,
+    }]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    let part = &body["contents"][1]["parts"][0];
+    assert_eq!(part["text"], "summarydetail");
+    assert_eq!(part["thought"], true);
+    assert!(part.get("thoughtSignature").is_none());
+}
+
+#[test]
+fn redacted_thinking_is_dropped_without_leaking_data() {
+    let request = assistant_blocks_request(vec![
+        ContentBlock::RedactedThinking {
+            data: "redacted-payload".into(),
+        },
+        ContentBlock::Text {
+            text: "answer".into(),
+            cache_control: None,
+        },
+    ]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    let parts = body["contents"][1]["parts"].as_array().unwrap();
+    assert_eq!(parts.as_slice(), [serde_json::json!({"text": "answer"})]);
+    assert!(!body.to_string().contains("redacted-payload"));
+}
+
+#[test]
+fn assistant_item_with_only_unmappable_protected_payload_is_skipped() {
+    let request = assistant_blocks_request(vec![ContentBlock::RedactedThinking {
+        data: "redacted-payload".into(),
+    }]);
+
+    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+
+    // 整条 assistant 内容都无法承载时不能发出空 model content。
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0]["role"], "user");
+    assert!(!body.to_string().contains("redacted-payload"));
+}

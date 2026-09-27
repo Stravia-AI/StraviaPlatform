@@ -415,16 +415,16 @@ fn encode_message(
             if reasoning.is_some() || msg.tool_calls.is_some() {
                 let mut blocks: Vec<Value> = vec![];
                 if let Some(text) = reasoning {
-                    let mut block = serde_json::json!({
-                        "type": "thinking",
-                        "thinking": text,
-                    });
-                    if let Some(signature) = reasoning_signature
-                        && let Some(obj) = block.as_object_mut()
-                    {
-                        obj.insert("signature".into(), serde_json::json!(signature));
+                    // Anthropic 拒绝无签名的 thinking 块：只有携带签名的思考才能
+                    // 原生回放，无签名明文只能降级为普通文本，否则上游直接 400。
+                    match reasoning_signature {
+                        Some(signature) => blocks.push(serde_json::json!({
+                            "type": "thinking",
+                            "thinking": text,
+                            "signature": signature,
+                        })),
+                        None => blocks.push(serde_json::json!({"type": "text", "text": text})),
                     }
-                    blocks.push(block);
                 }
                 if !t.is_empty() {
                     blocks.push(serde_json::json!({"type": "text", "text": t}));
@@ -458,9 +458,10 @@ fn encode_message(
             }
         }
         MessageContent::Blocks(blocks) => {
-            let arr: Vec<Value> = blocks
+            // 一个推理块可能展开为多个 text 块，也可能整块省略，这里用 flat_map 展开。
+            let mut arr: Vec<Value> = blocks
                 .iter()
-                .map(|block| {
+                .flat_map(|block| {
                     encode_content_block_for_anthropic_with_ids(
                         block,
                         generated_tool_id_seq,
@@ -468,6 +469,36 @@ fn encode_message(
                     )
                 })
                 .collect();
+            // Blocks 形态同样可能携带 msg.tool_calls（如 chat 解码出的
+            // thinking+tool_calls 条目）；未以 ToolUse 块表达的调用必须补发，
+            // 否则回放时整条调用被静默丢掉。
+            if let Some(tcs) = &msg.tool_calls {
+                for tc in tcs {
+                    let represented = blocks.iter().any(
+                        |block| matches!(block, ContentBlock::ToolUse { id, .. } if id == &tc.id),
+                    );
+                    if represented {
+                        continue;
+                    }
+                    let input: Value = serde_json::from_str(&tc.arguments).map_err(|error| {
+                        anyhow::anyhow!(
+                            "anthropic tool_use input cannot represent arguments for tool call {}: {error}",
+                            tc.id
+                        )
+                    })?;
+                    let id = normalized_anthropic_tool_id(
+                        &tc.id,
+                        generated_tool_id_seq,
+                        supplied_tool_ids,
+                    );
+                    arr.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": tc.name,
+                        "input": input,
+                    }));
+                }
+            }
             Value::Array(arr)
         }
     };
@@ -479,12 +510,65 @@ fn encode_message(
 }
 
 #[cfg(test)]
-fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
+fn encode_content_block_for_anthropic(b: &ContentBlock) -> Vec<Value> {
     let mut generated_tool_id_seq = 0;
     encode_content_block_for_anthropic_with_ids(b, &mut generated_tool_id_seq, &HashSet::new())
 }
 
+/// 一个 IR 块可能展开为多个 wire 块（无签名推理降级为逐段 text），
+/// 也可能整块省略（空的无签名思考），因此返回 Vec。
 fn encode_content_block_for_anthropic_with_ids(
+    b: &ContentBlock,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> Vec<Value> {
+    match b {
+        // Anthropic 拒绝无签名的 thinking 块：只有携带签名的思考才能原生回放；
+        // 无签名明文降级为普通 text 块，否则上游直接 400。
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => match signature.as_deref().filter(|sig| !sig.trim().is_empty()) {
+            Some(signature) => vec![serde_json::json!({
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": signature,
+            })],
+            None if thinking.is_empty() => Vec::new(),
+            None => vec![serde_json::json!({"type": "text", "text": thinking})],
+        },
+        // Reasoning 复用 stream.rs `normalize_client_history_item` 的同款映射：
+        // summary 与 content 各段顺序拼接为 thinking 文本，encrypted_content 作
+        // signature；无密文时每段非空明文降级为一个 text 块。
+        ContentBlock::Reasoning {
+            summary,
+            content,
+            encrypted_content,
+        } => match encrypted_content
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(encrypted_content) => vec![serde_json::json!({
+                "type": "thinking",
+                "thinking": summary.iter().chain(content).cloned().collect::<String>(),
+                "signature": encrypted_content,
+            })],
+            None => summary
+                .iter()
+                .chain(content)
+                .filter(|text| !text.is_empty())
+                .map(|text| serde_json::json!({"type": "text", "text": text}))
+                .collect(),
+        },
+        other => vec![encode_single_anthropic_content_block(
+            other,
+            generated_tool_id_seq,
+            supplied_tool_ids,
+        )],
+    }
+}
+
+fn encode_single_anthropic_content_block(
     b: &ContentBlock,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
@@ -526,22 +610,8 @@ fn encode_content_block_for_anthropic_with_ids(
             }
             block
         }
-        ContentBlock::Thinking {
-            thinking,
-            signature,
-        } => {
-            let mut block = serde_json::json!({
-                "type": "thinking",
-                "thinking": thinking,
-            });
-            if let Some(sig) = signature
-                && !sig.trim().is_empty()
-                && let Some(obj) = block.as_object_mut()
-            {
-                obj.insert("signature".into(), serde_json::json!(sig));
-            }
-            block
-        }
+        // Thinking / Reasoning 由 `encode_content_block_for_anthropic_with_ids`
+        // 统一处理（可能展开为多个块），不会走到这里。
         ContentBlock::RedactedThinking { data } => {
             serde_json::json!({"type": "redacted_thinking", "data": data})
         }
@@ -652,7 +722,7 @@ fn anthropic_tool_result_payload(
                 Value::Array(
                     blocks
                         .iter()
-                        .map(|block| {
+                        .flat_map(|block| {
                             encode_content_block_for_anthropic_with_ids(
                                 block,
                                 generated_tool_id_seq,

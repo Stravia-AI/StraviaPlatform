@@ -258,7 +258,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - WebSocket 失败通过强类型传输事实跨越 WIT 边界，不直接授权重试。只有未提交结果且既有 Route 策略允许同 Target 重试时，宿主才将下一次尝试设为 HTTP-only，并去除仅当前 WebSocket 可用的续接状态，以完整历史重放；下一次客户端请求恢复自动传输选择。
 - `ws-request.continuation-id` 只用于依赖连接本地状态的续接。宿主在池锁内匹配精确身份和 response tip、独占取出 socket，再检查其可用性；找不到时返回 `continuation-unavailable`，不新建握手、不发送增量请求。Executor 直接使用已保留的完整 Effective Model Request，不消耗上游恢复预算或增加 Target 失败计数。
 - 插件消费成功的 `completed` 终态后，通过 `ws-connection.close(Some(upstream response ID))` 归还连接；宿主不解析供应商 JSON 来猜测身份。`close(None)` 清除旧 tip；取消、中途断流、非法帧或未知终态直接销毁连接。`store=false` 的旧 ID 不得发送到新连接、其他分支占用的连接或 tip 已前移的连接。
-- 插件以 `continuation-not-found` 和 `protected-reasoning-rejected` 报告已确认的续接丢失或受保护推理拒绝，不将普通上游错误归入这些事实。宿主只在输出前且恢复预算允许时执行一次完整历史恢复；受保护推理恢复必须实际移除对应载荷，不向客户端暴露未经脱敏的上游错误文本。
+- 插件以 `continuation-not-found` 和 `protected-reasoning-rejected` 报告已确认的续接丢失或受保护推理拒绝，不将普通上游错误归入这些事实。宿主只在输出前且恢复预算允许时执行完整历史恢复；续接丢失恢复一次，受保护推理恢复最多两级（先移除来源未证实的载荷，再移除全部），每级都必须实际移除载荷并消耗恢复预算，不向客户端暴露未经脱敏的上游错误文本。插件 codec 与内置 codec 一样自行决定可读思考的表示：原生载体能承载无签名明文时原生编码，否则降级为助手正文；宿主不再替插件把思考改写成文本。
 - Codex 通过宿主的 `transport_affinity` 派生稳定的 session/thread/window 身份，轮次身份留在消息中；省略的默认服务级别与上游补全的 `default` 生成相同路由提示。认证、账号、URL、插件与凭据作用域仍参与连接隔离。只有实际发送了续接 ID、尚无模型响应事件，且收到 HTTP 状态语义为 400、`invalid_request_error`、无 code 的明确 ``Invalid `previous_response_id`.`` 错误时，才把该 Codex 错误归类为 `continuation-not-found`；普通 400 与已开始响应后的错误不回放。
 - 同一次 Model Turn 的完整历史恢复、认证刷新及随后重放持续复用最初的组件、操作租约与数据代际，不能在恢复循环中重新取得管理器当前版本。真实 HTTP 401 可在未提交且预算允许时进入一次认证恢复；403 不触发刷新。插件声明的辅助认证刷新也由宿主调度，不要求伪造持久化 OAuth 记录。
 - OAuth 回放与原生压缩的账户身份采用宿主持久化的稳定认证连接标识，而不是 access token、refresh token 或到期时间。正常刷新保持身份，重新登录创建新身份；非 OAuth 凭据变更仍改变其指纹。Target、供应商、channel、协议、模型、代理、地址与选项边界保持不变。

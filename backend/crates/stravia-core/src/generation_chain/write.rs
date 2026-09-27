@@ -210,20 +210,15 @@ impl GenerationChainWrite {
             self.parent.parent_id.as_deref(),
         );
         let (effective_state, upstream_response_id) = match source {
-            GenerationSource::Target {
-                namespace,
-                protocol,
-                actual_model,
-                selected_target_key,
-            } => (
+            GenerationSource::Target(source) => (
                 GenerationChainState::from_request(
                     &self.request,
-                    namespace,
+                    &source.namespace,
                     Option::<ProtocolId>::None,
                 )
-                .with_protocol_identity(protocol.as_ref())
-                .with_provider_model(actual_model)
-                .with_selected_target_key(selected_target_key),
+                .with_protocol_identity(source.protocol.as_ref())
+                .with_provider_model(&source.actual_model)
+                .with_selected_target_key(&source.target_id),
                 upstream_response_id,
             ),
             GenerationSource::Hook { protocol } => (

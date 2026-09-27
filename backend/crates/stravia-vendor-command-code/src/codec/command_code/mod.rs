@@ -136,7 +136,11 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
         for item in &request.items {
             match item.role {
                 Role::System | Role::Developer => system.extend(encode_system_blocks(item)?),
-                _ => messages.push(encode_message(item, &tool_names)?),
+                _ => {
+                    if let Some(message) = encode_message(item, &tool_names)? {
+                        messages.push(message);
+                    }
+                }
             }
         }
         if system.is_empty() {
@@ -262,8 +266,19 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
                             ContentBlock::Text { text, .. } if !text.is_empty() => {
                                 content.push(json!({"type": "text", "text": text}));
                             }
-                            ContentBlock::Thinking { thinking, .. } => {
+                            ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
                                 content.push(json!({"type": "reasoning", "text": thinking}));
+                            }
+                            ContentBlock::Reasoning {
+                                summary,
+                                content: reasoning,
+                                ..
+                            } => {
+                                for text in summary.iter().chain(reasoning) {
+                                    if !text.is_empty() {
+                                        content.push(json!({"type": "reasoning", "text": text}));
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -496,19 +511,27 @@ fn encode_system_blocks(item: &AiItem) -> anyhow::Result<Vec<Value>> {
     }
 }
 
-fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyhow::Result<Value> {
+/// 返回 None 表示整条消息跳过：编码后没有任何部件且不带 tool call 的
+/// assistant 条目（如只剩无法承载的受保护思考载荷）不应发出空消息。
+fn encode_message(
+    item: &AiItem,
+    tool_names: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<Value>> {
     match item.role {
         Role::System | Role::Developer => unreachable!("system messages are encoded separately"),
-        Role::User => Ok(json!({
+        Role::User => Ok(Some(json!({
             "role": "user",
             "content": encode_user_parts(&item.content)?,
-        })),
+        }))),
         Role::Assistant => {
             let mut content = encode_assistant_parts(&item.content)?;
             for call in item.tool_calls.as_deref().unwrap_or_default() {
                 content.push(encode_tool_call_value(call));
             }
-            Ok(json!({"role": "assistant", "content": content}))
+            if content.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(json!({"role": "assistant", "content": content})))
         }
         Role::Tool => {
             let tool_call_id = item
@@ -519,7 +542,7 @@ fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyho
                 .get(tool_call_id)
                 .map(String::as_str)
                 .unwrap_or("");
-            Ok(json!({
+            Ok(Some(json!({
                 "role": "tool",
                 "content": [{
                     "type": "tool-result",
@@ -527,7 +550,7 @@ fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyho
                     "toolName": tool_name,
                     "output": {"type": "text", "value": tool_result_text(&item.content)?},
                 }],
-            }))
+            })))
         }
     }
 }
@@ -559,9 +582,23 @@ fn encode_assistant_parts(content: &MessageContent) -> anyhow::Result<Vec<Value>
             let mut rest = Vec::new();
             for block in blocks {
                 match block {
-                    ContentBlock::Thinking { thinking, .. } => {
+                    // reasoning 部件只有 text：signature/encrypted_content/redacted
+                    // 均无可承载的字段，按回放契约静默忽略，绝不写进可读正文。
+                    ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
                         reasoning.push(json!({"type": "reasoning", "text": thinking}));
                     }
+                    ContentBlock::Reasoning {
+                        summary, content, ..
+                    } => {
+                        // Open Responses 明文顺序：summary 在前、content 在后，
+                        // 每段非空文本一个 reasoning 部件。
+                        for text in summary.iter().chain(content) {
+                            if !text.is_empty() {
+                                reasoning.push(json!({"type": "reasoning", "text": text}));
+                            }
+                        }
+                    }
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
                     ContentBlock::Text { text, .. } if !text.is_empty() => {
                         rest.push(json!({"type": "text", "text": text}));
                     }
