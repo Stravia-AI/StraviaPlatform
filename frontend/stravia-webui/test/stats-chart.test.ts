@@ -14,16 +14,37 @@ describe('latency chart', () => {
         { bucket_start: start + 2 * HOUR_MS, avg_first_token_ms: 2_000, avg_duration_ms: 6_000 },
         { bucket_start: start + 3 * HOUR_MS, avg_first_token_ms: null, avg_duration_ms: 7_000 },
       ],
-      (ms) => new Date(ms).toISOString(),
       HOUR_MS,
     )
 
     expect(points).toEqual([
-      { bucket: '2026-09-02T18:00:00.000Z', firstToken: 1, duration: 5 },
-      { bucket: '2026-09-02T19:00:00.000Z', firstToken: null, duration: null },
-      { bucket: '2026-09-02T20:00:00.000Z', firstToken: 2, duration: 6 },
-      { bucket: '2026-09-02T21:00:00.000Z', firstToken: null, duration: 7 },
+      { bucket: new Date(start), firstToken: 1, duration: 5 },
+      { bucket: new Date(start + HOUR_MS), firstToken: null, duration: null },
+      { bucket: new Date(start + 2 * HOUR_MS), firstToken: 2, duration: 6 },
+      { bucket: new Date(start + 3 * HOUR_MS), firstToken: null, duration: 7 },
     ])
+  })
+
+  test('keeps unique time coordinates when first and last buckets share a localized label', () => {
+    // 跨日 24h 窗口返回 25 个小时桶，首尾同为 19:00；显示标签重名，
+    // 但 x 坐标必须保持真实时刻，否则会折回左端画出斜线。
+    const start = Date.UTC(2026, 8, 2, 19)
+    const points = buildLatencyChart(
+      Array.from({ length: 25 }, (_, i) => ({
+        bucket_start: start + i * HOUR_MS,
+        avg_first_token_ms: 1_000,
+        avg_duration_ms: 2_000,
+      })),
+      HOUR_MS,
+    )
+
+    expect(points).toHaveLength(25)
+    expect(points[0].bucket.toISOString().slice(11, 16)).toBe('19:00')
+    expect(points[24].bucket.toISOString().slice(11, 16)).toBe('19:00')
+    const times = points.map((point) => point.bucket.getTime())
+    expect(times).toEqual([...times].sort((a, b) => a - b))
+    expect(new Set(times).size).toBe(times.length)
+    expect(points.every((point) => point.bucket instanceof Date)).toBe(true)
   })
 })
 

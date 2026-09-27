@@ -88,6 +88,53 @@ test('Overview with traffic shows request and second-based latency charts', asyn
   await expect(modelSection.locator('.route-mobile-list')).toContainText('Input 920 · Output 86 · 120 ms')
 })
 
+for (const routePath of ['/', '/stats']) {
+  test(`${routePath} latency stays chronological across repeated clock labels`, async ({ page }) => {
+    await stubTraffic(page, { requests: 22, errors: 0 })
+    const start = new Date(2026, 8, 26, 19).getTime()
+    await page.clock.setFixedTime(new Date(start + 24 * 3_600_000 + 5 * 60_000))
+    await page.route('**/api/v1/stats/series**', async (route) => {
+      const data = Array.from({ length: 25 }, (_, hour) => ({
+        bucket_start: start + hour * 3_600_000,
+        request_count: 1,
+        error_count: 0,
+        total_input_tokens: 10,
+        total_output_tokens: 5,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_reasoning_tokens: 0,
+        avg_duration_ms: 5_000 + (hour % 5) * 1_000,
+        avg_first_token_ms: 1_000 + (hour % 3) * 500,
+      })).filter((_, hour) => ![7, 13, 14].includes(hour))
+      await route.fulfill({ json: { data } })
+    })
+    await page.goto(routePath)
+
+    const chart = page.getByLabel('Latency chart', { exact: true })
+    await expect(chart).toBeVisible()
+    const paths = chart.locator('path.lc-path')
+    await expect(paths).toHaveCount(2)
+    await expect
+      .poll(async () =>
+        paths.evaluateAll((elements) =>
+          elements.every((element) => {
+            const path = element as SVGPathElement
+            const length = path.getTotalLength()
+            if (length === 0) return false
+            let previous = path.getPointAtLength(0).x
+            for (let sample = 1; sample <= 200; sample++) {
+              const x = path.getPointAtLength((length * sample) / 200).x
+              if (x < previous - 0.01) return false
+              previous = x
+            }
+            return previous > path.getPointAtLength(0).x
+          }),
+        ),
+      )
+      .toBe(true)
+  })
+}
+
 test('Usage analytics uses backend input and output without re-counting cache or reasoning', async ({ page }) => {
   await stubTraffic(page, { requests: 12, errors: 0 })
   await page.goto('/stats')

@@ -15,16 +15,13 @@ export function localTzOffsetMs(): number {
 }
 
 export interface LatencyChartPoint {
-  bucket: string
+  /** Bucket 起点的真实时刻，作为时间轴坐标；显示文案由轴刻度与 tooltip 按需本地化格式化。 */
+  bucket: Date
   firstToken: number | null
   duration: number | null
 }
 
-export function buildLatencyChart(
-  rows: readonly LatencyStats[],
-  formatBucket: (bucketStart: number) => string,
-  bucketMs: number,
-): LatencyChartPoint[] {
+export function buildLatencyChart(rows: readonly LatencyStats[], bucketMs: number): LatencyChartPoint[] {
   const points: LatencyChartPoint[] = []
   let previousStart: number | undefined
 
@@ -32,11 +29,11 @@ export function buildLatencyChart(
     const start = row.bucket_start
     if (previousStart != null && Number.isFinite(start)) {
       for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
-        points.push({ bucket: formatBucket(missing), firstToken: null, duration: null })
+        points.push({ bucket: new Date(missing), firstToken: null, duration: null })
       }
     }
     points.push({
-      bucket: formatBucket(start),
+      bucket: new Date(start),
       firstToken: row.avg_first_token_ms == null ? null : row.avg_first_token_ms / 1000,
       duration: row.avg_duration_ms == null ? null : row.avg_duration_ms / 1000,
     })
