@@ -429,10 +429,16 @@ fn encode_message(
                 if !t.is_empty() {
                     blocks.push(serde_json::json!({"type": "text", "text": t}));
                 }
-                if let Some(ref tcs) = msg.tool_calls {
+                if let Some(tcs) = &msg.tool_calls {
                     for tc in tcs {
-                        let input: Value = serde_json::from_str(&tc.arguments)
-                            .unwrap_or(Value::Object(Default::default()));
+                        let input: Value = serde_json::from_str(&tc.arguments).map_err(
+                            |error| {
+                                anyhow::anyhow!(
+                                    "anthropic tool_use input cannot represent arguments for tool call {}: {error}",
+                                    tc.id
+                                )
+                            },
+                        )?;
                         let id = normalized_anthropic_tool_id(
                             &tc.id,
                             generated_tool_id_seq,

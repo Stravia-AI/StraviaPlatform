@@ -453,7 +453,26 @@ impl StreamEncodeStage {
                 lost,
             ));
         }
-        Ok(self.encoder.format_deltas(deltas))
+        // Gemini 的 functionCall args 契约是 JSON 对象，流式分片要到流终止
+        // 才能判定整体是否可表达；缓冲由各 formatter 自管，终态显式失败，
+        // 绝不伪造 {}、丢弃调用或冒充成功终态。Done 与本批分片可能同批到达，
+        // 必须先让 formatter 吃完字节再判定；失败时丢弃本批事件不上线。
+        let events = self.encoder.format_deltas(deltas);
+        if deltas
+            .iter()
+            .any(|delta| matches!(delta, AiStreamDelta::Done { .. }))
+        {
+            let lost = self.encoder.unrepresentable_tool_arguments();
+            if !lost.is_empty() {
+                self.closed = true;
+                return Err(unrepresentable(
+                    self.pair,
+                    TransformDirection::ClientResponse,
+                    lost,
+                ));
+            }
+        }
+        Ok(events)
     }
 
     pub fn set_response_profile(
@@ -489,6 +508,14 @@ impl StreamEncodeStage {
             ));
         }
         self.closed = true;
+        let lost = self.encoder.unrepresentable_tool_arguments();
+        if !lost.is_empty() {
+            return Err(unrepresentable(
+                self.pair,
+                TransformDirection::ClientResponse,
+                lost,
+            ));
+        }
         Ok(self.encoder.format_done())
     }
 }
@@ -625,6 +652,15 @@ impl WireStreamEncoder {
             Self::Responses(formatter) => formatter.format_done(),
             Self::Anthropic(formatter) => formatter.format_done(),
             Self::Google(formatter) => formatter.format_done(),
+        }
+    }
+
+    // 流终止时仍拼不出可表达工具入参的路径；逐字字节能力不足的 formatter
+    // 自己报告，支持逐字的编码器返回空。
+    pub(crate) fn unrepresentable_tool_arguments(&self) -> Vec<String> {
+        match self {
+            Self::Google(formatter) => formatter.unrepresentable_tool_arguments(),
+            _ => Vec::new(),
         }
     }
 }
@@ -923,6 +959,22 @@ fn request_loss_paths(
             }
         }
     }
+    if matches!(
+        pair.egress.protocol,
+        Protocol::AnthropicMessages | Protocol::GoogleGemini
+    ) {
+        // 对象类型的工具入参装不下非合法 JSON 的逐字字节；上报为不可表达，
+        // 绝不交给编码器伪造空对象。
+        for (message_index, message) in request.items.iter().enumerate() {
+            for (call_index, call) in message.tool_calls.iter().flatten().enumerate() {
+                if serde_json::from_str::<Value>(&call.arguments).is_err() {
+                    lost.push(format!(
+                        "messages[{message_index}].tool_calls[{call_index}].arguments"
+                    ));
+                }
+            }
+        }
+    }
     for field in request.meta.vendor.passthrough_safe.keys() {
         lost.push(format!("vendor.passthrough_safe.{field}"));
     }
@@ -1157,10 +1209,24 @@ fn canonicalized_google_stream_metadata(raw: &str) -> bool {
 }
 
 fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String> {
-    if pair.ingress == pair.egress {
-        return Vec::new();
-    }
     let mut lost = Vec::new();
+    if matches!(
+        pair.ingress.protocol,
+        Protocol::AnthropicMessages | Protocol::GoogleGemini
+    ) {
+        // 对象类型的工具入参装不下非合法 JSON 的逐字字节；上报为不可表达，
+        // 绝不交给格式化器伪造空对象。
+        for (index, item) in response.items.iter().enumerate() {
+            for (call_index, call) in item.tool_calls.iter().flatten().enumerate() {
+                if serde_json::from_str::<Value>(&call.arguments).is_err() {
+                    lost.push(format!("items[{index}].tool_calls[{call_index}].arguments"));
+                }
+            }
+        }
+    }
+    if pair.ingress == pair.egress {
+        return lost;
+    }
     if response
         .protected_reasoning_signatures()
         .any(|signature| signature.is_some())

@@ -124,14 +124,23 @@ impl DetachedPlatformExecution {
             context,
             ..
         } = self;
+        // 参数解析失败交回模型修正（is_error 工具结果），绝不把原始字节塞进 executor。
+        let arguments = match serde_json::from_str(&call.call.arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                return PlatformToolResult {
+                    tool_id: call.tool_id,
+                    call_id: call.call.id.to_string(),
+                    content: serde_json::Value::String(format!("invalid tool arguments: {error}")),
+                    content_kind:
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    is_error: true,
+                    metadata: serde_json::Map::new(),
+                };
+            }
+        };
         tools
-            .execute(
-                &call.tool_id,
-                call.call.id.to_string(),
-                serde_json::from_str(&call.call.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(call.call.arguments.clone())),
-                context,
-            )
+            .execute(&call.tool_id, call.call.id.to_string(), arguments, context)
             .await
     }
 }

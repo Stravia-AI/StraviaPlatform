@@ -621,7 +621,12 @@ impl stravia_runtime_contract::hook::PlatformTool for RuntimeEchoTool {
         arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
     ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
-        if arguments.get("fail").is_some() {
+        let Some(object) = arguments.as_object() else {
+            return Err(stravia_runtime_contract::hook::PlatformToolError::new(
+                "arguments must be an object",
+            ));
+        };
+        if object.contains_key("fail") {
             Err(stravia_runtime_contract::hook::PlatformToolError::new(
                 "tool failed",
             ))
@@ -748,4 +753,172 @@ fn reasoning_patch_updates_typed_item_and_protects_encrypted_content() {
         *encrypted_content = Some("changed".into());
     }
     assert!(validate_response_protected_fields(&original, &candidate).is_err());
+}
+
+struct NoopResponseSession;
+
+#[async_trait]
+impl HookSession for NoopResponseSession {
+    async fn handle(&mut self, _event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        Ok(ActionBatch::default())
+    }
+}
+
+fn tool_call(
+    id: &str,
+    name: &str,
+    arguments: &str,
+) -> stravia_runtime_contract::protocol::ir::ToolCall {
+    stravia_runtime_contract::protocol::ir::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: arguments.into(),
+    }
+}
+
+#[tokio::test]
+async fn client_tool_arguments_pass_through_verbatim_even_when_not_json() {
+    let runtime = HookRuntime::new(vec![Arc::new(TestHook {
+        descriptor: HookDescriptor::all("observe"),
+        make: Arc::new(|| Box::new(NoopResponseSession)),
+    })]);
+    let request = AiRequest::new("model", Vec::<AiItem>::new());
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Full,
+        )
+        .unwrap();
+    run.set_route(route_context());
+    let mut response = AiResponse::new("response", "model");
+    response.extend_tool_calls(vec![
+        tool_call("call-truncated", "local_probe", "{\"path\":\"/tmp/x\""),
+        tool_call("call-empty", "local_probe", ""),
+    ]);
+
+    run.on_upstream_response(&request, &mut response)
+        .await
+        .expect("client tool arguments are opaque to the platform");
+    run.on_client_output(&mut response)
+        .await
+        .expect("client tool arguments are opaque to the platform");
+
+    let arguments = response
+        .tool_calls()
+        .map(|call| call.arguments.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, ["{\"path\":\"/tmp/x\"", ""]);
+}
+
+#[tokio::test]
+async fn valid_platform_call_does_not_block_malformed_client_arguments() {
+    let registry = crate::hook::PlatformToolRegistry::new(vec![Arc::new(RuntimeEchoTool)]).unwrap();
+    let runtime = HookRuntime::with_tools(
+        vec![Arc::new(TestHook {
+            descriptor: HookDescriptor::all("expose"),
+            make: Arc::new(|| Box::new(ExposeToolSession)),
+        })],
+        registry,
+    );
+    let mut request = AiRequest::new("model", Vec::<AiItem>::new());
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Full,
+        )
+        .unwrap();
+    run.on_request(&mut request).await.unwrap();
+    run.set_route(route_context());
+    let platform_name = request
+        .tools
+        .as_ref()
+        .expect("exposed tool spec")
+        .iter()
+        .map(|tool| tool.name.clone())
+        .next()
+        .expect("one exposed tool");
+    let mut response = AiResponse::new("response", "model");
+    response.extend_tool_calls(vec![
+        tool_call("platform-call", &platform_name, "{}"),
+        tool_call("client-call", "local_probe", "{\"path\":\"/tmp/x\""),
+    ]);
+
+    run.on_upstream_response(&request, &mut response)
+        .await
+        .expect("valid platform call may not fail client argument passthrough");
+
+    let client_arguments = response
+        .tool_calls()
+        .find(|call| call.id.as_str() == "client-call")
+        .map(|call| call.arguments.as_str());
+    assert_eq!(client_arguments, Some("{\"path\":\"/tmp/x\""));
+}
+
+#[tokio::test]
+async fn platform_tool_malformed_arguments_are_refused_at_execution() {
+    let registry = crate::hook::PlatformToolRegistry::new(vec![Arc::new(RuntimeEchoTool)]).unwrap();
+    let runtime = HookRuntime::with_tools(
+        vec![Arc::new(TestHook {
+            descriptor: HookDescriptor::all("expose"),
+            make: Arc::new(|| Box::new(ExposeToolSession)),
+        })],
+        registry,
+    );
+    let mut request = AiRequest::new("model", Vec::<AiItem>::new());
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Full,
+        )
+        .unwrap();
+    run.on_request(&mut request).await.unwrap();
+    run.set_route(route_context());
+    let platform_name = request
+        .tools
+        .as_ref()
+        .expect("exposed tool spec")
+        .iter()
+        .map(|tool| tool.name.clone())
+        .next()
+        .expect("one exposed tool");
+    let mut response = AiResponse::new("response", "model");
+    response.extend_tool_calls(vec![tool_call(
+        "platform-call",
+        &platform_name,
+        "{\"path\":",
+    )]);
+
+    // 非法参数不失败响应阶段：拒绝发生在平台执行边界，以 is_error 工具结果返回。
+    run.on_upstream_response(&request, &mut response)
+        .await
+        .expect("argument errors must not fail the response stages");
+
+    let classified = run.classify_tool_calls(&response);
+    assert_eq!(classified.platform.len(), 1);
+    let result = run
+        .detached_platform_execution(
+            classified
+                .platform
+                .into_iter()
+                .next()
+                .expect("platform call"),
+            stravia_runtime_contract::CancellationToken::new(),
+        )
+        .execute()
+        .await;
+
+    assert!(result.is_error, "malformed arguments must refuse execution");
+    assert_eq!(result.call_id, "platform-call");
+    assert!(
+        result
+            .content
+            .as_str()
+            .expect("error content is a string")
+            .contains("invalid tool arguments"),
+        "refusal must explain the argument error: {}",
+        result.content
+    );
 }

@@ -247,8 +247,12 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                     parts.push(serde_json::json!({"text": t}));
                 }
                 for tc in tcs {
-                    let args: Value = serde_json::from_str(&tc.arguments)
-                        .unwrap_or(Value::Object(Default::default()));
+                    let args: Value = serde_json::from_str(&tc.arguments).map_err(|error| {
+                        anyhow::anyhow!(
+                            "gemini functionCall args cannot represent arguments for tool call {}: {error}",
+                            tc.id
+                        )
+                    })?;
                     parts.push(serde_json::json!({"functionCall": {
                         "id": tc.id,
                         "name": tc.name,

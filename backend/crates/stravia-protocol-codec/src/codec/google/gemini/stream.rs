@@ -492,7 +492,7 @@ impl GoogleStreamFormatter {
                     };
                     let buf = self.tool_arg_buffers.entry(*index).or_default();
                     buf.push_str(arguments);
-                    let Ok(args) = serde_json::from_str::<Value>(buf) else {
+                    let Ok(args @ Value::Object(_)) = serde_json::from_str::<Value>(buf) else {
                         continue;
                     };
                     let normalized_args = normalize_tool_args(&name, args);
@@ -597,6 +597,18 @@ impl GoogleStreamFormatter {
     pub(crate) fn format_done(&mut self) -> Vec<SseEvent> {
         vec![]
     }
+
+    // functionCall 的 args 契约是 JSON 对象：标量、数组、null 与非 JSON 字节
+    // 同样不可表达；合法 JSON 不足以满足对象契约。
+    pub(crate) fn unrepresentable_tool_arguments(&self) -> Vec<String> {
+        self.tool_arg_buffers
+            .iter()
+            .filter(|(_, buffer)| {
+                !matches!(serde_json::from_str::<Value>(buffer), Ok(Value::Object(_)))
+            })
+            .map(|(index, _)| format!("tool_calls[{index}].arguments"))
+            .collect()
+    }
 }
 
 fn google_parts_from_response(resp: &AiResponse) -> Vec<Value> {
@@ -620,8 +632,10 @@ fn google_parts_from_response(resp: &AiResponse) -> Vec<Value> {
         {
             parts.push(serde_json::json!({"text": text}));
         } else if let Some(call) = item.function_call_ref() {
-            let args: Value =
-                serde_json::from_str(&call.arguments).unwrap_or(Value::Object(Default::default()));
+            // response_loss_paths 已在可失败边界拦截不可表达的入参；这里只
+            // 兜底保留原始字节，绝不凭空生成空对象。
+            let args: Value = serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|_| Value::String(call.arguments.clone()));
             parts.push(serde_json::json!({
                 "functionCall": {"id": call.id, "name": call.name, "args": args}
             }));

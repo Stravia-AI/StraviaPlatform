@@ -498,3 +498,40 @@ fn rejects_malformed_dated_text_blocks() {
             .expect_err("malformed dated text block must fail");
     }
 }
+
+#[test]
+fn client_function_call_arguments_pass_through_verbatim_even_when_not_json() {
+    // 客户端入参是逐字字节：平台已下发的字节必须原样往返，
+    // 不补全、不拒绝。
+    let request = ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "logical-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "run the probe"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "local_probe",
+                    "arguments": "{\"path\":\"/tmp/x\""
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }
+            ]
+        }))
+        .expect("client tool arguments are opaque and must pass through verbatim");
+
+    let arguments = request
+        .items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter().flatten())
+        .map(|call| call.arguments.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, ["{\"path\":\"/tmp/x\""]);
+}

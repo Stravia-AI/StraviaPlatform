@@ -349,6 +349,10 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 标准 function tool 保留 `name`、description、JSON Schema parameters、strict、tool choice、parallel choice、call ID、arguments delta/done 和 output content。
 
+客户端拥有的 function call，其 `arguments` 是不透明字符串：空串、非法 JSON、缺失闭合符号与原始空白均原样保留，不由响应 Hook 校验、补全或替换。此规则覆盖流式 delta/done、完整响应、Generation Chain 及客户端下一轮回显；工具参数解析错误由客户端处理，不单独升级为平台响应失败。Platform Tool 在实际执行前解析参数，解析失败作为 `is_error` 工具结果交回模型，不调用工具执行器。Hook 主动修改参数仍遵循既有 patch 契约。
+
+透传不绕过凭据保护：结构不完整但字符串转义可解释的参数继续检测与还原；检测、替换或还原无法安全解释转义时仍失败关闭。跨协议目标若只能承载结构化工具参数，无法表示的原始字符串明确返回转换错误，不伪造 `{}`；Anthropic 流式 `input_json_delta` 可保留原始参数分片。
+
 纯客户端 function call 终结当前 response；客户端下一次请求创建新的 Inference Run。只有同轮同时出现 Platform Tool 和客户端 function call 时，才保留现有 mixed-only、process-local `ToolContinuation`：隐藏 Platform Tool 继续执行，客户端 call 等待 output 后恢复同一个 run。
 
 ### 9.2 Platform Tool wire identity

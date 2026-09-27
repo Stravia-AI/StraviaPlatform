@@ -1095,13 +1095,117 @@ fn rejects_malformed_done_event_references_and_payloads() {
     parser
         .parse_chunk(&function_prefix)
         .expect("function prefix");
-    let error = parser
+    parser
             .parse_chunk(&sse_event(
                 "response.function_call_arguments.done",
-                r#"{"type":"response.function_call_arguments.done","sequence_number":2,"item_id":"fc_1","output_index":0,"arguments":"{"}"#,
+                r#"{"type":"response.function_call_arguments.done","sequence_number":2,"item_id":"wrong","output_index":0,"arguments":"{}"}"#,
             ))
-            .expect_err("done event with invalid final arguments");
-    assert!(error.to_string().contains("arguments"));
+            .expect_err("done event with a mismatched item id");
+}
+
+#[test]
+fn stream_passes_function_call_arguments_through_verbatim_when_not_json() {
+    // 客户端入参是逐字字节：上游发出未闭合 JSON 不能掐断流，
+    // 字节原样下发——不补全、不替换、不丢弃。
+    let sse = [
+            sse_event(
+                "response.created",
+                r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","model":"model","status":"in_progress"}}"#,
+            ),
+            sse_event(
+                "response.output_item.added",
+                r#"{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"local_probe","arguments":"","status":"in_progress"}}"#,
+            ),
+            sse_event(
+                "response.function_call_arguments.done",
+                r#"{"type":"response.function_call_arguments.done","sequence_number":2,"item_id":"fc_1","output_index":0,"arguments":"{\"path\":\"/tmp/x\""}"#,
+            ),
+            sse_event(
+                "response.output_item.done",
+                r#"{"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"local_probe","arguments":"{\"path\":\"/tmp/x\"","status":"completed"}}"#,
+            ),
+            sse_event(
+                "response.completed",
+                r#"{"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","model":"model","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"local_probe","arguments":"{\"path\":\"/tmp/x\"","status":"completed"}]}}"#,
+            ),
+        ]
+        .concat();
+
+    let deltas = ResponsesStreamParser::new()
+        .parse_chunk(&sse)
+        .expect("malformed client tool arguments must not fail the stream");
+
+    assert!(deltas.iter().any(
+            |delta| matches!(delta, AiStreamDelta::ToolCallDelta { arguments, .. } if arguments == r#"{"path":"/tmp/x""#)
+        ));
+    assert!(deltas.iter().any(|delta| matches!(
+        delta,
+        AiStreamDelta::ItemDone { item, .. }
+            if item
+                .tool_calls
+                .iter()
+                .flatten()
+                .any(|call| call.arguments == r#"{"path":"/tmp/x""#)
+    )));
+}
+
+#[test]
+fn stream_passes_empty_function_call_arguments_through_verbatim() {
+    let sse = [
+            sse_event(
+                "response.created",
+                r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","model":"model","status":"in_progress"}}"#,
+            ),
+            sse_event(
+                "response.output_item.added",
+                r#"{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"local_probe","arguments":"","status":"in_progress"}}"#,
+            ),
+            sse_event(
+                "response.output_item.done",
+                r#"{"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"local_probe","arguments":"","status":"completed"}}"#,
+            ),
+        ]
+        .concat();
+
+    let deltas = ResponsesStreamParser::new()
+        .parse_chunk(&sse)
+        .expect("empty client tool arguments must not fail the stream");
+
+    assert!(deltas.iter().any(|delta| matches!(
+        delta,
+        AiStreamDelta::ItemDone { item, .. }
+            if item
+                .tool_calls
+                .iter()
+                .flatten()
+                .any(|call| call.arguments.is_empty())
+    )));
+}
+
+#[test]
+fn unary_response_passes_function_call_arguments_through_verbatim_when_not_json() {
+    let resource = dated_response(serde_json::json!({
+        "output": [
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "local_probe",
+                "arguments": "{\"path\":\"/tmp/x\"",
+                "status": "completed"
+            }
+        ]
+    }));
+
+    let response = ResponsesResponseParser
+        .parse_response(resource)
+        .expect("unary decode must keep client tool arguments verbatim");
+
+    let arguments = response
+        .tool_calls()
+        .map(|call| call.arguments.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, ["{\"path\":\"/tmp/x\""]);
 }
 
 #[test]

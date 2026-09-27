@@ -363,6 +363,8 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
         if path != "/v1/chat/completions":
             self._write_json(404, {"error": f"unknown path: {path}"})
             return
+        with self._attempts_lock:
+            self.server.captured_requests.append(body)
         model = str(body.get("model", "mock"))
         messages = body.get("messages", [])
         scenario = json.dumps(messages, sort_keys=True, separators=(",", ":"))
@@ -459,6 +461,104 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+        passthrough_args: str | None = None
+        passthrough_tool = "local_probe"
+        has_tool_result = any(
+            isinstance(message, dict) and message.get("role") == "tool"
+            for message in messages
+        )
+        # Only the first turn emits the passthrough call: once the client or
+        # the platform executor returns a role=tool result the run must end.
+        if "passthrough-platform-malformed-tool-args" in scenario and not has_tool_result:
+            passthrough_args = '{"path":"/tmp/x"'
+            passthrough_tool = "StraviaRead"
+        elif "passthrough-malformed-tool-args" in scenario and not has_tool_result:
+            passthrough_args = '{"path":"/tmp/x"'
+        elif "passthrough-empty-tool-args" in scenario and not has_tool_result:
+            passthrough_args = ""
+        if passthrough_args is not None:
+            if body.get("stream") is True:
+                chunks = [
+                    {
+                        "id": "chatcmpl-passthrough",
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call_passthrough",
+                                    "type": "function",
+                                    "function": {"name": passthrough_tool, "arguments": ""},
+                                }],
+                            },
+                            "finish_reason": None,
+                        }],
+                    }
+                ]
+                # Fragment the argument bytes like the incident stream did.
+                if passthrough_args:
+                    chunks.append(
+                        {
+                            "id": "chatcmpl-passthrough",
+                            "object": "chat.completion.chunk",
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"tool_calls": [{"index": 0, "function": {"arguments": passthrough_args[:8]}}]},
+                                "finish_reason": None,
+                            }],
+                        }
+                    )
+                    chunks.append(
+                        {
+                            "id": "chatcmpl-passthrough",
+                            "object": "chat.completion.chunk",
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"tool_calls": [{"index": 0, "function": {"arguments": passthrough_args[8:]}}]},
+                                "finish_reason": None,
+                            }],
+                        }
+                    )
+                chunks.append(
+                    {
+                        "id": "chatcmpl-passthrough",
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                    }
+                )
+                self._write_sse(chunks)
+            else:
+                self._write_json(
+                    200,
+                    {
+                        "id": "chatcmpl-passthrough",
+                        "object": "chat.completion",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [{
+                                    "id": "call_passthrough",
+                                    "type": "function",
+                                    "function": {"name": passthrough_tool, "arguments": passthrough_args},
+                                }],
+                            },
+                            "finish_reason": "tool_calls",
+                        }],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                    },
+                )
+            return
+
         tool_results = sum(
             1 for message in messages if isinstance(message, dict) and message.get("role") == "tool"
         )
@@ -537,6 +637,7 @@ def minimal_mock_provider(port: int) -> tuple[ThreadingHTTPServer, threading.Thr
     """Start a minimal OpenAI-compatible mock on *port*; return (server, thread)."""
     server = ThreadingHTTPServer(("127.0.0.1", port), _MinimalMockHandler)
     server.stream_error_release = threading.Event()
+    server.captured_requests = []
     t = threading.Thread(target=server.serve_forever, name="mock-provider", daemon=True)
     t.start()
     return server, t

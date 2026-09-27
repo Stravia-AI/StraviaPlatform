@@ -180,13 +180,9 @@ fn validate_core_output_item(item: &Value) -> Result<()> {
             require_output_status(object, item_type)?;
             required_non_empty_output_string(object, "call_id", item_type)?;
             required_non_empty_output_string(object, "name", item_type)?;
-            let arguments = object
-                .get("arguments")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("output item function_call missing arguments"))?;
-            serde_json::from_str::<Value>(arguments).map_err(|error| {
-                anyhow::anyhow!("output item function_call arguments are invalid JSON: {error}")
-            })?;
+            if object.get("arguments").and_then(Value::as_str).is_none() {
+                anyhow::bail!("output item function_call missing arguments");
+            }
         }
         "reasoning" => {
             let summary = object
@@ -531,14 +527,12 @@ impl ResponsesResponseParser {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        // 客户端入参是逐字字节：原样透传，不补全、不重新序列化。
                         let arguments = item
                             .get("arguments")
                             .and_then(|v| v.as_str())
                             .unwrap_or("{}")
                             .to_string();
-                        serde_json::from_str::<Value>(&arguments).map_err(|error| {
-                            anyhow::anyhow!("function_call arguments are invalid JSON: {error}")
-                        })?;
                         if call_id.is_empty() || name.is_empty() {
                             anyhow::bail!("function_call requires non-empty call_id and name");
                         }
@@ -1163,13 +1157,9 @@ impl ResponsesStreamParser {
                     )?;
                 }
                 if event == "response.output_item.done" && item_type == "function_call" {
-                    let arguments = item
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| anyhow::anyhow!("function_call arguments are missing"))?;
-                    serde_json::from_str::<Value>(arguments).map_err(|error| {
-                        anyhow::anyhow!("function_call arguments are invalid JSON: {error}")
-                    })?;
+                    if item.get("arguments").and_then(Value::as_str).is_none() {
+                        anyhow::bail!("function_call arguments are missing");
+                    }
                 }
                 if !matches!(
                     item_type,
@@ -1540,10 +1530,7 @@ impl ResponsesStreamParser {
                 if item_type != "function_call" {
                     anyhow::bail!("{event} references no open function_call item");
                 }
-                let arguments = required_stream_text(payload, "arguments", event)?;
-                serde_json::from_str::<Value>(arguments).map_err(|error| {
-                    anyhow::anyhow!("{event} arguments are invalid JSON: {error}")
-                })?;
+                required_stream_text(payload, "arguments", event)?;
             }
             "response.queued" => {}
             _ => unreachable!("dated event allowlist and match must stay aligned"),

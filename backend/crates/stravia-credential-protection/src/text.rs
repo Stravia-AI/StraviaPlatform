@@ -95,7 +95,12 @@ fn arguments_text(arguments: &mut String, visit: &mut Visitor<'_>) -> Result<(),
     if arguments.is_empty() {
         return Ok(());
     }
-    let _: Value = serde_json::from_str(arguments).map_err(|_| RedactionError::InvalidText)?;
+    if serde_json::from_str::<Value>(arguments).is_err() {
+        // 结构未闭合的入参：闭合且可解码的字符串 token 仍走解码-替换-重编码
+        // 语义，字符串之外的字节只做字面扫描；转义损坏的 token 与无法解码
+        // 的尾部可能藏有转义形式凭据或引用，任何方向都 fail-closed。
+        return malformed_arguments_text(arguments, visit);
+    }
     let bytes = arguments.as_bytes();
     let mut out = String::with_capacity(arguments.len());
     let mut cursor = 0;
@@ -140,6 +145,124 @@ fn arguments_text(arguments: &mut String, visit: &mut Visitor<'_>) -> Result<(),
         out.push_str(&arguments[copied..]);
         *arguments = out;
     }
+    Ok(())
+}
+
+// 完整闭合的字符串 token：返回（含引号的字节区间, 解码值——转义损坏时为
+// None，不凭空解码），以及第一个未闭合字符串的开引号位置；其后的字节
+// 一律按字符串残段处理。
+fn closed_string_tokens(raw: &str) -> (Vec<(usize, usize, Option<String>)>, Option<usize>) {
+    let bytes = raw.as_bytes();
+    let mut tokens = Vec::new();
+    let mut unterminated = None;
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'"' {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\\' => cursor += 2,
+                b'"' => {
+                    cursor += 1;
+                    break;
+                }
+                _ => cursor += 1,
+            }
+        }
+        let end = cursor.min(bytes.len());
+        let token = &raw[start..end];
+        if token.len() < 2 || !token.ends_with('"') {
+            unterminated = Some(start);
+            break;
+        }
+        tokens.push((start, end, serde_json::from_str::<String>(token).ok()));
+    }
+    (tokens, unterminated)
+}
+
+fn malformed_arguments_text(
+    arguments: &mut String,
+    visit: &mut Visitor<'_>,
+) -> Result<(), RedactionError> {
+    let (tokens, unterminated_from) = closed_string_tokens(arguments);
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut residuals: Vec<(usize, usize)> = Vec::new();
+    let mut context: Option<String> = None;
+    let mut last = 0;
+    for (start, end, decoded) in tokens {
+        if last < start {
+            residuals.push((last, start));
+        }
+        last = end;
+        // 闭合但转义损坏的 token 可能藏有转义形式凭据或引用，fail-closed。
+        let Some(decoded) = decoded else {
+            return Err(RedactionError::InvalidText);
+        };
+        if arguments[end..].trim_start().starts_with(':') {
+            context = Some(decoded);
+            continue;
+        }
+        let original = decoded.clone();
+        let mut decoded = decoded;
+        visit(&mut decoded, context.as_deref())?;
+        if decoded != original {
+            edits.push((
+                start,
+                end,
+                serde_json::to_string(&decoded).map_err(|_| RedactionError::InvalidText)?,
+            ));
+        }
+    }
+    if let Some(open) = unterminated_from {
+        // 开引号本身属于结构字节；引号之后是未闭合的字符串内容。
+        residuals.push((last, open + 1));
+        let content = &arguments[open + 1..];
+        // 转义序列完整则内容可判定解码；否则该段语义不可保证，fail-closed。
+        let decoded = serde_json::from_str::<String>(&format!("\"{content}\""))
+            .map_err(|_| RedactionError::InvalidText)?;
+        let original = decoded.clone();
+        let mut decoded = decoded;
+        visit(&mut decoded, context.as_deref())?;
+        if decoded != original {
+            let encoded =
+                serde_json::to_string(&decoded).map_err(|_| RedactionError::InvalidText)?;
+            edits.push((
+                open + 1,
+                arguments.len(),
+                encoded[1..encoded.len() - 1].to_string(),
+            ));
+        }
+    } else {
+        residuals.push((last, arguments.len()));
+    }
+    for (start, end) in residuals {
+        if start >= end {
+            continue;
+        }
+        // 字符串之外的残段没有转义语义，字面扫描与拼接即为原始字节。
+        let mut after = arguments[start..end].to_string();
+        visit(&mut after, None)?;
+        if after != arguments[start..end] {
+            edits.push((start, end, after));
+        }
+    }
+    if edits.is_empty() {
+        return Ok(());
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut out = String::with_capacity(arguments.len());
+    let mut pos = 0;
+    for (start, end, replacement) in edits {
+        out.push_str(&arguments[pos..start]);
+        out.push_str(&replacement);
+        pos = end;
+    }
+    out.push_str(&arguments[pos..]);
+    *arguments = out;
     Ok(())
 }
 
@@ -514,7 +637,31 @@ fn read_arguments(arguments: &str, visit: &mut ReadVisitor<'_>) -> Result<(), Re
     if arguments.is_empty() {
         return Ok(());
     }
-    let value: Value = serde_json::from_str(arguments).map_err(|_| RedactionError::InvalidText)?;
+    let Ok(value) = serde_json::from_str::<Value>(arguments) else {
+        // 检测必须完整覆盖：完整 token 解码后送检，其余字节原文送检；
+        // 无法安全解码的转义区域可能藏有转义形式凭据，一律 fail-closed。
+        let (tokens, unterminated_from) = closed_string_tokens(arguments);
+        let mut readable = String::new();
+        let mut last = 0;
+        for (start, end, decoded) in tokens {
+            readable.push_str(&arguments[last..start]);
+            let Some(decoded) = decoded else {
+                return Err(RedactionError::InvalidText);
+            };
+            readable.push_str(&decoded);
+            last = end;
+        }
+        if let Some(open) = unterminated_from {
+            readable.push_str(&arguments[last..open]);
+            let content = &arguments[open + 1..];
+            let decoded = serde_json::from_str::<String>(&format!("\"{content}\""))
+                .map_err(|_| RedactionError::InvalidText)?;
+            readable.push_str(&decoded);
+        } else {
+            readable.push_str(&arguments[last..]);
+        }
+        return visit(&readable, None);
+    };
     read_json_values(&value, None, visit)
 }
 
@@ -594,6 +741,8 @@ pub fn redact_request(
     Ok(used.into_iter().collect())
 }
 
+// 还原与出站保护共用同一遍历：转义损坏区域对引用同样不可判定（引用也可能
+// 被上游 unicode 转义后藏入），故所有方向统一 fail-closed。
 pub(super) fn restore_item(
     item: &mut AiItem,
     mappings: &[Mapping],
@@ -846,5 +995,160 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_still_sweep_credentials_and_pass_through() {
+        let mapping = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
+            secret: "sk-live-7f3a9c".into(),
+            expires_at: i64::MAX,
+        };
+        let malformed = format!("{{\"key\":\"{}\"", mapping.secret);
+
+        // 未闭合字符串残段中的字面凭据仍被检测并替换成引用原子。
+        let mut request = AiRequest::new(
+            "model",
+            vec![AiItem::function_call(
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "call-1".into(),
+                    name: "local_probe".into(),
+                    arguments: malformed.clone(),
+                },
+            )],
+        );
+        let (texts, _) = request_texts(&request, true)
+            .expect("malformed arguments are still readable for detection");
+        assert!(texts.iter().any(|text| text.contains(&mapping.secret)));
+        redact_request(&mut request, std::slice::from_ref(&mapping))
+            .expect("malformed arguments must not fail redaction");
+        let redacted = &request.items[0].tool_calls.as_ref().unwrap()[0].arguments;
+        assert!(!redacted.contains(&mapping.secret));
+        assert!(redacted.contains(&mapping.reference));
+        assert!(redacted.starts_with("{\"key\":\""));
+
+        // 还原方向把引用原子按原样字节放回残段。
+        let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-1".into(),
+            name: "local_probe".into(),
+            arguments: redacted.clone(),
+        });
+        let mut used = BTreeSet::new();
+        restore_item(&mut item, std::slice::from_ref(&mapping), &mut used)
+            .expect("malformed arguments must not fail restoration");
+        assert_eq!(item.tool_calls.as_ref().unwrap()[0].arguments, malformed);
+    }
+
+    #[test]
+    fn malformed_tool_arguments_keep_decoded_credential_and_escape_semantics() {
+        // 转义形式的凭据：闭合字符串 token 解码后可检测；裸原始字节扫描
+        // 反而匹配不到 "\u002d" 形态。
+        let escaped = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
+            secret: "sk-live-7f3a9c".into(),
+            expires_at: i64::MAX,
+        };
+        let malformed = "{\"k\":\"sk\\u002dlive\\u002d7f3a9c\",\"t\":".to_string();
+        let mut request = AiRequest::new(
+            "model",
+            vec![AiItem::function_call(
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "call-1".into(),
+                    name: "local_probe".into(),
+                    arguments: malformed.clone(),
+                },
+            )],
+        );
+        let (texts, _) = request_texts(&request, true).expect("readable");
+        assert!(texts.iter().any(|text| text.contains(&escaped.secret)));
+        redact_request(&mut request, std::slice::from_ref(&escaped)).expect("redact");
+        let redacted = &request.items[0].tool_calls.as_ref().unwrap()[0].arguments;
+        assert!(redacted.contains(&escaped.reference));
+        assert!(!redacted.contains(&escaped.secret));
+        let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-1".into(),
+            name: "local_probe".into(),
+            arguments: redacted.clone(),
+        });
+        let mut used = BTreeSet::new();
+        restore_item(&mut item, std::slice::from_ref(&escaped), &mut used).expect("restore");
+        assert!(
+            item.tool_calls.as_ref().unwrap()[0]
+                .arguments
+                .contains(&escaped.secret),
+            "decoded credential must restore inside the same token"
+        );
+
+        // 需要 JSON 转义的 secret 在闭合 token 内往返：还原必须重新转义，
+        // 而不是把原始引号字节直接插入字符串。
+        let quoting = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
+            secret: "a\"b".into(),
+            expires_at: i64::MAX,
+        };
+        let malformed = "{\"k\":\"a\\\"b\",\"t\":".to_string();
+        let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-1".into(),
+            name: "local_probe".into(),
+            arguments: format!("{{\"k\":\"{}\",\"t\":", quoting.reference),
+        });
+        let mut used = BTreeSet::new();
+        restore_item(&mut item, std::slice::from_ref(&quoting), &mut used).expect("restore");
+        assert_eq!(
+            item.tool_calls.as_ref().unwrap()[0].arguments,
+            malformed,
+            "restored secret must be re-escaped as JSON string content"
+        );
+    }
+
+    #[test]
+    fn undecodable_escape_regions_fail_closed_in_all_directions() {
+        // \l、\q 不是合法转义：对应区域可能藏有转义形式凭据，
+        // 检测与出站保护不能返回成功。
+        let mapping = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
+            secret: "sk-live-7f3a9c".into(),
+            expires_at: i64::MAX,
+        };
+        for malformed in ["{\"k\":\"sk\\live", "{\"k\":\"a\\qb\",\"t\":"] {
+            let request = |malformed: &str| {
+                AiRequest::new(
+                    "model",
+                    vec![AiItem::function_call(
+                        stravia_runtime_contract::protocol::ir::ToolCall {
+                            id: "call-1".into(),
+                            name: "local_probe".into(),
+                            arguments: malformed.to_string(),
+                        },
+                    )],
+                )
+            };
+            assert!(
+                matches!(
+                    request_texts(&request(malformed), true),
+                    Err(RedactionError::InvalidText)
+                ),
+                "detection must fail closed on undecodable escapes: {malformed}"
+            );
+            let mut request = request(malformed);
+            assert!(matches!(
+                redact_request(&mut request, std::slice::from_ref(&mapping)),
+                Err(RedactionError::InvalidText)
+            ));
+
+            // 还原方向同样 fail-closed：引用也可能被上游 unicode 转义后藏入
+            // 损坏区域，字面扫描无法保证完整覆盖。
+            let mut item =
+                AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "call-1".into(),
+                    name: "local_probe".into(),
+                    arguments: malformed.to_string(),
+                });
+            let mut used = BTreeSet::new();
+            assert!(matches!(
+                restore_item(&mut item, std::slice::from_ref(&mapping), &mut used),
+                Err(RedactionError::InvalidText)
+            ));
+        }
     }
 }

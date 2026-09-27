@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Client-owned tool arguments now remain verbatim across Chat Completions and Responses delivery, streaming completion, stored history, and client replay, including empty or malformed JSON. Response hooks no longer fail a completed upstream call solely because client arguments are invalid; platform tool argument errors instead return an error tool result without executing the tool. Credential protection retains decoded-string handling for incomplete JSON and fails closed when outbound escapes cannot be safely interpreted. Object-only protocol conversions reject unrepresentable arguments rather than fabricating empty objects.
+
 - Command Code and other known plugin-owned protocols now apply target-specific thinking-history replay independently of host codec registration. Client-replayed Responses reasoning no longer causes a local HTTP 400 after history compaction or edits; readable reasoning and tool-result associations are preserved without relaxing protocol validation or history matching.
 
 ## [0.3.0] - 2026-09-26

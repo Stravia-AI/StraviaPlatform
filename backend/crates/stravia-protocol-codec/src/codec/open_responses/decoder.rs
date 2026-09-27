@@ -709,14 +709,13 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // 客户端入参回显必须是逐字字节：客户端可能原样回送平台已下发的
+            // 字节，这里不做校验、不补全、不替换。
             let arguments = item
                 .get("arguments")
                 .and_then(Value::as_str)
                 .unwrap_or("{}")
                 .to_string();
-            serde_json::from_str::<Value>(&arguments).map_err(|error| {
-                anyhow::anyhow!("function_call arguments are invalid JSON: {error}")
-            })?;
             if call_id.trim().is_empty() || name.trim().is_empty() {
                 anyhow::bail!("function_call requires non-empty call_id and name");
             }

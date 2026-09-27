@@ -21,7 +21,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    ProtocolTransform, ThinkingCarrierFacts, TransformError, response_loss_paths, stream_loss_paths,
+    ProtocolTransform, ThinkingCarrierFacts, TransformError, adapter, request_loss_paths,
+    response_loss_paths, stream_loss_paths,
 };
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
@@ -2063,4 +2064,183 @@ fn open_responses_reasoning_signatures_are_canonical() {
     assert!(
         stream_loss_paths(pair, &[AiStreamDelta::ThinkingSignature("opaque".into())]).is_empty()
     );
+}
+
+#[test]
+fn malformed_tool_arguments_are_unrepresentable_for_object_typed_egress() {
+    let malformed_request = || {
+        let mut request = AiRequest::new("model", Vec::new());
+        request.items.push(AiItem::function_call(ToolCall {
+            id: "call-1".into(),
+            name: "local_probe".into(),
+            arguments: "{\"path\":\"/tmp/x\"".into(),
+        }));
+        request
+    };
+
+    for target in [
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ] {
+        let pair = ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, target)
+            .expect("registered protocol pair");
+        let capabilities = adapter(target).expect("registered adapter").capabilities();
+        assert_eq!(
+            request_loss_paths(pair, &malformed_request(), capabilities),
+            vec!["messages[0].tool_calls[0].arguments"],
+            "object-typed tool input must not silently fabricate {{}}"
+        );
+    }
+
+    // 字符串类型目标保留逐字字节。
+    let target = OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, target)
+        .expect("registered protocol pair");
+    let capabilities = adapter(target).expect("registered adapter").capabilities();
+    assert!(request_loss_paths(pair, &malformed_request(), capabilities).is_empty());
+}
+
+#[test]
+fn malformed_tool_arguments_are_unrepresentable_from_object_typed_ingress() {
+    let malformed_response = || {
+        let mut response = AiResponse::new("resp-1", "model");
+        response.items.push(AiItem::function_call(ToolCall {
+            id: "call-1".into(),
+            name: "local_probe".into(),
+            arguments: "{\"path\":\"/tmp/x\"".into(),
+        }));
+        response
+    };
+
+    for ingress in [
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ] {
+        let pair = ProtocolTransform::global()
+            .bind(ingress, OPEN_RESPONSES_2026_04_24)
+            .expect("registered protocol pair");
+        assert_eq!(
+            response_loss_paths(pair, &malformed_response()),
+            vec!["items[0].tool_calls[0].arguments"]
+        );
+        // 同协议回传的重编码同样要求对象入参。
+        let relay = ProtocolTransform::global()
+            .bind(ingress, ingress)
+            .expect("registered protocol pair");
+        assert_eq!(
+            response_loss_paths(relay, &malformed_response()),
+            vec!["items[0].tool_calls[0].arguments"]
+        );
+    }
+
+    // 字符串类型出参保留逐字字节；CC 同协议回传同样逐字。
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("registered protocol pair");
+    assert!(response_loss_paths(pair, &malformed_response()).is_empty());
+}
+
+#[test]
+fn gemini_stream_encode_fails_on_unrepresentable_tool_arguments() {
+    // 截断的入参字节永远无法成为 functionCall args 对象：终态必须显式失败，
+    // 不能伪造 {}、丢弃调用或发出假 STOP。
+    let pair = ProtocolTransform::global()
+        .bind(
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("registered protocol pair");
+    let (_decoder, mut encoder) = pair.stream().expect("stream session").into_parts();
+
+    encoder
+        .encode_deltas(&[
+            AiStreamDelta::ToolCallStart {
+                index: 0,
+                id: "call_passthrough".into(),
+                name: "local_probe".into(),
+            },
+            AiStreamDelta::ToolCallDelta {
+                index: 0,
+                arguments: "{\"path\":\"/tmp/x\"".into(),
+            },
+        ])
+        .expect("mid-stream fragments stay pending until done");
+    let error = encoder
+        .encode_deltas(&[AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        }])
+        .expect_err("unrepresentable arguments must fail the terminal state");
+    assert!(
+        matches!(
+            error,
+            TransformError::Unrepresentable { ref lost, .. }
+                if lost.iter().any(|path| path == "tool_calls[0].arguments")
+        ),
+        "unexpected transform error: {error}"
+    );
+}
+
+#[test]
+fn gemini_stream_encode_fails_on_argumentless_tool_call() {
+    // 空字节串也不是 {}：无参调用同样不可表达，终态显式失败。
+    let pair = ProtocolTransform::global()
+        .bind(
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("registered protocol pair");
+    let (_decoder, mut encoder) = pair.stream().expect("stream session").into_parts();
+
+    encoder
+        .encode_deltas(&[AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_probe".into(),
+            name: "local_probe".into(),
+        }])
+        .expect("tool call start stays pending");
+    let error = encoder
+        .encode_deltas(&[AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        }])
+        .expect_err("argumentless call is unrepresentable for gemini args");
+    assert!(matches!(error, TransformError::Unrepresentable { .. }));
+}
+
+#[test]
+fn gemini_stream_encode_passes_valid_tool_arguments() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("registered protocol pair");
+    let (_decoder, mut encoder) = pair.stream().expect("stream session").into_parts();
+
+    let events = encoder
+        .encode_deltas(&[
+            AiStreamDelta::ToolCallStart {
+                index: 0,
+                id: "call_probe".into(),
+                name: "local_probe".into(),
+            },
+            AiStreamDelta::ToolCallDelta {
+                index: 0,
+                arguments: "{\"path\":\"/tmp/x\"}".into(),
+            },
+            AiStreamDelta::Done {
+                stop_reason: "stop".into(),
+            },
+        ])
+        .expect("valid arguments still encode");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.data.contains("functionCall"))
+    );
+    assert!(events.iter().any(|event| event.data.contains("STOP")));
 }

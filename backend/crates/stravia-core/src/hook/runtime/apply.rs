@@ -225,10 +225,8 @@ pub(super) fn validate_response_protected_fields(
     if tool_call_identities(original) != tool_call_identities(candidate) {
         return Err("tool call ownership, ids, and names are read-only".into());
     }
-    for call in candidate.tool_calls() {
-        serde_json::from_str::<serde_json::Value>(&call.arguments)
-            .map_err(|error| format!("tool arguments are not valid JSON: {error}"))?;
-    }
+    // 工具入参在此不做 JSON 校验：客户端工具的参数字节必须原样透传；
+    // 平台工具的参数错误在执行边界以 is_error 结果交回模型，绝不失败响应。
     Ok(())
 }
 

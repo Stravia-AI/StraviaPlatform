@@ -157,8 +157,10 @@ impl AnthropicResponseFormatter {
                     content.push(serde_json::json!({"type": "text", "text": text}));
                 }
             } else if let Some(call) = item.function_call_ref() {
+                // response_loss_paths 已在可失败边界拦截不可表达的入参；这里只
+                // 兜底保留原始字节，绝不凭空生成空对象。
                 let input: Value = serde_json::from_str(&call.arguments)
-                    .unwrap_or(Value::Object(Default::default()));
+                    .unwrap_or_else(|_| Value::String(call.arguments.clone()));
                 content.push(serde_json::json!({
                     "type": "tool_use",
                     "id": call.id,
