@@ -189,7 +189,7 @@ const requestChart = $derived(
     errors: item.error_count,
   })),
 )
-const latencyChart = $derived(buildLatencyChart(seriesQuery.data ?? [], formatTime, 3_600_000))
+const latencyChart = $derived(buildLatencyChart(seriesQuery.data ?? [], 3_600_000))
 const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
 const dash = '–'
 const metrics = $derived([
@@ -376,7 +376,10 @@ function retryConfiguration(): void {
                   { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                   { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
                 ]}
-                props={{ xAxis: { ticks: 4 } }} />
+                props={{
+                  xAxis: { ticks: 4, format: (value: Date) => formatTime(value) },
+                  tooltip: { header: { format: (value: Date) => formatTime(value) } },
+                }} />
             </div>
           {:else}
             <Empty.Root class="h-72 border-y"

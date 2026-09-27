@@ -177,7 +177,7 @@ const activityGrid = $derived(
 )
 // 延伸窗口里可能存在所选范围外的历史活动，不能只看 overview 的当前范围计数。
 const hasActivity = $derived(hasTraffic || activityGrid.cells.some((cell) => cell.tokens !== 0))
-const latencyChart = $derived(buildLatencyChart(seriesStats, formatBucket, HOUR_MS))
+const latencyChart = $derived(buildLatencyChart(seriesStats, HOUR_MS))
 const errorChart = $derived(
   seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
 )
@@ -274,7 +274,7 @@ function getApiKeyStatsRowId(apiKey: ApiKeyStats): string {
   return apiKey.api_key_id
 }
 
-function formatBucket(value: number): string {
+function formatBucket(value: number | Date): string {
   return hoursNumber <= 24 ? formatTime(value) : formatLogTime(value)
 }
 
@@ -419,7 +419,10 @@ function retryAll(): void {
                 { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                 { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
               ]}
-              props={{ xAxis: { ticks: 4 } }} />
+              props={{
+                xAxis: { ticks: 4, format: formatBucket },
+                tooltip: { header: { format: formatBucket } },
+              }} />
           </div>{:else}<Empty.Root class="h-40 border-y"
             ><Empty.Header
               ><Empty.Description

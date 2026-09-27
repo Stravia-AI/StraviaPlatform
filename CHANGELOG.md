@@ -8,6 +8,8 @@
 
 - Startup recovery now uses run/status indexes for Model Turn and Target Attempt observations on SQLite and PostgreSQL, avoiding repeated full-table scans as request history grows. Existing databases receive the indexes through an incremental migration without deleting history.
 
+- Overview and Usage analytics latency charts now use actual timestamps for horizontal positions, preventing lines from doubling back when a 24-hour window includes the same clock time on consecutive days. Localized axis and tooltip labels and gaps for periods without requests are preserved.
+
 - The request-history model filter now lists each Route by its effective display name and shows the same name for the applied selection, so Routes without a display name appear by Model ID instead of exposing the internal Route ID or reading as "All". Filter requests still send the Route ID unchanged.
 
 - Interrupted interaction chains retain their last request activity time instead of reappearing in recent activity when a delayed disconnect, idle timeout, restart recovery, or terminal cleanup is detected. Diagnostic events still record the actual detection time; previously stored timestamps are not backfilled.
