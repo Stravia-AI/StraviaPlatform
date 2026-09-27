@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- The request-history model filter now lists each Route by its effective display name and shows the same name for the applied selection, so Routes without a display name appear by Model ID instead of exposing the internal Route ID or reading as "All". Filter requests still send the Route ID unchanged.
+
 - Interrupted interaction chains retain their last request activity time instead of reappearing in recent activity when a delayed disconnect, idle timeout, restart recovery, or terminal cleanup is detected. Diagnostic events still record the actual detection time; previously stored timestamps are not backfilled.
 
 - Client-owned tool arguments now remain verbatim across Chat Completions and Responses delivery, streaming completion, stored history, and client replay, including empty or malformed JSON. Response hooks no longer fail a completed upstream call solely because client arguments are invalid; platform tool argument errors instead return an error tool result without executing the tool. Credential protection retains decoded-string handling for incomplete JSON and fails closed when outbound escapes cannot be safely interpreted. Object-only protocol conversions reject unrepresentable arguments rather than fabricating empty objects.

@@ -16,6 +16,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatBytes, formatCompactCount, formatLogTime } from '$lib/format'
+import { effectiveModelDisplayName } from '$lib/logical-model'
 import { observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations } from '$lib/observation-stream'
 import {
@@ -87,6 +88,7 @@ const ws = new ObservationWorkspace(admin.observations, subscribeToObservations,
   onError: (error) => toast.error(localizeBackendErrorMessage(error)),
 })
 
+const selectedFilterModel = $derived(modelsQuery.data?.find((item) => item.id === ws.modelFilter))
 const draftStartMs = $derived(new Date(draftStart).getTime())
 const draftEndMs = $derived(new Date(draftEnd).getTime())
 const validDraftRange = $derived(isValidObservationRange(draftStartMs, draftEndMs))
@@ -546,14 +548,13 @@ async function downloadBundle(): Promise<void> {
             type="single"
             bind:value={() => ws.modelFilter, (value: string) => ws.setModelFilter(value)}
             ><Select.Trigger id="observation-model" class="w-full"
-              >{modelsQuery.data?.find((item) => item.id === ws.modelFilter)?.display_name ??
-                m.observation_all()}</Select.Trigger
+              >{selectedFilterModel ? effectiveModelDisplayName(selectedFilterModel) : m.observation_all()}</Select.Trigger
             ><Select.Content
               ><Select.Group
                 ><Select.Item value="all">{m.observation_all()}</Select.Item
                 >{#each modelsQuery.data ?? [] as model (model.id)}<Select.Item
                     value={model.id}
-                    label={model.display_name || model.id}>{model.display_name || model.id}</Select.Item
+                    label={effectiveModelDisplayName(model)}>{effectiveModelDisplayName(model)}</Select.Item
                   >{/each}</Select.Group
               ></Select.Content
             ></Select.Root
