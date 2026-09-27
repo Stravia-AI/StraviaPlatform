@@ -698,7 +698,10 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                     return _wait_for("pending tool interaction", finished_waiting)
 
                 pending = create_waiting(env, "observation-branch pending before restart")
-                before = _detail(env, pending["id"])["runs"][0]
+                download_observation_bundle(env, _detail(env, pending["id"]))
+                pending_detail = _detail(env, pending["id"])
+                before_active_at = pending_detail["interaction"]["last_active_at"]
+                before = pending_detail["runs"][0]
             finally:
                 stop_stravia_server(process, logs)
 
@@ -732,7 +735,9 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                     historical = next(run for run in resolved["runs"] if run["id"] == resolved_run)
                     assert historical["status"] == "waiting_client"
                     assert not any(event["kind"] == "process_restarted" for event in historical["events"])
-                    recovered = _detail(current, pending["id"])["runs"][0]
+                    recovered_detail = _detail(current, pending["id"])
+                    assert recovered_detail["interaction"]["last_active_at"] == before_active_at
+                    recovered = recovered_detail["runs"][0]
                     assert recovered["status"] == "interrupted"
                     assert recovered["terminal_reason"] == "process_restarted"
                     for field in ("generation_node_id", "generation_parent_id", "finished_at", "client_output_committed"):
@@ -933,6 +938,10 @@ def test_idle_waiting_client_expires_to_disconnected_on_retention_sweep(
                         "WHERE interaction_id = ? AND status = 'waiting_client'",
                         (stale_at, waiting["id"]),
                     )
+                    connection.execute(
+                        "UPDATE interaction_observations SET last_active_at = ? WHERE id = ?",
+                        (stale_at, waiting["id"]),
+                    )
                     connection.commit()
                 status, setting = http_request(
                     "PUT",
@@ -954,6 +963,14 @@ def test_idle_waiting_client_expires_to_disconnected_on_retention_sweep(
                 run = detail["runs"][0]
                 assert run["status"] == "disconnected"
                 assert run["terminal_reason"] == "client_wait_expired"
+                assert detail["interaction"]["last_active_at"] == stale_at
+                now = int(time.time() * 1000)
+                for start_at, end_at, expected in (
+                    (now - 600_000, now + 1, False),
+                    (stale_at, stale_at + 600_000, True),
+                ):
+                    forest = _forest(env, start_at=start_at, end_at=end_at)
+                    assert forest["root_total"] == int(expected), forest
                 transitions = [
                     event for event in run["events"] if event["kind"] == "run_state_changed"
                 ]

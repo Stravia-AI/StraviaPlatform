@@ -76,7 +76,7 @@ HTTP 等待允许一个兜底闲置边界：叶等待 Run 的 `last_active_at` �
 
 WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run 且尚未由完整工具回传解除等待的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。结果先到时不追加虚假断线；关闭先到时保留真实断线历史。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，同一进程内仍等待合法续接、24 小时闲置超时或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填 `client_disconnected`。
 
-启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，记录 `process_restarted`，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage 和 `expires_at`；仅重算投影时保留 Interaction 原活动时间与 sequence，真正追加恢复事件时才使用该事件时间与 sequence。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
+启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，记录 `process_restarted`，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage、`last_active_at` 和 `expires_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
 
 HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。Observation 在流处理任务完成 Generation Chain 提交尝试后记录最终状态与已提交的节点关联；协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。公开工具交付后的 `waiting_client` 使用流处理任务最终确定的状态。
 
@@ -468,7 +468,7 @@ Interaction forest 查询参数：
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
 - 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条按「失败的请求」口径的失败 Run（判定谓词与失败列表一致），后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
 
-响应同时给出 window bounds、根链总数、next cursor 与 snapshot event sequence。根链按其最新 Interaction 的 `last_active_at` 归入且只归入一个时间页；返回时补全该根 DAG 在保留期内的全部 Interaction。
+响应同时给出 window bounds、根链总数、next cursor 与 snapshot event sequence。根链按其最新 Interaction 的 `last_active_at` 归入且只归入一个时间页；返回时补全该根 DAG 在保留期内的全部 Interaction。`last_active_at` 只由真实请求准入、请求事件与完成活动推进；断连判定、等待超时、重启恢复、残留观察收口，以及新请求对旧 Run 的打断或接替，不推进旧 Run 的活动时间。Interaction 从所属 Run 聚合活动时间；状态判定事件仍保留实际 `occurred_at` 与递增 sequence，不能因较晚发现中断而把旧链重新归入最近时间窗。旧版本已写入的错误活动时间不自动回填。
 
 SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser` 解析；Admin token 不进入 query string。
 
