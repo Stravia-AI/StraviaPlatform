@@ -2,7 +2,7 @@ version: "3"
 
 vars:
   DESKTOP_DIR: backend/apps/stravia-desktop
-  TAURI_CLI_VERSION: 2.11.1
+  TAURI_CLI_VERSION: 2.12.0
 
 tasks:
   brand:generate:

@@ -2,7 +2,9 @@ use futures::{stream, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, ProtocolVersion};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, InitializeRequestParams, ProtocolVersion,
+};
 use rmcp::service::RunningService;
 use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
@@ -175,7 +177,7 @@ struct ZhipuAdapter {
     reader_endpoint: String,
 }
 
-type ZhipuMcpService = RunningService<RoleClient, ClientInfo>;
+type ZhipuMcpService = RunningService<RoleClient, InitializeRequestParams>;
 
 #[async_trait::async_trait]
 impl WebProviderAdapter for ZhipuAdapter {
@@ -250,7 +252,7 @@ async fn connect_zhipu_mcp(
     let config = StreamableHttpClientTransportConfig::with_uri(endpoint.to_string())
         .auth_header(api_key.to_string());
     let transport = StreamableHttpClientTransport::with_client(client.clone(), config);
-    let mut client_info = ClientInfo::default();
+    let mut client_info = InitializeRequestParams::default();
     client_info.protocol_version = ProtocolVersion::V_2024_11_05;
     client_info
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)

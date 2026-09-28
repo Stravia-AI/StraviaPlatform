@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Updated compatible Rust and WebUI dependencies, including Tauri 2.12, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3. Refreshed workspace and Wasm fixture lockfiles and consolidated compatible duplicate dependencies. TypeScript remains on 6.0 while the Svelte and ESLint toolchains do not support TypeScript 7; incompatible upstream dependency ranges remain separate rather than being forced through overrides.
+
 - Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
 
 ### Fixed

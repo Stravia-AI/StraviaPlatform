@@ -255,7 +255,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         StreamableHttpClientTransportConfig::with_uri(app.endpoint.clone())
             .auth_header(other.token),
     );
-    let other_client = ClientInfo::default()
+    let other_client = InitializeRequestParams::default()
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
         .unwrap();

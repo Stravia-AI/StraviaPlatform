@@ -2,7 +2,7 @@ use super::*;
 use crate::Gateway;
 use base64::Engine;
 use bytes::Bytes;
-use rmcp::model::{CallToolRequestParams, ClientInfo, ProtocolVersion};
+use rmcp::model::{CallToolRequestParams, InitializeRequestParams, ProtocolVersion};
 use rmcp::service::RunningService;
 use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -212,7 +212,7 @@ impl Drop for TestApp {
     }
 }
 
-type SdkClient = RunningService<RoleClient, ClientInfo>;
+type SdkClient = RunningService<RoleClient, InitializeRequestParams>;
 
 #[tokio::test]
 async fn read_tool_responses_schema_supports_strict_optional_arguments() {
@@ -556,7 +556,7 @@ async fn connect(app: &TestApp) -> SdkClient {
     let config = StreamableHttpClientTransportConfig::with_uri(app.endpoint.clone())
         .auth_header(app.token.clone());
     let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
-    ClientInfo::default()
+    InitializeRequestParams::default()
         .serve_with_lifecycle(
             transport,
             ClientLifecycleMode::Discover {
@@ -788,7 +788,7 @@ async fn codex_protocol_client_initializes_and_lists_tools() {
     let config = StreamableHttpClientTransportConfig::with_uri(app.endpoint.clone())
         .auth_header(app.token.clone());
     let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
-    let client = ClientInfo::default()
+    let client = InitializeRequestParams::default()
         .with_protocol_version(ProtocolVersion::V_2025_06_18)
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
@@ -1099,7 +1099,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         StreamableHttpClientTransportConfig::with_uri(app.endpoint.clone())
             .auth_header(other.token),
     );
-    let other_client = ClientInfo::default()
+    let other_client = InitializeRequestParams::default()
         .serve_with_lifecycle(
             transport,
             ClientLifecycleMode::Discover {

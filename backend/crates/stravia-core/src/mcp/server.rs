@@ -13,9 +13,8 @@ use axum::response::{IntoResponse, Response};
 use futures::Stream;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    DiscoverResult, Implementation, JsonObject, ListToolsResult, MetaObject,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, SubscriptionFilter,
-    Tool,
+    DiscoverResult, Implementation, InitializeResult, JsonObject, ListToolsResult, MetaObject,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, SubscriptionFilter, Tool,
 };
 use rmcp::service::{RequestContext, SubscriptionContext};
 use rmcp::transport::streamable_http_server::{
@@ -111,8 +110,8 @@ pub(crate) fn router(gateway: Gateway) -> Router {
 }
 
 impl ServerHandler for StraviaMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> InitializeResult {
+        InitializeResult::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()

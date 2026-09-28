@@ -22,6 +22,7 @@ fn office_docx_bytes(text: &str) -> bytes::Bytes {
                 .collect(),
             ..Default::default()
         }],
+        ..Default::default()
     };
     let mut out = std::io::Cursor::new(Vec::new());
     office_oxide::create::create_from_ir_to_writer(

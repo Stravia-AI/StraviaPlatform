@@ -31,7 +31,7 @@ stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contra
 tokio = { version = "1", default-features = false }
 ammonia = "4.1.4"
 axum = { version = "0.8", default-features = false }
-rmcp = { version = "=3.1.4", default-features = false }
+rmcp = { version = "=3.5.0", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 reqwest-websocket = "0.6"
 tungstenite = { version = "0.28", default-features = false }
@@ -40,8 +40,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-wasmtime = { version = "=48.0.0", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation"] }
-wasmtime-wasi = { version = "=48.0.0", default-features = false, features = ["p2"] }
+wasmtime = { version = "=49.0.1", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation"] }
+wasmtime-wasi = { version = "=49.0.1", default-features = false, features = ["p2"] }
 serde-saphyr = "1"
 json5 = "1"
 async-trait = "0.1"
@@ -61,6 +61,7 @@ http-body-util = "0.1"
 htmd = "0.5"
 bytes = "1"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+# 与 shellexpand 复用 dirs 6；相同的 home_dir 实现无需在服务端额外编译 dirs 7。
 dirs = "6"
 dom_smoothie = "0.18"
 base64 = "0.23"
@@ -71,7 +72,7 @@ jsonwebtoken = { version = "11", default-features = false }
 rpassword = "7.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 office_oxide = "0.1.11"
-cfb = "0.7"
+cfb = "0.14"
 zip = { version = "8.6", default-features = false }
 dashmap = "6"
 inventory = "0.3"
@@ -87,7 +88,7 @@ numbat = { version = "1.24.0", default-features = false, features = ["fetch-exch
 parking_lot = "0.12.5"
 tempfile = "3"
 regex = "1.13.1"
-tiktoken-rs = "=0.12.0"
+tiktoken-rs = "=0.12.1"
 scraper = { version = "0.27.0", default-features = false, features = ["errors"] }
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }

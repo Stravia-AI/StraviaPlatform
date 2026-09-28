@@ -11,7 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine as _;
 use futures::StreamExt as _;
-use rmcp::model::{CallToolRequestParams, ClientInfo, ProtocolVersion};
+use rmcp::model::{CallToolRequestParams, InitializeRequestParams, ProtocolVersion};
 use rmcp::service::RunningService;
 use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -47,7 +47,7 @@ const SOURCE_URL: &str = "https://93.184.216.34/verified";
 const PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-type McpClient = RunningService<RoleClient, ClientInfo>;
+type McpClient = RunningService<RoleClient, InitializeRequestParams>;
 
 struct TestHarness {
     _data_dir: tempfile::TempDir,
@@ -356,7 +356,7 @@ async fn connect_mcp(endpoint: &str, token: &str) -> McpClient {
     let config = StreamableHttpClientTransportConfig::with_uri(endpoint.to_owned())
         .auth_header(token.to_owned());
     let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
-    ClientInfo::default()
+    InitializeRequestParams::default()
         .serve_with_lifecycle(
             transport,
             ClientLifecycleMode::Discover {

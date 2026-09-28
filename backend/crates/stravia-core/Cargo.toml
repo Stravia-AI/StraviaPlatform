@@ -75,7 +75,7 @@ stravia-runtime-contract = { workspace = true }
 office_oxide = { workspace = true }
 stravia-media = { workspace = true, features = ["test-support"] }
 tower = { workspace = true }
-jsonschema = { version = "0.51.0", default-features = false }
+jsonschema = { version = "0.58.1", default-features = false }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 axum = { workspace = true, features = ["http1"] }
