@@ -513,3 +513,102 @@ async fn sqlite_reusable_prefix_metadata_survives_store_reconstruction() {
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].node_id.as_str(), "resp_indexed");
 }
+
+/// Ancestor walks run inside the commit's write lock, so their cost must follow
+/// chain depth rather than how many nodes the principal owns. The VM-step budget
+/// makes that deterministic: a walk that rescans every node per ancestor exceeds
+/// it by an order of magnitude, while an indexed parent lookup stays far below.
+#[tokio::test]
+async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
+    const DEPTH: usize = 64;
+    const UNRELATED_NODES: i64 = 4_000;
+    const OPS_PER_TICK: i32 = 1_000;
+    const TICK_BUDGET: u32 = 200;
+
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let owner = principal("owner");
+    let setup = SqlTurnChainStore::sqlite(pool.clone());
+    let mut head: Option<TurnNodeId> = None;
+    for depth in 0..DEPTH {
+        let id = TurnNodeId::agent();
+        setup
+            .commit(TurnCommit {
+                id: id.clone(),
+                kind: TurnNodeKind::Agent,
+                parent_id: head.take(),
+                principal: owner.clone(),
+                payload_version: 1,
+                payload: serde_json::json!({"depth": depth}),
+                idle_ttl: Duration::from_secs(60),
+                reusable_prefix: None,
+            })
+            .await
+            .expect("commit chain node");
+        head = Some(id);
+    }
+    let head = head.expect("chain head");
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) \
+         INSERT INTO turn_chain_nodes \
+         (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) \
+         SELECT 'unrelated-' || i, ?, NULL, ?, 1, '{}', ?, ? FROM n",
+    )
+    .bind(UNRELATED_NODES)
+    .bind(TurnNodeKind::Agent.as_str())
+    .bind(owner.continuation_key())
+    .bind(now)
+    .bind(now + 60_000)
+    .execute(&pool)
+    .await
+    .expect("insert unrelated nodes");
+
+    let ticks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let handler_ticks = ticks.clone();
+    let budgeted = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let ticks = handler_ticks.clone();
+            Box::pin(async move {
+                connection
+                    .lock_handle()
+                    .await?
+                    .set_progress_handler(OPS_PER_TICK, move || {
+                        ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < TICK_BUDGET
+                    });
+                Ok(())
+            })
+        })
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("budgeted SQLite pool");
+    let store = SqlTurnChainStore::sqlite(budgeted);
+
+    let chain = store
+        .materialize(&owner, TurnNodeKind::Agent, &head)
+        .await
+        .expect("materialize within VM budget");
+    assert_eq!(chain.len(), DEPTH);
+    eprintln!("TICKS materialize={}", ticks.load(std::sync::atomic::Ordering::Relaxed));
+    ticks.store(0, std::sync::atomic::Ordering::Relaxed);
+    store
+        .commit(TurnCommit {
+            id: TurnNodeId::agent(),
+            kind: TurnNodeKind::Agent,
+            parent_id: Some(head),
+            principal: owner,
+            payload_version: 1,
+            payload: serde_json::json!({"depth": DEPTH}),
+            idle_ttl: Duration::from_secs(60),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("renew ancestors within VM budget");
+    eprintln!("TICKS commit={}", ticks.load(std::sync::atomic::Ordering::Relaxed));
+}
