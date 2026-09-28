@@ -408,16 +408,6 @@ pub(crate) fn catalog_profile_descriptor(
         _ => None,
     })?;
 
-    if npm == "@ai-sdk/anthropic" && id != "anthropic" {
-        descriptor
-            .channels
-            .retain(|channel| channel.id == "default");
-        descriptor.capabilities = descriptor.channels[0].capabilities.clone();
-        descriptor
-            .network
-            .extra_origins
-            .retain(|origin| origin.host != "claude.com" && origin.host != "platform.claude.com");
-    }
     descriptor.provider_id = id.to_owned();
     descriptor.catalog_id = Some(id.to_owned());
     descriptor.display_name = name.to_owned();

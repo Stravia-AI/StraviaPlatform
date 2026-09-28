@@ -10,9 +10,9 @@ interface AllowanceFixture {
 const freshSnapshot = {
   provider_id: 'provider-alpha',
   provider_name: 'Alpha account',
-  catalog_provider_id: 'anthropic',
-  channel: 'claude-code',
-  plan_label: 'Max',
+  catalog_provider_id: 'openai-codex',
+  channel: 'codex',
+  plan_label: 'Pro',
   status: 'fresh',
   fetched_at: '2026-09-01T12:00:00Z',
   allowances: [
@@ -47,7 +47,7 @@ const freshSnapshot = {
   ],
   models: [
     {
-      model: 'claude-opus-4-6',
+      model: 'gpt-5.3-codex-spark',
       allowances: [
         {
           key: 'weekly_model',
@@ -181,7 +181,7 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(forecastPanel).not.toContainText('may exhaust')
 
   await matrix.getByLabel('Show model allowances for Alpha account').click()
-  await matrix.getByText('claude-opus-4-6').click()
+  await matrix.getByText('gpt-5.3-codex-spark').click()
   await expect(matrix.getByText(/Resets/)).toBeVisible()
 
   await page.getByRole('button', { name: 'Refresh all' }).click()
@@ -243,8 +243,8 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
       models: [
         freshSnapshot.models[0],
         {
-          model: 'claude-sonnet-4-6',
-          allowances: [{ ...freshSnapshot.models[0].allowances[0], label: 'Sonnet window' }],
+          model: 'gpt-5.4',
+          allowances: [{ ...freshSnapshot.models[0].allowances[0], label: 'GPT-5.4 window' }],
         },
       ],
     },
@@ -252,13 +252,13 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
   await page.goto('/allowances')
   const matrix = page.getByRole('table', { name: 'Allowance matrix' })
   await matrix.getByRole('button', { name: 'Show model allowances for Alpha account' }).click()
-  const opus = matrix.getByRole('button', { name: 'claude-opus-4-6', exact: true })
-  const sonnet = matrix.getByRole('button', { name: 'claude-sonnet-4-6', exact: true })
+  const opus = matrix.getByRole('button', { name: 'gpt-5.3-codex-spark', exact: true })
+  const sonnet = matrix.getByRole('button', { name: 'gpt-5.4', exact: true })
   await opus.click()
   await sonnet.click()
   await expect(opus).toHaveAttribute('aria-expanded', 'true')
   await expect(sonnet).toHaveAttribute('aria-expanded', 'true')
-  await expect(matrix.getByText('Sonnet window')).toBeVisible()
+  await expect(matrix.getByText('GPT-5.4 window')).toBeVisible()
   await sonnet.click()
   await expect(opus).toHaveAttribute('aria-expanded', 'true')
   await expect(matrix.getByRole('progressbar', { name: 'Weekly window Utilization' })).toHaveAttribute(

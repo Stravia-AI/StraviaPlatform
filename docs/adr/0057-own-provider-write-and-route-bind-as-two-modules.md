@@ -4,7 +4,7 @@ status: accepted
 
 # Own Provider writes and Route binds behind two crate-private modules
 
-Stravia 将管理员侧的连接写入与 Target 绑定收成 `stravia-core` 里两条 crate-private deep module interface，而不是一个管理接入 façade，也不是 WebUI 里的领域实现。Provider module 写入 Provider：source 为 Catalog Entry 或 custom，拥有 Catalog Entry 解析、Adapter Credentials 校验、Base URL 组装与连通性测试；OAuth（Claude Code、Codex）是内部 seam。Route module 拥有 Provider Model snapshot、Selection Policy、sync、手动条目、Canonical Model 一次性模板，以及 Route / Route ID / Target。WebUI 与现有 Admin HTTP 只做 adapter。这样 Catalog 扁平化、OAuth session、Effective Availability 算术和空 Route 清理不再漏到调用方。
+Stravia 将管理员侧的连接写入与 Target 绑定收成 `stravia-core` 里两条 crate-private deep module interface，而不是一个管理接入 façade，也不是 WebUI 里的领域实现。Provider module 写入 Provider：source 为 Catalog Entry 或 custom，拥有 Catalog Entry 解析、Adapter Credentials 校验、Base URL 组装与连通性测试；OAuth（如 Codex）是内部 seam。Route module 拥有 Provider Model snapshot、Selection Policy、sync、手动条目、Canonical Model 一次性模板，以及 Route / Route ID / Target。WebUI 与现有 Admin HTTP 只做 adapter。这样 Catalog 扁平化、OAuth session、Effective Availability 算术和空 Route 清理不再漏到调用方。
 
 ## Considered options
 

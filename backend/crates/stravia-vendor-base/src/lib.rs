@@ -365,7 +365,7 @@ fn classify_stream_deltas(
 fn validate_target(provider: &ProviderSnapshot, channel: &str) -> Result<(), PluginError> {
     let provider_id = provider.provider_id.as_str();
     let declared = match (provider_id, channel) {
-        ("anthropic", "default" | "claude-code") => true,
+        ("anthropic", "default") => true,
         ("google-vertex", "native" | "openai") => true,
         ("google-vertex", _) => false,
         (_, "default") => {
@@ -498,13 +498,6 @@ mod tests {
         let minimax = descriptor.provider("minimax").expect("MiniMax profile");
         assert_eq!(minimax.channels.len(), 1);
         assert!(minimax.channels[0].auth.is_none());
-        assert!(
-            minimax
-                .network
-                .extra_origins
-                .iter()
-                .all(|origin| origin.host != "claude.com" && origin.host != "platform.claude.com")
-        );
         assert_eq!(
             minimax.channels[0].protocol.as_deref(),
             Some("anthropic-messages")

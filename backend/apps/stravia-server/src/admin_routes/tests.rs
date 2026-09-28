@@ -151,6 +151,7 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
 async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -158,9 +159,9 @@ async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String>
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "vendor_id": "anthropic",
-                    "channel": "claude-code",
-                    "base_url": "https://api.anthropic.com",
+                    "vendor_id": "devin",
+                    "channel": "devin",
+                    "base_url": "https://server.codeium.com",
                     "use_proxy": false,
                     "callback_mode": "auto",
                     "locale": locale,
@@ -379,6 +380,7 @@ async fn provider_endpoints_keep_unavailable_profiles_visible_without_echoing_se
 async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -386,7 +388,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -394,6 +396,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
     let init: serde_json::Value = serde_json::from_slice(&init_body)?;
     let session_id = init["data"]["session_id"].as_str().unwrap();
     let port = init["data"]["listener_port"].as_u64().unwrap() as u16;
+    let redirect_uri = init["data"]["redirect_uri"].as_str().unwrap();
     let state = reqwest::Url::parse(init["data"]["auth_url"].as_str().unwrap())?
         .query_pairs()
         .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
@@ -405,9 +408,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
                     "input": {
                         "type": "callback_url",
-                        "value": format!(
-                            "http://localhost:{port}/callback?error=access_denied&state={state}"
-                        )
+                        "value": format!("{redirect_uri}?error=access_denied&state={state}")
                     }
                 }))?))?,
         )
@@ -437,6 +438,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
 {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
@@ -444,7 +446,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -461,7 +463,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
     assert_eq!(init["data"]["listener_state"], "listening");
     assert_eq!(
         init["data"]["redirect_uri"],
-        format!("http://localhost:{port}/callback")
+        format!("http://127.0.0.1:{port}/callback")
     );
 
     let callback = reqwest::Client::builder()
@@ -509,6 +511,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
 async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
     let app = create_unprotected_router(gateway);
     let init_response = app
             .clone()
@@ -516,7 +519,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
                 Request::post("/api/v1/oauth/sessions/init")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto","locale":"zh-CN"}"#,
+                        r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto","locale":"zh-CN"}"#,
                     ))?,
             )
             .await?;
@@ -545,6 +548,30 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
 
     Ok(())
 }
+
+#[tokio::test]
+async fn oauth_init_rejects_the_removed_claude_code_channel() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    let app = create_unprotected_router(gateway);
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/oauth/sessions/init")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert!(json["error"].is_string());
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;

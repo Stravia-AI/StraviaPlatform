@@ -61,7 +61,6 @@ pub(crate) fn execute(
 
 fn monitor_for(vendor_id: &str, channel: &str) -> Option<Monitor> {
     match (vendor_id, channel) {
-        ("anthropic", "claude-code") => Some(Monitor::AnthropicClaudeCode),
         ("github-copilot", "default") => Some(Monitor::GitHubCopilot),
         ("kimi-for-coding", "default") => Some(Monitor::KimiCoding),
         ("nano-gpt", "default") => Some(Monitor::NanoGpt),
@@ -94,11 +93,6 @@ fn string_value(value: &Value) -> Option<&str> {
 
 fn requests_for(monitor: Monitor, credential: &str) -> Vec<HttpRequest> {
     let (method, urls, body): (&str, &[&str], Vec<u8>) = match monitor {
-        Monitor::AnthropicClaudeCode => (
-            "GET",
-            &["https://api.anthropic.com/api/oauth/usage"],
-            vec![],
-        ),
         Monitor::GitHubCopilot => (
             "GET",
             &["https://api.github.com/copilot_internal/user"],
@@ -147,9 +141,6 @@ fn requests_for(monitor: Monitor, credential: &str) -> Vec<HttpRequest> {
         .map(|url| {
             let mut headers = base_headers(monitor, credential);
             match monitor {
-                Monitor::AnthropicClaudeCode => {
-                    headers.push(("anthropic-beta".into(), "oauth-2025-04-20".into()));
-                }
                 Monitor::GitHubCopilot => {
                     headers.push(("editor-version".into(), "vscode/1.96.2".into()));
                     headers.push(("x-github-api-version".into(), "2025-04-01".into()));

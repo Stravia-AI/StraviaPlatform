@@ -510,16 +510,6 @@ pub(super) fn catalog_channels(
             CatalogAuthMode::OAuth,
         ));
     }
-    if provider_id == "anthropic" {
-        channels.push(channel(
-            provider_id,
-            "claude-code",
-            "Claude Code subscription",
-            "anthropic-messages",
-            "https://api.anthropic.com",
-            CatalogAuthMode::SetupToken,
-        ));
-    }
     if provider_id == "xai" {
         channels.push(channel(
             provider_id,

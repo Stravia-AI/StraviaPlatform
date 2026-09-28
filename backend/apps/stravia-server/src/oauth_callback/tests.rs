@@ -223,11 +223,12 @@ async fn concurrent_sessions_keep_independent_listener_lifetimes() -> anyhow::Re
     let gateway = memory_gateway(data_dir.path()).await?;
     stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "openai-codex")
         .await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
     let manager = OAuthCallbackManager::new(gateway.clone());
 
     let first = manager
         .init_session(
-            auth_candidate("anthropic", "claude-code", "https://api.anthropic.com"),
+            auth_candidate("devin", "devin", "https://server.codeium.com"),
             OAuthCallbackMode::Auto,
             None,
         )

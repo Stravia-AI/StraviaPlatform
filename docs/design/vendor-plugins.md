@@ -33,6 +33,10 @@ Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Pr
 
 历史手动安装的 `clinepass` 专属插件不会因本次变更自动卸载，其 `clinepass` Vendor 身份下的存量连接仍归旧插件执行，不自动迁移到 base。迁移时管理员新建 `cline-pass` Provider、重新绑定 Route，然后在供应商插件页面手动卸载旧插件。base 的 `cline-pass` 使用标准 OpenAI-compatible 接入，不复刻旧插件对上游响应 `data` 包装与 reasoning 字段优先级的私有处理。
 
+### Anthropic 接入
+
+Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OAuth 通道已移除，不再提供登录、令牌刷新、精选模型发现或订阅额度查询。已保存的订阅连接、凭据、Route 绑定与历史不自动删除，也不自动改为 API-key 认证；旧通道执行时明确报告不可用。继续使用 Anthropic 时，配置 API-key 连接并重新绑定所需 Route。Claude Code 作为 Connect Client 接入 Stravia 的能力不受影响。
+
 ### Provider 图标标识
 
 - 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。
@@ -45,7 +49,7 @@ Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Pr
 ## 已确认的供应商能力覆盖
 
 - 一个供应商 Profile 可以统一提供推理适配、自定义上游编解码、OAuth、自定义模型发现、额度获取与供应商特有计算，以及自定义 Provider 选项声明和校验；拆为五个包不缩减任何既有供应商能力。
-- `stravia-vendor-base` 承接 Codex、Grok、Command Code、Devin 之外的全部现有供应商接入，包括 Anthropic OAuth、云认证与云协议、模型发现、额度查询和供应商差异。它在单一 `base` Vendor 身份内按输入 `provider_id` 分派 Profile，不把 Profile 暴露为多个 Vendor。
+- `stravia-vendor-base` 承接 Codex、Grok、Command Code、Devin 之外的全部现有供应商接入，包括 Anthropic API-key 接入、云认证与云协议、模型发现、额度查询和供应商差异。它在单一 `base` Vendor 身份内按输入 `provider_id` 分派 Profile，不把 Profile 暴露为多个 Vendor。
 - `stravia-vendor-base` 的目标边界是在运行时消费 `https://models.stravia.cn/providers.json`，仅把能够映射到 base 已支持协议与认证实现的目录条目注册为 `ProviderDescriptor`。远端新增的兼容供应商无需更新 Stravia 或重新构建 base 即可添加；目录中存在但协议或认证方式尚未受支持的条目不得注册为可用 Profile。四个专属 Profile 继续由各自 dedicated Vendor 整体接管，不与 base 合并。
 - base 启动时优先使用本地最后一次成功供应商清单，没有缓存则使用插件内嵌供应商清单，随后尝试远端更新。首次离线仍可选择内嵌供应商，已有安装断网时仍可使用缓存供应商；内嵌清单只用于 bootstrap，不限制远端动态新增。缓存、内嵌和远端条目都必须按当前 base 已实现的协议与认证能力校验后才能注册。
 - 供应商模型目录属于对应 Provider Profile，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 是供应商接入身份，不是已保存连接 UUID。内嵌供应商清单不包含全部 provider-scoped 模型数据。Core 保留 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
@@ -109,7 +113,7 @@ Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Pr
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
 - channel 可通过 `default_models_source: "catalog"` 声明未指定来源时默认使用模型目录；未声明时保留插件自身的发现行为，宿主不以默认值覆盖已保存的来源。该声明只接受目录枚举值，不接受任意 URL，不表示其他 channel 不能选择目录。channel 另以 `consumes_catalog_models` 声明是否消费宿主注入的目录模型 scope；只有声明消费的 channel 才允许把目录作为默认来源，目录创建入口也只为这类 channel 保存 `catalog` 来源标记。宿主不按供应商 ID 猜测默认发现策略。
-- `base` 保留既有清单优先级：显式静态模型优先；原生 OpenAI、Anthropic、Google、Ollama、OpenRouter、xAI 的账户发现，以及 Claude Code、Vertex 的渠道精选清单，不被历史 `catalog` 来源标记覆盖。目录别名仍使用自己的目录范围，不能继承另一供应商的账户清单策略。该判定属于 guest，不移回 Core；`base` 的描述符按同一 provider 判定集合输出 `consumes_catalog_models`，专属插件一律声明不消费。
+- `base` 保留既有清单优先级：显式静态模型优先；原生 OpenAI、Anthropic、Google、Ollama、OpenRouter、xAI 的账户发现，以及 Vertex 的渠道精选清单，不被历史 `catalog` 来源标记覆盖。目录别名仍使用自己的目录范围，不能继承另一供应商的账户清单策略。该判定属于 guest，不移回 Core；`base` 的描述符按同一 provider 判定集合输出 `consumes_catalog_models`，专属插件一律声明不消费。
 - 发现操作与同步富化按 `catalog_id` 提供原始目录 scope，不再次套用目录的旧 channel 定义，且只在 channel 声明消费时才解析该 scope。只有 `ProviderNotFound` 表示可选目录条目不存在，不提供目录模型快照，由插件决定其发现行为；消费目录来源的插件必须对缺失快照报错，不能返回伪造的空成功。目录访问或解析失败仍向上传播，不触发隐藏回退。
 - 已保存的非 `catalog` 发现地址保留完整路径与查询参数，并使用所属供应商的发现认证策略；不能重新拼成推理基址的 `/models`，也不能把所有显式地址一律改为 Bearer。Google 官方原生目录使用 API-key 查询参数，自定义目录保留既有 Bearer 约定；标准 Anthropic 目录保留 `x-api-key` 与版本头。
 - `descriptor`、`select-protocol`、`execute` 的导出结构保持不变。首先提供 Rust 插件 SDK，以复用现有供应商实现；WIT 契约不限定插件必须使用 Rust，其他语言的实际工具链兼容性需要验证。

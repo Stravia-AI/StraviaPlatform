@@ -107,7 +107,7 @@ const providerDescriptors = [
     provider_id: 'anthropic',
     catalog_id: 'anthropic',
     display_name: 'Anthropic',
-    description: 'Anthropic API and Claude Code OAuth account connections.',
+    description: 'Anthropic API connections.',
     channels: [
       {
         id: 'default',
@@ -120,28 +120,8 @@ const providerDescriptors = [
         model_capabilities: [],
         search_model_required: false,
       },
-      {
-        id: 'claude-code',
-        name: { 'en-US': 'Claude Code', 'zh-CN': 'Claude Code' },
-        description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
-        auth: {
-          flow: 'authorization_code',
-          callback: {
-            bind_host: '127.0.0.1',
-            redirect_host: 'localhost',
-            path: '/auth/callback',
-            port: { kind: 'dynamic' },
-          },
-          manual_input: null,
-        },
-        protocol: 'anthropic-messages',
-        default_base_url: 'https://api.anthropic.com',
-        capabilities: ['infer', 'compact', 'auth_oauth', 'model_discovery', 'config_validation'],
-        model_capabilities: [],
-        search_model_required: false,
-      },
     ],
-    capabilities: ['infer', 'compact', 'auth_oauth', 'model_discovery', 'config_validation'],
+    capabilities: ['infer', 'compact', 'model_discovery', 'config_validation'],
     config_fields: [
       {
         key: 'api_key',

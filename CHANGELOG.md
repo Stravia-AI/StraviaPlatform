@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Removed
+
+- Removed the Anthropic `claude-code` OAuth channel, including subscription sign-in, token refresh, curated model discovery, and allowance monitoring. Anthropic API-key access and Claude Code client configuration remain supported. Existing subscription connections, credentials, and history are retained, but the removed channel is unavailable; configure an Anthropic API-key connection and rebind its Routes to resume inference.
+
 ### Added
 
 - Cline Pass is now served by the embedded base Vendor's `cline-pass` catalog Profile — standard OpenAI-compatible access with API-key authentication plus subscription allowance monitoring — and no dedicated plugin package is built or required. A `clinepass` plugin previously imported from a local package is not migrated or uninstalled automatically; recreate the connection as a base `cline-pass` Provider, rebind its Routes, then uninstall the old plugin in **Vendor Plugins**.

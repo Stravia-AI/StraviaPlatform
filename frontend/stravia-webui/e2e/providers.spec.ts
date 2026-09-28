@@ -37,7 +37,7 @@ test('service cards localize sign-in methods and prefer catalog logos with local
 
   const search = page.locator('[data-provider-toolbar] input')
   await search.fill('账号')
-  await expect(grid.getByRole('button')).toHaveCount(2)
+  await expect(grid.getByRole('button')).toHaveCount(1)
   await search.fill('API 密钥')
   await expect(openAi).toBeVisible()
   await expect(grid.getByRole('button', { name: /OAuth 账号/ })).toHaveCount(0)
@@ -110,11 +110,11 @@ test('configured Providers table filters and persists column customization', asy
     {
       id: 'alpha-provider',
       name: 'Alpha Service',
-      vendor: 'anthropic',
-      protocol: 'anthropic-messages',
+      vendor: 'openai-codex',
+      protocol: 'open-responses',
       base_url: 'https://alpha.example/v1',
       use_proxy: false,
-      channel: 'claude-code',
+      channel: 'codex',
       configured_credential_fields: [],
       is_enabled: false,
       created_at: '2026-01-01T00:00:00Z',

@@ -1,11 +1,8 @@
-use std::collections::HashMap;
-
 use serde_json::{Map, Value};
-use stravia_vendor_sdk::{AllowanceAmount, AllowanceItem, AllowanceResponse, ModelAllowance};
+use stravia_vendor_sdk::{AllowanceAmount, AllowanceItem, AllowanceResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Monitor {
-    AnthropicClaudeCode,
     GitHubCopilot,
     KimiCoding,
     NanoGpt,
@@ -23,7 +20,6 @@ pub(super) enum Monitor {
 pub(super) fn parse(monitor: Monitor, body: &[u8]) -> Result<AllowanceResponse, ()> {
     let payload: Value = serde_json::from_slice(body).map_err(|_| ())?;
     let parsed = match monitor {
-        Monitor::AnthropicClaudeCode => parse_anthropic(&payload),
         Monitor::GitHubCopilot => parse_github_copilot(&payload),
         Monitor::KimiCoding => parse_kimi(&payload),
         Monitor::NanoGpt => parse_nano_gpt(&payload),
@@ -208,105 +204,9 @@ fn window_label(key: &str) -> String {
         "credits_balance" => "Credit balance".into(),
         "premium_interactions" => "Premium interactions".into(),
         "mcp_tools" => "MCP tools".into(),
-        "extra_usage" => "Extra usage".into(),
         "tokens" => "Tokens".into(),
         other => other.into(),
     }
-}
-
-fn parse_anthropic(payload: &Value) -> Result<AllowanceResponse, ()> {
-    let object = payload.as_object().ok_or(())?;
-    let mut allowances = Vec::new();
-    let mut models_by_name: HashMap<String, Vec<AllowanceItem>> = HashMap::new();
-    if let Some(limits) = object
-        .get("limits")
-        .and_then(Value::as_array)
-        .filter(|v| !v.is_empty())
-    {
-        for value in limits {
-            let Some(limit) = value.as_object() else {
-                continue;
-            };
-            let key = match limit.get("kind").and_then(non_empty) {
-                Some("session") => Some("5h"),
-                Some("weekly_all") => Some("7d"),
-                Some("weekly_scoped") => None,
-                _ => continue,
-            };
-            let mut allowance = item(
-                key.unwrap_or("7d"),
-                window_label(key.unwrap_or("7d")),
-                "quota_window",
-            );
-            set_percent(&mut allowance, field_number(limit, "percent"));
-            allowance.resets_at_unix_ms = field_timestamp(limit, "resets_at");
-            allowance.window_seconds = Some(if key == Some("5h") { 18_000 } else { 604_800 });
-            if limit.get("kind").and_then(non_empty) == Some("weekly_scoped") {
-                let model = value
-                    .pointer("/scope/model/display_name")
-                    .and_then(non_empty)
-                    .ok_or(())?;
-                models_by_name
-                    .entry(model.into())
-                    .or_default()
-                    .push(allowance);
-            } else {
-                allowances.push(allowance);
-            }
-        }
-    } else {
-        for (field, key, seconds) in [("five_hour", "5h", 18_000), ("seven_day", "7d", 604_800)] {
-            let Some(limit) = object.get(field).and_then(Value::as_object) else {
-                continue;
-            };
-            let mut allowance = item(key, window_label(key), "quota_window");
-            set_percent(&mut allowance, field_number(limit, "utilization"));
-            allowance.resets_at_unix_ms = field_timestamp(limit, "resets_at");
-            allowance.window_seconds = Some(seconds);
-            allowances.push(allowance);
-        }
-    }
-    if let Some(spend) = object.get("spend").and_then(Value::as_object)
-        && spend.get("enabled").and_then(Value::as_bool) == Some(true)
-    {
-        let used = spend.get("used").and_then(money_amount);
-        let limit = spend.get("limit").and_then(money_amount);
-        let remaining = used.zip(limit).map(|(used, limit)| limit - used);
-        let currency = spend
-            .get("used")
-            .and_then(|v| v.get("currency"))
-            .and_then(non_empty)
-            .or_else(|| {
-                spend
-                    .get("limit")
-                    .and_then(|v| v.get("currency"))
-                    .and_then(non_empty)
-            });
-        let mut allowance = item("extra_usage", window_label("extra_usage"), "balance");
-        amount_fields(&mut allowance, used, remaining, limit, "currency", currency);
-        let percent =
-            field_number(spend, "percent").or_else(|| percent_from(used, remaining, limit));
-        set_percent(&mut allowance, percent);
-        allowances.push(allowance);
-    }
-    let mut models = models_by_name
-        .into_iter()
-        .map(|(model, allowances)| ModelAllowance { model, allowances })
-        .collect::<Vec<_>>();
-    models.sort_by(|left, right| left.model.cmp(&right.model));
-    Ok(AllowanceResponse {
-        allowances,
-        models,
-        plan_label: None,
-    })
-}
-
-fn money_amount(value: &Value) -> Option<f64> {
-    let object = value.as_object()?;
-    Some(
-        field_number(object, "amount_minor")?
-            / 10_f64.powf(field_number(object, "exponent").unwrap_or(2.0)),
-    )
 }
 
 fn parse_github_copilot(payload: &Value) -> Result<AllowanceResponse, ()> {

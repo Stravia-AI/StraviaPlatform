@@ -1,5 +1,4 @@
 use stravia_vendor_common::common;
-mod auth;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,104 +6,47 @@ use serde_json::Value;
 use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_vendor_sdk::{
-    AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
     ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
     DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
-    ProviderSnapshot, ValidationIssue,
+    OperationInput, OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot,
+    ValidationIssue,
 };
 
 const VENDOR_ID: &str = "anthropic";
 const DEFAULT_CHANNEL: &str = "default";
-const CLAUDE_CODE_CHANNEL: &str = "claude-code";
 const MAX_ERROR_BODY: usize = 256 * 1024;
 const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.222 (external, cli)";
-const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
-const CLAUDE_CODE_MODELS: &[&str] = &[
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-opus-4-5-20251101",
-    "claude-sonnet-4-5-20250929",
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-1-20250805",
-    "claude-opus-4-20250514",
-    "claude-haiku-4-5-20251001",
-    "claude-3-5-haiku-20241022",
-];
 
 pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
     (vendor_id == VENDOR_ID).then(anthropic_descriptor)
 }
 
 fn anthropic_descriptor() -> ProviderDescriptor {
-    let direct = BTreeSet::from([
+    let capabilities = BTreeSet::from([
         Capability::Infer,
         Capability::ModelDiscovery,
         Capability::ConfigValidation,
     ]);
-    let claude_code = BTreeSet::from([
-        Capability::Infer,
-        Capability::AuthOauth,
-        Capability::ModelDiscovery,
-        Capability::Allowance,
-        Capability::ConfigValidation,
-    ]);
-    let capabilities = direct.union(&claude_code).copied().collect();
     ProviderDescriptor {
         provider_id: VENDOR_ID.into(),
         catalog_id: Some(VENDOR_ID.into()),
         display_name: "Anthropic".into(),
-        description: Some("Anthropic Messages API and Claude Code OAuth channel.".into()),
-        channels: vec![
-            ChannelDescriptor {
-                id: DEFAULT_CHANNEL.into(),
-                name: crate::messages::anthropic_api_channel(),
-                description: Some(crate::messages::anthropic_api_channel_description()),
-                auth: None,
-                protocol: Some("anthropic-messages".into()),
-                protocols: Vec::new(),
-                default_base_url: Some("https://api.anthropic.com".into()),
-                default_models_source: None,
-                consumes_catalog_models: false,
-                capabilities: direct,
-                model_capabilities: BTreeSet::new(),
-                search_model_required: false,
-            },
-            ChannelDescriptor {
-                id: CLAUDE_CODE_CHANNEL.into(),
-                name: crate::messages::claude_code_channel(),
-                description: Some(crate::messages::claude_code_channel_description()),
-                auth: Some(AuthDescriptor {
-                    flow: AuthFlow::AuthorizationCode,
-                    callback: Some(AuthCallback {
-                        bind_host: "127.0.0.1".into(),
-                        redirect_host: "localhost".into(),
-                        path: "/callback".into(),
-                        port: AuthCallbackPort::Dynamic,
-                        manual_redirect_uri: Some(
-                            "https://platform.claude.com/oauth/code/callback".into(),
-                        ),
-                        cancel_path: None,
-                    }),
-                    manual_input: Some(AuthManualInput {
-                        input_type: AuthManualInputType::CallbackUrl,
-                        label: crate::messages::callback_url(),
-                        description: Some(crate::messages::callback_url_description()),
-                        secret: false,
-                    }),
-                }),
-                protocol: Some("anthropic-messages".into()),
-                protocols: Vec::new(),
-                default_base_url: Some("https://api.anthropic.com".into()),
-                default_models_source: None,
-                consumes_catalog_models: false,
-                capabilities: claude_code,
-                model_capabilities: BTreeSet::new(),
-                search_model_required: false,
-            },
-        ],
+        description: Some("Anthropic Messages API.".into()),
+        channels: vec![ChannelDescriptor {
+            id: DEFAULT_CHANNEL.into(),
+            name: crate::messages::anthropic_api_channel(),
+            description: Some(crate::messages::anthropic_api_channel_description()),
+            auth: None,
+            protocol: Some("anthropic-messages".into()),
+            protocols: Vec::new(),
+            default_base_url: Some("https://api.anthropic.com".into()),
+            default_models_source: None,
+            consumes_catalog_models: false,
+            capabilities: capabilities.clone(),
+            model_capabilities: BTreeSet::new(),
+            search_model_required: false,
+        }],
         capabilities,
         website: None,
         implementation: None,
@@ -129,18 +71,7 @@ fn anthropic_descriptor() -> ProviderDescriptor {
         }],
         network: NetworkDeclaration {
             base_url_field: None,
-            extra_origins: vec![
-                OriginDeclaration {
-                    scheme: "https".into(),
-                    host: "claude.com".into(),
-                    port: None,
-                },
-                OriginDeclaration {
-                    scheme: "https".into(),
-                    host: "platform.claude.com".into(),
-                    port: None,
-                },
-            ],
+            extra_origins: Vec::new(),
             field_origins: Vec::new(),
         },
         data_compat: DataCompatibility::default(),
@@ -162,10 +93,10 @@ pub(crate) fn execute(
     }
     match (channel, input) {
         (DEFAULT_CHANNEL, OperationInput::Infer { provider, request }) => {
-            infer(host, provider, request, false)
+            infer(host, provider, request)
         }
         (DEFAULT_CHANNEL, OperationInput::Discover { provider, request }) => {
-            discover(host, provider, request, false)
+            discover(host, provider, request)
         }
         (
             DEFAULT_CHANNEL,
@@ -175,32 +106,11 @@ pub(crate) fn execute(
             },
         ) => Ok(OperationOutput::ConfigValidation(
             ConfigValidationResponse {
-                issues: validate_config(&request.options, false),
+                issues: validate_config(&request.options),
                 proposed_base_url: None,
             },
         )),
-        (CLAUDE_CODE_CHANNEL, OperationInput::Infer { provider, request }) => {
-            infer(host, provider, request, true)
-        }
-        (CLAUDE_CODE_CHANNEL, OperationInput::Auth { provider, request }) => {
-            auth::execute(host, &provider, request).map(OperationOutput::Auth)
-        }
-        (CLAUDE_CODE_CHANNEL, OperationInput::Discover { provider, request }) => {
-            discover(host, provider, request, true)
-        }
-        (
-            CLAUDE_CODE_CHANNEL,
-            OperationInput::ConfigValidation {
-                provider: _,
-                request,
-            },
-        ) => Ok(OperationOutput::ConfigValidation(
-            ConfigValidationResponse {
-                issues: validate_config(&request.options, true),
-                proposed_base_url: None,
-            },
-        )),
-        (DEFAULT_CHANNEL | CLAUDE_CODE_CHANNEL, _) => Err(unsupported(
+        (DEFAULT_CHANNEL, _) => Err(unsupported(
             "operation is not supported by this Anthropic channel",
         )),
         _ => Err(unsupported("unknown Anthropic channel")),
@@ -211,7 +121,6 @@ fn infer(
     host: &GuestHost,
     provider: ProviderSnapshot,
     mut request: stravia_runtime_contract::protocol::ir::AiRequest,
-    claude_code: bool,
 ) -> Result<OperationOutput, PluginError> {
     let model = required_model(&provider)?;
     request.model = model.into();
@@ -236,13 +145,9 @@ fn infer(
         "text/event-stream, application/json".into(),
     );
     set_header(&mut headers, "anthropic-version", "2023-06-01".into());
-    if claude_code {
-        append_claude_code_headers(&provider, &mut headers)?;
-    } else {
-        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
-        if let Some(api_key) = credential(&provider, "apiKey") {
-            headers.push(("x-api-key".into(), api_key.into()));
-        }
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
+    if let Some(api_key) = credential(&provider, "apiKey") {
+        headers.push(("x-api-key".into(), api_key.into()));
     }
     host.emit_started()?;
     let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
@@ -271,29 +176,7 @@ fn discover(
     host: &GuestHost,
     provider: ProviderSnapshot,
     request: DiscoverRequest,
-    claude_code: bool,
 ) -> Result<OperationOutput, PluginError> {
-    if claude_code {
-        if request.cursor.is_some() {
-            return Err(unsupported(
-                "Claude Code's curated model inventory is not paginated",
-            ));
-        }
-        return Ok(OperationOutput::Discover(DiscoverResponse {
-            models: CLAUDE_CODE_MODELS
-                .iter()
-                .map(|id| DiscoveredModel {
-                    id: (*id).into(),
-                    display_name: human_model_name(id),
-                    family: Some("claude".into()),
-                    selector: None,
-                    capabilities: Vec::new(),
-                    metadata: BTreeMap::new(),
-                })
-                .collect(),
-            next_cursor: None,
-        }));
-    }
     let mut url = provider
         .operation_metadata
         .get("models_source")
@@ -391,8 +274,8 @@ fn discover(
     }))
 }
 
-fn validate_config(options: &BTreeMap<String, Value>, claude_code: bool) -> Vec<ValidationIssue> {
-    if claude_code || options.get("apiKey").is_none() {
+fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {
+    if options.get("apiKey").is_none() {
         Vec::new()
     } else {
         vec![ValidationIssue {
@@ -401,24 +284,6 @@ fn validate_config(options: &BTreeMap<String, Value>, claude_code: bool) -> Vec<
             message: crate::messages::secret_in_options(),
         }]
     }
-}
-
-pub(super) fn append_claude_code_headers(
-    provider: &ProviderSnapshot,
-    headers: &mut Vec<(String, String)>,
-) -> Result<(), PluginError> {
-    set_header(
-        headers,
-        "authorization",
-        format!("Bearer {}", secret(provider, "access_token")?),
-    );
-    set_header(headers, "user-agent", CLAUDE_CLI_USER_AGENT.into());
-    set_header(headers, "referer", "https://claude.ai/".into());
-    set_header(headers, "origin", "https://claude.ai".into());
-    set_header(headers, "anthropic-beta", ANTHROPIC_OAUTH_BETA.into());
-    set_header(headers, "anthropic-version", "2023-06-01".into());
-    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
-    Ok(())
 }
 
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
@@ -432,18 +297,6 @@ fn endpoint(base_url: &str, path: &str) -> String {
         base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
-}
-
-fn human_model_name(id: &str) -> String {
-    id.split('-')
-        .map(|part| {
-            let mut chars = part.chars();
-            chars.next().map_or_else(String::new, |first| {
-                first.to_uppercase().collect::<String>() + chars.as_str()
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn percent_encode(value: &str) -> String {
@@ -476,13 +329,6 @@ fn credential<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> 
         .filter(|value| !value.is_empty())
 }
 
-pub(super) fn secret<'a>(
-    provider: &'a ProviderSnapshot,
-    key: &str,
-) -> Result<&'a str, PluginError> {
-    credential(provider, key).ok_or_else(|| auth_error(format!("missing credential `{key}`")))
-}
-
 fn ensure_success(
     response: &stravia_vendor_sdk::HttpResponse,
     label: &str,
@@ -511,14 +357,6 @@ fn ensure_success(
 pub(super) fn invalid(message: impl Into<String>) -> PluginError {
     PluginError {
         kind: ErrorKind::Invalid,
-        message: message.into(),
-        upstream_status: None,
-    }
-}
-
-pub(super) fn auth_error(message: impl Into<String>) -> PluginError {
-    PluginError {
-        kind: ErrorKind::Auth,
         message: message.into(),
         upstream_status: None,
     }

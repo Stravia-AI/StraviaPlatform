@@ -670,7 +670,7 @@ stravia-core/plugin/         ← 安装、版本、权限、网络、状态、�
 model_turn/                  ← 路由与尝试策略；只调用 Gateway::execute_vendor
 ```
 
-基础包只有一个 Vendor 身份；其中各供应商 profile 是配置与行为声明，不是多个 Vendor。普通 OpenAI 与 xAI API channel 留在基础包，Anthropic OAuth、Google/Vertex、Bedrock、DeepSeek 及其他非专属接入的既有认证、云协议、发现、allowance 与推理能力也完整保留。Codex、Grok、Command Code、Devin 的专属包按供应商身份整体接管所有 channel 和操作；专属包未安装、不可用、缺少某项 channel/能力或执行失败时都不回退基础包。
+基础包只有一个 Vendor 身份；其中各供应商 profile 是配置与行为声明，不是多个 Vendor。普通 OpenAI 与 xAI API channel 留在基础包，Anthropic API-key 接入、Google/Vertex、Bedrock、DeepSeek 及其他非专属接入的既有认证、云协议、发现、allowance 与推理能力也完整保留。Codex、Grok、Command Code、Devin 的专属包按供应商身份整体接管所有 channel 和操作；专属包未安装、不可用、缺少某项 channel/能力或执行失败时都不回退基础包。
 
 这是对 ADR-0069、ADR-0070 中“四个通用协议 Vendor/插件”表述的后续取代性澄清：保留全量 Wasm 与自包含锁定 codec 的决策，但四个标准协议 family 现在是共享 codec，而不是四个 Vendor 包。它与 ADR-0067 的独立 Vendor 身份一致；基础包仍是一个 Vendor，而不是一个包导出多个 Vendor。Command Code 与 Devin 的专有 codec 分别归其 guest，Bedrock、Cohere、Gateway、Watsonx 的专有实现归基础 guest，host 不链接这些专有 codec。
 
@@ -707,7 +707,7 @@ Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提�
 
 新增或修改 Vendor 行为时必须修改对应 guest，并在真实 Wasm 测试面验证；不得在 Core 按 vendor id、model 名称或 protocol family 增加特殊分支。Core 可保留的只有平台通用 codec、权限、网络、调度、观测和持久化职责。若 guest 需要新的宿主能力，应先扩展通用 typed SDK/WIT 契约，并证明它不依赖单一厂商品牌；不能以临时 native fallback 绕过组件边界。
 
-内置组件当前覆盖 OpenAI/Codex、Anthropic/Claude Code、Google、Vertex AI、Amazon Bedrock、Devin、Command Code、xAI、GitLab、SAP AI Core、Watsonx 及通用 OpenAI-compatible 系列。实际可用列表始终以运行时已安装 descriptor 为准，而不是本文静态清单。
+内置组件当前覆盖 OpenAI/Codex、Anthropic API、Google、Vertex AI、Amazon Bedrock、Devin、Command Code、xAI、GitLab、SAP AI Core、Watsonx 及通用 OpenAI-compatible 系列。实际可用列表始终以运行时已安装 descriptor 为准，而不是本文静态清单。
 
 ## 7. 错误处理
 
