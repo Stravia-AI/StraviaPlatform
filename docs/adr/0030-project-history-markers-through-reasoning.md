@@ -4,6 +4,8 @@ status: superseded by ADR-0033
 
 # Project History Markers through reasoning carriers
 
+> 本决策已被 [ADR-0033](0033-stream-text-and-project-post-text-thinking.md) 整体取代：普通可见 Text 不再因为暴露或使用 Platform Tool 而缓冲，改由 Post-Text Thinking 投影保持顺序。原文保留供追溯。
+
 本决策取代 ADR 0028 中“普通可见 delta 立即发送”和 Marker 载体相关部分。ADR 0028 的 Principal 隔离、one-to-one Hidden History Segment、durable execution、publish、lease、deadline、取消及崩溃恢复不变量保持不变。
 
 ## Context

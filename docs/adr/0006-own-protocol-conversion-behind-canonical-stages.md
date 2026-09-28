@@ -4,7 +4,7 @@ status: accepted
 
 # Own Protocol Conversion behind a pair-bound canonical interface
 
-协议集合的增长规则见 [`ADR-0056`](0056-grow-protocols-by-unique-wire.md)。
+> 部分被 [`ADR-0056`](0056-grow-protocols-by-unique-wire.md) 取代：协议集合固定为四条的约束不再适用。Protocol 改为按 wire contract 去重，只有 wire 确实不同才新增。
 
 > 部分被 [`ADR-0011`](0011-own-open-responses-as-a-dated-protocol.md) 取代：pair-bound conversion seam、canonical ownership 与 representability gate 继续有效；最终 canonical shape 改为 ordered `AiItem` Graph 和 lifecycle-complete stream events。
 

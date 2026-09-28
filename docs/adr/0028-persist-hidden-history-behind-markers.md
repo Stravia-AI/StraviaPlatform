@@ -4,6 +4,12 @@ status: accepted
 
 # Persist hidden history behind one-to-one markers
 
+> **部分被取代。**
+> - 「Streaming」一节中“普通可见 delta 立即发送”以及 Marker 载体的相关约定，曾被 [ADR-0030](0030-project-history-markers-through-reasoning.md) 取代；ADR-0030 又被 [ADR-0033](0033-stream-text-and-project-post-text-thinking.md) 整体取代，当前以 ADR-0033 为准。
+> - 「Target and storage boundaries」一节中“证明属于其它作用域时剥离”的判定，由 [ADR-0075](0075-replay-protected-reasoning-within-protocol-and-learn-rejections.md) 取代：同一出口协议下仅部署或凭据不同的受保护载荷改为保留，只有出口协议不同、协议绑定的模型不同，或已被当前签发作用域拒绝过时才剥离。
+>
+> 其余约定继续有效，包括 Principal 隔离、一对一 Hidden History Segment、durable execution，以及来源记录、可读推理的 codec 表示和两级剥离顺序。
+
 Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图：客户端投影只用 Principal-scoped History Marker 表示未披露内容，History Marker Store 持久化实际 Hidden History Segment，恢复请求时在 Marker 原位置替换后再发送上游。Marker 不依赖周边上下文匹配；客户端可以修改其他历史。一个 Marker 只对应一个 Platform Tool Execution 的 call/result 对，或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。
 
 ## Client projection
