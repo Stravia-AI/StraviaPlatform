@@ -242,10 +242,7 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
       ...freshSnapshot,
       models: [
         freshSnapshot.models[0],
-        {
-          model: 'gpt-5.4',
-          allowances: [{ ...freshSnapshot.models[0].allowances[0], label: 'GPT-5.4 window' }],
-        },
+        { model: 'gpt-5.4', allowances: [{ ...freshSnapshot.models[0].allowances[0], label: 'GPT-5.4 window' }] },
       ],
     },
   ])

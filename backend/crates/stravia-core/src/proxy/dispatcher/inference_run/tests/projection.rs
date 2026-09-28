@@ -251,35 +251,32 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
             "one original generation and one continuation"
         );
         let input = captured[1]["input"].as_array().expect("Responses input");
-        assert!(
-            input
-                .iter()
-                .all(|item| item["type"] == "reasoning" || item["role"] == "user"),
-            "display-only whitespace must not become an upstream assistant text item: {input:?}"
-        );
-        let replayed = input
-            .iter()
-            .filter(|item| item["type"] == "reasoning")
-            .collect::<Vec<_>>();
+        // Marker 恢复不携带可回放的上游条目 ID；无密文的公开推理按 Responses
+        // 契约降级为正文。完整输入比较同时禁止展示用段落分隔符泄漏为额外文本。
         assert_eq!(
-            replayed.len(),
-            items.len(),
-            "independent reasoning blocks survive replay"
+            input,
+            &vec![
+                json!({
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "test"}]
+                }),
+                json!({
+                    "type": "reasoning",
+                    "summary": items[0]["summary"],
+                    "content": items[0]["content"],
+                    "encrypted_content": items[0]["encrypted_content"]
+                }),
+                json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": parts[3]}]
+                }),
+                json!({
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}]
+                }),
+            ],
+            "replay preserves original reasoning bytes and order without display-only whitespace: stream={stream}"
         );
-        for (actual, expected) in replayed.iter().zip(&items) {
-            assert_eq!(
-                actual["summary"], expected["summary"],
-                "exact summary parts, including CRLF and spaces"
-            );
-            assert_eq!(
-                actual["content"], expected["content"],
-                "no fabricated reasoning content"
-            );
-            assert_eq!(
-                actual["encrypted_content"], expected["encrypted_content"],
-                "exact protected cipher and public-block absence"
-            );
-        }
         let upstream = captured[1].to_string();
         assert!(
             !upstream.contains(crate::history_marker::HISTORY_MARKER_PREFIX),

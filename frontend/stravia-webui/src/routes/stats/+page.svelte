@@ -419,10 +419,7 @@ function retryAll(): void {
                 { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                 { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
               ]}
-              props={{
-                xAxis: { ticks: 4, format: formatBucket },
-                tooltip: { header: { format: formatBucket } },
-              }} />
+              props={{ xAxis: { ticks: 4, format: formatBucket }, tooltip: { header: { format: formatBucket } } }} />
           </div>{:else}<Empty.Root class="h-40 border-y"
             ><Empty.Header
               ><Empty.Description

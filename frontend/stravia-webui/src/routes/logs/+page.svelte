@@ -548,7 +548,9 @@ async function downloadBundle(): Promise<void> {
             type="single"
             bind:value={() => ws.modelFilter, (value: string) => ws.setModelFilter(value)}
             ><Select.Trigger id="observation-model" class="w-full"
-              >{selectedFilterModel ? effectiveModelDisplayName(selectedFilterModel) : m.observation_all()}</Select.Trigger
+              >{selectedFilterModel
+                ? effectiveModelDisplayName(selectedFilterModel)
+                : m.observation_all()}</Select.Trigger
             ><Select.Content
               ><Select.Group
                 ><Select.Item value="all">{m.observation_all()}</Select.Item
