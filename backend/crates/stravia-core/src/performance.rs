@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use metrics::{gauge, histogram};
+use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use parking_lot::{Mutex, RwLock};
 use serde_json::{Value, json};
@@ -53,6 +53,21 @@ struct PerfSpan {
     epoch: u64,
 }
 
+const WORK_FIELDS: [&str; 4] = [
+    "node_count",
+    "reference_count",
+    "candidate_count",
+    "event_count",
+];
+
+#[derive(Clone, Copy, Default)]
+struct SqlActivity {
+    query_count: u64,
+    query_duration_us: u64,
+    pool_acquire_count: u64,
+    pool_acquire_duration_us: u64,
+}
+
 struct ActiveSpan {
     name: &'static str,
     id: u64,
@@ -63,6 +78,8 @@ struct ActiveSpan {
     active_elapsed: Duration,
     was_entered: bool,
     status: Option<&'static str>,
+    work: [Option<u64>; 4],
+    sql: SqlActivity,
 }
 
 #[derive(Clone)]
@@ -74,6 +91,8 @@ struct TraceRecord {
     finished: Option<Instant>,
     active_us: Option<u64>,
     status: Option<&'static str>,
+    work: [Option<u64>; 4],
+    sql: SqlActivity,
 }
 
 impl ActiveSpan {
@@ -91,6 +110,8 @@ impl ActiveSpan {
             finished,
             active_us: self.was_entered.then(|| micros(active)),
             status: finished.map(|_| self.status.unwrap_or("closed")),
+            work: self.work,
+            sql: self.sql,
         }
     }
 }
@@ -170,6 +191,19 @@ pub fn timeline_snapshot() -> Value {
         }
         if let Some(active_us) = span.active_us {
             args["active_us"] = json!(active_us);
+        }
+        for (name, value) in WORK_FIELDS.into_iter().zip(span.work) {
+            if let Some(value) = value {
+                args[name] = json!(value);
+            }
+        }
+        if span.sql.query_count > 0 {
+            args["sql_query_count"] = json!(span.sql.query_count);
+            args["sql_query_duration_us"] = json!(span.sql.query_duration_us);
+        }
+        if span.sql.pool_acquire_count > 0 {
+            args["sql_pool_acquire_count"] = json!(span.sql.pool_acquire_count);
+            args["sql_pool_acquire_duration_us"] = json!(span.sql.pool_acquire_duration_us);
         }
         let mut event = json!({
             "name": span.name,
@@ -282,9 +316,21 @@ pub fn init_metrics() -> bool {
 #[derive(Default)]
 struct StatusVisitor {
     status: Option<&'static str>,
+    work: [Option<u64>; 4],
 }
 
 impl Visit for StatusVisitor {
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        let index = match field.name() {
+            "node_count" => 0,
+            "reference_count" => 1,
+            "candidate_count" => 2,
+            "event_count" => 3,
+            _ => return,
+        };
+        self.work[index] = Some(value);
+    }
+
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "status" {
             self.status = match value {
@@ -300,7 +346,7 @@ impl Visit for StatusVisitor {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 }
 
-/// 静态 span 名称是唯一 operation 标签；其他字段（尤其 SQL/URL/body/error）不读取。
+/// 静态 span 名称是唯一 operation 标签；仅接受状态和工作量数值白名单。
 /// 内存上限是活动 1024 + 已结束 2048 条；满额的活动 span 不导出也不记指标。
 pub struct PerformanceLayer;
 
@@ -359,6 +405,8 @@ where
                 active_elapsed: Duration::ZERO,
                 was_entered: false,
                 status: status.status,
+                work: status.work,
+                sql: SqlActivity::default(),
             },
         );
         span.extensions_mut()
@@ -377,10 +425,15 @@ where
         }
         let mut status = StatusVisitor::default();
         values.record(&mut status);
-        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id)
-            && let Some(status) = status.status
-        {
-            active.status = Some(status);
+        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id) {
+            if let Some(status) = status.status {
+                active.status = Some(status);
+            }
+            for (current, value) in active.work.iter_mut().zip(status.work) {
+                if value.is_some() {
+                    *current = value;
+                }
+            }
         }
     }
 
@@ -459,6 +512,17 @@ pub(crate) fn record_generation_cache_bytes(bytes: usize) {
     let guard = sources().read();
     if any_enabled(&guard) {
         gauge!("stravia_generation_materialization_cache_bytes").set(bytes as f64);
+    }
+}
+
+pub(crate) fn record_generation_cache_access(hit: bool) {
+    let guard = sources().read();
+    if any_enabled(&guard) {
+        counter!(
+            "stravia_generation_materialization_cache_access_total",
+            "result" => if hit { "hit" } else { "miss" }
+        )
+        .increment(1);
     }
 }
 
@@ -541,8 +605,8 @@ pub fn is_sqlx_metric_target(target: &str) -> bool {
 /// 在日志初始化时安装目标过滤；SQL 不进入 fmt layers。
 pub struct SqlxMetricsLayer;
 
-impl<S: Subscriber> Layer<S> for SqlxMetricsLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for SqlxMetricsLayer {
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let target = event.metadata().target();
         if !is_sqlx_metric_target(target) {
             return;
@@ -554,18 +618,51 @@ impl<S: Subscriber> Layer<S> for SqlxMetricsLayer {
         if !any_enabled(&guard) || EPOCH.load(Ordering::Acquire) != epoch {
             return;
         }
+        let owner = ctx.event_scope(event).and_then(|mut scope| {
+            scope.find_map(|span| {
+                span.extensions()
+                    .get::<PerfSpan>()
+                    .map(|perf| (perf.id, perf.epoch, span.metadata().name()))
+            })
+        });
+        // SQLite worker 会跨线程持有提交查询时的 span；重开 Debug 后不能
+        // 把旧周期尚未完成的查询计入新周期，也不能回退为 unattributed。
+        if owner.is_some_and(|(_, span_epoch, _)| span_epoch != epoch) {
+            return;
+        }
+        let operation = owner.map_or("unattributed", |(_, _, name)| name);
         if target == "sqlx::query" {
             if let Some(value) = values
                 .elapsed_secs
                 .filter(|value| value.is_finite() && *value >= 0.0)
             {
-                histogram!("stravia_sql_query_duration_seconds").record(value);
+                histogram!("stravia_sql_query_duration_seconds", "operation" => operation)
+                    .record(value);
+                if let Some((id, _, _)) = owner
+                    && let Some(active) = TIMELINE.lock().active.get_mut(&id)
+                {
+                    active.sql.query_count += 1;
+                    active.sql.query_duration_us = active
+                        .sql
+                        .query_duration_us
+                        .saturating_add((value * 1_000_000.0) as u64);
+                }
             }
         } else if let Some(value) = values
             .acquired_after_secs
             .filter(|value| value.is_finite() && *value >= 0.0)
         {
-            histogram!("stravia_sql_pool_acquire_duration_seconds").record(value);
+            histogram!("stravia_sql_pool_acquire_duration_seconds", "operation" => operation)
+                .record(value);
+            if let Some((id, _, _)) = owner
+                && let Some(active) = TIMELINE.lock().active.get_mut(&id)
+            {
+                active.sql.pool_acquire_count += 1;
+                active.sql.pool_acquire_duration_us = active
+                    .sql
+                    .pool_acquire_duration_us
+                    .saturating_add((value * 1_000_000.0) as u64);
+            }
         }
     }
 }
@@ -621,10 +718,12 @@ mod tests {
             .with(
                 SqlxMetricsLayer.with_filter(
                     dynamic_filter_fn(|meta, _ctx| {
-                        is_sqlx_metric_target(meta.target()) && enabled()
+                        (is_sqlx_metric_target(meta.target()) || meta.target() == "stravia::perf")
+                            && enabled()
                     })
                     .with_callsite_filter(|meta| {
-                        if is_sqlx_metric_target(meta.target()) {
+                        if is_sqlx_metric_target(meta.target()) || meta.target() == "stravia::perf"
+                        {
                             Interest::sometimes()
                         } else {
                             Interest::never()
@@ -687,7 +786,10 @@ mod tests {
         handle.run_upkeep();
         let output = handle.render();
         assert!(output.contains("stravia_sql_query_duration_seconds_bucket"));
-        assert!(output.contains("stravia_sql_query_duration_seconds_count 1"));
+        assert!(
+            output
+                .contains("stravia_sql_query_duration_seconds_count{operation=\"unattributed\"} 1")
+        );
         assert!(output.contains("operation=\"test.reused\",status=\"completed\""));
         assert!(output.contains("operation=\"test.child\",status=\"error\""));
         assert!(output.contains("operation=\"test.explicit_child\",status=\"closed\""));
@@ -945,5 +1047,160 @@ mod tests {
             summary = "SELECT password", db.statement = "SELECT password FROM vault",
             elapsed_secs = 0.025_f64,
         );
+    }
+
+    #[test]
+    fn sqlite_worker_queries_keep_exclusive_operation_attribution() {
+        if !isolated("sqlite_worker_queries_keep_exclusive_operation_attribution") {
+            return;
+        }
+        let debug = Arc::new(AtomicBool::new(false));
+        bind_debug(&debug);
+        assert!(init_metrics());
+        tracing::subscriber::set_global_default(subscriber()).expect("isolated subscriber");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .test_before_acquire(false)
+                .acquire_time_level(log::LevelFilter::Debug)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            set_debug(&debug, true);
+            async {
+                let mut connection = pool.acquire().await.unwrap();
+                let value: i64 = sqlx::query_scalar("SELECT 41 + 1")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+                assert_eq!(value, 42);
+                async {
+                    for secret in ["private-query-value-one", "private-query-value-two"] {
+                        let value: String = sqlx::query_scalar("SELECT ?")
+                            .bind(secret)
+                            .fetch_one(&mut *connection)
+                            .await
+                            .unwrap();
+                        assert_eq!(value, secret);
+                    }
+                    // fetch_one 可先于 worker 的 QueryLogger 析构返回；ping 是
+                    // 同一连接的 FIFO 屏障，不产生额外 SQL，也不依赖时间等待。
+                    sqlx::Connection::ping(&mut *connection).await.unwrap();
+                }
+                .instrument(tracing::info_span!(
+                    target: "stravia::perf", "test.sqlite.child", node_count = 2_u64
+                ))
+                .await;
+            }
+            .instrument(tracing::info_span!(target: "stravia::perf", "test.sqlite.parent"))
+            .await;
+            set_debug(&debug, false);
+            pool.close().await;
+        });
+        let trace = timeline_snapshot();
+        let events = trace["traceEvents"].as_array().unwrap();
+        let get = |name| {
+            events
+                .iter()
+                .find(|event| event["name"] == name && event["ph"] == "X")
+                .unwrap()
+        };
+        let parent = get("test.sqlite.parent");
+        let child = get("test.sqlite.child");
+        assert_eq!(parent["args"]["sql_query_count"], 1);
+        assert_eq!(parent["args"]["sql_pool_acquire_count"], 1);
+        assert_eq!(child["args"]["sql_query_count"], 2);
+        assert_eq!(child["args"]["node_count"], 2);
+        assert_eq!(child["args"]["parent_id"], parent["args"]["span_id"]);
+        let metrics = metrics_snapshot().unwrap();
+        for (operation, count) in [("test.sqlite.parent", 1), ("test.sqlite.child", 2)] {
+            assert!(metrics.contains(&format!(
+                "stravia_sql_query_duration_seconds_count{{operation=\"{operation}\"}} {count}\n"
+            )));
+        }
+        assert!(!metrics.contains("operation=\"unattributed\""));
+        for output in [metrics, trace.to_string()] {
+            for secret in [
+                "SELECT",
+                "private-query-value-one",
+                "private-query-value-two",
+            ] {
+                assert!(!output.contains(secret), "query data leaked into telemetry");
+            }
+        }
+    }
+
+    #[test]
+    fn sql_attribution_rejects_stale_epochs_and_unapproved_work_fields() {
+        if !isolated("sql_attribution_rejects_stale_epochs_and_unapproved_work_fields") {
+            return;
+        }
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let debug = Arc::new(AtomicBool::new(false));
+        bind_debug(&debug);
+        metrics::with_local_recorder(&recorder, || {
+            tracing::subscriber::with_default(subscriber(), || {
+                record_generation_cache_access(true);
+                set_debug(&debug, true);
+                let stale = tracing::info_span!(target: "stravia::perf", "test.stale_sql");
+                set_debug(&debug, false);
+                set_debug(&debug, true);
+                stale.in_scope(emit_sql_event);
+                drop(stale);
+                let current = tracing::info_span!(
+                    target: "stravia::perf", "test.current_sql",
+                    node_count = 3_u64, reference_count = tracing::field::Empty,
+                    secret_number = 919191_u64, candidate_count = "private-count"
+                );
+                current.in_scope(|| {
+                    emit_sql_event();
+                    tracing::event!(target: "sqlx::pool::acquire", Level::DEBUG,
+                        acquired_after_secs = 0.002_f64);
+                    current.record("reference_count", 7_u64);
+                    current.record("node_count", -1_i64);
+                    record_generation_cache_access(true);
+                    record_generation_cache_access(false);
+                });
+                drop(current);
+                set_debug(&debug, false);
+                record_generation_cache_access(false);
+            });
+        });
+        handle.run_upkeep();
+        let metrics = handle.render();
+        assert!(!metrics.contains("test.stale_sql"));
+        assert!(!metrics.contains("operation=\"unattributed\""));
+        for result in ["hit", "miss"] {
+            assert!(metrics.contains(&format!(
+                "stravia_generation_materialization_cache_access_total{{result=\"{result}\"}} 1\n"
+            )));
+        }
+        let snapshot = timeline_snapshot();
+        let events = snapshot["traceEvents"].as_array().unwrap();
+        let current = events
+            .iter()
+            .find(|event| event["name"] == "test.current_sql")
+            .unwrap();
+        assert_eq!(current["args"]["sql_query_count"], 1);
+        assert_eq!(current["args"]["sql_query_duration_us"], 25_000);
+        assert_eq!(current["args"]["sql_pool_acquire_count"], 1);
+        assert_eq!(current["args"]["sql_pool_acquire_duration_us"], 2_000);
+        assert_eq!(current["args"]["node_count"], 3);
+        assert_eq!(current["args"]["reference_count"], 7);
+        assert!(current["args"].get("candidate_count").is_none());
+        let stale = events
+            .iter()
+            .find(|event| event["name"] == "test.stale_sql")
+            .unwrap();
+        assert!(stale["args"].get("sql_query_count").is_none());
+        let serialized = snapshot.to_string();
+        assert!(!serialized.contains("919191"));
+        assert!(!serialized.contains("private-count"));
     }
 }

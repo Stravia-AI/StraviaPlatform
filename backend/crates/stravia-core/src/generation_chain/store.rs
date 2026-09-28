@@ -9,6 +9,8 @@ pub(super) struct GenerationChainStore {
 
 #[derive(Clone)]
 pub(super) struct MaterializedGeneration {
+    pub(super) root_id: String,
+    pub(super) compaction_record_ids: Vec<String>,
     pub(super) effective_items: Vec<AiItem>,
     pub(super) client_items: Vec<AiItem>,
     pub(super) effective_request: Option<EffectiveRequestConfig>,
@@ -152,6 +154,11 @@ impl GenerationChainStore {
         TurnNodeId::response().to_string()
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.references.resolve_available",
+        skip_all
+    )]
     pub async fn resolve_available_item_references(
         &self,
         principal: &Principal,
@@ -183,6 +190,11 @@ impl GenerationChainStore {
         resolve_item_references(items, &persisted, Some(ingress))
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.parent.resolve",
+        skip_all
+    )]
     pub async fn materialize_parent(
         &self,
         principal: &Principal,
@@ -238,6 +250,12 @@ impl GenerationChainStore {
         self.discover_prefix(principal, request, false).await
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.parent.discover_prefix",
+        skip_all,
+        fields(candidate_count = 0_u64)
+    )]
     pub(super) async fn discover_prefix(
         &self,
         principal: &Principal,
@@ -309,6 +327,7 @@ impl GenerationChainStore {
                 .await
                 .map_err(|error| error.to_string())?,
         );
+        tracing::Span::current().record("candidate_count", candidates.len() as u64);
         for candidate in candidates {
             let matched_units = usize::try_from(candidate.item_count).unwrap_or(usize::MAX);
             let Some(matched_items) =
@@ -360,6 +379,12 @@ impl GenerationChainStore {
         Ok(None)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.parent.compaction_source",
+        skip_all,
+        fields(candidate_count)
+    )]
     pub(super) async fn compaction_source_from_items(
         &self,
         principal: &Principal,
@@ -409,9 +434,15 @@ impl GenerationChainStore {
                 }
             }
         }
+        tracing::Span::current().record("candidate_count", seen.len() as u64);
         Ok(source)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.parent.source",
+        skip_all
+    )]
     pub(super) async fn source_parent(
         &self,
         principal: &Principal,
@@ -441,48 +472,42 @@ impl GenerationChainStore {
         })
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.parent.materialize",
+        skip_all
+    )]
     async fn materialize_parent_id(
         &self,
         principal: &Principal,
         parent_id: &str,
         request: &mut AiRequest,
     ) -> Result<ActiveGenerationChain, String> {
-        let not_found = if request_has_item_references(request) {
+        let has_references = request_has_item_references(request);
+        let not_found = if has_references {
             "item_reference_not_found"
         } else {
             "previous_response_not_found"
         };
-        let materialized = self
-            .materialize_generation(principal, &TurnNodeId::new(parent_id))
-            .await
-            .map_err(|_| not_found.to_string())?;
-        let mut new_messages = std::mem::take(&mut request.items);
-        let nodes = self
-            .turn_chain
-            .materialize(
-                principal,
-                TurnNodeKind::Response,
-                &TurnNodeId::new(parent_id),
+        let ingress = ProtocolTransform::inferred_ingress(request);
+        let id = TurnNodeId::new(parent_id);
+        let (materialized, catalog) = if has_references {
+            let (materialized, catalog) = self
+                .materialize_generation_with_catalog(principal, &id, ingress, not_found)
+                .await?;
+            (materialized, Some(catalog?))
+        } else {
+            (
+                self.materialize_generation(principal, &id)
+                    .await
+                    .map_err(|_| not_found.to_string())?,
+                None,
             )
-            .await
-            .map_err(|_| not_found.to_string())?;
-        let persisted = nodes
-            .into_iter()
-            .map(super::materialize::decode_response_node)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| not_found.to_string())?;
-        let root_id = persisted.first().map(|(id, _)| id.to_string());
-        let mut compaction_record_ids = persisted
-            .iter()
-            .flat_map(|(_, node)| node.compaction_record_ids.iter().cloned())
-            .collect::<Vec<_>>();
-        compaction_record_ids.sort();
-        compaction_record_ids.dedup();
-        resolve_item_references(
-            &mut new_messages,
-            &persisted,
-            ProtocolTransform::inferred_ingress(request),
-        )?;
+        };
+        let mut new_messages = std::mem::take(&mut request.items);
+        if let Some(catalog) = catalog {
+            resolve_catalog_references(&mut new_messages, &catalog, ingress)?;
+        }
         if let Some(config) = materialized.effective_request.clone() {
             config.apply_missing_to(request);
         }
@@ -500,7 +525,7 @@ impl GenerationChainStore {
             request.meta.vendor.ingress.remove("previous_response_id");
         }
         Ok(ActiveGenerationChain {
-            root_id,
+            root_id: Some(materialized.root_id),
             parent_id: Some(parent_id.to_owned()),
             parent_upstream_response_id: materialized.upstream_response_id,
             parent_state: Some(materialized.effective_state),
@@ -511,8 +536,58 @@ impl GenerationChainStore {
             replacement_client_items: None,
             compaction_input_range: None,
             fresh_inline_states: Vec::new(),
-            compaction_record_ids,
+            compaction_record_ids: materialized.compaction_record_ids,
         })
+    }
+
+    async fn load_generation_chain(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<stravia_runtime_contract::turn_chain::MaterializedTurnChain, String> {
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(target: "stravia::perf", "generation_chain.history.load", status = tracing::field::Empty);
+        let chain = self
+            .turn_chain
+            .materialize_with_expiry(principal, TurnNodeKind::Response, id)
+            .instrument(span.clone())
+            .await;
+        span.record("status", if chain.is_ok() { "completed" } else { "error" });
+        chain.map_err(|error| error.to_string())
+    }
+
+    async fn materialize_generation_with_catalog(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+        ingress: Option<ProtocolId>,
+        not_found: &str,
+    ) -> Result<(MaterializedGeneration, Result<Vec<AiItem>, String>), String> {
+        let principal_key = principal.continuation_key();
+        let cached = self.materialization_cache_get(&principal_key, id);
+        crate::performance::record_generation_cache_access(cached.is_some());
+        let chain = self
+            .load_generation_chain(principal, id)
+            .await
+            .map_err(|_| not_found.to_string())?;
+        if let Some(materialized) = cached {
+            let mut catalog = Ok(Vec::new());
+            for node in chain.nodes {
+                let (_, node) = super::materialize::decode_response_node(node)
+                    .map_err(|_| not_found.to_string())?;
+                if let Ok(items) = catalog.as_mut()
+                    && let Err(error) = append_history_catalog_node(items, &node, ingress)
+                {
+                    catalog = Err(error);
+                }
+            }
+            return Ok((materialized, catalog));
+        }
+        let (materialized, catalog) =
+            materialize_generation_nodes_with_catalog(chain.nodes, chain.expires_at, ingress)
+                .map_err(|_| not_found.to_string())?;
+        self.materialization_cache_insert(principal_key, id.clone(), materialized.clone());
+        Ok((materialized, catalog))
     }
 
     pub(super) async fn materialize_generation(
@@ -522,18 +597,11 @@ impl GenerationChainStore {
     ) -> Result<MaterializedGeneration, String> {
         let principal_key = principal.continuation_key();
         if let Some(materialized) = self.materialization_cache_get(&principal_key, id) {
+            crate::performance::record_generation_cache_access(true);
             return Ok(materialized);
         }
-        use tracing::Instrument as _;
-        let span = tracing::info_span!(target: "stravia::perf", "generation_chain.history.load", status = tracing::field::Empty);
-        let chain = self
-            .turn_chain
-            .materialize_with_expiry(principal, TurnNodeKind::Response, id)
-            .instrument(span.clone())
-            .await;
-        span.record("status", if chain.is_ok() { "completed" } else { "error" });
-        drop(span);
-        let chain = chain.map_err(|error| error.to_string())?;
+        crate::performance::record_generation_cache_access(false);
+        let chain = self.load_generation_chain(principal, id).await?;
         let materialized = materialize_generation_nodes(chain.nodes, chain.expires_at)?;
         self.materialization_cache_insert(principal_key, id.clone(), materialized.clone());
         Ok(materialized)

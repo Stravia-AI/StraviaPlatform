@@ -514,6 +514,10 @@ Request Hook 完成后、首次 Target 选择前，`CacheAffinity` 对每个 can
 
 Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Gateway 在进程内以按字节上限淘汰的 LRU Generation Materialization Cache 加速读取；它保存精确物化的 execution context，但不是历史事实源。重启或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
 
+父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，但仍读取一次祖先历史以构造引用目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录只用于本次请求，不将完整原始历史加入缓存。
+
+SQLite 共享内容恢复按节点 ID 查找引用。JOIN 中对引用表的 Principal 列使用单目 `+` 排除 principal-leading 索引条件，避免每个节点扫描同主体的全部引用；仍保留与节点 Principal 的等值校验，并由右侧节点列的 TEXT affinity 保持比较语义。该查询选择不依赖自动生成的索引名，不要求修改 schema 或运行 `ANALYZE`；PostgreSQL 保持普通等值条件。
+
 历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或过期历史撤销不可用索引，不重写原始节点或父边。
 
 Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。

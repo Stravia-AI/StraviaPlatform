@@ -1,5 +1,9 @@
 use super::*;
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 
 async fn execute(store: &SqlTurnChainStore, sql: &str) {
     match store {
@@ -224,6 +228,93 @@ async fn contract(store: SqlTurnChainStore) {
 #[tokio::test]
 async fn structural_history_sqlite_contract() {
     contract(super::test_store().await).await;
+}
+
+/// Restoring a short chain must visit its own references, not all references
+/// belonging to the same Principal. The progress budget covers the real store
+/// materialization path while allowing the unrelated rows to be seeded first.
+#[tokio::test]
+async fn optimization_sqlite_history_restore_ignores_unrelated_references() {
+    const UNRELATED_REFERENCES: i64 = 10_000;
+    const OPS_PER_TICK: i32 = 1_000;
+    const TICK_BUDGET: u32 = 20;
+
+    let store = super::test_store().await;
+    let owner = Principal::new("content-restore-owner");
+    let root = TurnNodeId::response();
+    let child = TurnNodeId::response();
+    let shared = payload();
+    let plain = json!({"message": "a node without references"});
+    for (id, parent_id, value) in [(&root, None, &shared), (&child, Some(root.clone()), &plain)] {
+        store
+            .commit(TurnCommit {
+                id: id.clone(),
+                kind: TurnNodeKind::Response,
+                parent_id,
+                principal: owner.clone(),
+                payload_version: 6,
+                payload: value.clone(),
+                idle_ttl: Duration::from_secs(60),
+                reusable_prefix: None,
+            })
+            .await
+            .expect("commit test chain");
+    }
+
+    let SqlTurnChainStore::Sqlite(pool) = &store else {
+        unreachable!("SQLite test store")
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) \
+         INSERT INTO turn_chain_nodes \
+         (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) \
+         SELECT 'unrelated-ref-' || i, ?, NULL, ?, 6, '{}', ?, ? FROM n",
+    )
+    .bind(UNRELATED_REFERENCES)
+    .bind(TurnNodeKind::Response.as_str())
+    .bind(owner.continuation_key())
+    .bind(now)
+    .bind(now + 60_000)
+    .execute(pool)
+    .await
+    .expect("seed unrelated nodes");
+    sqlx::query(
+        "INSERT INTO turn_chain_content_refs (node_id, principal, path, content_key) \
+         SELECT n.id, n.principal, '/effective_system', r.content_key \
+         FROM turn_chain_nodes n CROSS JOIN turn_chain_content_refs r \
+         WHERE n.id LIKE 'unrelated-ref-%' AND r.node_id = ? AND r.path = '/effective_system'",
+    )
+    .bind(root.as_str())
+    .execute(pool)
+    .await
+    .expect("seed unrelated references");
+    assert!(
+        scalar(&store, "SELECT COUNT(*) FROM turn_chain_content_refs").await
+            >= UNRELATED_REFERENCES,
+        "test requires many Principal-owned references"
+    );
+
+    let ticks = Arc::new(AtomicU32::new(0));
+    {
+        let mut connection = pool.acquire().await.expect("SQLite connection");
+        let measured_ticks = ticks.clone();
+        connection
+            .lock_handle()
+            .await
+            .expect("SQLite handle")
+            .set_progress_handler(OPS_PER_TICK, move || {
+                measured_ticks.fetch_add(1, Ordering::Relaxed) < TICK_BUDGET
+            });
+    }
+    let nodes = store
+        .materialize(&owner, TurnNodeKind::Response, &child)
+        .await
+        .expect("restore within VM budget");
+    assert_eq!(
+        nodes.iter().map(|node| &node.payload).collect::<Vec<_>>(),
+        [&shared, &plain]
+    );
 }
 
 #[tokio::test]

@@ -78,8 +78,16 @@ fn content_key(content: &str) -> String {
 }
 
 // 每批一次 JOIN；避免随历史节点数逐条查询。SQL 层强制 Principal 一致。
+// SQLite 的 principal-first 内容索引会让每个节点扫描同主体的全部引用；
+// 单目 + 只排除该索引条件，仍由 n.principal 的 TEXT affinity 执行等值校验。
 macro_rules! backend {
-    ($put:ident, $restore:ident, $db:ty, $conn:ty) => {
+    ($put:ident, $restore:ident, $db:ty, $conn:ty, $refs_principal:literal) => {
+        #[tracing::instrument(
+            target = "stravia::perf",
+            name = "turn_chain.content.put",
+            skip_all,
+            fields(reference_count = encoded.refs.len() as u64)
+        )]
         pub(super) async fn $put(
             connection: &mut $conn, node: &str, principal: &str, encoded: &Encoded,
         ) -> anyhow::Result<()> {
@@ -98,13 +106,21 @@ macro_rules! backend {
             Ok(())
         }
 
+        #[tracing::instrument(
+            target = "stravia::perf",
+            name = "turn_chain.content.restore",
+            skip_all,
+            fields(node_count = nodes.len() as u64, reference_count)
+        )]
         pub(super) async fn $restore(connection: &mut $conn, nodes: &mut [TurnNode]) -> anyhow::Result<()> {
+            let mut reference_count = 0usize;
             for batch in nodes.chunks_mut(400) {
-                let mut query = sqlx::QueryBuilder::<$db>::new(
+                let mut query = sqlx::QueryBuilder::<$db>::new(concat!(
                     "SELECT n.id, CAST(n.storage_format AS BIGINT), r.path, r.content_key, c.content FROM turn_chain_nodes n \
-                     LEFT JOIN turn_chain_content_refs r ON r.node_id = n.id AND r.principal = n.principal \
-                     LEFT JOIN turn_chain_contents c ON c.principal = r.principal AND c.content_key = r.content_key WHERE n.id IN ("
-                );
+                     LEFT JOIN turn_chain_content_refs r ON r.node_id = n.id AND ",
+                    $refs_principal,
+                    " LEFT JOIN turn_chain_contents c ON c.principal = r.principal AND c.content_key = r.content_key WHERE n.id IN ("
+                ));
                 let mut list = query.separated(",");
                 for node in batch.iter() { list.push_bind(node.id.as_str()); }
                 list.push_unseparated(")");
@@ -126,6 +142,7 @@ macro_rules! backend {
                 }
                 for node in batch {
                     let (format, mut references) = by_node.remove(node.id.as_str()).context("history node disappeared")?;
+                    reference_count += references.len();
                     match format {
                         0 => ensure!(references.is_empty(), "unexpected history references"),
                         1 => {
@@ -146,6 +163,7 @@ macro_rules! backend {
                     }
                 }
             }
+            tracing::Span::current().record("reference_count", reference_count as u64);
             Ok(())
         }
     }
@@ -155,11 +173,13 @@ backend!(
     put_sqlite,
     restore_sqlite,
     sqlx::Sqlite,
-    sqlx::SqliteConnection
+    sqlx::SqliteConnection,
+    "+r.principal = n.principal"
 );
 backend!(
     put_postgres,
     restore_postgres,
     sqlx::Postgres,
-    sqlx::PgConnection
+    sqlx::PgConnection,
+    "r.principal = n.principal"
 );

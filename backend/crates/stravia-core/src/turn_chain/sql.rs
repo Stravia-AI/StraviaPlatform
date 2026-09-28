@@ -86,15 +86,23 @@ impl TurnChainStore for SqlTurnChainStore {
             .nodes)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "turn_chain.materialize",
+        skip_all,
+        fields(node_count)
+    )]
     async fn materialize_with_expiry(
         &self,
         principal: &Principal,
         kind: TurnNodeKind,
         id: &TurnNodeId,
     ) -> Result<MaterializedTurnChain, TurnUnavailable> {
+        use tracing::Instrument as _;
         let principal = principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
-        let rows: Vec<(String, Option<String>, i64, String, i64, i64)> = match self {
+        let rows: Vec<(String, Option<String>, i64, String, i64, i64)> = async {
+            match self {
             Self::Sqlite(pool) => {
                 // CROSS JOIN 固定 ancestors 为外层：否则无统计信息的 SQLite 会按
                 // (principal, kind) 扫描该主体全部节点，耗时随链深 × 节点数增长。
@@ -140,8 +148,15 @@ impl TurnChainStore for SqlTurnChainStore {
                 .fetch_all(pool)
                 .await
             }
+            }
         }
+        .instrument(tracing::info_span!(
+            target: "stravia::perf",
+            "turn_chain.ancestor.select"
+        ))
+        .await
         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+        tracing::Span::current().record("node_count", rows.len() as u64);
         if rows.is_empty()
             || rows
                 .first()
@@ -195,12 +210,19 @@ impl TurnChainStore for SqlTurnChainStore {
         Ok(MaterializedTurnChain { nodes, expires_at })
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "turn_chain.commit",
+        skip_all,
+        fields(reference_count)
+    )]
     async fn commit(&self, commit: TurnCommit) -> Result<TurnNodeId, TurnCommitError> {
         let principal = commit.principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         let expires_at = unix_millis_after(commit.idle_ttl);
         let encoded = content::encode(commit.payload)
             .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+        tracing::Span::current().record("reference_count", encoded.refs.len() as u64);
         let payload = &encoded.payload;
         let payload_version = i64::from(commit.payload_version);
         let prefix_namespace = commit
@@ -387,6 +409,12 @@ impl TurnChainStore for SqlTurnChainStore {
         Ok(commit.id)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "turn_chain.prefix.lookup",
+        skip_all,
+        fields(candidate_count = 0_u64)
+    )]
     async fn find_reusable_prefixes(
         &self,
         principal: &Principal,
@@ -459,6 +487,7 @@ impl TurnChainStore for SqlTurnChainStore {
             }
         }
         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+        tracing::Span::current().record("candidate_count", rows.len() as u64);
         rows.into_iter()
             .map(|(node_id, item_count, completed_at)| {
                 Ok(ReusablePrefixCandidate {

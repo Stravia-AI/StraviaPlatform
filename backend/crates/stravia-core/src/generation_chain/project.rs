@@ -474,26 +474,33 @@ pub(super) fn attach_persisted_profile(
         .insert("__open_responses_effective_request".into(), profile);
 }
 
+pub(super) fn append_history_catalog_node(
+    catalog: &mut Vec<AiItem>,
+    node: &PersistedResponseNode,
+    ingress: Option<ProtocolId>,
+) -> Result<(), String> {
+    catalog.extend(node.client_delta.messages.iter().cloned());
+    if let Some(output) = &node.client_output {
+        catalog.extend(output.iter().cloned());
+    } else if let Some(ingress) = ingress {
+        catalog.extend(project_client_history(
+            ingress,
+            &node.effective_output,
+            &mut [],
+        )?);
+    } else {
+        catalog.extend(generic_client_history_output(&node.effective_output));
+    }
+    Ok(())
+}
+
 fn history_catalog(
     persisted: &[(TurnNodeId, PersistedResponseNode)],
     ingress: Option<ProtocolId>,
 ) -> Result<Vec<AiItem>, String> {
     let mut catalog = Vec::new();
     for (_, node) in persisted {
-        catalog.extend(node.client_delta.messages.clone());
-        if let Some(output) = &node.client_output {
-            catalog.extend(output.clone());
-            continue;
-        }
-        if let Some(ingress) = ingress {
-            catalog.extend(project_client_history(
-                ingress,
-                &node.effective_output,
-                &mut [],
-            )?);
-        } else {
-            catalog.extend(generic_client_history_output(&node.effective_output));
-        }
+        append_history_catalog_node(&mut catalog, node, ingress)?;
     }
     Ok(catalog)
 }
@@ -504,8 +511,16 @@ pub(super) fn resolve_item_references(
     ingress: Option<ProtocolId>,
 ) -> Result<(), String> {
     let catalog = history_catalog(persisted, ingress)?;
+    resolve_catalog_references(messages, &catalog, ingress)
+}
+
+pub(super) fn resolve_catalog_references(
+    messages: &mut [AiItem],
+    catalog: &[AiItem],
+    ingress: Option<ProtocolId>,
+) -> Result<(), String> {
     if let Some(ingress) = ingress {
-        resolve_protocol_item_references(ingress, messages, &catalog)?;
+        resolve_protocol_item_references(ingress, messages, catalog)?;
     } else if messages
         .iter()
         .any(|item| item_reference_id(item).is_some())

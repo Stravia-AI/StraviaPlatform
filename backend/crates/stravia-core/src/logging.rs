@@ -62,10 +62,12 @@ pub fn init_runtime_logging(
     // callsite 虽固定，Debug 却可在运行时切换；不能把关闭缓存成 Interest::never。
     let sql_layer = SqlxMetricsLayer.with_filter(
         dynamic_filter_fn(|meta, _ctx| {
-            performance::is_sqlx_metric_target(meta.target()) && performance::enabled()
+            (performance::is_sqlx_metric_target(meta.target()) || meta.target() == "stravia::perf")
+                && performance::enabled()
         })
         .with_callsite_filter(|meta| {
-            if performance::is_sqlx_metric_target(meta.target()) {
+            if performance::is_sqlx_metric_target(meta.target()) || meta.target() == "stravia::perf"
+            {
                 Interest::sometimes()
             } else {
                 Interest::never()

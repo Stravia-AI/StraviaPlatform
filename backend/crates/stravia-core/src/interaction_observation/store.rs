@@ -64,6 +64,11 @@ impl ObservationStore {
         })
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.persist_tail_source",
+        skip_all
+    )]
     pub(super) async fn persist_tail_source(
         &self,
         run_id: &str,
@@ -106,6 +111,11 @@ impl ObservationStore {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.set_tail_generation_node",
+        skip_all
+    )]
     pub(super) async fn set_tail_generation_node(
         &self,
         run_id: &str,
@@ -266,6 +276,11 @@ impl ObservationStore {
         })
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.admit_persist",
+        skip_all
+    )]
     pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool) => {
@@ -390,6 +405,11 @@ impl ObservationStore {
         }
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.persist_event",
+        skip_all
+    )]
     pub async fn persist_manifest_event(
         &self,
         interaction_id: &str,
@@ -508,6 +528,11 @@ impl ObservationStore {
     }
 
     // 缺失标记不依赖事件插入或 Debug Trace，事件表写入故障时仍可保留诊断不完整状态。
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.mark_gap",
+        skip_all
+    )]
     pub async fn mark_observation_gap(&self, interaction_id: &str) -> anyhow::Result<bool> {
         let affected = match self {
             Self::Sqlite(pool) => {
@@ -528,6 +553,11 @@ impl ObservationStore {
         Ok(affected != 0)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.persist_input_preview",
+        skip_all
+    )]
     pub(super) async fn persist_input_preview(
         &self,
         interaction_id: &str,
@@ -659,6 +689,11 @@ impl ObservationStore {
 
     /// The observation writer is the sole caller: one lineage lookup per received batch,
     /// then persist in input order. Only live, same-principal parent_run_id ancestors qualify.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.filter_client_tool_results",
+        skip_all
+    )]
     pub(super) async fn filter_client_tool_results(
         &self,
         interaction_id: &str,
@@ -800,6 +835,7 @@ impl ObservationStore {
             .await?
             .pop())
     }
+    #[tracing::instrument(target = "stravia::perf", name = "observation.writer.persist_events", skip_all, fields(event_count = events.len()))]
     pub(super) async fn persist_run_events(
         &self,
         interaction_id: &str,
@@ -957,6 +993,11 @@ impl ObservationStore {
         Ok(result)
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.disconnect_waiting_client",
+        skip_all
+    )]
     pub(super) async fn disconnect_waiting_client(
         &self,
         run_id: &str,
@@ -1074,6 +1115,11 @@ impl ObservationStore {
     /// 超时未收到工具回传的等待叶 Run 按 client_wait_expired 转为 disconnected。
     /// HTTP 客户端没有连接关闭信号，闲置窗口是平台唯一能用的判定；
     /// 已收齐回传或仍有 child 的 Run 不算等待叶，不在此转换。
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.expire_idle_waiting_client",
+        skip_all
+    )]
     pub(super) async fn expire_idle_waiting_client(
         &self,
         now: i64,
@@ -1193,6 +1239,11 @@ impl ObservationStore {
     }
 
     /// 最后一个观察句柄释放后才收口残留活动，不能在响应结束时取消合法后台工具。
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.writer.finalize_activity",
+        skip_all
+    )]
     pub(super) async fn finalize_activity(
         &self,
         interaction_id: &str,
@@ -1359,6 +1410,7 @@ impl ObservationStore {
         }
     }
 
+    #[tracing::instrument(target = "stravia::perf", name = "observation.writer.reject", skip_all)]
     pub async fn reject(&self, rejection: Rejection<'_>) -> anyhow::Result<ObservationEvent> {
         let Rejection {
             ingress,

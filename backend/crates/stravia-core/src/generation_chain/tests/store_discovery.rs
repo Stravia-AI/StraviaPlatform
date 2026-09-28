@@ -3,6 +3,289 @@ use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
 type PendingPersist = tokio::task::JoinHandle<Result<(), PersistError>>;
 
+struct CountingParentTurnChainStore {
+    inner: crate::turn_chain::SqlTurnChainStore,
+    materializations: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingParentTurnChainStore {
+    fn reads(&self) -> usize {
+        self.materializations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnChainStore for CountingParentTurnChainStore {
+    async fn materialize(
+        &self,
+        principal: &Principal,
+        kind: TurnNodeKind,
+        id: &TurnNodeId,
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
+        self.materializations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.materialize(principal, kind, id).await
+    }
+
+    async fn materialize_with_expiry(
+        &self,
+        principal: &Principal,
+        kind: TurnNodeKind,
+        id: &TurnNodeId,
+    ) -> Result<
+        stravia_runtime_contract::turn_chain::MaterializedTurnChain,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
+        self.materializations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .materialize_with_expiry(principal, kind, id)
+            .await
+    }
+
+    async fn commit(
+        &self,
+        commit: TurnCommit,
+    ) -> Result<TurnNodeId, stravia_runtime_contract::turn_chain::TurnCommitError> {
+        self.inner.commit(commit).await
+    }
+
+    async fn sweep_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.sweep_expired().await
+    }
+}
+
+fn reference_to(id: &str) -> AiItem {
+    let mut item = user_message("");
+    item.meta = Some(
+        stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+            serde_json::json!({"__open_responses_item_reference": id}),
+        ),
+    );
+    item
+}
+
+fn continuation_to(id: &str, items: Vec<AiItem>) -> AiRequest {
+    let mut request = responses_request(items);
+    crate::router::stamp_previous_response_id(&mut request, id);
+    request
+}
+
+#[tokio::test]
+async fn optimization_plain_parent_reads_chain_once_cold_and_not_at_all_warm() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let owner = principal("owner");
+    let mut root = observation_payload(
+        vec![user_message("root question")],
+        None,
+        Some(vec![AiItem::output_text("root answer")]),
+        "effective root answer",
+    );
+    root["compaction_record_ids"] = serde_json::json!(["compact-root"]);
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_root",
+        None,
+        root,
+        Duration::from_secs(60),
+    )
+    .await;
+    let mut child = observation_payload(
+        vec![user_message("child question")],
+        None,
+        Some(vec![AiItem::output_text("child answer")]),
+        "effective child answer",
+    );
+    child["compaction_record_ids"] = serde_json::json!(["compact-child", "compact-root"]);
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_child",
+        Some("resp_optimization_root"),
+        child,
+        Duration::from_secs(60),
+    )
+    .await;
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    for (iteration, expected_reads) in [(0, 1), (1, 1)] {
+        let mut request = continuation_to(
+            "resp_optimization_child",
+            vec![user_message("next question")],
+        );
+        let parent = store
+            .materialize_parent(&owner, &mut request)
+            .await
+            .expect("restore parent");
+        assert_eq!(backend.reads(), expected_reads, "iteration {iteration}");
+        assert_eq!(parent.root_id.as_deref(), Some("resp_optimization_root"));
+        assert_eq!(
+            parent.compaction_record_ids,
+            ["compact-child".to_owned(), "compact-root".to_owned()]
+        );
+        assert_eq!(
+            request
+                .items
+                .iter()
+                .map(|item| item.content.to_text())
+                .collect::<Vec<_>>(),
+            [
+                "root question",
+                "effective root answer",
+                "child question",
+                "effective child answer",
+                "next question",
+            ]
+        );
+    }
+    let mut denied = continuation_to(
+        "resp_optimization_child",
+        vec![user_message("unauthorized")],
+    );
+    assert_eq!(
+        store
+            .materialize_parent(&principal("other"), &mut denied)
+            .await
+            .expect_err("cache must not cross principals"),
+        "previous_response_not_found"
+    );
+}
+
+#[tokio::test]
+async fn optimization_references_resolve_old_ancestor_after_replace_with_one_cold_read() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let owner = principal("owner");
+    let old_output = AiItem::output_text("old answer").with_graph_metadata(
+        Some("msg_old".into()),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_reference_root",
+        None,
+        observation_payload(
+            vec![user_message("old question")],
+            None,
+            Some(vec![old_output]),
+            "private old answer",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_reference_child",
+        Some("resp_optimization_reference_root"),
+        observation_payload(
+            vec![user_message("edited question")],
+            Some(EffectiveHistoryMutation::Replace {
+                items: vec![user_message("edited question")],
+            }),
+            Some(vec![AiItem::output_text("new answer")]),
+            "private new answer",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    for (iteration, expected_reads) in [(0, 1), (1, 2)] {
+        let mut request = continuation_to(
+            "resp_optimization_reference_child",
+            vec![reference_to("msg_old")],
+        );
+        store
+            .materialize_parent(&owner, &mut request)
+            .await
+            .expect("ancestor output reference survives Replace");
+        assert_eq!(backend.reads(), expected_reads, "iteration {iteration}");
+        assert_eq!(
+            request.items.last().unwrap().content.to_text(),
+            "old answer"
+        );
+        assert_eq!(request.items.last().unwrap().id_ref(), Some("msg_old"));
+        assert!(
+            !request.items[..request.items.len() - 1]
+                .iter()
+                .any(|item| item.content.to_text() == "old answer"),
+            "Replace must still remove old output from the effective execution history"
+        );
+    }
+}
+
+#[tokio::test]
+async fn optimization_reference_conflicts_across_ancestors_remain_ambiguous() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let owner = principal("owner");
+    let item = |text| {
+        AiItem::output_text(text).with_graph_metadata(
+            Some("msg_conflicting".into()),
+            Some(AiItemStatus::Completed),
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        )
+    };
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_conflict_root",
+        None,
+        observation_payload(
+            vec![user_message("question")],
+            None,
+            Some(vec![item("first answer")]),
+            "private first answer",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "resp_optimization_conflict_child",
+        Some("resp_optimization_conflict_root"),
+        observation_payload(
+            vec![user_message("followup")],
+            None,
+            Some(vec![item("conflicting answer")]),
+            "private conflicting answer",
+        ),
+        Duration::from_secs(60),
+    )
+    .await;
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    let mut request = continuation_to(
+        "resp_optimization_conflict_child",
+        vec![reference_to("msg_conflicting")],
+    );
+    assert_eq!(
+        store
+            .materialize_parent(&owner, &mut request)
+            .await
+            .expect_err("different answers with the same ID cannot resolve"),
+        "item_reference_ambiguous"
+    );
+    assert_eq!(backend.reads(), 1);
+}
+
 async fn blocked_generation_commit(
     fail: bool,
 ) -> (

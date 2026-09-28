@@ -146,6 +146,11 @@ impl UnpersistedGaps {
 }
 
 impl InteractionObservation {
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.startup",
+        skip_all
+    )]
     pub(crate) async fn new(
         sqlite: Option<SqlitePool>,
         postgres: Option<PgPool>,
@@ -400,6 +405,11 @@ impl InteractionObservation {
     pub(crate) async fn sweep_retention(&self) -> anyhow::Result<()> {
         self.sweep().await
     }
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.sweep",
+        skip_all
+    )]
     async fn sweep(&self) -> anyhow::Result<()> {
         self.flush().await?;
         let now = chrono::Utc::now().timestamp_millis();

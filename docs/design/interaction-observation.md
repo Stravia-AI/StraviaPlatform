@@ -384,7 +384,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 - 关闭立即停止新的性能样本；Wire 捕获继续遵循下述准入快照契约，不中断在途 Run，不删除已有 Trace。普通 Observation 不受影响。
 - 设置页可下载 Prometheus 文本性能快照（`GET /api/v1/performance/metrics`）及 Chrome Trace JSON 时间线（`GET /api/v1/performance/timeline`）。两者均要求管理员鉴权，以禁止缓存的附件返回，不另开监听端口。关闭 Debug 后仍能下载本进程已有数据；进程重启后不保留。清除 Debug 数据仍仅清除 Wire Trace，不重置性能指标或时间线。
 - Desktop 下载沿用宿主默认保存位置；设置页等待原生下载完成后提示实际文件路径，取消或失败不报告成功。Web 下载仍交由浏览器处理，管理员鉴权与附件格式不变。
-- 性能指标包含静态命名操作耗时、SQLx 查询与成功获取连接的耗时分布、观察写入队列深度、历史物化缓存记账字节，以及每五秒采样的宿主进程 RSS／CPU。CPU 在开启后的首个采样点不输出缺少差分基线的读数，多核 CPU 百分比可以超过 100%。不计入浏览器子进程或远端数据库内存；缓存记账容量不等于实际堆占用。
+- 性能指标包含静态命名操作耗时、按操作归因的 SQLx 查询与成功获取连接的耗时分布、观察写入队列深度、历史物化缓存记账字节及 hit/miss 次数，以及每五秒采样的宿主进程 RSS／CPU。CPU 在开启后的首个采样点不输出缺少差分基线的读数，多核 CPU 百分比可以超过 100%。不计入浏览器子进程或远端数据库内存；缓存记账容量不等于实际堆占用。
 - SQLx 指标只读取数值，不导出 SQL 文本、参数、请求正文或动态身份标签。查询事件不能说明成功／失败或所属连接池；连接获取耗时包含建连和健康检查，超时失败不在成功样本中。关闭再开启期间尚未完成的 span 不写入新启用周期。
 - 开关是当前 Gateway 进程的原子运行态；默认关闭，重启后关闭；
 - 每次开启都显示确认：除 HTTP `Authorization` header 值外，Trace 会原样保存其他 header、URL、body、提示词、工具参数、业务数据与媒体；关闭后已有 Trace 仍按保留期存在；
@@ -399,11 +399,47 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 
 常规异步函数使用 `#[tracing::instrument(target = "stravia::perf", name = "router.select", skip_all, fields(status))]` 这类静态声明；局部 future、独立任务通过 `.instrument(span)` 传播上下文。不得跨 `.await` 保留 `span.enter()` guard。响应体、WebSocket 与后台 producer 必须持有对应 span，直到真实生命周期结束；有非性能中间 span 时，仍关联最近的性能祖先。
 
-Layer 只保留静态操作名、内部生成的 span／parent ID、时间与白名单状态，忽略其他 span 字段，不使用 `ret`／`err` 自动记录业务值。默认终态为 `closed`，仅表示 span 生命周期结束；业务代码在已知结果时显式记录 `completed`、`error`、`cancelled` 或 `abandoned`。不能把函数返回、future 被丢弃或父 span 关闭自动解释为成功。
+Layer 只保留静态操作名、内部生成的 span／parent ID、时间、白名单状态，以及 `node_count`、`reference_count`、`candidate_count`、`event_count` 四个非负整数工作量字段；忽略其他 span 字段，不使用 `ret`／`err` 自动记录业务值。默认终态为 `closed`，仅表示 span 生命周期结束；业务代码在已知结果时显式记录 `completed`、`error`、`cancelled` 或 `abandoned`。不能把函数返回、future 被丢弃或父 span 关闭自动解释为成功。
 
 时间线最多保留 1,024 个活动 span 与 2,048 个结束记录；活动区满时拒收新 span（相应耗时也不入直方图），结束区满时淘汰最旧记录。JSON `metadata.capacity`、`dropped_active`、`dropped_completed`、`incomplete` 与 `incomplete_total` 显式描述容量、丢弃数、当前未完成记录数与累计未完成数，不承诺完整请求树。关闭 Debug 将活动记录冻结为未完成记录；随后关闭的旧 span 不补写终态或直方图，重新开启只接收新周期的数据。
 
 导出使用标准 Chrome Trace 事件：已结束 span 为 `X`，未结束或被 Debug 关闭截断的 span 只有 `B`，不伪造结束时间；可见父子间附带 flow。每个 span 使用合成 track，`tid` 不是操作系统线程。可导入 Perfetto 或 Chrome trace viewer 查看墙钟时长与父子关联；`active_us` 仅表示 span 被 enter 的区间并集（重入或并发 enter 不重复累加），不是 CPU 时间，未 enter 的 span 不输出该值。该时间线不是 CPU／堆 profiler；进程 CPU／RSS 仍是独立全局采样，不能归因到单个 span。
+
+#### 7.1.2 查询次数与调用来源
+
+`stravia_sql_query_duration_seconds` 和 `stravia_sql_pool_acquire_duration_seconds` 使用静态 `operation` 标签，取事件所属的最近一层性能 span；没有可归因的性能上下文时标记为 `unattributed`。不再输出无标签的并行总量，全部操作的 `_count` 求和即当前累计总次数。SQLite worker 传播调用侧 span，因此异步线程上的查询仍归属于发起它的操作；关联旧 Debug 周期 span 的延迟事件不会计入新周期。
+
+这里的查询次数是 SQLx 查询日志事件数，不是 SELECT 次数、网络往返数或数据库引擎执行的全部语句数。读、写和失败执行都可能产生事件；SQLite 原生事务控制和连接健康检查不一定产生查询事件，多语句执行也不能据此拆成逐条语句。成功获取连接的 `_count` 单独计数，不应与查询次数相加。`stravia_operation_duration_seconds_count` 则是操作调用次数，操作可以执行零条或多条 SQL。
+
+时间线中每个 span 的 `args` 可包含：
+
+|字段|含义|
+|---|---|
+|`sql_query_count` / `sql_query_duration_us`|直属 SQLx 查询事件数及其累计耗时；没有查询事件时省略|
+|`sql_pool_acquire_count` / `sql_pool_acquire_duration_us`|直属成功连接获取次数及其累计耗时；没有事件时省略|
+|`node_count`|本次底层历史物化或内容恢复的节点数|
+|`reference_count`|本次内容写入或恢复的引用条目数|
+|`candidate_count`|前缀查询返回或对应发现阶段已统计的候选数；未完成统计时可能省略|
+|`event_count`|`observation.writer.persist_events` 收到的事件批量大小，包含随后可能被过滤掉的事件|
+
+SQL 事件只计入最近的 span，不重复累加到祖先。父 span 的直属计数为零不表示整条请求没有 SQL；分析请求总量需要沿子树汇总，且必须检查记录淘汰和不完整标记。SQL 耗时是事件耗时之和，并发时可超过 span 墙钟时长，不是 CPU 时间。不会为每条 SQL 创建时间线记录，也不输出 SQL 文本、参数、Principal、Run 或节点身份作为指标标签。
+
+用于区分查询来源的主要操作：
+
+|操作|用途|
+|---|---|
+|`generation_chain.parent.*`、`generation_chain.references.resolve_available`、`generation_chain.ancestor.*`|区分显式父节点、前缀发现、压缩来源、引用恢复及后台祖先访问|
+|`generation_chain.history.load`|Generation Materialization Cache 未命中或 Item Reference 恢复所需的祖先历史读取，不能代表所有底层读链|
+|`turn_chain.materialize` → `turn_chain.ancestor.select` / `turn_chain.content.restore`|覆盖包括绕过 Generation 缓存的直接物化，拆分祖先查询与共享内容恢复|
+|`turn_chain.commit` → `turn_chain.content.put`|区分节点提交与按引用执行的内容 upsert／引用 insert|
+|`turn_chain.prefix.lookup`|持久前缀候选查询|
+|`observation.attribution.admit` / `observation.writer.admit_persist`|区分后台交互归属判定与准入记录落盘|
+|`observation.writer.persist_events`、`persist_tail_source`、`filter_client_tool_results` 等|观察事件批次、工具尾迹与工具结果归属查询|
+|`observation.manifest.*` / `observation.maintenance.*`|Debug manifest 写入、计数与保留期维护；不在空闲的每个 writer tick 上建立 span|
+
+`stravia_generation_materialization_cache_access_total{result="hit"|"miss"}` 统计普通物化与含 Item Reference 的父节点恢复对 Generation Materialization Cache 的访问。普通父节点恢复命中缓存后不再读链；含 Item Reference 时，命中只表示可复用执行上下文，仍需读取祖先历史构造引用目录。直接调用底层 Turn Chain 物化不会经过该缓存，因此不能仅凭命中率推断底层读取次数。
+
+调查时，在同一进程、同一段复现操作前后各导出一次 metrics，按 `operation` 比较 `_count` 和 `_sum` 差值，并在操作完成后立即导出 timeline。先按查询次数判断高频来源，再按耗时判断慢路径；用工作量字段区分大批次与过多小批次，用父子关系识别重复物化。指标是累计值，关闭或清除 Debug 数据不会归零；有界 timeline 与累计 metrics 也不覆盖相同时间窗口，不能直接相除推导每请求查询量。
 
 ### 7.2 脱敏
 

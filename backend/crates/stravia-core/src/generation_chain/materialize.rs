@@ -29,6 +29,34 @@ pub(super) fn materialize_generation_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
 ) -> Result<MaterializedGeneration, String> {
+    materialize_generation_nodes_inner(nodes, expires_at, |_| {})
+}
+
+pub(super) fn materialize_generation_nodes_with_catalog(
+    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+    expires_at: std::time::Instant,
+    ingress: Option<ProtocolId>,
+) -> Result<(MaterializedGeneration, Result<Vec<AiItem>, String>), String> {
+    let mut catalog = Ok(Vec::new());
+    // 保留原有错误优先级：完整验证历史后再报告引用目录的协议投影错误。
+    // 目录只服务本次引用解析，不进入跨请求缓存。
+    let materialized = materialize_generation_nodes_inner(nodes, expires_at, |node| {
+        if let Ok(items) = catalog.as_mut()
+            && let Err(error) = append_history_catalog_node(items, node, ingress)
+        {
+            catalog = Err(error);
+        }
+    })?;
+    Ok((materialized, catalog))
+}
+
+fn materialize_generation_nodes_inner(
+    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+    expires_at: std::time::Instant,
+    mut visit_node: impl FnMut(&PersistedResponseNode),
+) -> Result<MaterializedGeneration, String> {
+    let mut root_id = None;
+    let mut compaction_record_ids = Vec::new();
     let mut effective_items = Vec::new();
     let mut client_items = Vec::new();
     let mut effective_request = None;
@@ -40,7 +68,12 @@ pub(super) fn materialize_generation_nodes(
     let mut payload_version = 0;
     for node in nodes {
         let node_version = node.payload_version;
-        let (_, mut persisted) = decode_response_node(node)?;
+        let (id, mut persisted) = decode_response_node(node)?;
+        if root_id.is_none() {
+            root_id = Some(id.to_string());
+        }
+        compaction_record_ids.append(&mut persisted.compaction_record_ids);
+        visit_node(&persisted);
         match persisted.effective_history_mutation.take() {
             Some(EffectiveHistoryMutation::Append { items }) => effective_items.extend(items),
             Some(EffectiveHistoryMutation::Replace { items }) => effective_items = items,
@@ -61,9 +94,9 @@ pub(super) fn materialize_generation_nodes(
         effective_state = persisted.effective_state;
         payload_version = node_version;
     }
-    if payload_version == 0 {
-        return Err("generation chain was empty".into());
-    }
+    let root_id = root_id.ok_or_else(|| "generation chain was empty".to_string())?;
+    compaction_record_ids.sort();
+    compaction_record_ids.dedup();
     // Client identity is derived from retained client history. Do not replace
     // upstream proofs: they may describe a reversible-redaction Provider view,
     // not these retained items. An old incompatible proof safely declines
@@ -73,6 +106,8 @@ pub(super) fn materialize_generation_nodes(
         history.context_messages = client_items.len();
     }
     Ok(MaterializedGeneration {
+        root_id,
+        compaction_record_ids,
         effective_items,
         client_items,
         effective_request,
@@ -123,6 +158,14 @@ pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) 
     items
         .saturating_add(client_items)
         .saturating_add(profile)
+        .saturating_add(materialized.root_id.len())
+        .saturating_add(
+            materialized
+                .compaction_record_ids
+                .iter()
+                .map(|id| id.len().saturating_add(std::mem::size_of::<String>()))
+                .fold(0usize, usize::saturating_add),
+        )
         .saturating_add(std::mem::size_of::<MaterializedGeneration>())
 }
 

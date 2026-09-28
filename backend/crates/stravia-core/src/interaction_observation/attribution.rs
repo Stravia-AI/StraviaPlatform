@@ -291,6 +291,11 @@ impl<E: AttributionEvidence> RunAttribution<E> {
     /// Resolves one admission. `ingress_received_at` is the receipt captured at
     /// ingress; the module stamps it onto the attribution — callers ship no
     /// placeholder.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.attribution.admit",
+        skip_all
+    )]
     pub(super) async fn admit(
         &mut self,
         start: &RunStart,

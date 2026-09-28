@@ -336,6 +336,12 @@ impl GenerationChain {
             })
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.ancestor.require",
+        skip_all,
+        fields(node_count)
+    )]
     async fn require_ancestor(
         &self,
         principal: &Principal,
@@ -348,6 +354,7 @@ impl GenerationChain {
             .materialize(principal, TurnNodeKind::Response, &TurnNodeId::new(parent))
             .await
             .map_err(|_| BeginError::CompactionUnavailable)?;
+        tracing::Span::current().record("node_count", nodes.len() as u64);
         if nodes.iter().any(|node| node.id.as_str() == source) {
             Ok(())
         } else {
@@ -358,6 +365,12 @@ impl GenerationChain {
     /// Visits cumulative ancestor client items of a completed response node.
     /// Generation Chain owns its schema; callers borrow each root-to-head snapshot,
     /// never node payloads. An incomplete or expired chain declines without visiting.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.ancestor.visit_client_items",
+        skip_all,
+        fields(node_count)
+    )]
     pub(crate) async fn visit_ancestor_client_items(
         &self,
         principal: &Principal,
@@ -371,6 +384,7 @@ impl GenerationChain {
             .await
         {
             Ok(nodes) => {
+                tracing::Span::current().record("node_count", nodes.len() as u64);
                 visit_client_items_from_nodes(nodes, visit).map_err(anyhow::Error::msg)?;
                 Ok(true)
             }

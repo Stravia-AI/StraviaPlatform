@@ -6,6 +6,11 @@ use sqlx::Connection;
 use std::collections::HashSet;
 
 impl ObservationStore {
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.update_retention",
+        skip_all
+    )]
     pub async fn update_retention(&self, days: u32) -> anyhow::Result<()> {
         let ttl = i64::from(days).saturating_mul(86_400_000);
         match self {
@@ -39,6 +44,11 @@ impl ObservationStore {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.list_ids",
+        skip_all
+    )]
     pub async fn manifest_ids(&self) -> anyhow::Result<(HashSet<String>, HashSet<String>)> {
         let rows: Vec<(String, bool)> = match self {
             Self::Sqlite(p) => {
@@ -63,6 +73,11 @@ impl ObservationStore {
         }
         Ok((retained, tomb))
     }
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.delete_tombstones",
+        skip_all
+    )]
     pub async fn delete_manifests(&self, ids: &[String]) -> anyhow::Result<()> {
         for id in ids {
             match self {
@@ -89,6 +104,11 @@ impl ObservationStore {
 
     /// Tombstone every Debug manifest so retained trace files can be removed wholesale.
     /// Active runs may re-persist their manifest afterwards with a partial status.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.mark_all_tombstones",
+        skip_all
+    )]
     pub async fn mark_all_debug_tombstones(&self) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
@@ -114,6 +134,11 @@ impl ObservationStore {
         }
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.mark_expired_tombstones",
+        skip_all
+    )]
     pub async fn mark_expired_tombstones(&self, now: i64) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
@@ -142,6 +167,11 @@ impl ObservationStore {
             }
         }
     }
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.purge_expired",
+        skip_all
+    )]
     pub async fn purge_expired_rows(&self, now: i64) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
@@ -161,6 +191,11 @@ impl ObservationStore {
         }
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.mark_clear_tombstones",
+        skip_all
+    )]
     pub async fn mark_clear_tombstones(&self) -> anyhow::Result<ClearHistoryResult> {
         match self {
             Self::Sqlite(p) => {
@@ -198,6 +233,11 @@ impl ObservationStore {
             }
         }
     }
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.maintenance.purge_clear",
+        skip_all
+    )]
     pub async fn purge_clear_rows(&self) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
@@ -216,11 +256,17 @@ impl ObservationStore {
             }
         }
     }
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "observation.manifest.counts",
+        skip_all
+    )]
     pub async fn debug_manifest_counts(&self) -> anyhow::Result<(u64, u64)> {
         let (bytes,partial):(i64,i64)=match self{Self::Sqlite(p)=>sqlx::query_as("SELECT COALESCE(SUM(bytes_written),0),COALESCE(SUM(CASE WHEN status='partial' AND completed_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM debug_trace_manifests WHERE tombstoned=0").fetch_one(p).await?,Self::Postgres(p)=>sqlx::query_as("SELECT COALESCE(SUM(bytes_written),0),COALESCE(SUM(CASE WHEN status='partial' AND completed_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM debug_trace_manifests WHERE tombstoned=FALSE").fetch_one(p).await?};
         Ok((bytes.max(0) as u64, partial.max(0) as u64))
     }
 
+    #[tracing::instrument(target = "stravia::perf", name = "observation.manifest.save", skip_all)]
     pub async fn save_manifest(
         &self,
         run_id: Option<&str>,
