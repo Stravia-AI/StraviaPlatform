@@ -338,6 +338,7 @@ impl Gateway {
             hook_runtime: HookRuntime::default(),
             mcp_registry: McpToolRegistry::default(),
             history_markers,
+            reasoning_rejections: history_marker::ReasoningRejections::default(),
             redaction,
             turn_chains,
             generation_chains,

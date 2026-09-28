@@ -1,3 +1,4 @@
+mod rejections;
 mod sql;
 mod syntax;
 
@@ -10,6 +11,7 @@ use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::ToolCall;
 
+pub(crate) use rejections::{ReasoningRejections, protected_payload_digests};
 pub use sql::SqlHistoryMarkerStore;
 #[cfg(test)]
 pub(crate) use syntax::render_text_projection_span;
@@ -49,10 +51,22 @@ pub struct ThinkingSource {
 pub(crate) enum ThinkingProvenance {
     /// 来源记录证明由同一签发作用域产生。
     Verified,
-    /// 无来源记录（客户端提供或记录已丢失），或旧记录无法拆出签发作用域。
+    /// 无来源记录（客户端提供或记录已丢失），或同一出口协议下签发作用域不同：
+    /// 上游仍可能接受，乐观回放。
     Unknown,
-    /// 来源记录证明属于其它签发作用域，或私有记录已损坏。
+    /// 当前签发作用域已拒绝过、出口协议不同、协议绑定的模型不同，或私有记录已损坏。
     Foreign,
+}
+
+/// 已知协议按协议族比较；插件自定义的协议标识按原字符串比较。
+fn same_protocol(
+    left: &stravia_runtime_contract::protocol::ids::ProtocolIdentity,
+    right: &stravia_runtime_contract::protocol::ids::ProtocolIdentity,
+) -> bool {
+    match (left.protocol(), right.protocol()) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 impl ThinkingSource {
@@ -62,10 +76,19 @@ impl ThinkingSource {
         serde_json::from_value(item.meta.as_ref()?.get(Self::ITEM_META_KEY)?.clone()).ok()
     }
 
+    /// 按兼容性判定（ADR-0075）：只有已被当前签发作用域拒绝过，或能确定上游必然拒绝
+    /// （出口协议不同、协议绑定的模型不同）时才判为 Foreign；签发作用域不同但仍可能
+    /// 被接受的载荷按来源不明处理，交给上游校验与拒绝恢复。
     pub(crate) fn provenance(
         &self,
         item: &stravia_runtime_contract::protocol::ir::AiItem,
+        rejections: &ReasoningRejections,
     ) -> ThinkingProvenance {
+        if let Some(authority) = &self.authority
+            && rejections.rejected(authority, item)
+        {
+            return ThinkingProvenance::Foreign;
+        }
         let Some(stamp) = item
             .meta
             .as_ref()
@@ -76,16 +99,29 @@ impl ThinkingSource {
         let Ok(source) = serde_json::from_value::<Self>(stamp.clone()) else {
             return ThinkingProvenance::Foreign;
         };
-        match &source.authority {
-            Some(authority) if self.authority.as_ref() == Some(authority) => {
-                ThinkingProvenance::Verified
-            }
-            Some(_) => ThinkingProvenance::Foreign,
-            // 旧记录只有整体 namespace：相等仍可证明；不等时拆不出签发作用域，
-            // 按来源不明处理，交给上游校验与拒绝恢复。
-            None if source.namespace == self.namespace => ThinkingProvenance::Verified,
-            None => ThinkingProvenance::Unknown,
+        let same_scope = match &source.authority {
+            Some(authority) => self.authority.as_ref() == Some(authority),
+            // 旧记录只有整体 namespace：相等仍可证明，不等时拆不出签发作用域。
+            None => source.namespace == self.namespace,
+        };
+        if same_scope {
+            return ThinkingProvenance::Verified;
         }
+        if let (Some(egress), Some(issuer)) = (&self.protocol, &source.protocol)
+            && !same_protocol(egress, issuer)
+        {
+            return ThinkingProvenance::Foreign;
+        }
+        if self
+            .protocol
+            .as_ref()
+            .and_then(|protocol| protocol.protocol())
+            .is_some_and(stravia_protocol_codec::transform::protected_thinking_binds_model)
+            && source.actual_model != self.actual_model
+        {
+            return ThinkingProvenance::Foreign;
+        }
+        ThinkingProvenance::Unknown
     }
 
     pub(crate) fn stamp_response(
