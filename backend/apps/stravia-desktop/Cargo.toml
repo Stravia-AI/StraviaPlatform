@@ -10,7 +10,7 @@ description = "Stravia Agent infra — Desktop Application"
 workspace = true
 
 [features]
-desktop-e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+desktop-e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver", "dep:windows"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -47,6 +47,8 @@ tauri = { workspace = true, features = ["macos-private-api"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+# The WebDriver plugin imports CreateStreamOnHGlobal without enabling its windows feature.
+windows = { version = "0.61", optional = true, features = ["Win32_System_Com_StructuredStorage"] }
 
 [build-dependencies]
 tauri-build = { workspace = true }

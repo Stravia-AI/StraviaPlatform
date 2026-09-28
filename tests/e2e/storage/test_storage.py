@@ -73,7 +73,7 @@ def test_failed_request_projection_survives_restart_and_clear(
     logs = []
     try:
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = initialize_server(base, wait_for_setup_token(logs, process), database)
         env = {"admin": base, "proxy": base, "auth": session.auth_headers(), "mock": f"http://127.0.0.1:{mock_port}"}
         model = f"observation-always-failed-storage-{backend}"
@@ -96,7 +96,7 @@ def test_failed_request_projection_survives_restart_and_clear(
         stop_stravia_server(process, logs)
         process = None
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = WebSession(base)
         status, _ = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
         assert status == 200
@@ -430,7 +430,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
     try:
         with echo_provider() as (upstream, received):
             process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             session = initialize_server(base, wait_for_setup_token(logs, process), database)
             env = {"admin": base, "proxy": base, "mock": upstream, "auth": session.auth_headers()}
             model = f"reversible-restart-{backend}"
@@ -457,7 +457,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             process = None
 
             process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-            wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+            wait_until_ready(f"{base}/api/v1/auth/state")
             session = WebSession(base)
             status, body = session.request(
                 "POST", "/api/v1/auth/login",
@@ -539,7 +539,7 @@ def test_observation_tool_replay_and_trace_survive_restart(
     logs: list[str] = []
     try:
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = initialize_server(base, wait_for_setup_token(logs, process), database)
         env = {"admin": base, "proxy": base, "mock": f"http://127.0.0.1:{upstream_port}", "auth": session.auth_headers()}
         model = f"observation-tool-loop-{backend}"
@@ -551,7 +551,7 @@ def test_observation_tool_replay_and_trace_survive_restart(
                 stop_stravia_server(process, logs)
                 process = None
                 process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-                wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+                wait_until_ready(f"{base}/api/v1/auth/state")
                 session = WebSession(base)
                 status, body = session.request("POST", "/api/v1/auth/login", {
                     "username": "admin", "password": "correct horse battery staple",

@@ -38,7 +38,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
     try:
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = initialize_server(base, wait_for_setup_token(logs, process), database)
         env = {"admin": base, "proxy": base, "auth": session.auth_headers()}
         model = f"native-cold-{backend}"
@@ -68,7 +68,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
         stop_stravia_server(process, logs)
         process = None
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = WebSession(base)
         status, body = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
         assert status == 200, body
@@ -87,7 +87,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
         stop_stravia_server(process, logs)
         process = None
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
-        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        wait_until_ready(f"{base}/api/v1/auth/state")
         session = WebSession(base)
         status, body = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
         assert status == 200, body

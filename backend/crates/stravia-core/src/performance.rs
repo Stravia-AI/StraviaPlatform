@@ -377,10 +377,10 @@ where
         }
         let mut status = StatusVisitor::default();
         values.record(&mut status);
-        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id) {
-            if let Some(status) = status.status {
-                active.status = Some(status);
-            }
+        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id)
+            && let Some(status) = status.status
+        {
+            active.status = Some(status);
         }
     }
 
@@ -413,14 +413,14 @@ where
         if !any_enabled(&sources) || perf.epoch != EPOCH.load(Ordering::Acquire) {
             return;
         }
-        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id) {
-            if active.active_depth > 0 {
-                active.active_depth -= 1;
-                if active.active_depth == 0 {
-                    if let Some(start) = active.active_started.take() {
-                        active.active_elapsed += start.elapsed();
-                    }
-                }
+        if let Some(active) = TIMELINE.lock().active.get_mut(&perf.id)
+            && active.active_depth > 0
+        {
+            active.active_depth -= 1;
+            if active.active_depth == 0
+                && let Some(start) = active.active_started.take()
+            {
+                active.active_elapsed += start.elapsed();
             }
         }
     }

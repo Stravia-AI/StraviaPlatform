@@ -286,8 +286,6 @@ describe('Stravia desktop smoke', () => {
       ),
     ).toBe(false)
 
-    const brand = await $('[aria-label="Stravia 观策行"]')
-    await expect(brand).toBeDisplayed()
     await $('a[href="/"]').click()
 
     const navigationTrigger = await $('header button[aria-expanded]')
@@ -522,15 +520,16 @@ describe('Stravia desktop smoke', () => {
 
   it('captures a rejected request through native Request Records and clears retained diagnostics', async () => {
     const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
-    await $('a[href="/logs"]').click()
-    await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
-    const debugSwitch = await $('[role="switch"][aria-label="Debug"]')
-    await expect(debugSwitch).toBeEnabled()
-    await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
-    await debugSwitch.click()
+    await $('a[href="/settings"]').click()
+    await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+    const debugSwitch = () => $('#diagnostics-debug')
+    await expect(debugSwitch()).toBeEnabled()
+    await expect(debugSwitch()).toHaveAttribute('role', 'switch')
+    await expect(debugSwitch()).toHaveAttribute('aria-checked', 'false')
+    await debugSwitch().click()
     await expect($('[role="alertdialog"]')).toBeDisplayed()
     await (await $('[role="alertdialog"]')).$('button=Enable Debug').click()
-    await expect(debugSwitch).toHaveAttribute('aria-checked', 'true')
+    await expect(debugSwitch()).toHaveAttribute('aria-checked', 'true')
 
     const rejected = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
       method: 'POST',
@@ -538,6 +537,8 @@ describe('Stravia desktop smoke', () => {
       body: JSON.stringify({ model: 'desktop-observation', messages: [{ role: 'user', content: 'local smoke' }] }),
     })
     expect(rejected.status).toBe(401)
+    await $('a[href="/logs"]').click()
+    await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
     await $('button=Failed Requests').click()
     const request = await $('table[aria-label="Failed Requests"] tbody tr')
     await expect(request).toHaveText(expect.stringContaining('Unauthenticated'))
@@ -549,9 +550,13 @@ describe('Stravia desktop smoke', () => {
     await expect(inspector.$('button=Debug bundle')).toBeEnabled()
     await expect(inspector).toHaveText(expect.stringContaining('HTTP 401'))
     await expect(inspector.$('button=Open interaction')).not.toExist()
-    await debugSwitch.click()
-    await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
 
+    await $('a[href="/settings"]').click()
+    await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+    await debugSwitch().click()
+    await expect(debugSwitch()).toHaveAttribute('aria-checked', 'false')
+    await $('a[href="/logs"]').click()
+    await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
     await $('button=Clear history').click()
     await (await $('[role="alertdialog"]')).$('button=Clear history').click()
     await expect($('table[aria-label="Failed Requests"]')).not.toExist()

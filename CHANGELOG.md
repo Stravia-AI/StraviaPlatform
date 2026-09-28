@@ -14,13 +14,17 @@
 
 ### Changed
 
-- Updated compatible Rust and WebUI dependencies, including Tauri 2.12, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3. Refreshed workspace and Wasm fixture lockfiles and consolidated compatible duplicate dependencies. TypeScript remains on 6.0 while the Svelte and ESLint toolchains do not support TypeScript 7; incompatible upstream dependency ranges remain separate rather than being forced through overrides.
+- Updated compatible Rust and WebUI dependencies, including Tauri 2.11.2, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3. Refreshed workspace and Wasm fixture lockfiles and consolidated compatible duplicate dependencies. TypeScript remains on 6.0 while the Svelte and ESLint toolchains do not support TypeScript 7; incompatible upstream dependency ranges remain separate rather than being forced through overrides.
 
 - The single Debug switch and Debug Trace cleanup action now live in Settings → Diagnostics instead of Request History. The switch controls performance sampling and wire capture together, requires confirmation when enabled, and resets after restart. Disabling freezes performance data, marks active spans incomplete, and preserves the capture decisions of in-flight requests.
 
 - Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
 
 ### Fixed
+
+- Desktop performance exports now report the saved file path after the native download completes, or show a cancellation/failure message instead of silently saving files without feedback.
+
+- Restored Windows desktop WebDriver builds by keeping Tauri 2.11.2 and its runtime/macro dependencies compatible with WebDriver 1.4.0's WebView2 bindings, and enabling the missing StructuredStorage feature only for desktop E2E. WebUI and desktop smoke tests now use Settings → Diagnostics for Debug controls. Storage restart tests use the shared cold-Gateway startup budget instead of overriding it with 30 seconds. Named the credential string-token type and simplified performance-span conditions to satisfy Clippy without changing redaction or timing behavior.
 
 - Fixed the CI Rust formatting check for the SQLite ancestor-walk regression test; test behavior is unchanged.
 

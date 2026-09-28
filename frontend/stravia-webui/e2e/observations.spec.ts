@@ -3088,19 +3088,24 @@ test.describe('Interaction Observation canvas', () => {
       await route.fallback()
     })
 
+    await page.goto('/settings')
+    const diagnostics = page.getByRole('region', { name: 'Diagnostics' })
+    await expect(diagnostics).toContainText('Currently saved: 1.1 GiB.')
     await page.goto('/logs')
     await page.getByRole('button', { name: 'Clear history', exact: true }).click()
     await page
       .getByRole('alertdialog', { name: 'Clear history' })
       .getByRole('button', { name: 'Clear history', exact: true })
       .click()
-    await page.getByRole('switch', { name: 'Debug' }).click()
-    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently saved: 0 B.')
+    await expect(page.getByRole('alertdialog', { name: 'Clear history' })).toBeHidden()
+    await page.goto('/settings')
+    await expect(diagnostics).toContainText('Currently saved: 0 B.')
   })
 
   test('clears retained Debug data while Debug stays enabled', async ({ page }) => {
     const fixture = await installObservationFixture(page)
-    await page.goto('/logs')
+    await page.goto('/settings')
+    await expect(page.getByRole('switch', { name: 'Debug' })).not.toBeChecked()
     await expect(page.getByRole('button', { name: 'Clear debug data' })).toBeHidden()
 
     await page.getByRole('switch', { name: 'Debug' }).click()
@@ -3186,6 +3191,7 @@ test.describe('Interaction Observation canvas', () => {
       await expect(inspector).toBeHidden()
       await expect(selectedNode).toBeFocused()
 
+      await page.goto('/settings')
       const debugSwitch = page.getByRole('switch', { name: 'Debug' })
       await debugSwitch.click()
       const confirmation = page.getByRole('alertdialog', { name: 'Enable Debug' })
@@ -3207,6 +3213,7 @@ test.describe('Interaction Observation canvas', () => {
       await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toBeVisible()
 
       await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Cancel' }).click()
+      await page.goto('/logs')
       await page.locator('.svelte-flow__pane').scrollIntoViewIfNeeded()
       const paneBox = (await page.locator('.svelte-flow__pane').boundingBox())!
       const centerX = paneBox.x + paneBox.width / 2

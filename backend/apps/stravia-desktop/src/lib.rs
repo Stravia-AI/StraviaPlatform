@@ -20,9 +20,10 @@ use stravia_core::{
 };
 use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 use tauri::{
-    Manager,
+    Emitter, Manager,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    webview::DownloadEvent,
 };
 use window_geometry::WindowGeometry;
 
@@ -866,6 +867,21 @@ fn build_main_window(
     // 原生窗口必须带着位置创建；Windows 可能在 WebView 初始化时重置创建后的坐标。
     let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
         .data_directory(webview_dir)
+        .on_download(|webview, event| {
+            if let DownloadEvent::Finished { url, path, success } = event
+                && let Err(error) = webview.emit(
+                    "desktop-download-finished",
+                    serde_json::json!({
+                        "url": url.as_str(),
+                        "path": path.map(|path| path.to_string_lossy().into_owned()),
+                        "success": success,
+                    }),
+                )
+            {
+                tracing::warn!(%error, "failed to report desktop download result");
+            }
+            true
+        })
         .visible(visible)
         .focused(visible)
         .build()?;

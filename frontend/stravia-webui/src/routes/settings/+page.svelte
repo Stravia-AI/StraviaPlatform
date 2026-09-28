@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import SaveIcon from '@lucide/svelte/icons/save'
+import { listen } from '@tauri-apps/api/event'
 import { setMode, userPrefersMode } from 'mode-watcher'
 import { toast } from 'svelte-sonner'
 import { onDestroy, onMount } from 'svelte'
@@ -38,6 +39,14 @@ let clearingDebug = $state(false)
 let downloadingPerformance = $state<'metrics' | 'timeline' | null>(null)
 let performanceDownloadHref: string | undefined
 let performanceDownloadDisposed = false
+let performanceDownloadUnlisten: (() => void) | undefined
+let cancelPerformanceDownload: (() => void) | undefined
+
+interface DesktopDownloadFinished {
+  url: string
+  path: string | null
+  success: boolean
+}
 let artifactDraft = $state<ArtifactSettings>()
 let artifactSaving = $state(false)
 let artifactError = $state('')
@@ -181,7 +190,11 @@ onMount(() => {
 
 onDestroy(() => {
   performanceDownloadDisposed = true
+  cancelPerformanceDownload?.()
+  performanceDownloadUnlisten?.()
+  performanceDownloadUnlisten = undefined
   if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
+  performanceDownloadHref = undefined
 })
 
 async function saveSetting(key: string, value: string): Promise<void> {
@@ -295,24 +308,60 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
     const blob = await admin.performance[kind]()
     if (performanceDownloadDisposed) return
     if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
-    performanceDownloadHref = undefined
     const href = URL.createObjectURL(blob)
+    performanceDownloadHref = href
+    let completed: PromiseWithResolvers<DesktopDownloadFinished | null> | undefined
+    if (isTauri) {
+      completed = Promise.withResolvers<DesktopDownloadFinished | null>()
+      cancelPerformanceDownload = () => completed?.resolve(null)
+      performanceDownloadUnlisten = await listen<DesktopDownloadFinished>('desktop-download-finished', (event) => {
+        if (event.payload.url === href) {
+          cancelPerformanceDownload = undefined
+          // The native download completion is the only reliable success signal.
+          completed?.resolve(event.payload)
+        }
+      })
+      if (performanceDownloadDisposed) return
+    }
     const link = document.createElement('a')
     link.href = href
     link.download = kind === 'metrics' ? 'stravia-performance-metrics.prom' : 'stravia-performance-trace.json'
+    document.body.append(link)
     try {
-      document.body.append(link)
       link.click()
-      performanceDownloadHref = href
     } catch (error) {
-      URL.revokeObjectURL(href)
+      if (!isTauri) {
+        URL.revokeObjectURL(href)
+        performanceDownloadHref = undefined
+      }
       throw error
     } finally {
       link.remove()
     }
+    if (completed) {
+      const result = await completed.promise
+      if (!performanceDownloadDisposed && result) {
+        if (result.success) {
+          toast.success(
+            result.path
+              ? m.settings_diagnostics_download_saved_to({ path: result.path })
+              : m.settings_diagnostics_download_completed(),
+          )
+        } else {
+          toast.error(m.settings_diagnostics_download_failed())
+        }
+      }
+    }
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    if (!performanceDownloadDisposed) toast.error(localizeBackendErrorMessage(error))
   } finally {
+    performanceDownloadUnlisten?.()
+    performanceDownloadUnlisten = undefined
+    cancelPerformanceDownload = undefined
+    if (isTauri && performanceDownloadHref) {
+      URL.revokeObjectURL(performanceDownloadHref)
+      performanceDownloadHref = undefined
+    }
     downloadingPerformance = null
   }
 }

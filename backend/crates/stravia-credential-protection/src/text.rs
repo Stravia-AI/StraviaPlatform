@@ -148,10 +148,12 @@ fn arguments_text(arguments: &mut String, visit: &mut Visitor<'_>) -> Result<(),
     Ok(())
 }
 
+type ClosedStringToken = (usize, usize, Option<String>);
+
 // 完整闭合的字符串 token：返回（含引号的字节区间, 解码值——转义损坏时为
 // None，不凭空解码），以及第一个未闭合字符串的开引号位置；其后的字节
 // 一律按字符串残段处理。
-fn closed_string_tokens(raw: &str) -> (Vec<(usize, usize, Option<String>)>, Option<usize>) {
+fn closed_string_tokens(raw: &str) -> (Vec<ClosedStringToken>, Option<usize>) {
     let bytes = raw.as_bytes();
     let mut tokens = Vec::new();
     let mut unterminated = None;
