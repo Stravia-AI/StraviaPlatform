@@ -10,6 +10,10 @@
 
 - Cline Pass is now served by the embedded base Vendor's `cline-pass` catalog Profile — standard OpenAI-compatible access with API-key authentication plus subscription allowance monitoring — and no dedicated plugin package is built or required. A `clinepass` plugin previously imported from a local package is not migrated or uninstalled automatically; recreate the connection as a base `cline-pass` Provider, rebind its Routes, then uninstall the old plugin in **Vendor Plugins**.
 
+### Changed
+
+- Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
+
 ### Fixed
 
 - The bundled base plugin now updates on startup when its version is unchanged but its component digest differs, including when the previous bundled artifact is unavailable. Identical components are not reinstalled; downgrades and locally installed replacements remain excluded from automatic updates.

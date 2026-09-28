@@ -1365,7 +1365,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Result<()> {
+async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     for (model, values, context, output, input_modalities) in [
@@ -1412,7 +1412,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
 
     let route = admin
         .create_model(CreateRoute {
-            model_id: "intersection-route".into(),
+            model_id: "union-route".into(),
             display_name: None,
             balance: None,
 
@@ -1444,7 +1444,12 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
 
     assert_eq!(
         route.supported_thinking_levels,
-        vec![ThinkingLevel::Low, ThinkingLevel::High]
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::High,
+            ThinkingLevel::Max,
+        ]
     );
     assert_eq!(route.context_window, Some(128_000));
     assert_eq!(route.output_max_tokens, Some(32_000));

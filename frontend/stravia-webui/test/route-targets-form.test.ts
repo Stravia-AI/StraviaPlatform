@@ -235,7 +235,9 @@ describe('route targets form', () => {
     expect(buildRouteTargets(targets).error).toBe('no-enabled-target')
   })
 
-  test('supported thinking levels require every enabled target to expose the level', () => {
+  test('supported thinking levels are the union across enabled targets in canonical order', () => {
+    expect(routeSupportedThinkingLevels([])).toEqual([])
+
     const map = (hidden: ThinkingLevel[]): ThinkingLevelMapping[] =>
       THINKING_LEVELS.map((level) => ({
         level,
@@ -243,7 +245,12 @@ describe('route targets form', () => {
         source: 'generated',
       }))
     const targets = [
-      createRouteTarget([], { providerId: 'provider-a', model: 'model-a', enabled: true, thinkingLevelMap: map([]) }),
+      createRouteTarget([], {
+        providerId: 'provider-a',
+        model: 'model-a',
+        enabled: true,
+        thinkingLevelMap: map(['max']),
+      }),
     ]
     targets.push(
       createRouteTarget(targets, {
@@ -254,12 +261,13 @@ describe('route targets form', () => {
       }),
     )
 
+    // 'xhigh' is offered by provider-a alone; 'max' by neither.
+    expect(routeSupportedThinkingLevels(targets)).toEqual(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+
+    targets[0].enabled = false
     expect(routeSupportedThinkingLevels(targets)).toEqual(['off', 'minimal', 'low', 'medium', 'high'])
 
     targets[1].enabled = false
-    expect(routeSupportedThinkingLevels(targets)).toEqual(THINKING_LEVELS)
-
-    targets[0].enabled = false
     expect(routeSupportedThinkingLevels(targets)).toEqual([])
   })
 })

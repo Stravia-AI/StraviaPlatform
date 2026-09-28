@@ -1978,8 +1978,10 @@ mod tests {
         assert_eq!(
             active.supported_thinking_levels,
             vec![
+                ThinkingLevel::Off,
                 ThinkingLevel::Minimal,
                 ThinkingLevel::Low,
+                ThinkingLevel::Medium,
                 ThinkingLevel::High
             ]
         );

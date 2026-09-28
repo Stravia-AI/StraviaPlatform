@@ -748,7 +748,7 @@ Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小�
 
 > `ingress_protocol` 不属于 Route 配置；它由 `RequestContext` 携带，并写入 `inference_run_observations.ingress_protocol`。Rejected Request 则写入 `rejected_request_observations.ingress_protocol`。
 
-**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 的共享连续失败计数、冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
+**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力聚合。Target 的共享连续失败计数、冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
 
 SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 区分模型目标与合法的 Provider-only 目标。
 
@@ -756,7 +756,7 @@ SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` �
 
 运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。`UsageStatsStore` 从 `target_attempt_observations` 读取 Confirmed Upstream Usage：Traffic Equalization 比较过去 24 小时的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。查询失败时返回最后一次成功的进程内 snapshot 并标记 `stale`；尚无 snapshot 或 Observation gap 造成历史不完整时按无历史样本执行原有确定性 fallback，观测故障不能阻断选路。
 
-客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；客户端未提供任何推理指令时才继承 Route 的可选默认档位。先按既有策略选择 Target，再以原请求档位在该 Target 的非 Hidden Thinking Level Map 中匹配：精确档位优先，否则优先向上选择最近档位，无更高档位时才向下选择最近档位，并生成 protocol-native control。off 并非禁止向上匹配；不同 Target 的实际档位可以不同。每次 failover 都从原请求档位重新匹配，不沿用上一个 Target 的实际档位。若选中 Target 全部 Mapping 为 Hidden，客户端显式档位跳过该 Target 并尝试可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续。Route 的 Supported Thinking Levels 仍由所有已启用 Target 的非 Hidden Mapping 交集派生，只是管理面、模型发现及客户端配置导出的保守共同能力展示，不钳制执行，也不决定 Target 准入。`GET /v1/models` 仍仅在交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control；客户端配置导出仍使用该交集，字段与导出格式不变。
+客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；客户端未提供任何推理指令时才继承 Route 的可选默认档位。先按既有策略选择 Target，再以原请求档位在该 Target 的非 Hidden Thinking Level Map 中匹配：精确档位优先，否则优先向上选择最近档位，无更高档位时才向下选择最近档位，并生成 protocol-native control。off 并非禁止向上匹配；不同 Target 的实际档位可以不同。每次 failover 都从原请求档位重新匹配，不沿用上一个 Target 的实际档位。若选中 Target 全部 Mapping 为 Hidden，客户端显式档位跳过该 Target 并尝试可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续。Route 的 Supported Thinking Levels 由所有已启用 Target 的非 Hidden Mapping 并集派生，供管理面、模型发现及客户端配置导出展示至少一个已启用 Target 支持的等级，不钳制执行，也不决定 Target 准入。无已启用 Target 时集合为空；等级按 off、minimal、low、medium、high、xhigh、max 排序且不重复。`GET /v1/models` 仅在并集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control；客户端配置导出使用该并集，字段与导出格式不变。
 
 按 Catalog `reasoning_options` 生成 Thinking Level Map 时，Provider 协议无法表达的行一律降级为 Hidden（不提供该等级，而不猜测 wire 形状）；用户显式提交的不可写 Control 仍按 `THINKING_CONTROL_UNREPRESENTABLE` 拒绝。
 

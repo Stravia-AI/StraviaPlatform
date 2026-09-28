@@ -40,7 +40,7 @@ export function routeSupportedThinkingLevels(targets: RouteTargetForm[]): Thinki
   const enabled = targets.filter((target) => target.enabled)
   if (enabled.length === 0) return []
   return THINKING_LEVELS.filter((level) =>
-    enabled.every((target) =>
+    enabled.some((target) =>
       target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden'),
     ),
   )

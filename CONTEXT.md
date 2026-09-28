@@ -549,12 +549,12 @@ _避免使用_：Omitted Mapping、Null Level、Unsupported Level（当指对照
 
 ## Supported Thinking Levels
 
-Supported Thinking Levels 是一条 Route 的所有已启用 Target 非 Hidden Mapping 的交集，供管理面、模型发现面及客户端配置导出保守地展示共同能力；它不由管理员单独配置，也不是请求执行的准入集合或钳制集合。即使交集为空，只要选中的 Target 有非 Hidden Mapping，显式 Thinking Level 仍可按该 Target 的映射执行。它不是 catalog 的 reasoning_options，也不是对照表里的上游值。
+Supported Thinking Levels 是一条 Route 的所有已启用 Target 非 Hidden Mapping 的并集，供管理面、模型发现面及客户端配置导出展示至少一个已启用 Target 支持的等级；无已启用 Target 时为空。它不由管理员单独配置，也不是请求执行的准入集合或钳制集合；实际档位仍按选中 Target 的映射匹配，不保证每个 Target 都提供同一档位。它不是 catalog 的 reasoning_options，也不是对照表里的上游值。
 _避免使用_：Advertised Thinking Levels、Visible Thinking Levels、Supported Reasoning
 
 ## Default Thinking Level
 
-Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不在 Supported Thinking Levels 中的档位；运行时与客户端显式档位统一按选中 Target 的非 Hidden Mapping 匹配，不受 Route 交集钳制。客户端显式给出的任何推理指令优先于它。若选中 Target 的 Mapping 全为 Hidden，客户端显式档位跳过该 Target 并继续可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续，由上游模型自行决定。
+Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不在 Supported Thinking Levels 中的档位；运行时与客户端显式档位统一按选中 Target 的非 Hidden Mapping 匹配，不受 Route 的 Supported Thinking Levels 钳制。客户端显式给出的任何推理指令优先于它。若选中 Target 的 Mapping 全为 Hidden，客户端显式档位跳过该 Target 并继续可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续，由上游模型自行决定。
 _避免使用_：Route Reasoning Default、Fallback Effort、Implicit Thinking
 
 ## Target Thinking Control
