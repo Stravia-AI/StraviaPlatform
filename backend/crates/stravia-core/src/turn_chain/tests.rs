@@ -595,7 +595,10 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .await
         .expect("materialize within VM budget");
     assert_eq!(chain.len(), DEPTH);
-    eprintln!("TICKS materialize={}", ticks.load(std::sync::atomic::Ordering::Relaxed));
+    eprintln!(
+        "TICKS materialize={}",
+        ticks.load(std::sync::atomic::Ordering::Relaxed)
+    );
     ticks.store(0, std::sync::atomic::Ordering::Relaxed);
     store
         .commit(TurnCommit {
@@ -610,5 +613,8 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         })
         .await
         .expect("renew ancestors within VM budget");
-    eprintln!("TICKS commit={}", ticks.load(std::sync::atomic::Ordering::Relaxed));
+    eprintln!(
+        "TICKS commit={}",
+        ticks.load(std::sync::atomic::Ordering::Relaxed)
+    );
 }

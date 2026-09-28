@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Fixed the CI Rust formatting check for the SQLite ancestor-walk regression test; test behavior is unchanged.
+
 - The bundled base plugin now updates on startup when its version is unchanged but its component digest differs, including when the previous bundled artifact is unavailable. Identical components are not reinstalled; downgrades and locally installed replacements remain excluded from automatic updates.
 
 - Startup recovery now uses run/status indexes for Model Turn and Target Attempt observations on SQLite and PostgreSQL, avoiding repeated full-table scans as request history grows. Existing databases receive the indexes through an incremental migration without deleting history.
