@@ -416,7 +416,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     target_model: 'wide-model',
     is_enabled: true,
     created_at: '2026-08-17T00:00:00Z',
-    supported_thinking_levels: ['off', 'max'],
+    supported_thinking_levels: ['off', 'low', 'high', 'xhigh'],
     targets: [
       {
         id: 'target-wide',
@@ -442,7 +442,20 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         target_retry_budget: 5,
         target_cooldown_ms: 120_000,
         created_at: '2026-08-17T00:00:00Z',
-        thinking_level_map: thinkingMap(new Set(['low', 'high'])),
+        thinking_level_map: thinkingMap(new Set(['low', 'high', 'xhigh'])),
+      },
+      {
+        id: 'target-retired',
+        model_id: 'thinking-route',
+        provider_id: 'provider',
+        model: 'retired-model',
+        enabled: false,
+        priority: 3,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
+        created_at: '2026-08-17T00:00:00Z',
+        thinking_level_map: thinkingMap(new Set(['off', 'low', 'high', 'max'])),
       },
     ],
   }
@@ -486,7 +499,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
           target_model: 'wide-model',
           is_enabled: updateBody.is_enabled,
           created_at: '2026-08-17T00:00:00Z',
-          supported_thinking_levels: ['low', 'high'],
+          supported_thinking_levels: ['off', 'low', 'high', 'xhigh'],
           targets: [],
         },
       },
@@ -541,6 +554,11 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   const levelCards = page.locator('[data-slot="route-thinking-level"]')
   await expect(levelCards).toHaveCount(7)
   await expect(levelCards).toHaveText(thinkingLevels)
+  // Union across enabled destinations: 'off' comes only from wide-model, 'xhigh' only from narrow-model.
+  await expect(page.locator('[data-slot="route-thinking-level"][data-level="off"]')).toHaveAttribute(
+    'data-supported',
+    'true',
+  )
   await expect(page.locator('[data-slot="route-thinking-level"][data-level="low"]')).toHaveAttribute(
     'data-supported',
     'true',
@@ -549,13 +567,23 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     'data-supported',
     'true',
   )
+  await expect(page.locator('[data-slot="route-thinking-level"][data-level="xhigh"]')).toHaveAttribute(
+    'data-supported',
+    'true',
+  )
+  await expect(page.locator('[data-slot="route-thinking-level"][data-level="minimal"]')).toHaveAttribute(
+    'data-supported',
+    'false',
+  )
   const maxLevel = page.locator('[data-slot="route-thinking-level"][data-level="max"]')
   await expect(maxLevel).toHaveAttribute('data-supported', 'false')
   await maxLevel.hover()
   const blockedTooltip = page.locator('[data-slot="tooltip-content"]')
-  await expect(blockedTooltip).toContainText('Blocked by these destinations:')
+  await expect(blockedTooltip).toContainText('No enabled destination can send this level:')
   await expect(blockedTooltip).toContainText('Destination 1 · Provider · wide-model')
   await expect(blockedTooltip).toContainText('Destination 2 · Provider · narrow-model')
+  // The disabled destination supports 'max' but does not count toward the union or the list.
+  await expect(blockedTooltip).not.toContainText('retired-model')
   await expect(page.locator('[id^="thinking-level-"]')).toHaveCount(0)
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => updateBody?.is_enabled).toBe(false)

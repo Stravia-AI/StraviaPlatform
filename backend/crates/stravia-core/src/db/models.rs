@@ -151,15 +151,13 @@ impl RouteConfig {
         self.supported_thinking_levels = ThinkingLevel::ALL
             .into_iter()
             .filter(|level| {
-                self.targets.iter().any(|target| target.enabled)
-                    && self
-                        .targets
-                        .iter()
-                        .filter(|target| target.enabled)
-                        .all(|target| {
-                            mapping_control(&target.thinking_level_map, *level)
-                                .is_some_and(|control| !control.is_hidden())
-                        })
+                self.targets
+                    .iter()
+                    .filter(|target| target.enabled)
+                    .any(|target| {
+                        mapping_control(&target.thinking_level_map, *level)
+                            .is_some_and(|control| !control.is_hidden())
+                    })
             })
             .collect();
     }

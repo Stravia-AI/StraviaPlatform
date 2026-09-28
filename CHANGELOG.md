@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
+
 ### Fixed
 
 - The bundled base plugin now updates on startup when its version is unchanged but its component digest differs, including when the previous bundled artifact is unavailable. Identical components are not reinstalled; downgrades and locally installed replacements remain excluded from automatic updates.

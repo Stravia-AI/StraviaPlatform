@@ -1430,7 +1430,7 @@ async function saveModel(): Promise<void> {
       <div class="grid grid-cols-2 gap-1 rounded-xl bg-muted/60 p-1 sm:grid-cols-4 xl:grid-cols-7">
         {#each thinkingLevels as level (level)}
           {@const blockers = thinkingLevelBlockers(level)}
-          {#if blockers.length > 0}
+          {#if !supportedThinkingLevels.includes(level)}
             <Tooltip.Root>
               <Tooltip.Trigger
                 type="button"
