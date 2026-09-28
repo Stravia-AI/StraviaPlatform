@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+## [0.3.1] - 2026-09-29
+
 ### Removed
 
-- Removed the Anthropic `claude-code` OAuth channel, including subscription sign-in, token refresh, curated model discovery, and allowance monitoring. Anthropic API-key access and Claude Code client configuration remain supported. Existing subscription connections, credentials, and history are retained, but the removed channel is unavailable; configure an Anthropic API-key connection and rebind its Routes to resume inference.
+- **Breaking:** Removed the Anthropic `claude-code` OAuth channel, including subscription sign-in, token refresh, curated model discovery, and allowance monitoring. Anthropic API-key access and Claude Code client configuration remain supported. Existing subscription connections, credentials, and history are retained, but the removed channel is unavailable; configure an Anthropic API-key connection and rebind its Routes to resume inference.
 
 ### Added
 
@@ -14,19 +16,19 @@
 
 ### Changed
 
-- Updated compatible Rust and WebUI dependencies, including Tauri 2.11.2, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3. Refreshed workspace and Wasm fixture lockfiles and consolidated compatible duplicate dependencies. TypeScript remains on 6.0 while the Svelte and ESLint toolchains do not support TypeScript 7; incompatible upstream dependency ranges remain separate rather than being forced through overrides.
+- Updated compatible Rust and WebUI dependencies, including Tauri 2.11.2, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3.
 
 - The single Debug switch and Debug Trace cleanup action now live in Settings → Diagnostics instead of Request History. The switch controls performance sampling and wire capture together, requires confirmation when enabled, and resets after restart. Disabling freezes performance data, marks active spans incomplete, and preserves the capture decisions of in-flight requests.
 
 - Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
 
+- Protected reasoning now survives account, deployment, and proxy changes within the same protocol unless the destination has already rejected that payload. Cross-protocol replay and Gemini model changes still strip incompatible protected reasoning. Rejections trigger at most two pre-output recovery requests without consuming the Target retry budget or putting the Target into cooldown; successful recovery remembers rejected payloads until restart. These additional upstream requests may consume provider quota.
+
 ### Fixed
 
 - Desktop performance exports now report the saved file path after the native download completes, or show a cancellation/failure message instead of silently saving files without feedback.
 
-- Restored Windows desktop WebDriver builds by keeping Tauri 2.11.2 and its runtime/macro dependencies compatible with WebDriver 1.4.0's WebView2 bindings, and enabling the missing StructuredStorage feature only for desktop E2E. WebUI and desktop smoke tests now use Settings → Diagnostics for Debug controls. Storage restart tests use the shared cold-Gateway startup budget instead of overriding it with 30 seconds. Named the credential string-token type and simplified performance-span conditions to satisfy Clippy without changing redaction or timing behavior.
-
-- Fixed the CI Rust formatting check for the SQLite ancestor-walk regression test; test behavior is unchanged.
+- History restoration avoids repeated ancestor reads and unrelated SQLite reference scans, reducing cold-cache work for long conversations without changing stored history or replay semantics. Performance exports now attribute SQL timings to named operations and include cache hit/miss counts and timeline work measurements.
 
 - The bundled base plugin now updates on startup when its version is unchanged but its component digest differs, including when the previous bundled artifact is unavailable. Identical components are not reinstalled; downgrades and locally installed replacements remain excluded from automatic updates.
 
@@ -44,7 +46,7 @@
 
 - Replayed reasoning is no longer turned into ordinary assistant text on targets whose native reasoning field accepts unsigned reasoning, such as Chat Completions `reasoning_content` and Command Code. Previously the model could treat that reasoning as text it had already said and stop producing reasoning. Anthropic, Bedrock, and Responses history without a replayable reasoning id still falls back to text.
 
-- Protected reasoning (signatures and encrypted reasoning) is now bound to its issuer (protocol, deployment, credential, and model for Gemini). Changing a Target's proxy, options, or Route wiring no longer discards it. Reasoning of unknown origin is replayed as-is; if the upstream rejects it, the retry first removes only unverified reasoning, then all protected reasoning. Anthropic, Bedrock, and Gemini signature rejections now trigger this retry.
+- Protected-reasoning recovery first removes only unverified reasoning, then all protected reasoning if necessary. Anthropic, Bedrock, and Gemini signature rejections now trigger this recovery.
 
 - Chat Completions upstream requests no longer include internal gateway request fields (`__stravia_*`, such as the generation session ID) in the request body.
 
