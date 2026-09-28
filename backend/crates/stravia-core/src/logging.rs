@@ -3,9 +3,13 @@
 
 use std::path::PathBuf;
 
+use tracing::subscriber::Interest;
+use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+use crate::performance::{self, PerformanceLayer, SqlxMetricsLayer};
 
 /// 日志目录保留的滚动文件数上限；按天滚动下单文件不封顶，
 /// 以天数约束目录占用换取稳定可预期的命名。
@@ -27,8 +31,15 @@ pub fn init_runtime_logging(
     log_dir: Option<PathBuf>,
     file_prefix: &str,
 ) -> RuntimeLoggingGuard {
+    performance::init_metrics();
     let filter = EnvFilter::new(filter);
-    let stdout_layer = fmt::layer().with_filter(filter.clone());
+    // 原始 SQL query 与 perf span 不进入 fmt；其他 SQLx 诊断日志（包括
+    // pool/connect/migrate）仍遵循原有日志级别，避免吞掉故障信息。
+    let stdout_layer = fmt::layer().with_filter(
+        filter
+            .clone()
+            .and(filter_fn(|meta| !is_telemetry_target(meta.target()))),
+    );
     let mut guard = RuntimeLoggingGuard { _worker: None };
     let file_layer = log_dir.and_then(|dir| match build_file_writer(&dir, file_prefix) {
         Ok((writer, worker)) => {
@@ -37,7 +48,7 @@ pub fn init_runtime_logging(
                 fmt::layer()
                     .with_ansi(false)
                     .with_writer(writer)
-                    .with_filter(filter),
+                    .with_filter(filter.and(filter_fn(|meta| !is_telemetry_target(meta.target())))),
             )
         }
         Err(error) => {
@@ -48,7 +59,33 @@ pub fn init_runtime_logging(
             None
         }
     });
-    let registry = tracing_subscriber::registry().with(stdout_layer);
+    // callsite 虽固定，Debug 却可在运行时切换；不能把关闭缓存成 Interest::never。
+    let sql_layer = SqlxMetricsLayer.with_filter(
+        dynamic_filter_fn(|meta, _ctx| {
+            performance::is_sqlx_metric_target(meta.target()) && performance::enabled()
+        })
+        .with_callsite_filter(|meta| {
+            if performance::is_sqlx_metric_target(meta.target()) {
+                Interest::sometimes()
+            } else {
+                Interest::never()
+            }
+        }),
+    );
+    let perf_layer = PerformanceLayer.with_filter(
+        dynamic_filter_fn(|meta, _ctx| meta.target() == "stravia::perf" && performance::enabled())
+            .with_callsite_filter(|meta| {
+                if meta.target() == "stravia::perf" {
+                    Interest::sometimes()
+                } else {
+                    Interest::never()
+                }
+            }),
+    );
+    let registry = tracing_subscriber::registry()
+        .with(sql_layer)
+        .with(perf_layer)
+        .with(stdout_layer);
     let installed = match file_layer {
         Some(layer) => registry.with(layer).try_init().is_ok(),
         None => registry.try_init().is_ok(),
@@ -58,6 +95,10 @@ pub fn init_runtime_logging(
         guard._worker = None;
     }
     guard
+}
+
+fn is_telemetry_target(target: &str) -> bool {
+    target == "stravia::perf" || target == "sqlx::query"
 }
 
 fn build_file_writer(

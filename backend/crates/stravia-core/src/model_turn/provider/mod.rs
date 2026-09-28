@@ -58,6 +58,8 @@ pub(crate) struct AttemptObservation {
     pub(crate) id: String,
     model_turn_id: String,
     started_at: Instant,
+    duration_span: Mutex<Option<tracing::Span>>,
+    first_token_span: Mutex<Option<tracing::Span>>,
     finished: AtomicBool,
     usage_confirmed: AtomicBool,
     thinking_active: AtomicBool,
@@ -95,6 +97,8 @@ impl AttemptObservation {
             });
         }
         let observed = observer.is_some();
+        let duration_span = tracing::info_span!(target: "stravia::perf", "model_turn.attempt.duration", status = tracing::field::Empty);
+        let first_token_span = tracing::info_span!(target: "stravia::perf", parent: &duration_span, "model_turn.attempt.first_token", status = tracing::field::Empty);
         Self {
             observer,
             id,
@@ -104,6 +108,8 @@ impl AttemptObservation {
                 String::new()
             },
             started_at: Instant::now(),
+            duration_span: Mutex::new(Some(duration_span)),
+            first_token_span: Mutex::new(Some(first_token_span)),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
@@ -189,6 +195,20 @@ impl AttemptObservation {
         self.started_at.elapsed().as_millis() as i64
     }
 
+    pub(crate) fn span(&self) -> tracing::Span {
+        self.duration_span
+            .lock()
+            .as_ref()
+            .expect("active Vendor attempt span")
+            .clone()
+    }
+
+    pub(crate) fn record_first_token(&self) {
+        if let Some(span) = self.first_token_span.lock().take() {
+            span.record("status", "completed");
+        }
+    }
+
     pub(crate) fn confirm_usage(&self, usage: &stravia_runtime_contract::protocol::ir::Usage) {
         if self.usage_confirmed.swap(true, Ordering::AcqRel) {
             return;
@@ -222,6 +242,19 @@ impl AttemptObservation {
         if self.finished.swap(true, Ordering::AcqRel) {
             return;
         }
+        if let Some(span) = self.duration_span.lock().take() {
+            span.record(
+                "status",
+                if status == "completed" {
+                    "completed"
+                } else {
+                    "error"
+                },
+            );
+        }
+        if let Some(span) = self.first_token_span.lock().take() {
+            span.record("status", "error");
+        }
         self.finish_thinking();
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::TargetAttemptFinished {
@@ -239,6 +272,13 @@ impl AttemptObservation {
 
 impl Drop for AttemptObservation {
     fn drop(&mut self) {
+        // 尚未终结的尝试不得计作成功；缺失首 token 同样不得计作成功 TTFT。
+        if let Some(span) = self.duration_span.get_mut().take() {
+            span.record("status", "abandoned");
+        }
+        if let Some(span) = self.first_token_span.get_mut().take() {
+            span.record("status", "abandoned");
+        }
         let reason = if self
             .first_token_timed_out
             .as_ref()

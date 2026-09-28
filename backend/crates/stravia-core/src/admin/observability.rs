@@ -73,6 +73,19 @@ impl AdminService {
         self.gw.observation.debug_state()
     }
 
+    pub fn performance_metrics(&self) -> Option<String> {
+        if self.gw.observation.debug_enabled() {
+            crate::performance::record_observation_queue_depth(
+                self.gw.observation.writer_queue_depth(),
+            );
+        }
+        crate::performance::metrics_snapshot()
+    }
+
+    pub fn performance_timeline(&self) -> serde_json::Value {
+        crate::performance::timeline_snapshot()
+    }
+
     pub fn set_observation_debug(&self, enabled: bool) -> DebugState {
         self.gw.observation.set_debug_enabled(enabled)
     }

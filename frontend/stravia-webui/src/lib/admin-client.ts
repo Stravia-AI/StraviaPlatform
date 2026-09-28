@@ -334,6 +334,18 @@ export const admin = {
         throughSequence == null ? {} : { through_sequence: throughSequence },
       ),
   },
+  performance: {
+    metrics: async (): Promise<Blob> => {
+      const response = await authenticatedFetch('/performance/metrics')
+      if (!response.ok) await decodeAdmin(response)
+      return response.blob()
+    },
+    timeline: async (): Promise<Blob> => {
+      const response = await authenticatedFetch('/performance/timeline')
+      if (!response.ok) await decodeAdmin(response)
+      return response.blob()
+    },
+  },
   stats: {
     overview: (hours?: number) => request<StatsOverview>('GET', statsPath('/stats/overview', hours)),
     series: (hours?: number, bucket?: number, tzOffset?: number) => {

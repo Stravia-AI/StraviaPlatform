@@ -100,7 +100,8 @@ struct Inner {
     updates: broadcast::Sender<ObservationUpdate>,
     live_content: Arc<live::LiveState>,
     trace_sequence: Arc<AtomicI64>,
-    debug: AtomicBool,
+    debug: Arc<AtomicBool>,
+    metrics_upkeep: Mutex<Option<tokio::task::JoinHandle<()>>>,
     retention_days: Arc<AtomicU32>,
     traces: TraceManager,
     bundles: BundleService,
@@ -211,6 +212,8 @@ impl InteractionObservation {
             live: Arc::clone(&live_content),
             generation_chains,
         });
+        let debug = Arc::new(AtomicBool::new(false));
+        crate::performance::bind_debug(&debug);
         Self {
             inner: Arc::new(Inner {
                 store,
@@ -220,7 +223,8 @@ impl InteractionObservation {
                 updates,
                 live_content,
                 trace_sequence,
-                debug: AtomicBool::new(false),
+                debug,
+                metrics_upkeep: Mutex::new(crate::performance::spawn_upkeep()),
                 retention_days,
                 traces,
                 bundles: BundleService::default(),
@@ -289,6 +293,10 @@ impl InteractionObservation {
         self.inner.debug.load(Ordering::Acquire)
     }
 
+    pub(crate) fn writer_queue_depth(&self) -> usize {
+        writer::QUEUE_CAPACITY.saturating_sub(self.inner.writer.capacity())
+    }
+
     pub(crate) fn debug_state(&self) -> DebugState {
         let active_partial = self
             .inner
@@ -309,7 +317,7 @@ impl InteractionObservation {
         }
     }
     pub(crate) fn set_debug_enabled(&self, enabled: bool) -> DebugState {
-        self.inner.debug.store(enabled, Ordering::Release);
+        crate::performance::set_debug(&self.inner.debug, enabled);
         self.debug_state()
     }
     /// 删除全部已落盘 Debug Trace 与 manifest，不动请求记录；活动 Trace 标记 partial 后停止。
@@ -739,12 +747,20 @@ impl InteractionObservation {
         Ok(())
     }
     pub(crate) fn stop_background(&self) {
+        crate::performance::set_debug(&self.inner.debug, false);
+        if let Some(task) = self.inner.metrics_upkeep.lock().take() {
+            task.abort();
+        }
         if !self.inner.stopped.swap(true, Ordering::AcqRel) {
             let (tx, _) = oneshot::channel();
             let _ = self.inner.writer.try_send(WriterCommand::Shutdown(tx));
         }
     }
     pub(crate) async fn shutdown(&self) {
+        crate::performance::set_debug(&self.inner.debug, false);
+        if let Some(task) = self.inner.metrics_upkeep.lock().take() {
+            task.abort();
+        }
         self.inner.stopped.store(true, Ordering::Release);
         let task = { self.inner.writer_task.lock().take() };
         if let Some(task) = task {

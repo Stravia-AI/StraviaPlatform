@@ -48,6 +48,10 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
+metrics = "0.24.2"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
+log = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false }
 chrono-tz = { version = "0.10.4", features = ["case-insensitive"] }

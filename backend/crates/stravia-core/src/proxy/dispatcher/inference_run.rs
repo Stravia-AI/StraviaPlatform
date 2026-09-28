@@ -6,6 +6,7 @@ mod engine;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::Stream;
+use tracing::Instrument as _;
 
 use crate::Gateway;
 use crate::interaction_observation::{IngressStart, RunEvent, RunObserver, RunOutcome};
@@ -112,8 +113,21 @@ impl Run {
             deadline.wait().await;
             cancellation.cancel();
         });
-        let response =
-            engine::orchestrate(self.input, &mut self.inference_run, &mut self.phase).await;
+        let span = tracing::info_span!(target: "stravia::perf", "proxy.inference_run.orchestrate", status = tracing::field::Empty);
+        let response = engine::orchestrate(self.input, &mut self.inference_run, &mut self.phase)
+            .instrument(span.clone())
+            .await;
+        span.record(
+            "status",
+            if response.status().as_u16() == 499 {
+                "cancelled"
+            } else if response.status().is_success() {
+                "completed"
+            } else {
+                "error"
+            },
+        );
+        drop(span);
         wrap_deadline_monitor(response, deadline_monitor)
     }
 }
@@ -121,6 +135,23 @@ impl Run {
 struct DeadlineLeaseStream {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
     monitor: Option<tokio::task::JoinHandle<()>>,
+}
+
+// HTTP handler 返回时只完成了响应头；最后一个 body poll/Drop 才释放根 span。
+struct RootDeliveryStream {
+    inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
+    root: tracing::Span,
+}
+
+impl Stream for RootDeliveryStream {
+    type Item = Result<bytes::Bytes, axum::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        // 只围绕一次同步 poll enter，不将 guard 穿越 await。
+        let this = self.get_mut();
+        let _entered = this.root.enter();
+        this.inner.as_mut().poll_next(context)
+    }
 }
 
 impl DeadlineLeaseStream {
@@ -171,6 +202,8 @@ fn wrap_deadline_monitor(response: Response, monitor: tokio::task::JoinHandle<()
 pub(crate) struct DeferredWebSocketDelivery;
 
 pub(crate) struct WebSocketRunDelivery {
+    root: tracing::Span,
+    delivery_span: tracing::Span,
     observer: RunObserver,
     connection: Option<crate::interaction_observation::ClientConnectionObservation>,
     terminal: RunTerminalContext,
@@ -267,6 +300,13 @@ impl WebSocketRunDelivery {
             return;
         }
         self.finished = true;
+        let metric_status = match status {
+            "delivered" => "completed",
+            "cancelled" => "cancelled",
+            _ => "error",
+        };
+        self.delivery_span.record("status", metric_status);
+        self.root.record("status", metric_status);
         let delivery_completed_at = (status == "delivered")
             .then_some(self.delivery_completed_at)
             .flatten();
@@ -358,6 +398,8 @@ pub(super) struct StreamDeliveryCompletion(
 
 struct ObservedDeliveryStream {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
+    delivery_span: Option<tracing::Span>,
+    root: tracing::Span,
     observer: RunObserver,
     protocol: String,
     transport: &'static str,
@@ -413,6 +455,8 @@ impl ObservedDeliveryStream {
             return;
         }
         self.finished = true;
+        let delivery_span = self.delivery_span.take();
+        let root = self.root.clone();
         let delivery_completed_at = (delivery_status == "delivered" && self.status_code < 400)
             .then(|| chrono::Utc::now().timestamp_millis());
         let Some(mut completion) = self.stream_completion.take() else {
@@ -423,45 +467,65 @@ impl ObservedDeliveryStream {
                 reason,
                 delivery_completed_at,
             );
+            if let Some(span) = delivery_span {
+                let status = match delivery_status {
+                    "delivered" => "completed",
+                    "cancelled" => "cancelled",
+                    _ => "error",
+                };
+                span.record("status", status);
+                root.record("status", status);
+            }
             return;
         };
         let observer = self.observer.clone();
         let terminal = self.terminal.clone();
         let status_code = self.status_code;
         // HTTP body 的 Drop/EOF 可能早于生成链落盘；协议终态与落盘结果由生产任务裁决。
-        let finish = move |result: Result<Option<RunTerminalContext>, ()>| match result {
-            Ok(Some(terminal)) => {
-                terminal.finish_http_delivery(
+        let finish = move |result: Result<Option<RunTerminalContext>, ()>| {
+            let metric_status = match &result {
+                Ok(Some(_)) => "completed",
+                Ok(None) if delivery_status == "cancelled" => "cancelled",
+                _ => "error",
+            };
+            match result {
+                Ok(Some(terminal)) => {
+                    terminal.finish_http_delivery(
+                        &observer,
+                        status_code,
+                        "delivered",
+                        None,
+                        terminal.delivery_completed_at(),
+                    );
+                }
+                Ok(None) if delivery_status != "delivered" => {
+                    terminal.finish_http_delivery(
+                        &observer,
+                        status_code,
+                        delivery_status,
+                        reason,
+                        None,
+                    );
+                }
+                Ok(None) => terminal.finish_http_delivery(
                     &observer,
                     status_code,
-                    "delivered",
+                    "delivery_failed",
+                    Some("stream_incomplete".into()),
                     None,
-                    terminal.delivery_completed_at(),
-                );
-            }
-            Ok(None) if delivery_status != "delivered" => {
-                terminal.finish_http_delivery(
+                ),
+                Err(()) => terminal.finish_http_delivery(
                     &observer,
                     status_code,
-                    delivery_status,
-                    reason,
+                    "delivery_failed",
+                    Some("stream_task_aborted".into()),
                     None,
-                );
+                ),
             }
-            Ok(None) => terminal.finish_http_delivery(
-                &observer,
-                status_code,
-                "delivery_failed",
-                Some("stream_incomplete".into()),
-                None,
-            ),
-            Err(()) => terminal.finish_http_delivery(
-                &observer,
-                status_code,
-                "delivery_failed",
-                Some("stream_task_aborted".into()),
-                None,
-            ),
+            if let Some(span) = delivery_span {
+                span.record("status", metric_status);
+                root.record("status", metric_status);
+            }
         };
         match completion.0.try_recv() {
             Ok(result) => finish(Ok(result)),
@@ -825,6 +889,7 @@ impl Drop for ObservedDeliveryStream {
 
 fn wrap_observed_delivery(
     response: Response,
+    root: tracing::Span,
     observer: RunObserver,
     protocol: String,
     terminal: RunTerminalContext,
@@ -855,6 +920,10 @@ fn wrap_observed_delivery(
     let (parts, body) = response.into_parts();
     let stream = ObservedDeliveryStream {
         inner: Box::pin(body.into_data_stream()),
+        delivery_span: Some(
+            tracing::info_span!(target: "stravia::perf", parent: &root, "proxy.client_delivery", status = tracing::field::Empty),
+        ),
+        root,
         observer,
         protocol,
         transport,
@@ -881,10 +950,13 @@ pub(super) struct RunInput {
 pub(super) fn execute(input: RunInput) -> impl std::future::Future<Output = Response> {
     // Keep the complete run state out of each caller's async frame, including
     // callers that poll directly rather than spawning a separately boxed task.
-    Box::pin(execute_observed(input))
+    Box::pin(async move {
+        let root = tracing::info_span!(target: "stravia::perf", "proxy.inference_run", status = tracing::field::Empty);
+        execute_observed(input, root.clone()).instrument(root).await
+    })
 }
 
-async fn execute_observed(input: RunInput) -> Response {
+async fn execute_observed(input: RunInput, root: tracing::Span) -> Response {
     let extensions = input.context.extensions.clone();
     let protocol = input.ingress.to_string();
     if !extensions.contains::<crate::interaction_observation::IngressObserver>() {
@@ -902,6 +974,16 @@ async fn execute_observed(input: RunInput) -> Response {
     }
     .execute()
     .await;
+    if !extensions.contains::<RunObserver>() && response.status().as_u16() >= 400 {
+        root.record(
+            "status",
+            if response.status().as_u16() == 499 {
+                "cancelled"
+            } else {
+                "error"
+            },
+        );
+    }
     if response.status().as_u16() >= 400
         && response.status().as_u16() != 499
         && let Some(observer) = extensions.get::<RunObserver>()
@@ -911,12 +993,14 @@ async fn execute_observed(input: RunInput) -> Response {
     {
         observer.record_response_failure(error.clone());
     }
-    match (
+    let response = match (
         extensions.get::<RunObserver>(),
         extensions.get::<engine::RunLedger>(),
     ) {
         (Some(observer), Some(ledger)) if extensions.contains::<DeferredWebSocketDelivery>() => {
             extensions.insert(WebSocketRunDelivery {
+                root: root.clone(),
+                delivery_span: tracing::info_span!(target: "stravia::perf", parent: &root, "proxy.client_delivery", status = tracing::field::Empty),
                 observer,
                 connection: extensions
                     .get::<crate::interaction_observation::ClientConnectionObservation>(),
@@ -930,12 +1014,23 @@ async fn execute_observed(input: RunInput) -> Response {
         }
         (Some(observer), Some(ledger)) => wrap_observed_delivery(
             response,
+            root.clone(),
             observer,
             protocol,
             ledger.terminal.clone(),
             ledger.take_stream_completion(),
         ),
         _ => response,
+    };
+    if extensions.contains::<DeferredWebSocketDelivery>() {
+        response
+    } else {
+        let (parts, body) = response.into_parts();
+        let stream = RootDeliveryStream {
+            inner: Box::pin(body.into_data_stream()),
+            root,
+        };
+        Response::from_parts(parts, axum::body::Body::from_stream(stream))
     }
 }
 

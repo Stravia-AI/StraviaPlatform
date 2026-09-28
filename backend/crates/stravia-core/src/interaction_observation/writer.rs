@@ -917,11 +917,16 @@ async fn persist_finish(
     flush_one(context, attribution, pending_text, run_id).await;
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
         let expiry = expires(at, context.retention.load(Ordering::Relaxed));
-        match context
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
+        let result = context
             .store
             .finish_run(interaction, run_id, outcome, at, expiry)
-            .await
-        {
+            .instrument(span.clone())
+            .await;
+        span.record("status", if result.is_ok() { "completed" } else { "error" });
+        drop(span);
+        match result {
             Ok(value) => {
                 if let Some(node) = outcome.generation_node_id.as_deref()
                     && let Err(error) = context.store.set_tail_generation_node(run_id, node).await
@@ -987,6 +992,8 @@ async fn persist_blocks(
             (block.event, Some(block.id), block.at)
         })
         .collect();
+    use tracing::Instrument as _;
+    let span = tracing::info_span!(target: "stravia::perf", "observation.writer.persist_text", status = tracing::field::Empty);
     let result = context
         .store
         .persist_run_events(
@@ -995,7 +1002,10 @@ async fn persist_blocks(
             &events,
             expires(at, context.retention.load(Ordering::Relaxed)),
         )
+        .instrument(span.clone())
         .await;
+    span.record("status", if result.is_ok() { "completed" } else { "error" });
+    drop(span);
     for (_, id, _) in &events {
         pending.live.remove(id.as_deref().expect("block id"));
     }

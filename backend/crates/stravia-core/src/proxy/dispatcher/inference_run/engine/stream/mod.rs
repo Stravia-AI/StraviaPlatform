@@ -99,6 +99,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     let completion_ledger = ledger.clone();
 
+    use tracing::Instrument as _;
+    // 生产任务返回响应头后仍继续运行；在 spawn 前创建子 span，显式携带父链。
+    let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.stream", status = tracing::field::Empty);
+    let status_span = span.clone();
     tokio::spawn(async move {
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
             ingress,
@@ -116,6 +120,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             .expect("admitted Inference Run observer")
             .clone();
         let mut projection = projection;
+        let stream_status;
         'model_legs: loop {
             let buffer_terminal_hooks = inference_run.requires_terminal_buffering();
             let mut leg = ModelLegConsume::begin(
@@ -642,9 +647,17 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             if let Some(mut phase) = owned_phase.take() {
                 phase.finish();
             }
+            stream_status = if delivery_completed_at.is_some() {
+                "completed"
+            } else if transport.cancelled || transport.receiver_closed {
+                "cancelled"
+            } else {
+                "error"
+            };
             break 'model_legs;
         }
-    });
+        status_span.record("status", stream_status);
+    }.instrument(span));
 
     match preflight_rx.await {
         Ok(Ok(())) => {}

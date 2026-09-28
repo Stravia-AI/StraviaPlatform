@@ -1,21 +1,24 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import DownloadIcon from '@lucide/svelte/icons/download'
 import SaveIcon from '@lucide/svelte/icons/save'
 import { setMode, userPrefersMode } from 'mode-watcher'
 import { toast } from 'svelte-sonner'
-import { onMount } from 'svelte'
+import { onDestroy, onMount } from 'svelte'
 
 import { admin, isTauri, type ArtifactSettings, type ArtifactS3Settings } from '$lib/admin-client'
 import SecretInput from '$lib/components/secret-input.svelte'
 import { changeCredentials, getAuthState } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { formatBytes } from '$lib/format'
 import DesktopClientSettings from '$lib/components/desktop-client-settings.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { Badge } from '$lib/components/ui/badge'
+import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -27,6 +30,14 @@ import { inputValue } from '$lib/utils.js'
 
 const queryClient = useQueryClient()
 const artifactQuery = createQuery(() => ({ queryKey: ['artifact-settings'], queryFn: admin.settings.artifacts }))
+const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
+let debugConfirmOpen = $state(false)
+let debugClearOpen = $state(false)
+let changingDebug = $state(false)
+let clearingDebug = $state(false)
+let downloadingPerformance = $state<'metrics' | 'timeline' | null>(null)
+let performanceDownloadHref: string | undefined
+let performanceDownloadDisposed = false
 let artifactDraft = $state<ArtifactSettings>()
 let artifactSaving = $state(false)
 let artifactError = $state('')
@@ -168,6 +179,11 @@ onMount(() => {
   requestAnimationFrame(() => scrollToSection('client'))
 })
 
+onDestroy(() => {
+  performanceDownloadDisposed = true
+  if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
+})
+
 async function saveSetting(key: string, value: string): Promise<void> {
   await admin.settings.set(key, value)
   await queryClient.invalidateQueries({ queryKey: ['setting', key] })
@@ -241,6 +257,64 @@ function retrySettings(): void {
     proxyUrlQuery.refetch(),
     proxyBypassQuery.refetch(),
   ])
+}
+
+async function setDebug(enabled: boolean): Promise<void> {
+  if (changingDebug || debugQuery.isFetching || debugQuery.error || !debugQuery.data) return
+  changingDebug = true
+  try {
+    const confirmed = await admin.observations.setDebug(enabled)
+    queryClient.setQueryData(['observation-debug'], confirmed)
+    debugConfirmOpen = false
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    changingDebug = false
+  }
+}
+
+async function clearDebugData(): Promise<void> {
+  if (clearingDebug || debugQuery.isFetching || debugQuery.error || !debugQuery.data) return
+  clearingDebug = true
+  try {
+    const confirmed = await admin.observations.clearDebug()
+    queryClient.setQueryData(['observation-debug'], confirmed)
+    debugClearOpen = false
+    toast.success(m.observation_debug_cleared())
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    clearingDebug = false
+  }
+}
+
+async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> {
+  if (downloadingPerformance) return
+  downloadingPerformance = kind
+  try {
+    const blob = await admin.performance[kind]()
+    if (performanceDownloadDisposed) return
+    if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
+    performanceDownloadHref = undefined
+    const href = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = kind === 'metrics' ? 'stravia-performance-metrics.prom' : 'stravia-performance-trace.json'
+    try {
+      document.body.append(link)
+      link.click()
+      performanceDownloadHref = href
+    } catch (error) {
+      URL.revokeObjectURL(href)
+      throw error
+    } finally {
+      link.remove()
+    }
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    downloadingPerformance = null
+  }
 }
 </script>
 
@@ -528,6 +602,72 @@ function retrySettings(): void {
       {/if}
     </section>
 
+    <section id="diagnostics" class="route-section scroll-mt-20 pb-8" aria-labelledby="diagnostics-title">
+      <div class="route-section-header">
+        <div>
+          <h2 id="diagnostics-title" class="route-section-title">{m.settings_diagnostics()}</h2>
+          <p class="route-section-description">{m.settings_diagnostics_summary()}</p>
+        </div>
+      </div>
+      {#if debugQuery.error}
+        <RequestFailure
+          title={m.settings_diagnostics_load_failed()}
+          message={localizeBackendErrorMessage(debugQuery.error)}
+          retry={() => void debugQuery.refetch()}
+          retrying={debugQuery.isFetching} />
+      {:else if debugQuery.data}
+        <Field.FieldGroup>
+          <Field.Field orientation="horizontal">
+            <div class="flex-1">
+              <Field.FieldLabel for="diagnostics-debug">{m.settings_diagnostics_debug()}</Field.FieldLabel>
+            </div>
+            <Switch
+              id="diagnostics-debug"
+              bind:checked={
+                () => debugQuery.data?.enabled ?? false,
+                (enabled) => (enabled ? (debugConfirmOpen = true) : void setDebug(false))
+              }
+              disabled={changingDebug || clearingDebug || debugQuery.isFetching}
+              aria-busy={changingDebug} />
+            {#if changingDebug}<Spinner aria-label={m.settings_diagnostics_saving()} />{/if}
+          </Field.Field>
+          <p class="text-sm text-muted-foreground">{m.observation_debug_disable_retains()}</p>
+          <p class="text-sm text-muted-foreground">
+            {m.observation_debug_retained({ retained: formatBytes(debugQuery.data.retained_bytes) })}
+          </p>
+          <p class="text-sm text-muted-foreground">{m.settings_diagnostics_timeline_description()}</p>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              disabled={downloadingPerformance !== null}
+              aria-busy={downloadingPerformance === 'metrics'}
+              onclick={() => void downloadPerformance('metrics')}>
+              {#if downloadingPerformance === 'metrics'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
+                  data-icon="inline-start" />{/if}
+              {m.settings_diagnostics_download_metrics()}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={downloadingPerformance !== null}
+              aria-busy={downloadingPerformance === 'timeline'}
+              onclick={() => void downloadPerformance('timeline')}>
+              {#if downloadingPerformance === 'timeline'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
+                  data-icon="inline-start" />{/if}
+              {m.settings_diagnostics_download_timeline()}
+            </Button>
+            {#if debugQuery.data.enabled || debugQuery.data.retained_bytes > 0}
+              <Button
+                variant="destructive"
+                disabled={clearingDebug || changingDebug || debugQuery.isFetching}
+                onclick={() => (debugClearOpen = true)}>{m.observation_clear_debug()}</Button>
+            {/if}
+          </div>
+        </Field.FieldGroup>
+      {:else}
+        <Skeleton class="h-10" aria-busy="true" />
+      {/if}
+    </section>
+
     {#if authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable'}
       <section id="credentials" class="route-section scroll-mt-20 pb-8" aria-labelledby="credentials-title">
         <div class="route-section-header">
@@ -596,3 +736,40 @@ function retrySettings(): void {
     <ProductUpdateSettings />
   </div>
 </div>
+
+<AlertDialog.Root bind:open={debugConfirmOpen}>
+  {#if debugQuery.data && !debugQuery.error}<AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
+        <AlertDialog.Description>
+          {m.observation_debug_warning({ retention_days: debugQuery.data.retention_days })}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+        <AlertDialog.Action disabled={changingDebug || debugQuery.isFetching} onclick={() => void setDebug(true)}>
+          {changingDebug ? m.observation_enabling() : m.observation_enable_debug()}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>{/if}
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={debugClearOpen}>
+  {#if debugQuery.data && !debugQuery.error}<AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>{m.observation_clear_debug()}</AlertDialog.Title>
+        <AlertDialog.Description>
+          {m.observation_clear_debug_warning({ retained: formatBytes(debugQuery.data.retained_bytes) })}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+        <AlertDialog.Action
+          variant="destructive"
+          disabled={clearingDebug || debugQuery.isFetching}
+          onclick={() => void clearDebugData()}>
+          {clearingDebug ? m.observation_clearing() : m.observation_clear_debug()}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>{/if}
+</AlertDialog.Root>

@@ -123,7 +123,9 @@ impl AgentRunner {
                             cancellation.cancel();
                             return Err(tool_authorization_error());
                         }
-                        Ok(tool.execute(
+                        use tracing::Instrument as _;
+                        let span = tracing::info_span!(target: "stravia::perf", "agent.tool.execute", status = tracing::field::Empty);
+                        let output = tool.execute(
                             AgentToolContext {
                                 principal,
                                 turn_id,
@@ -131,7 +133,9 @@ impl AgentRunner {
                                 deadline,
                             },
                             arguments,
-                        ).await)
+                        ).instrument(span.clone()).await;
+                        span.record("status", if output.is_ok() { "completed" } else { "error" });
+                        Ok(output)
                     } => result,
                 };
                 let result = match result {

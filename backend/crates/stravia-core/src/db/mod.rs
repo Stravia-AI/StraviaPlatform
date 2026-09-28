@@ -21,6 +21,7 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
 
     Ok(SqlitePoolOptions::new()
         .max_connections(5)
+        .acquire_time_level(log::LevelFilter::Debug)
         .connect_with(options)
         .await?)
 }

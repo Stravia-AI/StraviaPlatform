@@ -1097,10 +1097,22 @@ async fn acquire_turn(
     };
 
     let mut effective_request = request.clone();
-    let turn = match executor
+    use tracing::Instrument as _;
+    let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.acquire", status = tracing::field::Empty);
+    let first_attempt = executor
         .execute(make_input(effective_request.clone()))
-        .await
-    {
+        .instrument(span.clone())
+        .await;
+    span.record(
+        "status",
+        if first_attempt.is_ok() {
+            "completed"
+        } else {
+            "error"
+        },
+    );
+    drop(span);
+    let turn = match first_attempt {
         Ok(turn) => turn,
         Err(error)
             if error.code == "tools_unsupported"
@@ -1114,10 +1126,14 @@ async fn acquire_turn(
             if effective_request.tools == original_tools {
                 return Err(model_turn_execute_failure(error));
             }
-            executor
+            let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.acquire", status = tracing::field::Empty);
+            let retry = executor
                 .execute(make_input(effective_request.clone()))
-                .await
-                .map_err(model_turn_execute_failure)?
+                .instrument(span.clone())
+                .await;
+            span.record("status", if retry.is_ok() { "completed" } else { "error" });
+            drop(span);
+            retry.map_err(model_turn_execute_failure)?
         }
         Err(error) => return Err(model_turn_execute_failure(error)),
     };

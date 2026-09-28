@@ -40,6 +40,7 @@ impl PostgresAdapter {
     pub async fn connect(config: SqlBackendConfig) -> anyhow::Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
+            .acquire_time_level(log::LevelFilter::Debug)
             .min_connections(config.min_connections)
             .acquire_timeout(config.acquire_timeout)
             .idle_timeout(config.idle_timeout)
