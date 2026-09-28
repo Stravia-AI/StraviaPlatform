@@ -411,12 +411,21 @@ impl ObservationStore {
             bounded_end,
         } = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
-        let (root_total, root_rows) = match self {
-            Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await?,
-            Self::Postgres(p) => {
-                forest_roots_postgres(p, &q, start, end, bounded_end, limit).await?
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(target: "stravia::perf", "observation.query.forest_roots", status = tracing::field::Empty);
+        let roots = async {
+            match self {
+                Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await,
+                Self::Postgres(p) => {
+                    forest_roots_postgres(p, &q, start, end, bounded_end, limit).await
+                }
             }
-        };
+        }
+        .instrument(span.clone())
+        .await;
+        span.record("status", if roots.is_ok() { "completed" } else { "error" });
+        drop(span);
+        let (root_total, root_rows) = roots?;
         let root_ids: Vec<String> = root_rows
             .iter()
             .take(limit as usize)
@@ -665,6 +674,7 @@ impl ObservationStore {
         query: &InteractionEventsQuery,
         through: i64,
     ) -> anyhow::Result<(Vec<ObservationEvent>, Option<i64>)> {
+        use tracing::Instrument as _;
         let limit = query.limit.unwrap_or(200) as usize;
         let forward = query.after_sequence.is_some();
         let mut events = match self {
@@ -685,7 +695,11 @@ impl ObservationStore {
                     " ORDER BY sequence DESC LIMIT "
                 })
                 .push_bind((limit + 1) as i64);
-                map_sqlite_events(sql.build().fetch_all(pool).await?)?
+                let span = tracing::info_span!(target: "stravia::perf", "observation.query.interaction_events", status = tracing::field::Empty);
+                let rows = sql.build().fetch_all(pool).instrument(span.clone()).await;
+                span.record("status", if rows.is_ok() { "completed" } else { "error" });
+                drop(span);
+                map_sqlite_events(rows?)?
             }
             Self::Postgres(pool) => {
                 let mut sql = QueryBuilder::<sqlx::Postgres>::new(
@@ -704,7 +718,11 @@ impl ObservationStore {
                     " ORDER BY sequence DESC LIMIT "
                 })
                 .push_bind((limit + 1) as i64);
-                map_postgres_events(sql.build().fetch_all(pool).await?)?
+                let span = tracing::info_span!(target: "stravia::perf", "observation.query.interaction_events", status = tracing::field::Empty);
+                let rows = sql.build().fetch_all(pool).instrument(span.clone()).await;
+                span.record("status", if rows.is_ok() { "completed" } else { "error" });
+                drop(span);
+                map_postgres_events(rows?)?
             }
         };
         let more = events.len() > limit;

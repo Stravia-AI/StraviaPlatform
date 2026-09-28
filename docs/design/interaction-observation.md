@@ -380,12 +380,29 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 
 ### 7.1 开关
 
+- 唯一 Debug 开关位于设置页「诊断」，同时控制性能指标采集与原始 Wire 捕获；请求记录页不再提供启停或清除 Debug 数据入口，仍保留已有 Trace 查看及 Bundle 导出。
+- 关闭立即停止新的性能样本；Wire 捕获继续遵循下述准入快照契约，不中断在途 Run，不删除已有 Trace。普通 Observation 不受影响。
+- 设置页可下载 Prometheus 文本性能快照（`GET /api/v1/performance/metrics`）及 Chrome Trace JSON 时间线（`GET /api/v1/performance/timeline`）。两者均要求管理员鉴权，以禁止缓存的附件返回，不另开监听端口。关闭 Debug 后仍能下载本进程已有数据；进程重启后不保留。清除 Debug 数据仍仅清除 Wire Trace，不重置性能指标或时间线。
+- 性能指标包含静态命名操作耗时、SQLx 查询与成功获取连接的耗时分布、观察写入队列深度、历史物化缓存记账字节，以及每五秒采样的宿主进程 RSS／CPU。CPU 在开启后的首个采样点不输出缺少差分基线的读数，多核 CPU 百分比可以超过 100%。不计入浏览器子进程或远端数据库内存；缓存记账容量不等于实际堆占用。
+- SQLx 指标只读取数值，不导出 SQL 文本、参数、请求正文或动态身份标签。查询事件不能说明成功／失败或所属连接池；连接获取耗时包含建连和健康检查，超时失败不在成功样本中。关闭再开启期间尚未完成的 span 不写入新启用周期。
 - 开关是当前 Gateway 进程的原子运行态；默认关闭，重启后关闭；
 - 每次开启都显示确认：除 HTTP `Authorization` header 值外，Trace 会原样保存其他 header、URL、body、提示词、工具参数、业务数据与媒体；关闭后已有 Trace 仍按保留期存在；
 - 开启状态下提供「清除 Debug 数据」操作，删除全部已保留 Trace，不影响开关与请求记录；
 - 每个 Inference Run 在准入时独立快照；同一 Interaction 可以完整、部分或完全没有 Trace；
 - Rejected Request 在 ingress 时快照，并可生成只含 client request/platform error response 的独立 Trace；没有上游方向不算缺失；
-- 关闭只影响之后准入的 Run，不删除已有数据。
+- Wire 捕获的关闭只影响之后准入的 Run，不删除已有数据。
+
+#### 7.1.1 统一性能 span 与时间线
+
+命名操作统一使用 `tracing` 的 `stravia::perf` target。`PerformanceLayer` 从同一个 span 生成耗时直方图与有界时间线，不再维护独立手写 Timer。覆盖请求根、路由选择、Model Turn、Vendor、Target Attempt／首 token、Agent／工具、客户端交付、历史物化与观察写入。
+
+常规异步函数使用 `#[tracing::instrument(target = "stravia::perf", name = "router.select", skip_all, fields(status))]` 这类静态声明；局部 future、独立任务通过 `.instrument(span)` 传播上下文。不得跨 `.await` 保留 `span.enter()` guard。响应体、WebSocket 与后台 producer 必须持有对应 span，直到真实生命周期结束；有非性能中间 span 时，仍关联最近的性能祖先。
+
+Layer 只保留静态操作名、内部生成的 span／parent ID、时间与白名单状态，忽略其他 span 字段，不使用 `ret`／`err` 自动记录业务值。默认终态为 `closed`，仅表示 span 生命周期结束；业务代码在已知结果时显式记录 `completed`、`error`、`cancelled` 或 `abandoned`。不能把函数返回、future 被丢弃或父 span 关闭自动解释为成功。
+
+时间线最多保留 1,024 个活动 span 与 2,048 个结束记录；活动区满时拒收新 span（相应耗时也不入直方图），结束区满时淘汰最旧记录。JSON `metadata.capacity`、`dropped_active`、`dropped_completed`、`incomplete` 与 `incomplete_total` 显式描述容量、丢弃数、当前未完成记录数与累计未完成数，不承诺完整请求树。关闭 Debug 将活动记录冻结为未完成记录；随后关闭的旧 span 不补写终态或直方图，重新开启只接收新周期的数据。
+
+导出使用标准 Chrome Trace 事件：已结束 span 为 `X`，未结束或被 Debug 关闭截断的 span 只有 `B`，不伪造结束时间；可见父子间附带 flow。每个 span 使用合成 track，`tid` 不是操作系统线程。可导入 Perfetto 或 Chrome trace viewer 查看墙钟时长与父子关联；`active_us` 仅表示 span 被 enter 的区间并集（重入或并发 enter 不重复累加），不是 CPU 时间，未 enter 的 span 不输出该值。该时间线不是 CPU／堆 profiler；进程 CPU／RSS 仍是独立全局采样，不能归因到单个 span。
 
 ### 7.2 脱敏
 
@@ -492,7 +509,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 - `交互链路`：默认页签，Interaction forest 无限画布；
 - `失败的请求`：Failed Requests 表格列表与详情，不伪造画布节点。
 
-页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选、Debug switch 和“清除历史记录”；Debug 开启时额外提供“清除 Debug 数据”。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
+页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选和“清除历史记录”。Debug 开关及“清除 Debug 数据”统一位于设置页「诊断」。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
 
 #### 失败请求列表
 

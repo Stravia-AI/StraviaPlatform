@@ -691,6 +691,12 @@ impl Gateway {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "vendor.execute",
+        skip_all,
+        fields(status)
+    )]
     async fn execute_vendor_input(
         &self,
         plugin: LoadedPlugin,

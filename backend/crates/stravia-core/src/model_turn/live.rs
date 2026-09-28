@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
+use tracing::Instrument;
 
 use super::provider::AttemptObservation;
 use super::support::ai_response_to_deltas;
@@ -66,6 +67,12 @@ impl LiveModelTurnExecutor {
 
 #[async_trait]
 impl ModelTurnExecutor for LiveModelTurnExecutor {
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "model_turn.execute",
+        skip_all,
+        fields(status)
+    )]
     async fn execute(&self, mut input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
         if !input.attachments_normalized {
             tokio::select! {
@@ -121,6 +128,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             model_turn_id: model_turn_id.clone(),
             standalone,
             operation_started,
+            span: Some(tracing::Span::current()),
             finished: false,
         });
         let result = if input.cancellation.is_cancelled() {
@@ -421,6 +429,8 @@ struct ModelTurnTerminal {
     model_turn_id: String,
     standalone: bool,
     operation_started: Instant,
+    // Model Turn 只有收到语义终态才结束；execute 返回的只是流头。
+    span: Option<tracing::Span>,
     finished: bool,
 }
 
@@ -430,6 +440,16 @@ impl ModelTurnTerminal {
             return;
         }
         self.finished = true;
+        if let Some(span) = self.span.take() {
+            span.record(
+                "status",
+                match status {
+                    "completed" => "completed",
+                    "cancelled" => "cancelled",
+                    _ => "error",
+                },
+            );
+        }
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::ModelTurnFinished {
                 model_turn_id: self.model_turn_id.clone(),
@@ -1779,25 +1799,30 @@ async fn begin_attempt(
     let parent_cancellation = input.cancellation.clone();
     let deadline = input.deadline.clone();
     let observer = input.observer.clone();
-    let join = tokio::spawn(async move {
-        drive_vendor_attempt(
-            driver_gateway,
-            driver_route_id,
-            driver_target,
-            principal,
-            canonical_request,
-            parent_cancellation,
-            operation_cancellation,
-            deadline,
-            observer,
-            prepared,
-            policy,
-            output_tx,
-            terminal_output,
-            ready_tx,
-        )
-        .await;
-    });
+    use tracing::Instrument as _;
+    let parent = tracing::Span::current();
+    let join = tokio::spawn(
+        async move {
+            drive_vendor_attempt(
+                driver_gateway,
+                driver_route_id,
+                driver_target,
+                principal,
+                canonical_request,
+                parent_cancellation,
+                operation_cancellation,
+                deadline,
+                observer,
+                prepared,
+                policy,
+                output_tx,
+                terminal_output,
+                ready_tx,
+            )
+            .await;
+        }
+        .instrument(parent),
+    );
     let mut driver = VendorDriverHandle {
         join: Some(join),
         cancellation: driver_cancellation,
@@ -1930,6 +1955,7 @@ async fn drive_vendor_attempt(
             &mut last_publication,
             &mut first_token_ms,
         )
+        .instrument(attempt.span())
         .await;
 
         // 剥离后的重放没有再被判为推理拒绝（无论成功还是因其它原因失败），就记住该级
@@ -2021,6 +2047,9 @@ async fn drive_vendor_attempt(
                 .await;
                 match published {
                     Ok(()) => {
+                        if first_commit {
+                            attempt.record_first_token();
+                        }
                         gateway.cache_affinity.record_success(
                             &principal,
                             &route_id,
@@ -2073,6 +2102,9 @@ async fn drive_vendor_attempt(
                 .await;
                 match published {
                     Ok(()) => {
+                        if first_commit {
+                            attempt.record_first_token();
+                        }
                         policy.record_success(&target);
                         if let Some(reservation) = reservation.take() {
                             reservation.complete();
@@ -2858,6 +2890,7 @@ async fn commit_vendor_stream(
         )
         .await?;
         if first_commit && index == 0 {
+            attempt.record_first_token();
             *first_token_ms = Some(attempt.elapsed_ms());
             *committed = true;
             if let Some(ready) = ready.take() {

@@ -65,6 +65,12 @@ impl RouteSelector {
     /// Continuation and Conversation/Cache Affinity enter as hints, cooldown and
     /// health stay eligibility filters, and Target Priority + the route's
     /// scheduling strategy order the remainder.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "router.select",
+        skip_all,
+        fields(status)
+    )]
     pub(crate) async fn select(
         &self,
         principal: &Principal,
@@ -122,6 +128,12 @@ impl RouteSelector {
     /// continuation, or prompt-cache identity (for example full search or
     /// media generation). It uses the same Target eligibility, priority,
     /// cooldown, retry, and scheduling evidence as model turns.
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "router.select_independent",
+        skip_all,
+        fields(status)
+    )]
     pub(crate) async fn select_independent(
         &self,
         principal: &Principal,

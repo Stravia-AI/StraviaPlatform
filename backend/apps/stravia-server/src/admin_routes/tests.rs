@@ -9,6 +9,7 @@ use stravia_core::admin::identity::AdminAuth;
 use stravia_core::config::GatewayConfig;
 use stravia_core::storage::MemoryStorage;
 use tower::ServiceExt;
+use tracing_subscriber::layer::SubscriberExt;
 
 async fn memory_gateway(data_dir: &Path) -> anyhow::Result<Gateway> {
     Gateway::from_storage(
@@ -34,6 +35,109 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     assert_eq!(json["status"], "running");
     assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn performance_export_requires_admin_and_remains_available_after_debug_is_disabled()
+-> anyhow::Result<()> {
+    assert!(stravia_core::performance::init_metrics());
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway.clone(),
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+
+    let denied = app
+        .clone()
+        .oneshot(Request::get("/api/v1/performance/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let denied_timeline = app
+        .clone()
+        .oneshot(Request::get("/api/v1/performance/timeline").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied_timeline.status(), StatusCode::UNAUTHORIZED);
+
+    gateway.admin().set_observation_debug(true);
+    let subscriber =
+        tracing_subscriber::registry().with(stravia_core::performance::PerformanceLayer);
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::span!(
+            target: "stravia::perf",
+            tracing::Level::INFO,
+            "test.admin_export",
+            status = tracing::field::Empty,
+            secret = "must not leak",
+        );
+        let guard = span.enter();
+        span.record("status", "completed");
+        drop(guard);
+        drop(span);
+    });
+    gateway.admin().set_observation_debug(false);
+    let tokens = auth.login_native().await?;
+    let request = |path| {
+        Request::get(path)
+            .header("authorization", format!("Bearer {}", tokens.access_token))
+            .body(Body::empty())
+    };
+    let exported = app
+        .clone()
+        .oneshot(request("/api/v1/performance/metrics")?)
+        .await?;
+    assert_eq!(exported.status(), StatusCode::OK);
+    assert_eq!(exported.headers()["cache-control"], "no-store");
+    assert_eq!(exported.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        exported.headers()["content-type"],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = String::from_utf8(to_bytes(exported.into_body(), usize::MAX).await?.to_vec())?;
+    assert!(body.contains("stravia_operation_duration_seconds_bucket{"));
+    assert!(body.contains("operation=\"test.admin_export\""));
+
+    let timeline = app
+        .clone()
+        .oneshot(request("/api/v1/performance/timeline")?)
+        .await?;
+    assert_eq!(timeline.status(), StatusCode::OK);
+    assert_eq!(timeline.headers()["content-type"], "application/json");
+    assert_eq!(timeline.headers()["cache-control"], "no-store");
+    assert_eq!(timeline.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        timeline.headers()["content-disposition"],
+        "attachment; filename=\"stravia-performance-trace.json\""
+    );
+    let timeline_body = to_bytes(timeline.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&timeline_body)?;
+    assert!(json["traceEvents"].is_array());
+    assert_eq!(json["displayTimeUnit"], "ms");
+    assert!(json["metadata"]["capacity"]["completed"].is_number());
+    let event = json["traceEvents"]
+        .as_array()
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event["name"] == "test.admin_export")
+        })
+        .expect("finished span remains downloadable after Debug is disabled");
+    assert_eq!(event["ph"], "X");
+    assert_eq!(event["args"]["status"], "completed");
+    assert!(event["ts"].is_number());
+    assert!(event["dur"].is_number());
+    assert!(!String::from_utf8(timeline_body.to_vec())?.contains("must not leak"));
+    gateway.shutdown().await;
     Ok(())
 }
 

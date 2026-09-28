@@ -4,7 +4,6 @@ import { onMount, tick } from 'svelte'
 import { page } from '$app/state'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { SvelteFlowProvider } from '@xyflow/svelte'
-import BugIcon from '@lucide/svelte/icons/bug'
 import CalendarRangeIcon from '@lucide/svelte/icons/calendar-range'
 import MaximizeIcon from '@lucide/svelte/icons/maximize'
 import MinimizeIcon from '@lucide/svelte/icons/minimize'
@@ -15,7 +14,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { formatBytes, formatCompactCount, formatLogTime } from '$lib/format'
+import { formatCompactCount, formatLogTime } from '$lib/format'
 import { effectiveModelDisplayName } from '$lib/logical-model'
 import { observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations } from '$lib/observation-stream'
@@ -42,7 +41,6 @@ import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
 import { Slider } from '$lib/components/ui/slider'
-import { Switch } from '$lib/components/ui/switch'
 import * as Tabs from '$lib/components/ui/tabs'
 
 const queryClient = useQueryClient()
@@ -62,15 +60,10 @@ let filterOpen = $state(false)
 let clearOpen = $state(false)
 let clearing = $state(false)
 let clearResult = $state<{ skipped_active: number }>()
-let debugConfirmOpen = $state(false)
-let changingDebug = $state(false)
-let debugClearOpen = $state(false)
-let clearingDebug = $state(false)
 
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
-const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
 
 const ws = new ObservationWorkspace(admin.observations, subscribeToObservations, {
   focusLatest: async () => {
@@ -158,46 +151,6 @@ async function toggleFullscreen(): Promise<void> {
   }
 }
 
-async function disableDebug(): Promise<void> {
-  changingDebug = true
-  try {
-    await admin.observations.setDebug(false)
-    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    changingDebug = false
-  }
-}
-
-async function enableDebug(): Promise<void> {
-  changingDebug = true
-  try {
-    await admin.observations.setDebug(true)
-    debugConfirmOpen = false
-    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    changingDebug = false
-  }
-}
-
-async function clearDebugData(): Promise<void> {
-  clearingDebug = true
-  try {
-    await admin.observations.clearDebug()
-    debugClearOpen = false
-    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
-    await ws.refreshSelectedDetail()
-    toast.success(m.observation_debug_cleared())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    clearingDebug = false
-  }
-}
-
 async function clearHistory(): Promise<void> {
   clearing = true
   try {
@@ -253,19 +206,6 @@ async function downloadBundle(): Promise<void> {
 
 {#snippet headerActions()}
   <div class="flex flex-wrap items-center gap-2">
-    <div class="debug-toggle">
-      <BugIcon aria-hidden="true" /><span>{m.observation_debug()}</span><Switch
-        bind:checked={
-          () => debugQuery.data?.enabled ?? false,
-          (enabled) => (enabled ? (debugConfirmOpen = true) : void disableDebug())
-        }
-        disabled={changingDebug || debugQuery.isPending || !debugQuery.data}
-        aria-label={m.observation_debug()} />
-    </div>
-    {#if debugQuery.data?.enabled}
-      <Button variant="outline" onclick={() => (debugClearOpen = true)}
-        ><Trash2Icon data-icon="inline-start" />{m.observation_clear_debug()}</Button>
-    {/if}
     <Button variant="outline" onclick={() => (filterOpen = true)}
       ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if ws.activeFilterCount}<span
           >· {ws.activeFilterCount}</span
@@ -623,43 +563,6 @@ async function downloadBundle(): Promise<void> {
     ></Sheet.Content
   ></Sheet.Root>
 
-<AlertDialog.Root bind:open={debugConfirmOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
-      <AlertDialog.Description>
-        {m.observation_debug_warning({ retention_days: debugQuery.data?.retention_days ?? 0 })}
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <div class="rounded-md border p-3 text-sm">
-      <p>{m.observation_debug_retained({ retained: formatBytes(debugQuery.data?.retained_bytes) })}</p>
-      <p class="mt-1 text-muted-foreground">{m.observation_debug_disable_retains()}</p>
-    </div>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action disabled={changingDebug} onclick={() => void enableDebug()}
-        >{changingDebug ? m.observation_enabling() : m.observation_enable_debug()}</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
-
-<AlertDialog.Root bind:open={debugClearOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>{m.observation_clear_debug()}</AlertDialog.Title>
-      <AlertDialog.Description
-        >{m.observation_clear_debug_warning({
-          retained: formatBytes(debugQuery.data?.retained_bytes),
-        })}</AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" disabled={clearingDebug} onclick={() => void clearDebugData()}
-        >{clearingDebug ? m.observation_clearing() : m.observation_clear_debug()}</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
-
 <AlertDialog.Root bind:open={clearOpen}>
   <AlertDialog.Content>
     <AlertDialog.Header>
@@ -739,20 +642,6 @@ async function downloadBundle(): Promise<void> {
   color: var(--muted-foreground);
   /* Windows Chromium 会在非滚动容器上残留 scrollbar-button 残影；此处无滚动语义，显式关闭 */
   scrollbar-width: none;
-}
-.debug-toggle {
-  display: inline-flex;
-  height: 2.25rem;
-  align-items: center;
-  gap: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding-inline: 0.65rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-}
-.debug-toggle > :global(svg) {
-  width: 1rem;
 }
 .failures-view {
   position: relative;

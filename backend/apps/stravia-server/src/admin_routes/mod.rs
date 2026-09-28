@@ -24,6 +24,7 @@ use crate::oauth_callback::OAuthCallbackManager;
 use stravia_core::db::models::*;
 
 mod connect_clients;
+mod performance;
 mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
@@ -276,6 +277,8 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/stats/models", get(stats_by_model))
         .route("/stats/providers", get(stats_by_provider))
         .route("/stats/api-keys", get(stats_by_api_key))
+        .route("/performance/metrics", get(performance::metrics))
+        .route("/performance/timeline", get(performance::timeline))
         .route("/provider-allowances", get(list_provider_allowances))
         .route(
             "/provider-allowances/{provider_id}",

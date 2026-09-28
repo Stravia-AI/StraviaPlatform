@@ -8,11 +8,15 @@
 
 ### Added
 
+- Debug now collects process CPU/RSS, SQLx query and connection-acquisition histograms, named execution timings, and observation queue/cache gauges. A single tracing span pipeline supplies both Prometheus aggregates and a bounded Chrome Trace JSON timeline, downloadable by administrators from Settings without another listener. The timeline preserves async parent relationships, reports dropped and incomplete spans, and does not pretend to be a CPU profile. SQL text and request contents are excluded from performance exports.
+
 - Cline Pass is now served by the embedded base Vendor's `cline-pass` catalog Profile — standard OpenAI-compatible access with API-key authentication plus subscription allowance monitoring — and no dedicated plugin package is built or required. A `clinepass` plugin previously imported from a local package is not migrated or uninstalled automatically; recreate the connection as a base `cline-pass` Provider, rebind its Routes, then uninstall the old plugin in **Vendor Plugins**.
 
 ### Changed
 
 - Updated compatible Rust and WebUI dependencies, including Tauri 2.12, Wasmtime 49, RMCP 3.5, Svelte 5.57, and Vite 8.3. Refreshed workspace and Wasm fixture lockfiles and consolidated compatible duplicate dependencies. TypeScript remains on 6.0 while the Svelte and ESLint toolchains do not support TypeScript 7; incompatible upstream dependency ranges remain separate rather than being forced through overrides.
+
+- The single Debug switch and Debug Trace cleanup action now live in Settings → Diagnostics instead of Request History. The switch controls performance sampling and wire capture together, requires confirmation when enabled, and resets after restart. Disabling freezes performance data, marks active spans incomplete, and preserves the capture decisions of in-flight requests.
 
 - Supported Thinking Levels now use the union of non-hidden mappings across enabled Route targets instead of their intersection. The model editor, model discovery, client configuration exports, and Media Understanding level selection expose a level when at least one enabled target supports it. Disabled targets remain excluded; runtime matching still uses the selected target's own mapping.
 

@@ -134,24 +134,30 @@ impl AgentRunner {
         let runner = self.clone();
         let observation = crate::interaction_observation::scope::current();
         let (events, receiver) = mpsc::channel(32);
-        let driver = stream::once(async move {
-            let terminal = match runner
-                .execute(input, commit_policy, resolved, &events, observation)
-                .await
-            {
-                Ok(result) if result.completion == AgentCompletion::Completed => {
-                    AgentEvent::Completed(result)
-                }
-                Ok(result) => AgentEvent::Partial(result),
-                Err(error) => AgentEvent::Failed { error },
-            };
-            let _ = events.send(terminal).await;
-            None::<AgentEvent>
-        })
+        use tracing::Instrument as _;
+        let parent = tracing::Span::current();
+        let driver = stream::once(
+            async move {
+                let terminal = match runner
+                    .execute(input, commit_policy, resolved, &events, observation)
+                    .await
+                {
+                    Ok(result) if result.completion == AgentCompletion::Completed => {
+                        AgentEvent::Completed(result)
+                    }
+                    Ok(result) => AgentEvent::Partial(result),
+                    Err(error) => AgentEvent::Failed { error },
+                };
+                let _ = events.send(terminal).await;
+                None::<AgentEvent>
+            }
+            .instrument(parent),
+        )
         .filter_map(futures::future::ready);
         Box::pin(stream::select(ReceiverStream::new(receiver), driver))
     }
 
+    #[tracing::instrument(target = "stravia::perf", name = "agent.run", skip_all, fields(status))]
     async fn execute(
         &self,
         input: AgentInput,
@@ -509,27 +515,33 @@ impl AgentRunner {
                     publication: None,
                 })
             } else {
-                self.execute_model_turn(
-                    {
-                        let mut turn_input =
-                            TurnInput::new(input.principal.clone(), request.clone())
-                                .with_execution(
-                                    cancellation.clone(),
-                                    stravia_runtime_contract::Deadline::fixed(turn_deadline),
-                                );
-                        if let Some(observer) = observation.as_ref() {
-                            turn_input = turn_input.with_observer(observer.clone());
-                        }
-                        if capability_authorization.is_some() {
-                            turn_input = turn_input
-                                .with_authorization(ModelTurnAuthorization::CapabilityGrant);
-                        }
-                        turn_input
-                    },
-                    events,
-                    hooks.as_ref(),
-                )
-                .await
+                use tracing::Instrument as _;
+                let span = tracing::info_span!(target: "stravia::perf", "agent.model_turn.execute", status = tracing::field::Empty);
+                let result = self
+                    .execute_model_turn(
+                        {
+                            let mut turn_input =
+                                TurnInput::new(input.principal.clone(), request.clone())
+                                    .with_execution(
+                                        cancellation.clone(),
+                                        stravia_runtime_contract::Deadline::fixed(turn_deadline),
+                                    );
+                            if let Some(observer) = observation.as_ref() {
+                                turn_input = turn_input.with_observer(observer.clone());
+                            }
+                            if capability_authorization.is_some() {
+                                turn_input = turn_input
+                                    .with_authorization(ModelTurnAuthorization::CapabilityGrant);
+                            }
+                            turn_input
+                        },
+                        events,
+                        hooks.as_ref(),
+                    )
+                    .instrument(span.clone())
+                    .await;
+                span.record("status", if result.is_ok() { "completed" } else { "error" });
+                result
             };
             let turn_result = match response_result {
                 Err(error)

@@ -253,8 +253,16 @@ impl GenerationChainWrite {
         result
     }
 
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "generation_chain.history.persist",
+        skip_all,
+        fields(status)
+    )]
     pub(crate) async fn persist_holding_fence(&mut self) -> Result<(), PersistError> {
         let result = self.persist_inner().await;
+        tracing::Span::current()
+            .record("status", if result.is_ok() { "completed" } else { "error" });
         if result.is_err() {
             self.resolve_commit_fence();
         }

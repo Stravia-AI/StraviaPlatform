@@ -524,11 +524,16 @@ impl GenerationChainStore {
         if let Some(materialized) = self.materialization_cache_get(&principal_key, id) {
             return Ok(materialized);
         }
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(target: "stravia::perf", "generation_chain.history.load", status = tracing::field::Empty);
         let chain = self
             .turn_chain
             .materialize_with_expiry(principal, TurnNodeKind::Response, id)
-            .await
-            .map_err(|error| error.to_string())?;
+            .instrument(span.clone())
+            .await;
+        span.record("status", if chain.is_ok() { "completed" } else { "error" });
+        drop(span);
+        let chain = chain.map_err(|error| error.to_string())?;
         let materialized = materialize_generation_nodes(chain.nodes, chain.expires_at)?;
         self.materialization_cache_insert(principal_key, id.clone(), materialized.clone());
         Ok(materialized)
@@ -555,6 +560,7 @@ impl GenerationChainStore {
         if expired {
             if let Some(entry) = cache.entries.remove(&key) {
                 cache.bytes = cache.bytes.saturating_sub(entry.bytes);
+                crate::performance::record_generation_cache_bytes(cache.bytes);
             }
             cache.lru.retain(|candidate| candidate != &key);
             cache
@@ -619,6 +625,7 @@ impl GenerationChainStore {
             },
         );
         cache.lru.push_back(key);
+        crate::performance::record_generation_cache_bytes(cache.bytes);
     }
 
     #[cfg(test)]
