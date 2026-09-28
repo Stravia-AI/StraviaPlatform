@@ -1,3 +1,4 @@
+mod clinepass;
 mod parsers;
 
 use serde_json::Value;
@@ -12,15 +13,18 @@ use parsers::Monitor;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn supports(vendor_id: &str, channel: &str) -> bool {
-    monitor_for(vendor_id, channel).is_some()
+    clinepass::supports(vendor_id, channel) || monitor_for(vendor_id, channel).is_some()
 }
 
 pub(crate) fn execute(
     vendor_id: &str,
     host: &GuestHost,
     provider: ProviderSnapshot,
-    _request: AllowanceRequest,
+    request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
+    if clinepass::supports(vendor_id, provider.channel.as_str()) {
+        return clinepass::execute(host, &provider, request);
+    }
     let monitor = monitor_for(vendor_id, provider.channel.as_str()).ok_or_else(|| {
         error(
             ErrorKind::Unsupported,

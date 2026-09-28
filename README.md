@@ -131,9 +131,9 @@ Availability depends on upstream account and model support. Size preferences do 
 
 ### Vendor plugins
 
-All model Vendors run as self-contained Wasm Components. Stravia bundles exactly five packages: one base Vendor for existing integrations other than Codex, Grok, Command Code, and Devin, plus four dedicated packages for those identities. Dedicated packages own their full supplier identity and never fall back to the base package.
+All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; Codex, Grok, Command Code, and Devin are dedicated plugins distributed as separate Release attachments. Import the corresponding local `.wasm` file in **Vendor Plugins** before adding a connection. Dedicated plugins own their full supplier identity and never fall back to the base package.
 
-Bundled plugins are ready on first use, and **Vendor Plugins** can inspect them or import a local `.wasm` replacement without a marketplace. A plugin is trusted with the selected connection's upstream credentials and approved network destinations, so review its source and requested origins before use. See the [plugin design](docs/design/vendor-plugins.md) for supported capabilities, isolation, updates, and lifecycle details.
+**Vendor Plugins** also supports local plugin updates without a marketplace. A plugin is trusted with the selected connection's upstream credentials and approved network destinations, so review its source and requested origins before use. See the [plugin design](docs/design/vendor-plugins.md) for setup, supported capabilities, isolation, updates, and lifecycle details.
 
 ### Keys, usage, and request history
 

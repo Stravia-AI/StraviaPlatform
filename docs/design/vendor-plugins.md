@@ -22,6 +22,17 @@
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = command-code`、channel `default`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
 
+### Cline Pass 接入
+
+Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Profile，随内嵌供应商清单注册，推理复用标准 OpenAI-compatible codec；没有独立的 Wasm 包，也不发布专属 Release 附件。
+
+1. 添加 **Cline Pass** Provider，填写 Cline Pass API Key。默认地址为 `https://api.cline.bot/api/v1`；凭据通过连接范围的 `apiKey` 字段保存并使用 Bearer 认证。
+2. 同步模型并绑定到 Route。模型集合按 `cline-pass` Profile 的目录 scope 或管理员显式配置确定；未发布的规格不猜测，沿用现有 Canonical Model 元数据补全机制。
+
+额度监控读取连接地址下的 `/users/me/plan/usage-limits`，呈现上游报告的五小时、每周、每月等窗口及重置时间。base 不提供独立账号池、渠道钉住或自动重试；多个账号分别保存为 Provider，调度与故障切换沿用 Route 策略。
+
+历史手动安装的 `clinepass` 专属插件不会因本次变更自动卸载，其 `clinepass` Vendor 身份下的存量连接仍归旧插件执行，不自动迁移到 base。迁移时管理员新建 `cline-pass` Provider、重新绑定 Route，然后在供应商插件页面手动卸载旧插件。base 的 `cline-pass` 使用标准 OpenAI-compatible 接入，不复刻旧插件对上游响应 `data` 包装与 reasoning 字段优先级的私有处理。
+
 ### Provider 图标标识
 
 - 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。

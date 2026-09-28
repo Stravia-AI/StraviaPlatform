@@ -59,7 +59,7 @@ fn require(mut response: AllowanceResponse) -> Result<AllowanceResponse, ()> {
     Ok(response)
 }
 
-fn response(allowances: Vec<AllowanceItem>) -> AllowanceResponse {
+pub(super) fn response(allowances: Vec<AllowanceItem>) -> AllowanceResponse {
     AllowanceResponse {
         allowances,
         models: Vec::new(),
@@ -67,7 +67,7 @@ fn response(allowances: Vec<AllowanceItem>) -> AllowanceResponse {
     }
 }
 
-fn item(key: impl Into<String>, label: impl Into<String>, kind: &str) -> AllowanceItem {
+pub(super) fn item(key: impl Into<String>, label: impl Into<String>, kind: &str) -> AllowanceItem {
     AllowanceItem {
         key: key.into(),
         label: label.into(),
@@ -82,7 +82,7 @@ fn item(key: impl Into<String>, label: impl Into<String>, kind: &str) -> Allowan
     }
 }
 
-fn decimal(value: f64) -> String {
+pub(super) fn decimal(value: f64) -> String {
     value.to_string()
 }
 
@@ -107,7 +107,7 @@ fn amount_fields(
     item.limit = limit.map(|value| amount(value, unit, currency));
 }
 
-fn number(value: &Value) -> Option<f64> {
+pub(super) fn number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())
@@ -118,14 +118,14 @@ fn field_number(object: &Map<String, Value>, key: &str) -> Option<f64> {
     object.get(key).and_then(number)
 }
 
-fn non_empty(value: &Value) -> Option<&str> {
+pub(super) fn non_empty(value: &Value) -> Option<&str> {
     value
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
-fn timestamp_millis(value: &Value) -> Option<i64> {
+pub(super) fn timestamp_millis(value: &Value) -> Option<i64> {
     if let Some(value) = number(value) {
         let millis = if value.abs() < 1_000_000_000_000.0 {
             value * 1000.0
@@ -155,7 +155,7 @@ fn percent_from(used: Option<f64>, remaining: Option<f64>, limit: Option<f64>) -
     })
 }
 
-fn condition(item: &AllowanceItem) -> Option<String> {
+pub(super) fn condition(item: &AllowanceItem) -> Option<String> {
     let used = item
         .used_percent
         .as_deref()

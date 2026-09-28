@@ -131,9 +131,9 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 
 ### 供应商插件
 
-所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 恰好随附五个包：一个基础 Vendor 覆盖 Codex、Grok、Command Code、Devin 之外的既有接入，另有四个专属包分别负责这四种身份。专属包完整拥有对应供应商身份，任何情况下都不会回退到基础包。
+所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；Codex、Grok、Command Code 和 Devin 通过独立 Release 附件分发专属插件。添加连接前，先在**供应商插件**中导入对应的本地 `.wasm` 文件。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
 
-内置插件首次使用即可用；可在**供应商插件**中查看，或导入本地 `.wasm` 替换包，不依赖插件市场。插件会获得所选连接的上游凭据和已批准网络目标，因此使用前应核对来源与请求的 origin。支持能力、隔离、更新与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
+**供应商插件**也支持导入本地包更新，不依赖插件市场。插件会获得所选连接的上游凭据和已批准网络目标，因此使用前应核对来源与请求的 origin。接入步骤、支持能力、隔离、更新与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
 
 ### 密钥、用量与请求记录
 

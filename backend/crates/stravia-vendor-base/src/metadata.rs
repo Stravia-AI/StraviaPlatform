@@ -248,6 +248,14 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
                 ..NetworkDeclaration::default()
             },
         ),
+        // Usage limits are served from the connection's own base URL; the
+        // extra origin covers the fixed default when no URL is saved.
+        "cline-pass" => monitored_vendor(
+            "Cline Pass",
+            "openai-compatible",
+            "https://api.cline.bot/api/v1",
+            &["api.cline.bot"],
+        ),
         "github-copilot" => monitored_vendor(
             "GitHub Copilot",
             "openai-compatible",

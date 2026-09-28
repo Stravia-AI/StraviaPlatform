@@ -9,6 +9,9 @@ use axum::http::{Request, StatusCode};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use stravia_core::Gateway;
+use stravia_core::admin::provider_allowance::{
+    AllowanceCondition, AllowanceKind, ProviderAllowanceErrorCategory, ProviderAllowanceStatus,
+};
 use stravia_core::auth::types::{
     AuthSessionCandidate, OAuthCallbackMode, OAuthSessionStartOptions,
 };
@@ -911,6 +914,123 @@ async fn manually_installed_dedicated_packages_keep_complete_profiles() -> anyho
         "the manually installed dedicated packages must keep every previously public capability observable"
     );
 
+    Ok(())
+}
+
+/// Exercise the embedded component so an omitted allowance capability or
+/// network declaration cannot pass through parser-only tests.
+#[tokio::test]
+async fn base_cline_pass_allowance_reads_usage_limits_and_reports_window_quotas()
+-> anyhow::Result<()> {
+    let (_directory, gateway) = gateway().await?;
+    let served = AtomicUsize::new(0);
+    let (base_url, server) = local_upstream(2, {
+        move |_: &ObservedRequest| {
+            if served.fetch_add(1, Ordering::SeqCst) == 0 {
+                MockResponse::json(json!({
+                    "success": true,
+                    "data": {
+                        "limits": [
+                            {
+                                "type": "five_hour",
+                                "percentUsed": 12.5,
+                                "resetsAt": "2026-09-27T20:00:00Z"
+                            },
+                            {
+                                "type": "weekly",
+                                "percentUsed": 95,
+                                "resetsAt": "2026-10-01T00:00:00Z"
+                            }
+                        ]
+                    }
+                }))
+            } else {
+                MockResponse::json(json!({
+                    "success": false,
+                    "error": {"message": "quota backend offline"}
+                }))
+            }
+        }
+    })
+    .await?;
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Cline Pass allowance".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "cline-pass".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
+                base_url: format!("{base_url}/api/v1"),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "cline-pass-contract-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await?;
+
+    let snapshot = gateway
+        .admin()
+        .refresh_provider_allowance(&provider.id)
+        .await?
+        .expect("base cline-pass profile must answer allowance refreshes");
+    assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
+    assert_eq!(snapshot.error, None);
+    let five_hour = snapshot
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "five_hour")
+        .expect("five-hour quota window");
+    assert_eq!(five_hour.kind, AllowanceKind::QuotaWindow);
+    assert_eq!(five_hour.used_percent, Some(12.5));
+    assert_eq!(five_hour.window_seconds, Some(18_000));
+    assert_eq!(five_hour.reset_at, Some(1_790_539_200_000));
+    assert_eq!(five_hour.condition, Some(AllowanceCondition::Normal));
+    let weekly = snapshot
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "weekly")
+        .expect("weekly quota window");
+    assert_eq!(weekly.kind, AllowanceKind::QuotaWindow);
+    assert_eq!(weekly.used_percent, Some(95.0));
+    assert_eq!(weekly.window_seconds, Some(604_800));
+    assert_eq!(weekly.reset_at, Some(1_790_812_800_000));
+    assert_eq!(weekly.condition, Some(AllowanceCondition::Tight));
+
+    // A rejected envelope must surface as a stale snapshot with a classified
+    // error and keep the last-good windows, never as a fabricated success.
+    let stale = gateway
+        .admin()
+        .refresh_provider_allowance(&provider.id)
+        .await?
+        .expect("upstream rejection still returns the last-good snapshot");
+    assert_eq!(stale.status, ProviderAllowanceStatus::Stale);
+    assert_eq!(
+        stale.error.map(|error| error.category),
+        Some(ProviderAllowanceErrorCategory::UpstreamUnavailable)
+    );
+    assert_eq!(
+        stale
+            .allowances
+            .iter()
+            .map(|allowance| allowance.key.as_str())
+            .collect::<Vec<_>>(),
+        ["five_hour", "weekly"]
+    );
+
+    let observed = server.await??;
+    assert_eq!(observed.len(), 2);
+    for request in &observed {
+        assert_eq!(request.path, "/api/v1/users/me/plan/usage-limits");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer cline-pass-contract-key")
+        );
+    }
     Ok(())
 }
 

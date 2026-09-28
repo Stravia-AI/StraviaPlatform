@@ -1156,10 +1156,11 @@ impl ResponsesStreamParser {
                         event == "response.output_item.done",
                     )?;
                 }
-                if event == "response.output_item.done" && item_type == "function_call" {
-                    if item.get("arguments").and_then(Value::as_str).is_none() {
-                        anyhow::bail!("function_call arguments are missing");
-                    }
+                if event == "response.output_item.done"
+                    && item_type == "function_call"
+                    && item.get("arguments").and_then(Value::as_str).is_none()
+                {
+                    anyhow::bail!("function_call arguments are missing");
                 }
                 if !matches!(
                     item_type,
