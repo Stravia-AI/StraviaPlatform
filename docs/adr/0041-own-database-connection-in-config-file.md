@@ -4,6 +4,8 @@ status: accepted
 
 # 数据库连接仅由配置文件定义
 
+> 部分被 [ADR-0073](0073-cutover-to-single-baseline-schema.md) 取代：旧布局“停机后运行 `stravia-tools migrate-data` 复制并转换配置”的路径不再适用。`migrate-data` 只搬迁、优化带有受支持迁移前缀的数据根，不修改源 schema；`--config`（旧 `database.path` 转换）与 `--webview-from` 入口已移除。配置文件是数据库连接的唯一来源、统一数据根等其余约定继续有效。
+
 首次设置向导需要保存下一次启动仍能使用的数据库连接。本次设计选择配置文件作为数据库连接的唯一来源，移除现有数据库 CLI 参数及环境变量入口，而不采用 CLI、环境变量与文件的分层覆盖；这避免向导保存值与实际生效值存在两套解释。
 
 配置文件固定使用 `[database]`，由 `backend = "sqlite"` 或 `backend = "postgres"` 加 `url`（以及可选连接池参数）表达。`--config <path>` 只选择文件，默认是 `<data-dir>/server.toml`。后端选择及 PostgreSQL 连接不支持 CLI 或环境变量覆盖；SQLite 固定使用 `<data-dir>/db/gateway.db`，不再接受独立 `path`。

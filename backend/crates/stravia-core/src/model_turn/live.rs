@@ -1182,7 +1182,8 @@ async fn prepare_attempt(
     // 来源不明的受保护载荷乐观回放：上游拒绝时由 `protected_reasoning_rejected` 恢复分级剥离。
     let thinking_replayed =
         stravia_protocol_codec::transform::prepare_thinking_replay(&mut provider_request, |item| {
-            thinking_source.provenance(item) != crate::history_marker::ThinkingProvenance::Foreign
+            thinking_source.provenance(item, &gateway.reasoning_rejections)
+                != crate::history_marker::ThinkingProvenance::Foreign
         });
     let native_compaction_requested =
         stravia_protocol_codec::codec::compaction::native_compaction_requested(&provider_request);
@@ -1894,6 +1895,8 @@ async fn drive_vendor_attempt(
     let mut auth_recovered = false;
     // 分级见 `strip_rejected_protected_reasoning`。
     let mut protected_reasoning_recovery = 0u8;
+    // 最近一级剥离掉的受保护载荷摘要，等待该级重放的结果。
+    let mut stripped_protected_reasoning: Option<Vec<[u8; 32]>> = None;
 
     loop {
         let attempt = AttemptObservation::new(
@@ -1928,6 +1931,22 @@ async fn drive_vendor_attempt(
             &mut first_token_ms,
         )
         .await;
+
+        // 剥离后的重放没有再被判为推理拒绝（无论成功还是因其它原因失败），就记住该级
+        // 剥离掉的全部载荷。这是保守的过度近似：同一级中可能只有部分载荷是被拒原因。
+        if let Some(stripped) = stripped_protected_reasoning.take()
+            && !matches!(
+                &outcome,
+                Err(failure) if failure.error.code == "protected_reasoning_rejected"
+            )
+        {
+            remember_rejected_protected_reasoning(
+                &gateway.reasoning_rejections,
+                &prepared,
+                protected_reasoning_recovery,
+                stripped,
+            );
+        }
 
         match outcome {
             Ok(VendorTerminal::Infer(mut response, publication)) => {
@@ -2080,19 +2099,18 @@ async fn drive_vendor_attempt(
                     && prepared.allow_recovery
                     && protected_reasoning_recovery < 2 =>
             {
+                // 上游因载荷拒绝说明 Target 本身健康：不计入连续失败，也不受 Target
+                // 重试预算约束；只受两级剥离上限约束，且每级必须实际移除载荷。
                 let mut replay = continuation_fallback
                     .take()
                     .unwrap_or_else(|| request.clone());
                 crate::router::clear_previous_response_id(&mut replay);
+                let before = crate::history_marker::protected_payload_digests(&replay.items);
                 if strip_rejected_protected_reasoning(
                     &mut replay,
                     &mut protected_reasoning_recovery,
                     &prepared.thinking_source,
-                ) && policy.state.try_record_recovery_failure(
-                    &selected_target_key(&target),
-                    policy.epoch,
-                    target.target_retry_budget,
-                    target.target_cooldown_ms,
+                    &gateway.reasoning_rejections,
                 ) {
                     attempt.finish(
                         "failed",
@@ -2100,6 +2118,9 @@ async fn drive_vendor_attempt(
                         Some("protected_reasoning_rejected".into()),
                         None,
                     );
+                    let after = crate::history_marker::protected_payload_digests(&replay.items);
+                    stripped_protected_reasoning =
+                        Some(before.difference(&after).copied().collect());
                     request = replay;
                     continue;
                 }
@@ -3230,17 +3251,46 @@ fn strip_rejected_protected_reasoning(
     request: &mut AiRequest,
     stage: &mut u8,
     source: &crate::history_marker::ThinkingSource,
+    rejections: &crate::history_marker::ReasoningRejections,
 ) -> bool {
     if *stage == 0 {
         *stage = 1;
         if stravia_protocol_codec::transform::prepare_thinking_replay(request, |item| {
-            source.provenance(item) == crate::history_marker::ThinkingProvenance::Verified
+            source.provenance(item, rejections)
+                == crate::history_marker::ThinkingProvenance::Verified
         }) {
             return true;
         }
     }
     *stage = 2;
     stravia_protocol_codec::transform::prepare_thinking_replay(request, |_| false)
+}
+
+/// 把某一级剥离掉的载荷记入当前签发作用域的拒绝记忆（ADR-0075）。第二级包含来源
+/// 已证实的载荷，说明签发作用域判定与上游行为不符，需要运维可见。
+fn remember_rejected_protected_reasoning(
+    rejections: &crate::history_marker::ReasoningRejections,
+    prepared: &PreparedAttempt,
+    stage: u8,
+    stripped: Vec<[u8; 32]>,
+) {
+    if stripped.is_empty() {
+        return;
+    }
+    let authority = prepared
+        .thinking_source
+        .authority
+        .as_deref()
+        .expect("prepared Target always has a thinking authority");
+    if stage == 2 {
+        tracing::warn!(
+            target_id = %prepared.route.target_id,
+            protocol = %prepared.protocol_hint,
+            payloads = stripped.len(),
+            "upstream rejected protected reasoning from its own signing scope"
+        );
+    }
+    rejections.record(authority, stripped);
 }
 
 /// 受保护推理签发作用域：签名/密文由部署按凭据签发，是否再绑定模型由出口协议决定。
@@ -3388,7 +3438,9 @@ mod tests {
         UPSTREAM_NOT_STARTED, UPSTREAM_STARTED, UpstreamLocalWork, VendorDriverHandle,
         strip_rejected_protected_reasoning, thinking_authority,
     };
-    use crate::history_marker::{ThinkingProvenance, ThinkingSource};
+    use crate::history_marker::{
+        ReasoningRejections, ThinkingProvenance, ThinkingSource, protected_payload_digests,
+    };
     use crate::plugin::{VendorOperationTracker, VendorPublicationFence};
     use crate::router::{RoutePolicyState, TargetRuntimeState};
     use std::sync::{Arc, atomic::AtomicU8};
@@ -3396,6 +3448,7 @@ mod tests {
     use stravia_runtime_contract::Deadline;
     use stravia_runtime_contract::protocol::ids::{
         ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        OPEN_RESPONSES_2026_04_24,
     };
     use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, AiStreamDelta};
 
@@ -3579,57 +3632,193 @@ mod tests {
             authority: Some("deployment-a".into()),
         };
         let native = AiItem::thinking("reasoning", Some("signature".into()));
-        assert_eq!(target.provenance(&native), ThinkingProvenance::Unknown);
-
-        // 路由 Target、代理或选项不同，只要签发作用域相同仍可证明。
-        let mut rewired = native.clone();
-        ThinkingSource {
-            namespace: "other-namespace".into(),
-            actual_model: "other-model".into(),
-            target_id: "other-target".into(),
-            ..target.clone()
-        }
-        .stamp_item(&mut rewired);
-        assert_eq!(target.provenance(&rewired), ThinkingProvenance::Verified);
-
-        let mut foreign = native.clone();
-        ThinkingSource {
+        let stamped = |source: ThinkingSource| {
+            let mut item = native.clone();
+            source.stamp_item(&mut item);
+            item
+        };
+        let other_scope = ThinkingSource {
             authority: Some("deployment-b".into()),
             ..target.clone()
-        }
-        .stamp_item(&mut foreign);
-        assert_eq!(target.provenance(&foreign), ThinkingProvenance::Foreign);
-
-        let mut legacy_same = native.clone();
-        ThinkingSource {
-            authority: None,
+        };
+        let gemini = ThinkingSource {
+            protocol: Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.into()),
             ..target.clone()
-        }
-        .stamp_item(&mut legacy_same);
-        assert_eq!(
-            target.provenance(&legacy_same),
-            ThinkingProvenance::Verified
-        );
-
-        let mut legacy_other = native.clone();
-        ThinkingSource {
-            namespace: "other-namespace".into(),
-            authority: None,
+        };
+        let plugin = ThinkingSource {
+            protocol: Some("acme/custom-wire".into()),
             ..target.clone()
-        }
-        .stamp_item(&mut legacy_other);
-        assert_eq!(
-            target.provenance(&legacy_other),
-            ThinkingProvenance::Unknown
-        );
-
-        let mut malformed = native;
+        };
+        let mut malformed = native.clone();
         malformed.meta = Some(
             stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
                 serde_json::json!({"__stravia_thinking_source": "invalid"}),
             ),
         );
-        assert_eq!(target.provenance(&malformed), ThinkingProvenance::Foreign);
+        let cases = [
+            (
+                "no provenance record",
+                &target,
+                native.clone(),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "malformed record",
+                &target,
+                malformed,
+                ThinkingProvenance::Foreign,
+            ),
+            (
+                // 路由 Target、代理或选项不同，只要签发作用域相同仍可证明。
+                "same scope, different Target wiring",
+                &target,
+                stamped(ThinkingSource {
+                    namespace: "other-namespace".into(),
+                    actual_model: "other-model".into(),
+                    target_id: "other-target".into(),
+                    ..target.clone()
+                }),
+                ThinkingProvenance::Verified,
+            ),
+            (
+                "same protocol, other deployment or credential",
+                &target,
+                stamped(other_scope.clone()),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "same protocol family under an alias",
+                &target,
+                stamped(ThinkingSource {
+                    protocol: Some("anthropic-messages".into()),
+                    ..other_scope.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "other protocol",
+                &target,
+                stamped(ThinkingSource {
+                    protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
+                    ..other_scope.clone()
+                }),
+                ThinkingProvenance::Foreign,
+            ),
+            (
+                "plugin protocol against a known protocol",
+                &target,
+                stamped(ThinkingSource {
+                    protocol: Some("acme/custom-wire".into()),
+                    ..other_scope.clone()
+                }),
+                ThinkingProvenance::Foreign,
+            ),
+            (
+                "same plugin protocol identity",
+                &plugin,
+                stamped(ThinkingSource {
+                    authority: Some("deployment-b".into()),
+                    ..plugin.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "record without protocol",
+                &target,
+                stamped(ThinkingSource {
+                    protocol: None,
+                    ..other_scope.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "model change on a protocol without model binding",
+                &target,
+                stamped(ThinkingSource {
+                    actual_model: "other-model".into(),
+                    ..other_scope.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "Gemini model change",
+                &gemini,
+                stamped(ThinkingSource {
+                    actual_model: "other-model".into(),
+                    authority: Some("deployment-b".into()),
+                    ..gemini.clone()
+                }),
+                ThinkingProvenance::Foreign,
+            ),
+            (
+                "Gemini same model, other deployment",
+                &gemini,
+                stamped(ThinkingSource {
+                    authority: Some("deployment-b".into()),
+                    ..gemini.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "legacy record with the same namespace",
+                &target,
+                stamped(ThinkingSource {
+                    authority: None,
+                    ..target.clone()
+                }),
+                ThinkingProvenance::Verified,
+            ),
+            (
+                "legacy record with another namespace",
+                &target,
+                stamped(ThinkingSource {
+                    namespace: "other-namespace".into(),
+                    authority: None,
+                    ..target.clone()
+                }),
+                ThinkingProvenance::Unknown,
+            ),
+            (
+                "legacy record with another namespace and protocol",
+                &target,
+                stamped(ThinkingSource {
+                    namespace: "other-namespace".into(),
+                    protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
+                    authority: None,
+                    ..target.clone()
+                }),
+                ThinkingProvenance::Foreign,
+            ),
+        ];
+        let rejections = ReasoningRejections::default();
+        for (case, current, item, expected) in &cases {
+            assert_eq!(current.provenance(item, &rejections), *expected, "{case}");
+        }
+
+        // 被当前签发作用域拒绝过的载荷一律剥离，包括本可证明同源的载荷；
+        // 其它签发作用域不受影响。
+        rejections.record(
+            "deployment-a",
+            protected_payload_digests(std::slice::from_ref(&native)),
+        );
+        let verified = stamped(target.clone());
+        assert_eq!(
+            target.provenance(&verified, &rejections),
+            ThinkingProvenance::Foreign
+        );
+        assert_eq!(
+            target.provenance(&native, &rejections),
+            ThinkingProvenance::Foreign
+        );
+        assert_eq!(
+            other_scope.provenance(&native, &rejections),
+            ThinkingProvenance::Unknown
+        );
+        let unrelated = AiItem::thinking("reasoning", Some("other-signature".into()));
+        assert_eq!(
+            target.provenance(&unrelated, &rejections),
+            ThinkingProvenance::Unknown
+        );
     }
 
     #[test]
@@ -3654,13 +3843,15 @@ mod tests {
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
+        let rejections = ReasoningRejections::default();
         let mut request = AiRequest::new("model", vec![verified.clone(), unknown]);
         let mut stage = 0;
 
         assert!(strip_rejected_protected_reasoning(
             &mut request,
             &mut stage,
-            &source
+            &source,
+            &rejections
         ));
         assert_eq!(stage, 1);
         assert_eq!(signatures(&request), vec!["own-signature"]);
@@ -3668,7 +3859,8 @@ mod tests {
         assert!(strip_rejected_protected_reasoning(
             &mut request,
             &mut stage,
-            &source
+            &source,
+            &rejections
         ));
         assert_eq!(stage, 2);
         assert!(signatures(&request).is_empty());
@@ -3679,7 +3871,8 @@ mod tests {
         assert!(strip_rejected_protected_reasoning(
             &mut request,
             &mut stage,
-            &source
+            &source,
+            &rejections
         ));
         assert_eq!(stage, 2);
         assert!(signatures(&request).is_empty());

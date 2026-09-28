@@ -4,6 +4,8 @@ status: accepted
 
 # Vendor 身份独立于实现包与协议
 
+> 部分被 [Vendor Wasm 插件设计](../design/vendor-plugins.md#已确认的身份与信任) 取代：“五个 Vendor 均随程序交付”的分发描述不再适用。程序默认只内嵌 `base`，四个专属包作为独立 Release 附件，由管理员通过本地包导入。本 ADR 确定的 Vendor 身份、Profile 与协议边界不变。
+
 Vendor 使用独立、稳定的实现身份，不再由 npm package、Provider Catalog 条目或 Protocol 决定。最终随程序交付恰好五个 Vendor：`base` 回退 Vendor，以及 `openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属 Vendor。`base` 是一个 Vendor 和一个软件包，不是把多个 Vendor 合并到同一包；它通过多个 Provider Profile 承接四个专属接入之外的全部现有供应商能力，包括既有认证、OAuth、云协议、模型发现、额度和供应商差异。普通 `openai` 与 `xai` Profile 仍归 `base`，Codex 与 Grok 则分别使用独立的 `openai-codex` 与 `xai-grok` 身份。
 
 `VendorDescriptor` 以 `kind` 区分 `fallback` 与 `dedicated`，并在 `providers` 中声明 `ProviderDescriptor`。每个 Profile 以稳定的 `provider_id` 标识供应商接入，并可通过 `catalog_id` 关联展示目录；`ProviderSnapshot.provider_id` 是 `stravia:vendor@0.2.0` 的必填输入。供应商 Profile ID 与已保存 Provider 连接的数据库 UUID 是不同概念：迁移 Vendor 归属不能改变连接 UUID、凭据、Route 或历史。更换 SDK、共享标准 codec 或升级插件也不应改变已有连接所引用的身份。

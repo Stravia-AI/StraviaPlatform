@@ -348,13 +348,22 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         messages.push(message);
         messages.push(json!({"role": "user", "content": "continue"}));
     }
-    for captured in [&foreign_requests, &chat_requests] {
+    // 同协议的其它部署可能接受原密文，乐观回放；其它协议必然拒绝，发送前剥离。
+    for (captured, replays_cipher) in [(&foreign_requests, true), (&chat_requests, false)] {
         let requests = captured.lock();
         let body = captured_body(&requests[0]);
         let wire = body.to_string();
         assert!(wire.contains("retained public summary"), "{wire}");
-        assert!(!wire.contains("origin-visible-cipher"), "{wire}");
-        assert!(!wire.contains("origin-opaque-cipher"), "{wire}");
+        assert_eq!(
+            wire.contains("origin-visible-cipher"),
+            replays_cipher,
+            "{wire}"
+        );
+        assert_eq!(
+            wire.contains("origin-opaque-cipher"),
+            replays_cipher,
+            "{wire}"
+        );
         assert!(!wire.contains("__stravia_thinking_source"), "{wire}");
     }
     shutdown_test_gateway(gateway).await;
@@ -480,7 +489,8 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         (true, "invalid_encrypted_content", true, false, 1, 2),
         (true, "invalid_encrypted_content", true, true, 1, 1),
         (false, "invalid_request_error", false, false, 1, 1),
-        (false, "invalid_encrypted_content", false, false, 0, 1),
+        // 推理被拒不是 Target 故障：预算为 0 仍恢复。
+        (false, "invalid_encrypted_content", false, false, 0, 2),
     ] {
         let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let app = Router::new()
@@ -558,6 +568,222 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         server.abort();
         close_test_gateway(gateway, data_dir).await;
     }
+}
+
+/// 本地 Responses 上游：请求体含 `unusable-cipher` 时以 `invalid_encrypted_content`
+/// 拒绝；`always_reject` 时一律拒绝。记录每次收到的请求体。
+struct CipherRejectingUpstream {
+    base_url: String,
+    requests: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn serve_cipher_rejecting_upstream(always_reject: bool) -> CipherRejectingUpstream {
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use serde_json::{Value, json};
+
+    type Fixture = (Arc<parking_lot::Mutex<Vec<Value>>>, bool);
+
+    async fn handle(
+        State((requests, always_reject)): State<Fixture>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let rejected = always_reject || body.to_string().contains("unusable-cipher");
+        requests.lock().push(body);
+        if rejected {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_encrypted_content",
+                    "message": "Encrypted content could not be verified"
+                }})),
+            )
+                .into_response();
+        }
+        Json(
+            stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                "resp-accepted",
+                "provider-model",
+                "completed",
+                vec![json!({
+                    "type": "message", "id": "msg_accepted", "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "accepted", "annotations": []}]
+                })],
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
+        )
+        .into_response()
+    }
+
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/v1/responses", post(handle))
+        .with_state((requests.clone(), always_reject));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local upstream");
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    CipherRejectingUpstream {
+        base_url: format!("http://{address}/v1"),
+        requests,
+        server,
+    }
+}
+
+/// 以 Responses 客户端发送一轮；`cipher` 为客户端自带（无来源记录）的推理密文。
+async fn post_reasoning_turn(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    model: &str,
+    cipher: Option<&str>,
+) -> (StatusCode, String) {
+    use serde_json::json;
+
+    let mut input = Vec::new();
+    if let Some(cipher) = cipher {
+        input.push(json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "public summary"}],
+            "encrypted_content": cipher
+        }));
+    }
+    input.push(json!({"role": "user", "content": "continue"}));
+    let request = stravia_protocol_codec::transform::ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap()
+        .decode_request(json!({"model": model, "input": input}))
+        .unwrap();
+    let response = execute_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        request,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+async fn cipher_rejection_gateway(
+    upstream: &CipherRejectingUpstream,
+    model: &str,
+) -> (Gateway, tempfile::TempDir) {
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // 夹具 Target 默认重试预算为 0、冷却不为 0：任何一次 Target 失败都会让它冷却。
+    configure_route_with_protocol(
+        &gateway,
+        model,
+        std::slice::from_ref(&upstream.base_url),
+        "custom",
+        "open-responses",
+    )
+    .await;
+    (gateway, data_dir)
+}
+
+#[tokio::test]
+async fn rejected_reasoning_is_remembered_for_the_signing_scope() {
+    let upstream = serve_cipher_rejecting_upstream(false).await;
+    let (gateway, data_dir) = cipher_rejection_gateway(&upstream, "remembered-rejection").await;
+    let headers = authorized_headers(&gateway).await;
+
+    let (status, body) = post_reasoning_turn(
+        &gateway,
+        &headers,
+        "remembered-rejection",
+        Some("unusable-cipher-remembered"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(upstream.requests.lock().len(), 2);
+
+    let (status, body) = post_reasoning_turn(
+        &gateway,
+        &headers,
+        "remembered-rejection",
+        Some("unusable-cipher-remembered"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = upstream.requests.lock();
+        assert_eq!(
+            requests.len(),
+            3,
+            "remembered payload must not be rejected again"
+        );
+        let replay = requests[2].to_string();
+        assert!(!replay.contains("unusable-cipher-remembered"), "{replay}");
+        assert!(replay.contains("public summary"), "{replay}");
+    }
+    upstream.server.abort();
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
+async fn rejected_reasoning_recovery_keeps_the_target_available() {
+    let upstream = serve_cipher_rejecting_upstream(false).await;
+    let (gateway, data_dir) = cipher_rejection_gateway(&upstream, "healthy-rejection").await;
+    let headers = authorized_headers(&gateway).await;
+
+    for turn in 0..3 {
+        let cipher = format!("unusable-cipher-{turn}");
+        let (status, body) =
+            post_reasoning_turn(&gateway, &headers, "healthy-rejection", Some(&cipher)).await;
+        assert_eq!(status, StatusCode::OK, "turn {turn}: {body}");
+        assert_eq!(upstream.requests.lock().len(), 2 * (turn + 1));
+    }
+    let (status, body) = post_reasoning_turn(&gateway, &headers, "healthy-rejection", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(upstream.requests.lock().len(), 7);
+    upstream.server.abort();
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
+async fn persistent_reasoning_rejection_stops_once_nothing_is_left_to_strip() {
+    let upstream = serve_cipher_rejecting_upstream(true).await;
+    let (gateway, data_dir) = cipher_rejection_gateway(&upstream, "persistent-rejection").await;
+    let headers = authorized_headers(&gateway).await;
+
+    let (status, body) = post_reasoning_turn(
+        &gateway,
+        &headers,
+        "persistent-rejection",
+        Some("unusable-cipher-persistent"),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    {
+        // 首发被拒后剥离来源不明的密文重放一次；再被拒时已无可剥离的载荷，按原错误结束。
+        let requests = upstream.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .to_string()
+                .contains("unusable-cipher-persistent")
+        );
+        assert!(
+            !requests[1]
+                .to_string()
+                .contains("unusable-cipher-persistent")
+        );
+    }
+    upstream.server.abort();
+    close_test_gateway(gateway, data_dir).await;
 }
 
 #[tokio::test]

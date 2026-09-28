@@ -96,6 +96,8 @@ impl TurnChainStore for SqlTurnChainStore {
         let now = chrono::Utc::now().timestamp_millis();
         let rows: Vec<(String, Option<String>, i64, String, i64, i64)> = match self {
             Self::Sqlite(pool) => {
+                // CROSS JOIN 固定 ancestors 为外层：否则无统计信息的 SQLite 会按
+                // (principal, kind) 扫描该主体全部节点，耗时随链深 × 节点数增长。
                 sqlx::query_as(
                     "WITH RECURSIVE ancestors(id, parent_id, payload_version, payload, expires_at, depth) AS (\
                      SELECT id, parent_id, payload_version, payload, expires_at, 0 \
@@ -103,9 +105,8 @@ impl TurnChainStore for SqlTurnChainStore {
                      WHERE id = ? AND principal = ? AND kind = ? \
                      UNION ALL \
                      SELECT node.id, node.parent_id, node.payload_version, node.payload, node.expires_at, ancestors.depth + 1 \
-                     FROM turn_chain_nodes node \
-                     JOIN ancestors ON node.id = ancestors.parent_id \
-                     WHERE node.principal = ? AND node.kind = ?\
+                     FROM ancestors CROSS JOIN turn_chain_nodes node \
+                     WHERE node.id = ancestors.parent_id AND node.principal = ? AND node.kind = ?\
                      ) \
                      SELECT id, parent_id, payload_version, payload, expires_at, depth \
                      FROM ancestors ORDER BY depth DESC",
@@ -239,14 +240,15 @@ impl TurnChainStore for SqlTurnChainStore {
                     return Err(TurnCommitError::AlreadyExists);
                 }
                 if let Some(parent_id) = commit.parent_id.as_ref() {
+                    // 该语句在写锁内执行；CROSS JOIN 的原因见 materialize_with_expiry。
                     let updated = sqlx::query(
                         "WITH RECURSIVE ancestors(id, parent_id, depth) AS (\
                          SELECT id, parent_id, 0 FROM turn_chain_nodes \
                          WHERE id = ? AND principal = ? AND kind = ? AND expires_at > ? \
                          UNION ALL \
-                         SELECT node.id, node.parent_id, ancestors.depth + 1 FROM turn_chain_nodes node \
-                         JOIN ancestors ON node.id = ancestors.parent_id \
-                         WHERE node.principal = ? AND node.kind = ?\
+                         SELECT node.id, node.parent_id, ancestors.depth + 1 \
+                         FROM ancestors CROSS JOIN turn_chain_nodes node \
+                         WHERE node.id = ancestors.parent_id AND node.principal = ? AND node.kind = ?\
                          ) \
                          UPDATE turn_chain_nodes \
                          SET expires_at = CASE WHEN expires_at < ? THEN ? ELSE expires_at END \
@@ -500,8 +502,8 @@ impl TurnChainStore for SqlTurnChainStore {
                          SELECT id, parent_id, payload_version, payload, expires_at, 0 FROM turn_chain_nodes \
                          WHERE id = $1 AND principal = $2 AND kind = 'response' \
                          UNION ALL SELECT node.id, node.parent_id, node.payload_version, node.payload, node.expires_at, ancestors.depth + 1 \
-                         FROM turn_chain_nodes node JOIN ancestors ON node.id = ancestors.parent_id \
-                         WHERE node.principal = $2 AND node.kind = 'response') \
+                         FROM ancestors CROSS JOIN turn_chain_nodes node \
+                         WHERE node.id = ancestors.parent_id AND node.principal = $2 AND node.kind = 'response') \
                          SELECT id, parent_id, payload_version, payload, expires_at FROM ancestors ORDER BY depth DESC"
                     ).bind(&id).bind(&principal).fetch_all(&mut *transaction).await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;

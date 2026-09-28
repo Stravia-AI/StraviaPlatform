@@ -4,6 +4,8 @@ status: superseded by ADR-0022
 
 # Checkpoint Generation Chains without duplicating history
 
+> 本决策已被 [ADR-0022](0022-materialize-generation-chains-from-deltas.md) 整体取代：不再持久化完整 Generation Checkpoint，改为从 delta 物化，并使用进程内 Generation Materialization Cache 加速。原文保留供追溯。
+
 Generation Chain 节点始终保存本轮 canonical 输入 delta、最终 canonical 输出和 resolved profile delta；Stravia 只在固定间隔、分支根或 Hook/Provider 改写既有历史时写入完整 effective execution context 的 Generation Checkpoint。物化从最近 Checkpoint 重放后续增量，既不重跑可变 Hook，也不让每个节点复制完整祖先历史。
 
 ## Considered options

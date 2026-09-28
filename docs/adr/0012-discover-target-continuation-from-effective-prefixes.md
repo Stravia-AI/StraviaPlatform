@@ -4,6 +4,8 @@ status: superseded by ADR-0014
 
 # Discover Target Continuation from exact effective prefixes
 
+> 本决策已被 [ADR-0014](0014-discover-target-continuation-from-effective-prefixes.md) 整体取代；原文保留供追溯。
+
 Stravia 允许没有显式 response ID 的客户端重发完整历史，因此只支持显式父节点会让 Chat Completions、Anthropic Messages 与 Google Gemini 客户端反复提交已完成上下文。Stravia 决定在完整历史恢复、Hook 与 Protocol Conversion 完成后，从同一 Principal 和等价 Target 语义的 Response Chain 节点中选择最长 Reusable Response Prefix，并以对应 Target Continuation 替换该前缀；这样减少重复 token，同时不把客户端连接或相似文本误当成 Session 身份。
 
 ## Considered options
