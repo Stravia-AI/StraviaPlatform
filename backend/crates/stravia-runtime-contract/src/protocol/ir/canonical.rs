@@ -69,7 +69,10 @@ pub fn history_unit_count(items: &[AiItem]) -> usize {
         .sum()
 }
 
-fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
+/// Canonical semantic units of one history item, in emission order. Callers
+/// that also need the unit count should project once through this function and
+/// take `len()`, not re-project via [`history_unit_count`].
+pub fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
     let values = if let Some(mut native) = native_compaction_item(item) {
         if let Some(fields) = native.as_object_mut() {
             for key in [
@@ -341,7 +344,10 @@ pub fn history_context_hash(items: &[AiItem]) -> [u8; 32] {
     digest
 }
 
-fn append_history_value_hash(previous: [u8; 32], value: serde_json::Value) -> [u8; 32] {
+/// Folds one canonical unit value into a running context hash. Pair with
+/// [`history_item_values`] to project each item once when both the hash chain
+/// and the unit count are needed.
+pub fn append_history_value_hash(previous: [u8; 32], value: serde_json::Value) -> [u8; 32] {
     let value = serde_json::to_vec(&value)
         .expect("model-visible provider-context unit must serialize as JSON");
     let mut hasher = Sha256::new();

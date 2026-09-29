@@ -25,9 +25,20 @@ static DEBUG_SOURCES: LazyLock<RwLock<Vec<Weak<AtomicBool>>>> =
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 static RECORDER: OnceLock<Option<PrometheusHandle>> = OnceLock::new();
 const ACTIVE_CAPACITY: usize = 1024;
-const COMPLETED_CAPACITY: usize = 2048;
+const COMPLETED_CAPACITY: usize = 10_000;
+const ACTIVE_CAPACITY_ENV: &str = "STRAVIA_PERF_TRACE_ACTIVE_CAPACITY";
+const COMPLETED_CAPACITY_ENV: &str = "STRAVIA_PERF_TRACE_COMPLETED_CAPACITY";
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 static TIMELINE: LazyLock<Mutex<Timeline>> = LazyLock::new(|| Mutex::new(Timeline::default()));
+
+/// 容量取自环境变量以便现网诊断时免重编译扩大保留窗口；缺失或非法值回退默认。
+fn env_capacity(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
 static CLOCK: LazyLock<(Instant, u64)> = LazyLock::new(|| {
     let instant = Instant::now();
     let micros = SystemTime::now()
@@ -116,18 +127,33 @@ impl ActiveSpan {
     }
 }
 
-#[derive(Default)]
 struct Timeline {
     active: HashMap<u64, ActiveSpan>,
     completed: VecDeque<TraceRecord>,
+    active_capacity: usize,
+    completed_capacity: usize,
     dropped_active: u64,
     dropped_completed: u64,
     incomplete: u64,
 }
 
+impl Default for Timeline {
+    fn default() -> Self {
+        Self {
+            active: HashMap::default(),
+            completed: VecDeque::default(),
+            active_capacity: env_capacity(ACTIVE_CAPACITY_ENV, ACTIVE_CAPACITY),
+            completed_capacity: env_capacity(COMPLETED_CAPACITY_ENV, COMPLETED_CAPACITY),
+            dropped_active: 0,
+            dropped_completed: 0,
+            incomplete: 0,
+        }
+    }
+}
+
 impl Timeline {
     fn push(&mut self, record: TraceRecord) {
-        if self.completed.len() == COMPLETED_CAPACITY {
+        if self.completed.len() == self.completed_capacity {
             self.completed.pop_front();
             self.dropped_completed += 1;
         }
@@ -145,7 +171,7 @@ impl Timeline {
 /// Perfetto/Chrome Trace JSON：已结束的是 X，仍活动或因 Debug 关闭中断的是只有 B 的不完整 span。
 /// 每个 span 使用自己的合成 track，tid 不是 CPU 线程；异步并发不会破坏同一 track 的嵌套约束。
 pub fn timeline_snapshot() -> Value {
-    let (records, live, dropped_active, dropped_completed, incomplete_total) = {
+    let (records, live, active_capacity, completed_capacity, dropped_active, dropped_completed, incomplete_total) = {
         let state = TIMELINE.lock();
         (
             state.completed.iter().cloned().collect::<Vec<_>>(),
@@ -154,6 +180,8 @@ pub fn timeline_snapshot() -> Value {
                 .values()
                 .map(|span| span.record(None))
                 .collect::<Vec<_>>(),
+            state.active_capacity,
+            state.completed_capacity,
             state.dropped_active,
             state.dropped_completed,
             state.incomplete + state.active.len() as u64,
@@ -223,7 +251,7 @@ pub fn timeline_snapshot() -> Value {
         "traceEvents": events,
         "displayTimeUnit": "ms",
         "metadata": {
-            "capacity": { "active": ACTIVE_CAPACITY, "completed": COMPLETED_CAPACITY },
+            "capacity": { "active": active_capacity, "completed": completed_capacity },
             "dropped_active": dropped_active,
             "dropped_completed": dropped_completed,
             "incomplete": incomplete,
@@ -347,7 +375,8 @@ impl Visit for StatusVisitor {
 }
 
 /// 静态 span 名称是唯一 operation 标签；仅接受状态和工作量数值白名单。
-/// 内存上限是活动 1024 + 已结束 2048 条；满额的活动 span 不导出也不记指标。
+/// 内存上限默认活动 1024 + 已结束 10000 条，可用 STRAVIA_PERF_TRACE_ACTIVE_CAPACITY
+/// 与 STRAVIA_PERF_TRACE_COMPLETED_CAPACITY 在进程启动时调整；满额的活动 span 不导出也不记指标。
 pub struct PerformanceLayer;
 
 impl<S> Layer<S> for PerformanceLayer
@@ -386,7 +415,7 @@ where
         attrs.record(&mut status);
         let Some(span) = ctx.span(id) else { return };
         let mut state = TIMELINE.lock();
-        if state.active.len() == ACTIVE_CAPACITY {
+        if state.active.len() == state.active_capacity {
             state.dropped_active += 1;
             return;
         }

@@ -204,7 +204,8 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
     )
     .await;
     let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
-    for (iteration, expected_reads) in [(0, 1), (1, 2)] {
+    // 首次冷读后 materialized 与引用目录同键缓存，后续命中不再触发存储读。
+    for (iteration, expected_reads) in [(0, 1), (1, 1)] {
         let mut request = continuation_to(
             "resp_optimization_reference_child",
             vec![reference_to("msg_old")],

@@ -645,21 +645,6 @@ fn history_tool_calls(items: &[AiItem]) -> Vec<(&str, &str)> {
     calls
 }
 
-pub(super) fn history_prefix_item_count(items: &[AiItem], expected_units: usize) -> Option<usize> {
-    let mut semantic_units = 0usize;
-    for (index, item) in items.iter().enumerate() {
-        semantic_units += stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
-            std::slice::from_ref(item),
-        );
-        match semantic_units.cmp(&expected_units) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => return Some(index + 1),
-            std::cmp::Ordering::Greater => return None,
-        }
-    }
-    None
-}
-
 pub(super) fn history_context_fingerprint(messages: &[AiItem]) -> String {
     stravia_runtime_contract::protocol::ir::canonical::hash_hex(
         &stravia_runtime_contract::protocol::ir::canonical::history_context_hash(messages),
