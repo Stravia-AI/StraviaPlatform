@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Request History Conversation and Diagnostics views now open at the latest content and follow new events while you stay at the bottom. Scrolling to the top shows a loading indicator and loads earlier events in place without shifting what you are reading. Diagnostics no longer shows earlier runs as empty before their events load.
+
 ## [0.3.1] - 2026-09-29
 
 ### Removed

@@ -1722,6 +1722,8 @@
   "observation_activity_error": "Failed",
   "observation_activity_storage_error": "Could not remember the expanded state in this browser.",
   "observation_chat_latest": "New activity · Back to latest",
+  "observation_older_loading": "Loading earlier events",
+  "observation_older_retry": "Couldn't load earlier events · Retry",
 
   "observation_live_capacity": "Live preview is incomplete. Content appears here as it is saved.",
   "observation_live_unsaved": "Not yet saved",

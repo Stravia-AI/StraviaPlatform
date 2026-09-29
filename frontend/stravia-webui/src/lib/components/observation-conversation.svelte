@@ -1,6 +1,5 @@
 <script lang="ts">
-import { tick, untrack } from 'svelte'
-import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
+import type { Snippet } from 'svelte'
 import BotIcon from '@lucide/svelte/icons/bot'
 import UserIcon from '@lucide/svelte/icons/user'
 import * as m from '$lib/paraglide/messages.js'
@@ -11,7 +10,7 @@ import ObservationActivity from '$lib/components/observation-activity.svelte'
 import type { InteractionDetail, LiveContentBlock } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
-import { Button } from '$lib/components/ui/button'
+import ObservationLogViewport from '$lib/components/observation-log-viewport.svelte'
 
 let {
   detail,
@@ -29,56 +28,6 @@ const messages = $derived.by(() => {
   previousMessages = observationConversationMessages(detail, liveBlocks, previousMessages)
   return previousMessages.filter((message) => message.role !== 'user' || message.text.trim())
 })
-let viewportElement: HTMLElement | undefined
-let olderSentinel: HTMLElement | undefined
-let prepending = false
-
-async function loadOlder(): Promise<void> {
-  const viewport = viewportElement
-  if (!viewport || !onolder || olderLoading || prepending || detail.older_events_cursor === null) return
-  const stayAtLatest = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2
-  if (!stayAtLatest) inspectActivity?.()
-  const insertion = olderSentinel?.getBoundingClientRect().top ?? viewport.getBoundingClientRect().top
-  const pinBelowInsertion = insertion <= viewport.getBoundingClientRect().top + 8
-  const height = viewport.scrollHeight
-  const top = viewport.scrollTop
-  prepending = true
-  try {
-    await onolder()
-    await tick()
-    if (stayAtLatest) viewport.scrollTop = viewport.scrollHeight
-    else if (pinBelowInsertion) viewport.scrollTop = top + viewport.scrollHeight - height
-  } finally {
-    prepending = false
-  }
-  if (olderSentinel && nearOlderSentinel(viewport, olderSentinel) && detail.older_events_cursor !== null)
-    void loadOlder()
-}
-
-function nearOlderSentinel(viewport: HTMLElement, sentinel: HTMLElement): boolean {
-  const view = viewport.getBoundingClientRect()
-  const rect = sentinel.getBoundingClientRect()
-  return rect.bottom >= view.top - 80 && rect.top <= view.bottom
-}
-
-function observeOlderSentinel(sentinel: HTMLElement): () => void {
-  return untrack(() => {
-    const viewport = sentinel.closest('.conversation-viewport')
-    if (!(viewport instanceof HTMLElement)) return () => {}
-    olderSentinel = sentinel
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void loadOlder()
-      },
-      { root: viewport, rootMargin: '80px 0px 0px 0px' },
-    )
-    observer.observe(sentinel)
-    return () => {
-      observer.disconnect()
-      if (olderSentinel === sentinel) olderSentinel = undefined
-    }
-  })
-}
 const groups = $derived.by(() => {
   const result: (typeof messages)[] = []
   for (const message of messages) {
@@ -99,116 +48,21 @@ const groups = $derived.by(() => {
 })
 const durableActivities = $derived(observationConversationActivities(detail))
 const activities = $derived(observationConversationActivities(detail, liveBlocks, durableActivities))
-let hasNewActivity = $state(false)
-let returnToLatest: (() => void) | undefined
-let inspectActivity: (() => void) | undefined
-
-function followConversation(viewport: HTMLElement): () => void {
-  return untrack(() => {
-    viewportElement = viewport
-    const content = viewport.firstElementChild!
-    let following = true
-    let previousTop = viewport.scrollTop
-    const atBottom = () => viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2
-    const scrollToLatest = () => {
-      viewport.scrollTop = viewport.scrollHeight
-      previousTop = viewport.scrollTop
-    }
-    const resume = () => {
-      following = true
-      hasNewActivity = false
-      scrollToLatest()
-    }
-    const onScroll = () => {
-      const top = viewport.scrollTop
-      if (top < previousTop || atBottom()) {
-        following = atBottom()
-        if (following) hasNewActivity = false
-      }
-      previousTop = top
-    }
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) following = false
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false
-    }
-    const resize = new ResizeObserver(() => {
-      if (following) scrollToLatest()
-    })
-    const mutation = new MutationObserver((records) => {
-      if (prepending) return
-      // 用户展开已有详情并不是收到新内容；仍观察详情内部的实时文本变化。
-      if (
-        records.every(
-          (record) =>
-            record.type === 'childList' &&
-            record.target instanceof Element &&
-            record.target.getAttribute('data-slot') === 'collapsible',
-        )
-      )
-        return
-      if (following) scrollToLatest()
-      else hasNewActivity = true
-    })
-    returnToLatest = resume
-    inspectActivity = () => {
-      following = false
-    }
-    scrollToLatest()
-    resize.observe(content)
-    resize.observe(viewport)
-    mutation.observe(content, { childList: true, subtree: true, characterData: true })
-    viewport.addEventListener('scroll', onScroll, { passive: true })
-    viewport.addEventListener('wheel', onWheel, { passive: true })
-    viewport.addEventListener('keydown', onKey)
-    return () => {
-      resize.disconnect()
-      mutation.disconnect()
-      viewport.removeEventListener('scroll', onScroll)
-      viewport.removeEventListener('wheel', onWheel)
-      viewport.removeEventListener('keydown', onKey)
-      returnToLatest = undefined
-      inspectActivity = undefined
-    }
-  })
-}
 </script>
 
-<div class="conversation-shell">
-  <!-- 独立滚动的消息记录需要参与 Tab 顺序，支持键盘翻阅。 -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div
-    class="conversation-viewport"
-    role="log"
-    aria-label={m.observation_conversation()}
-    aria-live="off"
-    aria-busy={olderLoading}
-    tabindex="0"
-    {@attach followConversation}>
+<ObservationLogViewport
+  label={m.observation_conversation()}
+  olderCursor={detail.older_events_cursor}
+  {olderLoading}
+  {onolder}>
+  {#snippet children(older: Snippet)}
     <div class="conversation-messages">
-      {#if detail.older_events_cursor !== null && groups[0]?.[0]?.role !== 'user'}
-        <!-- 分页空洞在已加载记录的起点；没有用户预览时才落在卷轴顶部。 -->
-        <div
-          class="older-sentinel older-sentinel-start"
-          data-conversation-older-sentinel
-          aria-hidden="true"
-          {@attach observeOlderSentinel}>
-        </div>
-      {/if}
+      <!-- 更早事件插在用户预览之后；没有用户预览时加载行落在卷轴顶部。 -->
+      {#if groups[0]?.[0]?.role !== 'user'}{@render older()}{/if}
       {#each groups as group, index (group[0].id)}
         {@const user = group[0].role === 'user'}
         {@const actor = user ? m.observation_chat_you() : group[0].model || m.observation_chat_model()}
         <article class={['message', user && 'message-user']} aria-label={actor}>
-          {#if user && index === 0 && detail.older_events_cursor !== null}
-            <!-- 更早事件插在用户预览之后；把哨兵放在这条边界，避免读输入时误触发并回弹。 -->
-            <div
-              class="older-sentinel"
-              data-conversation-older-sentinel
-              aria-hidden="true"
-              {@attach observeOlderSentinel}>
-            </div>
-          {/if}
           <span class="actor-icon" aria-hidden="true">
             {#if user}<UserIcon size={16} />{:else}<BotIcon size={16} />{/if}
           </span>
@@ -219,7 +73,7 @@ function followConversation(viewport: HTMLElement): () => void {
               {#if !user}
                 {#each activities.get(message.id) ?? [] as activity (activity.id)}
                   {#if activity.kind === 'thinking'}
-                    <ObservationActivity {activity} onInspect={() => inspectActivity?.()} />
+                    <ObservationActivity {activity} />
                   {/if}
                 {/each}
               {/if}
@@ -230,7 +84,7 @@ function followConversation(viewport: HTMLElement): () => void {
               {#if !user}
                 {#each activities.get(message.id) ?? [] as activity (activity.id)}
                   {#if activity.kind === 'tool'}
-                    <ObservationActivity {activity} onInspect={() => inspectActivity?.()} />
+                    <ObservationActivity {activity} />
                   {/if}
                 {/each}
               {/if}
@@ -242,60 +96,25 @@ function followConversation(viewport: HTMLElement): () => void {
             </div>
           </div>
         </article>
+        {#if index === 0 && user}{@render older()}{/if}
       {/each}
     </div>
-  </div>
-  {#if hasNewActivity}
-    <div class="latest-action">
-      <Button variant="secondary" onclick={() => returnToLatest?.()}>
-        <ArrowDownIcon data-icon="inline-start" />{m.observation_chat_latest()}
-      </Button>
-    </div>
-  {/if}
-</div>
+  {/snippet}
+</ObservationLogViewport>
 
 <style>
-.conversation-shell {
-  position: relative;
-  display: flex;
-  height: 100%;
-  min-height: 0;
-  flex-direction: column;
-}
-.conversation-viewport {
-  min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  overflow-anchor: none;
-  scrollbar-gutter: stable;
-}
 .conversation-messages {
-  position: relative;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
   padding: 1rem;
 }
 .message {
-  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
   width: 85%;
   min-width: 0;
-}
-.older-sentinel {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 1px;
-  pointer-events: none;
-}
-.older-sentinel-start {
-  top: 0;
-  bottom: auto;
 }
 .message-user {
   align-self: flex-end;
@@ -359,10 +178,5 @@ function followConversation(viewport: HTMLElement): () => void {
 }
 .message-user .message-meta {
   justify-content: flex-end;
-}
-.latest-action {
-  display: flex;
-  justify-content: center;
-  padding: 0.5rem 1rem max(0.5rem, env(safe-area-inset-bottom));
 }
 </style>

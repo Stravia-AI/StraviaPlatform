@@ -1718,6 +1718,8 @@
   "observation_activity_error": "失败",
   "observation_activity_storage_error": "无法在当前浏览器记住展开状态。",
   "observation_chat_latest": "有新活动 · 回到最新",
+  "observation_older_loading": "正在加载更早的事件",
+  "observation_older_retry": "更早的事件加载失败 · 重试",
 
   "observation_live_capacity": "实时预览不完整，读取到已保存内容后会补齐。",
   "observation_live_unsaved": "尚未保存",

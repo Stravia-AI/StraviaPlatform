@@ -12,7 +12,7 @@ import * as Collapsible from '$lib/components/ui/collapsible'
 import * as Marker from '$lib/components/ui/marker'
 import { Spinner } from '$lib/components/ui/spinner'
 
-let { activity, onInspect }: { activity: ObservationActivity; onInspect: () => void } = $props()
+let { activity }: { activity: ObservationActivity } = $props()
 const contentId = $props.id()
 const storageKey = $derived(`stravia:observation-activity:${activity.id}`)
 const expandable = $derived(activity.kind === 'thinking' || activity.input !== undefined || activity.results.length > 0)
@@ -38,7 +38,6 @@ onMount(() => {
 })
 
 function changeOpen(next: boolean): void {
-  onInspect()
   open = next
   try {
     if (next) localStorage.setItem(storageKey, 'true')

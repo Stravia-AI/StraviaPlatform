@@ -121,6 +121,17 @@ describe('deriveTimeline ordering', () => {
     expect(view.runIndex.get('b')).toBe(2)
     expect(view.timelines.get('a')!.map((e) => e.sequence)).toEqual([1, 3, 2])
   })
+
+  test('holds back runs before the loaded event page until earlier history loads', () => {
+    const runs = [run('a', 1000), run('b', 2000), run('c', 3000, [event(5, 'wire')]), run('d', 4000)]
+    const bounded = { ...detail(runs), older_events_cursor: 5 }
+    const view = deriveTimeline(bounded, undefined)
+    expect(view.visibleRuns.map((r) => r.id)).toEqual(['c', 'd'])
+    expect(view.runIndex.get('c')).toBe(3)
+    expect(deriveTimeline(detail(runs), undefined).visibleRuns.map((r) => r.id)).toEqual(['a', 'b', 'c', 'd'])
+    const unloaded = { ...detail([run('a', 1000), run('b', 2000)]), older_events_cursor: 5 }
+    expect(deriveTimeline(unloaded, undefined).visibleRuns.map((r) => r.id)).toEqual(['a', 'b'])
+  })
 })
 
 describe('stream item grouping', () => {
