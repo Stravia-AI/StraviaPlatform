@@ -6,7 +6,7 @@ use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_protocol_codec::transform::{EncodedRequest, ProtocolTransform, TransformError};
 use stravia_runtime_contract::protocol::ids::{Protocol, ProtocolEndpoint};
 use stravia_runtime_contract::protocol::ir::{
-    AiError, AiErrorKind, AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
+    AiError, AiErrorKind, AiItem, AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
 };
 use stravia_vendor_sdk::{
     ErrorKind, GuestHost, HttpResponse, OperationOutput, PluginError, read_http_body,
@@ -228,7 +228,51 @@ pub fn decode_ai_response_with_error_classifier(
     response: HttpResponse,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_policy(host, protocol, response, classify_error, false)
+    decode_ai_response_with_error_policy(host, protocol, response, classify_error, false, None)
+}
+
+/// 与 [`decode_ai_response_with_error_classifier`] 相同，但在发出增量与组装
+/// 最终响应前用 `rename_tool` 改写函数工具名。用于上游线上工具名与客户端
+/// 声明名不同的供应商（例如为请求中的工具名加了线上前缀）；返回 `None`
+/// 表示保留原名。
+pub fn decode_ai_response_renaming_tools(
+    host: &GuestHost,
+    protocol: &str,
+    response: HttpResponse,
+    classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
+    rename_tool: fn(&str) -> Option<String>,
+) -> Result<AiResponse, PluginError> {
+    decode_ai_response_with_error_policy(
+        host,
+        protocol,
+        response,
+        classify_error,
+        false,
+        Some(rename_tool),
+    )
+}
+
+fn rename_tool_name(name: &mut String, rename: fn(&str) -> Option<String>) {
+    if let Some(renamed) = rename(name) {
+        *name = renamed;
+    }
+}
+
+fn rename_item_tools(item: &mut AiItem, rename: fn(&str) -> Option<String>) {
+    for call in item.tool_calls.iter_mut().flatten() {
+        rename_tool_name(&mut call.name, rename);
+    }
+}
+
+fn rename_delta_tools(delta: &mut AiStreamDelta, rename: fn(&str) -> Option<String>) {
+    match delta {
+        AiStreamDelta::ToolCallStart { name, .. } => rename_tool_name(name, rename),
+        AiStreamDelta::ToolCallComplete { tool_call, .. } => {
+            rename_tool_name(&mut tool_call.name, rename);
+        }
+        AiStreamDelta::ItemDone { item, .. } => rename_item_tools(item, rename),
+        _ => {}
+    }
 }
 
 /// Decode a response while retaining the exact upstream error envelope in the
@@ -240,7 +284,7 @@ pub fn decode_ai_response_preserving_upstream_errors(
     response: HttpResponse,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_policy(host, protocol, response, classify_error, true)
+    decode_ai_response_with_error_policy(host, protocol, response, classify_error, true, None)
 }
 
 fn decode_ai_response_with_error_policy(
@@ -249,6 +293,7 @@ fn decode_ai_response_with_error_policy(
     response: HttpResponse,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
     preserve_upstream_errors: bool,
+    rename_tool: Option<fn(&str) -> Option<String>>,
 ) -> Result<AiResponse, PluginError> {
     let status = response.status()?;
     let headers = response.headers()?;
@@ -297,9 +342,15 @@ fn decode_ai_response_with_error_policy(
         let pair = ProtocolTransform::global()
             .bind(endpoint, endpoint)
             .map_err(map_response_transform_error)?;
-        return pair
+        let mut decoded = pair
             .decode_response(value)
-            .map_err(map_response_transform_error);
+            .map_err(map_response_transform_error)?;
+        if let Some(rename) = rename_tool {
+            for item in &mut decoded.items {
+                rename_item_tools(item, rename);
+            }
+        }
+        return Ok(decoded);
     }
 
     let mut decoder = ProtocolTransform::global()
@@ -308,9 +359,14 @@ fn decode_ai_response_with_error_policy(
     let mut accumulator = StreamResponseAccumulator::default();
     let mut saw_response_event = false;
     while let Some(chunk) = response.read_body()? {
-        let deltas = decoder
+        let mut deltas = decoder
             .decode_chunk(&chunk)
             .map_err(map_response_transform_error)?;
+        if let Some(rename) = rename_tool {
+            deltas
+                .iter_mut()
+                .for_each(|delta| rename_delta_tools(delta, rename));
+        }
         if !preserve_upstream_errors {
             classify_stream_error_before_emit(
                 endpoint.protocol,
@@ -322,7 +378,12 @@ fn decode_ai_response_with_error_policy(
         saw_response_event |= deltas.iter().any(is_response_event);
         emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
     }
-    let deltas = decoder.finish().map_err(map_response_transform_error)?;
+    let mut deltas = decoder.finish().map_err(map_response_transform_error)?;
+    if let Some(rename) = rename_tool {
+        deltas
+            .iter_mut()
+            .for_each(|delta| rename_delta_tools(delta, rename));
+    }
     if !preserve_upstream_errors {
         classify_stream_error_before_emit(
             endpoint.protocol,
@@ -653,6 +714,45 @@ fn emit_deltas_with_policy(
         return Err(model_error_with_facts(kind, status, None, message));
     }
     Ok(())
+}
+
+/// Anthropic Messages：`{"type":"error","error":{"type":"invalid_request_error",
+/// "message":..}}`。只有推理签名校验失败可剥离重试——官方文案为
+/// ``messages.N: Invalid `signature` in `thinking` block``（docs.claude.com
+/// thinking 文档与 anthropics/skills error-codes.md，新版还会追加
+/// "bound to a different conversation"），或 redacted_thinking 数据无效。
+/// 其它 400（角色交替、参数形状等）与推理载荷无关，保持原分类。
+pub fn classify_anthropic_error(
+    value: &serde_json::Value,
+    saw_response_event: bool,
+) -> Option<PluginError> {
+    if saw_response_event {
+        return None;
+    }
+    if value
+        .pointer("/error/type")
+        .and_then(serde_json::Value::as_str)
+        != Some("invalid_request_error")
+    {
+        return None;
+    }
+    let message = value
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    anthropic_protected_reasoning_message(message).then(|| {
+        plugin_error(
+            ErrorKind::ProtectedReasoningRejected,
+            "Anthropic rejected protected reasoning replay",
+        )
+    })
+}
+
+/// Anthropic 系推理签名校验文案：`thinking` 签名无效（包括新版
+/// "bound to a different conversation" 变体），或 `redacted_thinking` 数据无效。
+pub fn anthropic_protected_reasoning_message(message: &str) -> bool {
+    message.contains("Invalid `signature` in `thinking` block")
+        || (message.contains("redacted_thinking") && message.to_lowercase().contains("invalid"))
 }
 
 pub fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) -> PluginError {

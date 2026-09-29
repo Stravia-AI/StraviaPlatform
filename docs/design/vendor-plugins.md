@@ -5,7 +5,7 @@
 ## 已确认的身份与信任
 
 - 一个 Vendor Plugin 软件包实现一个稳定的 Vendor 实现身份；Vendor 身份不由 npm package、Provider Catalog 或协议决定，见 [ADR-0067](../adr/0067-separate-vendor-identity-from-package-and-protocol.md)。
-- Vendor 实现恰好拆为五个包：`base` 回退 Vendor，以及 `openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属 Vendor。程序默认只内嵌 `base`；四个专属包仅作为独立 Release 附件发布，由管理员通过本地包导入。`base` 是一个软件包和一个 Vendor 身份，通过多个 Provider Profile 覆盖四个专属接入之外的全部现有供应商，不是“一个包导出多个 Vendor”。
+- Vendor 实现拆为 `base` 回退 Vendor 与 `openai-codex`、`xai-grok`、`command-code`、`devin`、`claude-code` 等专属 Vendor（完整列表见下方组件身份映射）。程序默认只内嵌 `base`；专属包仅作为独立 Release 附件发布，由管理员通过本地包导入。`base` 是一个软件包和一个 Vendor 身份，通过多个 Provider Profile 覆盖专属接入之外的全部现有供应商，不是“一个包导出多个 Vendor”。
 - Provider Profile 的 `provider_id` 标识供应商接入，`catalog_id` 仅关联目录；两者都不等于已保存 Provider 连接的数据库 UUID。普通 OpenAI 与 xAI API Profile 归 `base`，Codex 与 Grok 分别使用 `openai-codex` 与 `xai-grok` 专属 Profile。
 - 既有 `openai/codex` 与 `xai/grok` 连接只迁移供应商 Profile 归属，分别指向 `openai-codex` 与 `xai-grok`；连接 UUID、channel、凭据、Route 和历史保持不变。
 - 专属 Profile 对匹配身份下的全部连接、channel 和操作进行整体接管。专属包不存在、缺少能力或 channel、加载失败或执行失败时明确失败；不得按单次能力、channel 或操作回退到 `base`，也不得把两边的声明、网络 origin 或行为合并。
@@ -16,11 +16,12 @@
 
 | crate | Vendor ID / kind | Provider Profile |
 | --- | --- | --- |
-| `stravia-vendor-base` | `base` / `fallback` | 除下列四个专属 Profile 外的全部现有供应商；`openai`、`xai` 仅保留普通 API channel。 |
+| `stravia-vendor-base` | `base` / `fallback` | 除下列专属 Profile 外的全部现有供应商；`openai`、`xai`、`anthropic` 仅保留普通 API channel。 |
 | `stravia-vendor-codex` | `openai-codex` / `dedicated` | `provider_id = openai-codex`、`catalog_id = openai`、channel `codex`。 |
 | `stravia-vendor-grok` | `xai-grok` / `dedicated` | `provider_id = xai-grok`、`catalog_id = xai`、channel `grok`。 |
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = command-code`、channel `default`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
+| `stravia-vendor-claudecode` | `claude-code` / `dedicated` | `provider_id = claude-code`、`catalog_id = anthropic`、channel `oauth`。 |
 
 ### Cline Pass 接入
 
@@ -35,7 +36,16 @@ Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Pr
 
 ### Anthropic 接入
 
-Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OAuth 通道已移除，不再提供登录、令牌刷新、精选模型发现或订阅额度查询。已保存的订阅连接、凭据、Route 绑定与历史不自动删除，也不自动改为 API-key 认证；旧通道执行时明确报告不可用。继续使用 Anthropic 时，配置 API-key 连接并重新绑定所需 Route。Claude Code 作为 Connect Client 接入 Stravia 的能力不受影响。
+base 的 Anthropic Profile 仅提供 `default` API-key 通道；旧的 `anthropic/claude-code` 订阅 OAuth 通道已移除，已保存的旧通道连接、凭据、Route 绑定与历史不自动删除或迁移，执行时明确报告不可用。Claude Code 作为 Connect Client 接入 Stravia 的能力不受影响。
+
+Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claudecode`，channel `oauth`）提供，需从 Release 附件本地导入。旧 `anthropic/claude-code` 连接不会自动归入该插件；改用订阅时新建 `claude-code` 连接、完成登录并重新绑定 Route。
+
+- 登录：授权码 + PKCE，授权页 `https://claude.ai/oauth/authorize`，回调 `http://localhost:54545/callback`（备用 54546，手动粘贴回调 URL 使用 54547）；令牌交换与刷新走 `https://api.anthropic.com/v1/oauth/token`。令牌响应缺少账号身份时，向 `/api/claude_cli/bootstrap` 补取账号与组织；该补取失败不影响登录。登录时为连接生成随机 `device_id`，刷新沿用已保存的账号身份与 `device_id`。
+- 推理：上游只接受 Claude Code CLI 形态的订阅请求。插件在 Anthropic Messages 编码结果上改写为 CLI 线上形态：`POST /v1/messages?beta=true`，CLI User-Agent、Stainless 与 `anthropic-beta` 请求头；`system[0]` 为计费头 `x-anthropic-billing-header`（含由首条用户消息计算的版本指纹和对最终请求体计算的 `cch` 校验值），`system[1]` 为 Claude Code 身份块；自定义工具名在请求中加 `_` 前缀、在响应中还原；`metadata.user_id` 由连接的账号身份与会话 ID 重建；缓存断点默认使用 1 小时 TTL；始终流式请求。该形态以 oh-my-pi v18.4.2 的实现与抓包为基准，上报的 CLI 版本默认 `2.1.280`，可在连接高级设置 `client_version` 中调整。
+- 请求头与 CLI 相同，包括 `Accept-Encoding: gzip, deflate, br, zstd`（宿主解码响应）与 `Connection: keep-alive`；工具 `strict` 与 `tool_result.is_error` 原样转发，客户端协议没有 `is_error`（OpenAI、Gemini 等入口）时按 CLI 形态补 `is_error: false`。
+- 已知差异：Stainless 平台头固定为 Linux x64；网关解析 JSON 后不保留客户端对象内的键顺序，工具 schema 与工具入参的嵌套键按字典序发送；HTTP 版本由宿主协商，协商到 HTTP/2 时 `Connection` 头按协议不发送；TLS 与 HTTP 实现指纹不同于 Bun。
+- 模型发现读取 `/v1/models`；额度监控读取 `/api/oauth/usage`，呈现 5 小时、每周、按模型的每周窗口与额外用量。
+- 以订阅 OAuth 令牌在 Claude Code 以外的客户端调用可能违反 Anthropic 使用条款并导致账号受限；上游对客户端形态的校验可能随 Claude Code 版本变化而失效。
 
 ### Provider 图标标识
 
@@ -48,9 +58,9 @@ Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OA
 
 ## 已确认的供应商能力覆盖
 
-- 一个供应商 Profile 可以统一提供推理适配、自定义上游编解码、OAuth、自定义模型发现、额度获取与供应商特有计算，以及自定义 Provider 选项声明和校验；拆为五个包不缩减任何既有供应商能力。
-- `stravia-vendor-base` 承接 Codex、Grok、Command Code、Devin 之外的全部现有供应商接入，包括 Anthropic API-key 接入、云认证与云协议、模型发现、额度查询和供应商差异。它在单一 `base` Vendor 身份内按输入 `provider_id` 分派 Profile，不把 Profile 暴露为多个 Vendor。
-- `stravia-vendor-base` 的目标边界是在运行时消费 `https://models.stravia.cn/providers.json`，仅把能够映射到 base 已支持协议与认证实现的目录条目注册为 `ProviderDescriptor`。远端新增的兼容供应商无需更新 Stravia 或重新构建 base 即可添加；目录中存在但协议或认证方式尚未受支持的条目不得注册为可用 Profile。四个专属 Profile 继续由各自 dedicated Vendor 整体接管，不与 base 合并。
+- 一个供应商 Profile 可以统一提供推理适配、自定义上游编解码、OAuth、自定义模型发现、额度获取与供应商特有计算，以及自定义 Provider 选项声明和校验；拆为多个包不缩减任何既有供应商能力。
+- `stravia-vendor-base` 承接各专属 Profile 之外的全部现有供应商接入，包括 Anthropic API-key 接入、云认证与云协议、模型发现、额度查询和供应商差异。它在单一 `base` Vendor 身份内按输入 `provider_id` 分派 Profile，不把 Profile 暴露为多个 Vendor。
+- `stravia-vendor-base` 的目标边界是在运行时消费 `https://models.stravia.cn/providers.json`，仅把能够映射到 base 已支持协议与认证实现的目录条目注册为 `ProviderDescriptor`。远端新增的兼容供应商无需更新 Stravia 或重新构建 base 即可添加；目录中存在但协议或认证方式尚未受支持的条目不得注册为可用 Profile。专属 Profile 继续由各自 dedicated Vendor 整体接管，不与 base 合并。
 - base 启动时优先使用本地最后一次成功供应商清单，没有缓存则使用插件内嵌供应商清单，随后尝试远端更新。首次离线仍可选择内嵌供应商，已有安装断网时仍可使用缓存供应商；内嵌清单只用于 bootstrap，不限制远端动态新增。缓存、内嵌和远端条目都必须按当前 base 已实现的协议与认证能力校验后才能注册。
 - 供应商模型目录属于对应 Provider Profile，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 是供应商接入身份，不是已保存连接 UUID。内嵌供应商清单不包含全部 provider-scoped 模型数据。Core 保留 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
 - 目录关联与缺省模型来源由已选 Profile 和 channel 决定，不由管理请求的 `catalog` / `custom` 创建分支决定。新建连接保存 Profile 的 `catalog_id`；模型来源优先使用显式配置，否则仅在 channel 声明消费目录且目录中存在对应供应商时使用 Catalog，其余沿用 channel 声明的默认来源。显式静态列表仍优先决定模型集合，账号级发现渠道不会被目录清单替换。
@@ -61,7 +71,7 @@ Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OA
 - 成功刷新整体替换供应商目录。远端删除供应商后，不得再从该 Catalog 条目新建 Provider；已经保存的 Provider 记录不自动删除，普通推理不只因目录删项停用。已有 Provider 使用 Catalog 同步模型时，缺项仍明确报告 `ProviderNotFound`，不得冒充空 scope 成功；上文确认的 Core 元数据回退只在模型集合已由上游发现或管理员添加确定时补充元数据，不恢复被删条目的新建资格。
 - 元数据富化继承原生顺序：先精确匹配 provider scope 的 upstream model ID，再按完整 canonical ID 精确匹配，随后按最右段 ASCII 小写键做唯一匹配；多个候选不匹配，最后才使用 bare metadata。该顺序不扩大模型集合。动态新增 Profile 的持续注册方式、持久化 schema 与缓存目录属于实现设计，本轮不另设产品策略。
 - base 通过 `sync-catalog` 导出实现该所有权：宿主把 catalog base URL、上次成功快照与可选的 scope 供应商 ID 传给 guest；guest 取回 `providers.json` 与 `providers/{id}/models.json`，返回完整 Profile 集与原始 body，由宿主持久化为 last-good。base 的构建脚本仍从 Core 的 `assets/providers.stravia.json` 生成内嵌 bootstrap Profile 表——该表只服务首次离线启动，不替代远端清单。目录删项不进入删除路径：被删 Profile 保留为 retired 状态，存量连接继续准入执行，新建入口与展示列表不再提供。ADR-0018 的跨模块原子 revision 与 scoped 失败约束仅按 ADR-0073 修订，其他缓存和模型快照契约保留。
-- OpenAI-compatible（包括 embeddings）、Anthropic、Gemini、Open Responses 四类标准 codec 由共享库提供，作为可复用实现源码由五个 guest crate 按需引用。
+- OpenAI-compatible（包括 embeddings）、Anthropic、Gemini、Open Responses 四类标准 codec 由共享库提供，作为可复用实现源码由各 guest crate 按需引用。
 - DeepSeek Profile 位于 `base`，复用标准 codec 并保留必要的供应商差异与额度能力，不要求为复用标准协议单独维护一套 codec。
 - Codex、Grok、Command Code、Devin 使用独立专属插件。Devin 保留自定义 Connect-RPC / protobuf 编解码、OAuth、模型列表与相关元数据、AssignModel 辅助调用及额度获取；Command Code 的自定义 Provider 选项注册属于插件契约，不能依赖宿主的供应商专属前端或后端分支。
 - 上述范围覆盖现有能力，不表示每个 Profile 都必须实现每种供应商功能；具体能力由对应 `ProviderDescriptor` 声明并按 Profile 独立校验，不能从同包其他 Profile 合并推断。
@@ -85,7 +95,7 @@ Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OA
 ## 已确认的统一运行机制
 
 - 最终所有模型 Vendor 均通过同一套 Wasm 插件机制加载与执行，不长期保留原生 Vendor 通道或供应商专属宿主执行分支。
-- 程序默认只内嵌 `base` 自包含 Wasm 包；全新 Gateway 因而只预装 `base`。`openai-codex`、`xai-grok`、`command-code`、`devin` 四个专属包不内嵌，必须从本地分发包手动导入后才可用。
+- 程序默认只内嵌 `base` 自包含 Wasm 包；全新 Gateway 因而只预装 `base`。`openai-codex`、`xai-grok`、`command-code`、`devin`、`claude-code` 等专属包不内嵌，必须从本地分发包手动导入后才可用。
 - 缩减默认内嵌集合不会自动删除实例中已经安装的专属插件及其数据；但不再内嵌的专属插件没有程序随附版本可供恢复或随宿主自动升级，后续更新仍通过本地包导入。
 - 宿主仍拥有通用网络、存储、授权、调度及客户端协议处理，不将整个网关移入 Wasm；供应商拆分不改变这些平台职责。
 - 内嵌与本地安装是分发来源的差异，不构成两套供应商能力契约，见 [ADR-0070](../adr/0070-run-all-model-vendors-as-wasm-plugins.md)。
@@ -125,9 +135,9 @@ Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OA
 
 - `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.4.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
-- `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/` 是五个 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。
+- `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/`、`stravia-vendor-claudecode/` 等 crate 是 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。
 - `backend/crates/stravia-vendor-common/` 是只提供多个 guest 实际共用辅助代码的 `rlib`。标准 codec 由 guest 在 Rust 源码层链接 `stravia-protocol-codec` 并编入 Component，而非采用 Component composition；Command Code 与 Devin 私有 codec 留在各自 crate，Bedrock、Cohere、Gateway、WatsonX 等私有实现留在 `base`。
-- 默认 builder 与 `task build:vendors` 只构建 `base`，在 `target/vendor-plugins/manifest.json` 生成仅含 `base` 的 manifest，供 Core 内嵌。发布流程通过 `task build:vendors:all`（builder 的 `--all` 模式）在独立的 `target/vendor-plugins-all/manifest.json` 生成五个 Component 的完整构建 manifest，并将其中四个专属 Wasm 以 `stravia-vendor-{vendor_id}-v{version}.wasm` 独立 Release 附件发布，统一由 `SHA256SUMS` 覆盖，供本地导入；`base` 不作为专属附件重复发布，完整构建 manifest 也不发布。`task build:vendor-fixtures` 依赖完整构建并生成真实测试组件。Core 的 `vendor_*` 契约与生命周期检查通过 Gateway 和本地上游验证行为；浏览器、Desktop 与双数据库验收仍分别使用根 `Taskfile.yml` 中的对应入口。
+- 默认 builder 与 `task build:vendors` 只构建 `base`，在 `target/vendor-plugins/manifest.json` 生成仅含 `base` 的 manifest，供 Core 内嵌。发布流程通过 `task build:vendors:all`（builder 的 `--all` 模式）在独立的 `target/vendor-plugins-all/manifest.json` 生成全部 Component 的完整构建 manifest，并将其中专属 Wasm 以 `stravia-vendor-{vendor_id}-v{version}.wasm` 独立 Release 附件发布，统一由 `SHA256SUMS` 覆盖，供本地导入；`base` 不作为专属附件重复发布，完整构建 manifest 也不发布。`task build:vendor-fixtures` 依赖完整构建并生成真实测试组件。Core 的 `vendor_*` 契约与生命周期检查通过 Gateway 和本地上游验证行为；浏览器、Desktop 与双数据库验收仍分别使用根 `Taskfile.yml` 中的对应入口。
 - Core 的 WebSocket 续接回归位于 `src/proxy/dispatcher/inference_run/tests/websocket_continuation.rs`，使用内嵌 `base` 的标准 OpenAI Responses 通道与本地 WebSocket 上游，验证连接复用、精确 tip、淘汰、并发分支、完整历史恢复和重试预算，不安装或加载 Codex。构建 `base` 后，可通过 `cargo test --locked -p stravia-core websocket_continuation::` 独立运行，不要求构建专属插件。
 - Codex 的真实 Component 握手、错误分类和大推理签名回归归属 `stravia-vendor-codex/tests/websocket_contract.rs`，不放入通用 runtime 测试。它们默认标记为 ignored；先运行 `task build:vendors:all`，再通过 `cargo test --locked -p stravia-vendor-codex --test websocket_contract -- --ignored` 显式验收。显式运行时缺少产物会报错，不静默跳过。
 
@@ -135,7 +145,7 @@ Anthropic 仅提供 `default` API-key 通道；`anthropic/claude-code` 订阅 OA
 
 - 提供插件管理页面，在其中展示已加载的插件。
 - 插件管理页面提供本地包安装与更新入口，并展示更新结果；只有内嵌的 `base` 可随宿主升级发生内置插件自动更新。
-- `base` 由程序内嵌；四个专属插件当前仅允许管理员通过本地插件包安装或更新。
+- `base` 由程序内嵌；专属插件当前仅允许管理员通过本地插件包安装或更新。
 - 当前不做插件市场，不提供在线插件获取流程。
 
 ### 插件卸载
@@ -300,6 +310,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - origin 按协议、主机与有效端口匹配，路径由插件构造。HTTP 与 WebSocket 使用各自明确获准的协议，不因主机相同就隐式扩大协议或端口范围。
 - 管理员可以显式将当前连接配置为本机或局域网服务，不一刀切禁止私网目标；这一配置不授权访问其他本机或私网地址。
 - 安装或更新页面展示插件声明的附属服务地址。每次重定向后的目标也必须重新检查，不自动将原目标的认证头转发到另一 origin。
+- 连接管理与报文分帧由宿主负责：插件不得设置 `Transfer-Encoding`、`Content-Length`、`Upgrade`、代理头，`Connection` 只允许 `keep-alive`（HTTP/2 下由传输层移除）。插件自行发送 `Accept-Encoding` 时，宿主按响应的 `Content-Encoding`（gzip、deflate、br、zstd）解码，并在交给插件的响应头中移除 `Content-Encoding` 与 `Content-Length`；未发送 `Accept-Encoding` 的请求保持原样字节，已安装的旧插件行为不变。
 - 使用出站代理不扩大允许访问的目标范围。允许访问目标与向目标发送凭据是不同的授权，不得根据网络白名单自动注入其他目标的凭据。
 - 内嵌 `base` 随宿主自动更新时，新增声明的网络 origin 无需单独确认，由宿主随受信内置版本更新生效白名单；这不授予插件在运行期间自行修改声明或访问任意目标的权力。
 - 本地包手动更新在已有确认界面展示网络范围变化，沿用一次更新确认，不额外增加网络授权步骤。
@@ -334,7 +345,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - `base` 的随附版本较低时不自动降级；版本与摘要都相同时不重复安装。
 - 自动更新使用程序随附的 `base` 本地插件产物，不引入插件市场、远程包获取或依赖下载。
 - 自动更新同样需要校验与准备加载；失败不先破坏原插件产物，也不代表不兼容的旧插件仍可在新宿主上执行。
-- 插件管理页面展示自动更新后的实际版本与结果。该例外不扩展到四个专属插件；它们没有随附版本，只能通过本地包更新。
+- 插件管理页面展示自动更新后的实际版本与结果。该例外不扩展到专属插件；它们没有随附版本，只能通过本地包更新。
 - 自动更新可以同时增加 `base` 声明的网络 origin，无需额外确认；管理员对内置更新来源的信任包含其网络声明变化。内置 `base` 的不兼容数据按格式版本差异选择性重置，也无需手动确认；本地包仍遵循手动确认规则。
 
 ## 已确认的本地替换与恢复内置
@@ -344,7 +355,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - 插件管理页面为 `base` 提供“恢复内置版本”操作，展示当前版本、程序随附版本及受影响连接；管理员确认后，使用随附实现并恢复随宿主自动更新。
 - 内置来源的 `base` 加载失败或与随附版本不同时，也提供同一恢复入口，无需先导入本地替代包；已有待确认更新时，保留单一的更新审阅入口。
 - 恢复内置可能替换为较低版本，必须明确展示；这一显式操作不改变内置自动更新只升级、不降级的规则。数据不兼容时同样需要丢弃数据的明确确认。
-- 四个专属插件没有程序随附版本，不能执行“恢复内置”或随宿主自动升级；已经安装的版本及其数据不会因默认内嵌集合缩减而自动删除。
+- 专属插件没有程序随附版本，不能执行“恢复内置”或随宿主自动升级；已经安装的版本及其数据不会因默认内嵌集合缩减而自动删除。
 
 ## 已确认的不兼容更新原则
 

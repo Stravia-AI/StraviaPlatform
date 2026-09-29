@@ -5,6 +5,7 @@
 ### Added
 
 - Credential Protection now supports custom rules. Add an exact-text rule (a request containing the text is replaced and restored like any detected credential) or a pattern rule with a regular expression, capture group, keywords, and minimum entropy. The rules table can be filtered by Built-in or Custom, and the match test includes enabled custom rules. Deleting a rule does not remove mappings it already created; they remain restorable until they expire.
+- Added the dedicated `claude-code` Vendor Plugin for Claude Pro/Max subscriptions. It is published as a standalone release asset for local import; sign in through the browser to use subscription models through the Anthropic Messages API, with model discovery and 5-hour, weekly, and extra usage allowance monitoring. Requests are sent in the Claude Code CLI format, and the reported CLI version can be changed in the connection's advanced settings. Using a subscription outside Claude Code may violate Anthropic's terms and can get the account restricted. Connections on the removed `anthropic/claude-code` channel are not migrated; create a new `claude-code` connection and rebind its Routes.
 
 ### Changed
 
@@ -13,6 +14,8 @@
 ### Fixed
 
 - The Observation "Model output preview" now starts a new paragraph for each model turn instead of running the text of consecutive turns together. Previews recorded before this change keep their existing text.
+- Anthropic Messages requests forwarded to an Anthropic-protocol upstream now keep tool `strict` flags and `tool_result.is_error` (including `false`). Routes to other protocols behave as before.
+- Vendor Plugins can now send `Connection: keep-alive` and negotiate `Accept-Encoding`. When a plugin sends `Accept-Encoding`, Stravia decodes gzip, deflate, Brotli, and zstd responses before handing them to the plugin. Plugins that do not send it, including already installed older plugins, receive responses unchanged.
 
 ## [0.3.1] - 2026-09-29
 

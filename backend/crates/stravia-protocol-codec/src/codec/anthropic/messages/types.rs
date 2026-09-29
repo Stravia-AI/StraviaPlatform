@@ -120,6 +120,8 @@ pub enum AnthropicContentBlock {
         tool_use_id: String,
         content: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     /// PDF / text / URL document for context (claude-3-5-sonnet+ with document support).
@@ -208,6 +210,9 @@ pub struct AnthropicToolDef {
     /// For function tools the schema goes here; built-in tools may omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<Value>,
+    /// 只随 Anthropic 原样工具透传到同协议上游；不进入 IR，跨协议路由行为不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
     /// Built-in tool type string e.g. "computer_20241022", "text_editor_20241022".

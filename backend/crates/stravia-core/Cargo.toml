@@ -29,7 +29,10 @@ reqwest = { workspace = true, features = ["charset", "form", "http2", "json", "r
 reqwest-websocket = { workspace = true }
 tungstenite = { workspace = true }
 url = { workspace = true }
-tower-http = { workspace = true }
+# 插件协商内容编码时由宿主解码响应；这些特性已随 wreq 进入依赖图。
+tower-http = { workspace = true, features = ["decompression-br", "decompression-deflate", "decompression-gzip", "decompression-zstd"] }
+tower = { workspace = true }
+http-body-util = { workspace = true }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -78,7 +81,6 @@ stravia-runtime-contract = { workspace = true }
 [dev-dependencies]
 office_oxide = { workspace = true }
 stravia-media = { workspace = true, features = ["test-support"] }
-tower = { workspace = true }
 jsonschema = { version = "0.58.1", default-features = false }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

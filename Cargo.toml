@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-vendor-opencode-free", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
+members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-vendor-opencode-free", "backend/crates/stravia-vendor-claudecode", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
 # 与 dev:server 保持相同的依赖特性图，避免裸 build 先构建桌面特性并集。
 default-members = ["backend/apps/stravia-server"]
 
@@ -23,6 +23,7 @@ stravia-vendor-grok = { path = "backend/crates/stravia-vendor-grok" }
 stravia-vendor-command-code = { path = "backend/crates/stravia-vendor-command-code" }
 stravia-vendor-devin = { path = "backend/crates/stravia-vendor-devin" }
 stravia-vendor-opencode-free = { path = "backend/crates/stravia-vendor-opencode-free" }
+stravia-vendor-claudecode = { path = "backend/crates/stravia-vendor-claudecode" }
 stravia-media = { path = "backend/crates/stravia-media" }
 stravia-web-search = { path = "backend/crates/stravia-web-search" }
 stravia-credential-protection = { path = "backend/crates/stravia-credential-protection" }

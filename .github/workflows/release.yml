@@ -163,7 +163,7 @@ jobs:
           directory = Path("target/vendor-plugins-all")
           records = json.loads((directory / "manifest.json").read_text())
           dedicated = [record for record in records if record["vendor_id"] != "base"]
-          expected = {"openai-codex", "xai-grok", "command-code", "devin"}
+          expected = {"openai-codex", "xai-grok", "command-code", "devin", "claude-code"}
           if len(dedicated) != len(expected) or {record["vendor_id"] for record in dedicated} != expected:
               raise SystemExit("Dedicated plugin release inventory is incomplete")
           output = Path("dist")

@@ -334,6 +334,116 @@ async fn evicted_tip_cannot_be_resumed_even_while_newer_tip_remains() {
     );
 }
 
+const GZIP_BODY: &[u8] = &[
+    31, 139, 8, 0, 0, 0, 0, 0, 0, 10, 75, 73, 77, 206, 79, 73, 77, 81, 40, 45, 40, 46, 41, 74, 77,
+    204, 85, 72, 202, 79, 169, 4, 0, 62, 59, 204, 84, 21, 0, 0, 0,
+];
+
+async fn read_all(response: &dyn stravia_vendor_runtime::HostHttpResponse) -> Vec<u8> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.read_body().await.expect("read upstream body") {
+        body.extend(chunk);
+    }
+    body
+}
+
+#[tokio::test]
+async fn plugin_negotiated_encoding_is_decoded_and_keep_alive_is_forwarded() {
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::<(
+        Option<String>,
+        Option<String>,
+    )>::new()));
+    let recorded = Arc::clone(&seen);
+    let app = Router::new().route(
+        "/gzip",
+        get(move |headers: axum::http::HeaderMap| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let header = |name: &str| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned)
+                };
+                recorded
+                    .lock()
+                    .push((header("connection"), header("accept-encoding")));
+                ([("content-encoding", "gzip")], GZIP_BODY)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local HTTP upstream");
+    let url = format!("http://{}/gzip", listener.local_addr().expect("address"));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve local HTTP upstream");
+    });
+    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+    let request = |headers: &[(&str, &str)]| stravia_vendor_runtime::HttpRequest {
+        method: "GET".into(),
+        url: url.clone(),
+        headers: headers
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect(),
+        body: Vec::new(),
+    };
+
+    let negotiated = network
+        .http_start(request(&[
+            ("accept-encoding", "gzip, deflate, br, zstd"),
+            ("connection", "keep-alive"),
+        ]))
+        .expect("start negotiated request");
+    assert_eq!(negotiated.status().await.expect("status"), 200);
+    let headers = negotiated.headers().await.expect("headers");
+    assert!(
+        !headers.iter().any(|(name, _)| name == "content-encoding"),
+        "decoded responses must not advertise the wire encoding: {headers:?}"
+    );
+    assert_eq!(
+        read_all(negotiated.as_ref()).await,
+        b"decoded upstream body"
+    );
+
+    // 未协商编码的旧插件读到原样字节，宿主不擅自解码。
+    let plain = network
+        .http_start(request(&[]))
+        .expect("start plain request");
+    assert!(
+        plain
+            .headers()
+            .await
+            .expect("headers")
+            .iter()
+            .any(|(name, value)| name == "content-encoding" && value == "gzip")
+    );
+    assert_eq!(read_all(plain.as_ref()).await, GZIP_BODY);
+
+    assert_eq!(
+        seen.lock().as_slice(),
+        [
+            (
+                Some("keep-alive".to_owned()),
+                Some("gzip, deflate, br, zstd".to_owned())
+            ),
+            (None, None),
+        ]
+    );
+    for value in ["close", "upgrade", "keep-alive, x-secret"] {
+        assert!(
+            network
+                .http_start(request(&[("connection", value)]))
+                .is_err(),
+            "connection: {value} must stay host-controlled"
+        );
+    }
+    task.abort();
+}
+
 #[test]
 fn wire_payloads_preserve_text_media_and_non_utf8_websocket_messages() {
     let media = r#"{"image":"data:image/png;base64,AAECA/8="}"#;

@@ -386,7 +386,7 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并获取根
 
 | 前缀 | 用途 |
 |---|---|
-| `__anthropic_raw_*` | Anthropic cache_control / exotic blocks 无损往返 |
+| `__anthropic_raw_*` | Anthropic cache_control / exotic blocks / 工具 `strict` / `tool_result.is_error` 无损往返 |
 | `__google_raw_*` | Google systemInstruction / built-in tools / generationConfig |
 | `__emb_*` | Embeddings 已知字段（input / dimensions / encoding_format / user） |
 | `__vendor_ingress` | 未知 vendor 字段集合（由 VendorFieldPolicy 决定是否转发） |
@@ -642,7 +642,7 @@ Request/response encode 和 stream delta encode 在跨协议时执行 per-value 
 
 **Open Responses 2026-04-24**：独立 decoder/encoder/parser/formatter；严格验证 dated request、ResponseResource 与 SSE lifecycle；Target 是否仅支持流式由 `ResolvedTargetCapabilities::stream_only` 声明。
 
-**Anthropic Messages**：cache_control、thinking config、context_management、exotic blocks（Document / InputAudio）保留 `__anthropic_raw_*` 做无损往返；built-in tools（web_search_call）作为 sentinel ToolDef 处理。
+**Anthropic Messages**：cache_control、thinking config、context_management、exotic blocks（Document / InputAudio）、工具 `strict` 与 `tool_result.is_error` 保留 `__anthropic_raw_*` 做同协议无损往返（后两者不进入 IR，跨协议路由不受影响）；built-in tools（web_search_call）作为 sentinel ToolDef 处理。
 
 **Google GenerateContent**：完整 generationConfig（20+ fields）、safety_settings、built-in tools（googleSearch / codeExecution）；`__google_generation_config` 在 encoder 中被 model 参数 overlay。
 
