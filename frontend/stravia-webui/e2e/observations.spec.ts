@@ -170,6 +170,52 @@ interface ObservationFixture {
   debugDeletes: number[]
 }
 
+function distanceFromBottom(viewport: Locator): Promise<number> {
+  return viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)
+}
+
+// 向上滚到加载行出现，并每帧记录锚点相对视口的位置；加载前、加载中与加载后都不允许位移。
+async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, text?: string): Promise<void> {
+  await viewport.evaluate(
+    (element, { selector, text }) => {
+      const offset = () => {
+        const anchor = [...element.querySelectorAll(selector)].find(
+          (candidate) => text === undefined || candidate.textContent === text,
+        )
+        return anchor ? anchor.getBoundingClientRect().top - element.getBoundingClientRect().top : Number.NaN
+      }
+      const loader = element.querySelector('[data-older-loader]')
+      if (!loader) throw new Error('missing older-events loader')
+      element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
+      const samples: number[] = []
+      const tracker = { samples, frame: 0 }
+      const sample = () => {
+        samples.push(offset())
+        tracker.frame = requestAnimationFrame(sample)
+      }
+      sample()
+      Object.assign(window, { anchorTracker: tracker })
+    },
+    { selector, text },
+  )
+}
+
+async function stopAnchorTracking(page: Page): Promise<number[]> {
+  // 再多采两帧，覆盖补入历史后的首次绘制。
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  return page.evaluate(() => {
+    const tracker = (window as unknown as { anchorTracker: { samples: number[]; frame: number } }).anchorTracker
+    cancelAnimationFrame(tracker.frame)
+    return tracker.samples
+  })
+}
+
+function expectAnchorHeld(samples: number[]): void {
+  expect(samples.length).toBeGreaterThan(2)
+  const spread = Math.max(...samples) - Math.min(...samples)
+  expect(spread).toBeLessThan(1)
+}
+
 async function installObservationFixture(
   page: Page,
   holdRemainingRoots = false,
@@ -778,7 +824,7 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.detailRequests).toHaveLength(1)
   })
 
-  test('latest details load bounded history and prepend earlier events without moving the reading anchor', async ({
+  test('conversation opens at the latest content and prepends earlier history without moving the reading position', async ({
     page,
   }) => {
     const fixture = await installObservationFixture(page, false, false, false, (detail) => {
@@ -796,48 +842,115 @@ test.describe('Interaction Observation canvas', () => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.goto('/logs?interaction=interaction-cinder')
     const conversation = page.getByRole('log', { name: 'Conversation' })
-    await expect(conversation).toContainText('Paragraph 251')
+    await expect(conversation.getByText('Paragraph 450', { exact: true })).toBeInViewport()
     await expect(conversation.getByText('Paragraph 250', { exact: true })).toHaveCount(0)
-    const earlier = conversation.getByRole('button', { name: 'Load earlier events', exact: true })
-    await expect(earlier).toHaveCount(0)
-    const userPreview = conversation.getByText('Cinder user question', { exact: true })
-    await conversation.evaluate((element) => {
-      element.scrollTop = 0
-      element.dispatchEvent(new Event('scroll'))
-    })
-    const userBefore = await userPreview.evaluate((element) => element.getBoundingClientRect().top)
-    await conversation
-      .getByText('Paragraph 51', { exact: true })
-      .waitFor({ state: 'attached', timeout: 1000 })
-      .catch(() => undefined)
-    expect(
-      Math.abs((await userPreview.evaluate((element) => element.getBoundingClientRect().top)) - userBefore),
-    ).toBeLessThan(3)
-    await expect(userPreview).toBeInViewport()
-    const alignOlderSentinel = () =>
-      conversation.evaluate((element) => {
-        const sentinel = element.querySelector('[data-conversation-older-sentinel]')
-        if (!(sentinel instanceof HTMLElement)) throw new Error('missing older-events sentinel')
-        element.scrollTop += sentinel.getBoundingClientRect().top - element.getBoundingClientRect().top
-        return [...element.querySelectorAll('p')]
-          .find((paragraph) => paragraph.textContent === 'Paragraph 251')!
-          .getBoundingClientRect().top
-      })
-    const anchor = conversation.getByText('Paragraph 251', { exact: true })
-    const before = await alignOlderSentinel()
+    await expect.poll(() => distanceFromBottom(conversation)).toBeLessThanOrEqual(2)
+    const loader = conversation.getByRole('status', { name: 'Loading earlier events', exact: true })
+
+    const release = fixture.holdNextRead('interaction-cinder')
+    await revealLoaderTrackingAnchor(conversation, 'p', 'Paragraph 251')
+    await expect(loader).toBeInViewport()
+    release()
     await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
-    await expect
-      .poll(async () => Math.abs((await anchor.evaluate((element) => element.getBoundingClientRect().top)) - before))
-      .toBeLessThan(3)
-    await alignOlderSentinel()
+    expectAnchorHeld(await stopAnchorTracking(page))
+    await expect(loader).not.toBeInViewport()
+
+    let failures = 0
+    await page.route('**/observations/interactions/interaction-cinder/events?**', async (route) => {
+      if (route.request().url().includes('before_sequence') && failures++ === 0)
+        await route.fulfill({ status: 503, json: { error: { message: 'Temporary read failure' } } })
+      else await route.fallback()
+    })
+    await revealLoaderTrackingAnchor(conversation, 'p', 'Paragraph 51')
+    // 失败后停在原位等待显式重试，而不是在视口顶部反复请求。
+    await conversation.getByRole('button', { name: "Couldn't load earlier events · Retry", exact: true }).click()
     await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
-    await expect(earlier).toHaveCount(0)
+    expect(failures).toBe(2)
+    expectAnchorHeld(await stopAnchorTracking(page))
+    await expect(loader).toHaveCount(0)
     expect(fixture.detailRequests).toHaveLength(1)
     expect(
       fixture.eventRequests
         .filter((url) => url.searchParams.has('before_sequence'))
         .map((url) => url.searchParams.get('before_sequence')),
     ).toEqual(['251', '51'])
+  })
+
+  test('diagnostics follow the latest run and reveal earlier runs as history loads without moving the reading position', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-cinder') return
+      const base = detail.runs[0]
+      const live = base.events.filter((event) => event.sequence > 360)
+      detail.runs = Array.from({ length: 6 }, (_, runIndex) => ({
+        ...base,
+        id: `run-page-${runIndex + 1}`,
+        parent_run_id: runIndex === 0 ? null : `run-page-${runIndex}`,
+        started_at: startedAt + runIndex * 1_000,
+        events: [
+          // 交替写入可见输出，让对话足够高，不会在对话页签里为填满视口而提前加载全部历史。
+          ...Array.from({ length: 60 }, (_, index) => {
+            const sequence = runIndex * 60 + index + 1
+            return {
+              sequence,
+              occurred_at: startedAt + runIndex * 1_000 + index,
+              interaction_id: detail.interaction.id,
+              run_id: `run-page-${runIndex + 1}`,
+              rejection_id: null,
+              ...(sequence % 2 === 0
+                ? { kind: 'client_visible_content_delta', payload: { text: `Paragraph ${sequence}\n\n` } }
+                : { kind: 'fixture_note', payload: { index: sequence } }),
+            }
+          }),
+          ...(runIndex === 5 ? live : []),
+        ],
+      }))
+    })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
+    const diagnostics = inspector.getByRole('log', { name: 'Diagnostics' })
+    const row = (sequence: number) => diagnostics.locator(`.stream-row[data-sequence="${sequence}"]`)
+    const runRow = (index: number) => diagnostics.locator(`button[data-run="run-page-${index}"]`)
+    await expect(row(360)).toBeInViewport()
+    await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
+    // 最新事件页之前的 Run 尚未加载：不显示成空 Run，续接关系只保留编号。
+    await expect(row(161)).toHaveCount(1)
+    await expect(row(160)).toHaveCount(0)
+    await expect(runRow(2)).toHaveCount(0)
+    await expect(runRow(3)).toHaveCount(1)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R2', exact: true })).toHaveCount(0)
+    await expect(diagnostics.getByText('Continued from R2', { exact: true })).toHaveCount(1)
+
+    fixture.emit({
+      sequence: 361,
+      occurred_at: startedAt + 5_100,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-page-6',
+      rejection_id: null,
+      kind: 'fixture_note',
+      payload: { index: 361 },
+    })
+    await expect(row(361)).toBeInViewport()
+    await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
+
+    const loader = diagnostics.getByRole('status', { name: 'Loading earlier events', exact: true })
+    const release = fixture.holdNextRead('interaction-cinder')
+    await revealLoaderTrackingAnchor(diagnostics, '.stream-row[data-sequence="161"]')
+    await expect(loader).toBeInViewport()
+    release()
+    await expect(runRow(1)).toHaveCount(1)
+    await expect(row(1)).toHaveCount(1)
+    expectAnchorHeld(await stopAnchorTracking(page))
+    await expect(loader).toHaveCount(0)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R2', exact: true })).toHaveCount(1)
+    expect(
+      fixture.eventRequests
+        .filter((url) => url.searchParams.has('before_sequence'))
+        .map((url) => url.searchParams.get('before_sequence')),
+    ).toEqual(['161'])
   })
 
   test('refreshes unopened previews and new interactions through summaries without fetching details', async ({

@@ -12,6 +12,8 @@ export type StreamItem =
 export interface ObservationTimeline {
   title: string
   orderedRuns: RunDetail[]
+  /** 已加载事件页覆盖的 Run；更早事件未加载时，排在最早已加载 Run 之前的 Run 暂不展示。 */
+  visibleRuns: RunDetail[]
   runIndex: Map<string, number>
   timelines: Map<string, ObservationEvent[]>
   attemptOutputs: Map<string, Map<string, number | null>>
@@ -109,6 +111,10 @@ export function deriveTimeline(
   const orderedRuns = [...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at)
   // Run 的父子关系表达续接与因果，不是包含：续接链按时间拍平展示，父 Run 仅以编号引用。
   const runIndex = new Map(orderedRuns.map((run, index) => [run.id, index + 1]))
+  // 详情只带最新一页事件：更早的 Run 事件尚未加载而非不存在，展示成空 Run 会被误读为没有事件。
+  const firstLoaded =
+    interaction?.older_events_cursor == null ? 0 : orderedRuns.findIndex((run) => run.events.length > 0)
+  const visibleRuns = firstLoaded > 0 ? orderedRuns.slice(firstLoaded) : orderedRuns
 
   const title = interaction
     ? orderedRuns.at(-1)?.model_display_name?.trim() ||
@@ -158,5 +164,16 @@ export function deriveTimeline(
     return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
   }
 
-  return { title, orderedRuns, runIndex, timelines, attemptOutputs, streams, failureItems, offsetLabel, gapLabel }
+  return {
+    title,
+    orderedRuns,
+    visibleRuns,
+    runIndex,
+    timelines,
+    attemptOutputs,
+    streams,
+    failureItems,
+    offsetLabel,
+    gapLabel,
+  }
 }

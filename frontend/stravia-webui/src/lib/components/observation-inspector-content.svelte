@@ -1,4 +1,5 @@
 <script lang="ts">
+import type { Snippet } from 'svelte'
 import * as m from '$lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
@@ -6,6 +7,7 @@ import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
 import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
+import ObservationLogViewport from '$lib/components/observation-log-viewport.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
 import { failureOriginLabel, observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
@@ -155,10 +157,13 @@ function jumpToRun(runId: string | null) {
   {/if}
 {/snippet}
 
-{#snippet runBlock(run: RunDetail, ordinal: number)}
+{#snippet runBlock(run: RunDetail)}
+  {@const ordinal = timeline.runIndex.get(run.id)}
   {@const items = timeline.streams.get(run.id) ?? []}
   {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
   {@const parentIndex = run.parent_run_id ? (timeline.runIndex.get(run.parent_run_id) ?? null) : null}
+  <!-- 父 Run 仍在未加载的更早区间时只显示编号，不提供跳转。 -->
+  {@const parentShown = parentIndex !== null && parentIndex > timeline.orderedRuns.length - timeline.visibleRuns.length}
   <li class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
     <Collapsible.Root>
       <div class="run-band">
@@ -185,13 +190,15 @@ function jumpToRun(runId: string | null) {
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         {#if run.parent_run_id}
-          {#if parentIndex !== null}
+          {#if parentShown}
             <button
               type="button"
               class="run-parent"
               title={m.observation_run_jump_to({ index: `R${parentIndex}` })}
               onclick={() => jumpToRun(run.parent_run_id)}
               >{m.observation_run_continued_from({ index: `R${parentIndex}` })}</button>
+          {:else if parentIndex !== null}
+            <span class="run-parent" data-muted>{m.observation_run_continued_from({ index: `R${parentIndex}` })}</span>
           {:else}
             <span class="run-parent" data-muted>{m.observation_run_continued_external()}</span>
           {/if}
@@ -357,39 +364,56 @@ function jumpToRun(runId: string | null) {
         {/key}
       {/if}
     </Tabs.Content>
-    <Tabs.Content value="diagnostics" class="min-h-0 flex-1 overflow-y-auto p-4">
+    <Tabs.Content value="diagnostics" class="min-h-0 flex-1 overflow-hidden">
       {#if interaction}
-        <dl class="diagnostic-overview">
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
-            <dd class="font-medium">{observationStatusLabel(interactionDisplayStatus(interaction.interaction))}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.observation_started()}</dt>
-            <dd class="font-technical text-xs">{formatLogTime(interaction.interaction.started_at)}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.observation_last_activity()}</dt>
-            <dd class="font-technical text-xs">{formatLogTime(interaction.interaction.last_active_at)}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.observation_debug()}</dt>
-            <dd class="font-medium">{observationDebugStatusLabel(interaction.interaction.debug_status)}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">{m.observation_interaction_id()}</dt>
-            <dd><TechnicalValue value={interaction.interaction.id} copyable /></dd>
-          </div>
-        </dl>
-        <ol class="stream">
-          {#each timeline.orderedRuns as run, index (run.id)}
-            {#if index > 0}
-              {@const gap = timeline.gapLabel(timeline.orderedRuns[index - 1], run)}
-              {#if gap}<li class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></li>{/if}
-            {/if}
-            {@render runBlock(run, index + 1)}
-          {/each}
-        </ol>
+        <div class="flex h-full min-h-0 flex-col">
+          <dl class="diagnostic-overview">
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
+              <dd class="font-medium">{observationStatusLabel(interactionDisplayStatus(interaction.interaction))}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.observation_started()}</dt>
+              <dd class="font-technical text-xs">{formatLogTime(interaction.interaction.started_at)}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.observation_last_activity()}</dt>
+              <dd class="font-technical text-xs">{formatLogTime(interaction.interaction.last_active_at)}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.observation_debug()}</dt>
+              <dd class="font-medium">{observationDebugStatusLabel(interaction.interaction.debug_status)}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.observation_interaction_id()}</dt>
+              <dd><TechnicalValue value={interaction.interaction.id} copyable /></dd>
+            </div>
+          </dl>
+          {#key interaction.interaction.id}
+            <div class="min-h-0 flex-1">
+              <ObservationLogViewport
+                label={m.observation_diagnostics()}
+                olderCursor={interaction.older_events_cursor}
+                {olderLoading}
+                {onolder}>
+                {#snippet children(older: Snippet)}
+                  <div class="diagnostic-log">
+                    {@render older()}
+                    <ol class="stream">
+                      {#each timeline.visibleRuns as run, index (run.id)}
+                        {#if index > 0}
+                          {@const gap = timeline.gapLabel(timeline.visibleRuns[index - 1], run)}
+                          {#if gap}<li class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></li>{/if}
+                        {/if}
+                        {@render runBlock(run)}
+                      {/each}
+                    </ol>
+                  </div>
+                {/snippet}
+              </ObservationLogViewport>
+            </div>
+          {/key}
+        </div>
       {/if}
     </Tabs.Content>
   </Tabs.Root>
@@ -398,12 +422,15 @@ function jumpToRun(runId: string | null) {
 <style>
 .diagnostic-overview {
   display: grid;
+  flex: none;
   grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
   gap: 0.75rem;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 1rem;
-  margin-bottom: 1rem;
+  padding: 1rem;
   font-size: 0.875rem;
+}
+.diagnostic-log {
+  padding: 1rem;
 }
 .diagnostic-overview dd {
   min-width: 0;
@@ -507,6 +534,7 @@ button.run-parent:focus-visible {
 }
 .run-parent[data-muted] {
   color: var(--muted-foreground);
+  cursor: default;
 }
 .stream-run[data-flash] .run-band :global(.stream-row) {
   background: var(--accent);
