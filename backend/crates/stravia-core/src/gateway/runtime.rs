@@ -186,8 +186,21 @@ impl Gateway {
                     ),
                 )
             };
-        let redaction =
-            crate::reversible_redaction::ReversibleRedaction::new(Arc::clone(&storage), mappings);
+        let custom_rules = Arc::new(if let Some(pool) = history_sqlite_pool.as_ref() {
+            stravia_credential_protection::SqlCustomRuleStore::sqlite(pool.clone())
+        } else {
+            stravia_credential_protection::SqlCustomRuleStore::postgres(
+                postgres_pool
+                    .as_ref()
+                    .expect("Gateway requires a SQL custom rule store")
+                    .clone(),
+            )
+        });
+        let redaction = crate::reversible_redaction::ReversibleRedaction::new(
+            Arc::clone(&storage),
+            mappings,
+            custom_rules,
+        );
         let upload_grants = Arc::new(
             agent::upload_grant::UploadGrantIssuer::load(
                 history_sqlite_pool.as_ref(),

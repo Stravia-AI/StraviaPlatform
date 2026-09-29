@@ -233,6 +233,14 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/reversible-redaction/rules", get(credential_rules))
         .route("/reversible-redaction/test", post(test_credentials))
         .route(
+            "/reversible-redaction/custom-rules",
+            get(list_custom_credential_rules).post(create_custom_credential_rule),
+        )
+        .route(
+            "/reversible-redaction/custom-rules/{id}",
+            put(update_custom_credential_rule).delete(delete_custom_credential_rule),
+        )
+        .route(
             "/reversible-redaction/discoveries",
             get(credential_discoveries),
         )

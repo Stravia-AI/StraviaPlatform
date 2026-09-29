@@ -7,6 +7,8 @@ import type {
   ApiKey,
   CredentialRuleCatalog,
   CredentialMatch,
+  CustomCredentialRule,
+  CustomCredentialRuleInput,
   CredentialDiscoveryQuery,
   CredentialDiscoveryPage,
   ProviderModelDetail,
@@ -148,6 +150,14 @@ export const admin = {
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
       request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
     test: (text: string) => request<{ matches: CredentialMatch[] }>('POST', '/reversible-redaction/test', { text }),
+    customRules: {
+      list: () => request<CustomCredentialRule[]>('GET', '/reversible-redaction/custom-rules'),
+      create: (input: CustomCredentialRuleInput) =>
+        request<CustomCredentialRule>('POST', '/reversible-redaction/custom-rules', input),
+      update: (id: string, input: CustomCredentialRuleInput) =>
+        request<CustomCredentialRule>('PUT', `/reversible-redaction/custom-rules/${encodeURIComponent(id)}`, input),
+      delete: (id: string) => request<void>('DELETE', `/reversible-redaction/custom-rules/${encodeURIComponent(id)}`),
+    },
   },
   connectClients: {
     preview: (input: ConnectClientApplyRequest) =>

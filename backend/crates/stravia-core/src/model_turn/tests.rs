@@ -1858,6 +1858,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
         store.clone(),
+        gateway.redaction.custom_rules.clone(),
     );
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
@@ -1973,6 +1974,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
         store.clone(),
+        gateway.redaction.custom_rules.clone(),
     );
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
@@ -2115,6 +2117,7 @@ async fn held_publication_turn(
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
         store.clone(),
+        gateway.redaction.custom_rules.clone(),
     );
     let mut request = AiRequest::new("publication-model", Vec::new());
     let mut pending_expiry = 0;

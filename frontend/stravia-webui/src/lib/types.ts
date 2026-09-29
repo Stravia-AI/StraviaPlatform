@@ -25,6 +25,27 @@ export interface CredentialRule {
   confidence: string
 }
 
+export type CustomCredentialRuleSpec =
+  | { mode: 'simple'; text: string }
+  | { mode: 'pattern'; regex: string; secret_group: number; keywords: string[]; min_entropy: number | null }
+
+export interface CustomCredentialRule {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  spec: CustomCredentialRuleSpec
+  created_at: number
+  updated_at: number
+}
+
+export interface CustomCredentialRuleInput {
+  name: string
+  description: string
+  enabled: boolean
+  spec: CustomCredentialRuleSpec
+}
+
 export interface CredentialRuleCatalog {
   rules: CredentialRule[]
   prefilter: string

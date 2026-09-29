@@ -9,7 +9,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatLogTime, formatNumber } from '$lib/format'
 import { observationStatusLabel } from '$lib/observation-labels'
-import type { CredentialDiscoverySummary, CredentialMatch, CredentialRule } from '$lib/types'
+import type { CredentialDiscoverySummary, CredentialMatch, CredentialRule, CustomCredentialRule } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import * as Accordion from '$lib/components/ui/accordion'
 import * as Alert from '$lib/components/ui/alert'
@@ -24,6 +24,9 @@ import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import InfoIcon from '@lucide/svelte/icons/info'
 import { Badge } from '$lib/components/ui/badge'
+import * as Select from '$lib/components/ui/select'
+import CustomRuleSheet from './custom-rule-sheet.svelte'
+import PlusIcon from '@lucide/svelte/icons/plus'
 import * as Tabs from '$lib/components/ui/tabs'
 import * as Sheet from '$lib/components/ui/sheet'
 import {
@@ -40,11 +43,20 @@ import { Textarea } from '$lib/components/ui/textarea'
 
 const settingKey = 'reversible_redaction_enabled'
 const queryKey = ['setting', settingKey]
+const customRulesKey = ['credential-protection-custom-rules']
+// 内置与自定义规则在同一张表浏览；详情与编辑各自沿用唯一的表面。
+type RuleRow =
+  | { origin: 'builtin'; id: string; name: string; rule: CredentialRule }
+  | { origin: 'custom'; id: string; name: string; rule: CustomCredentialRule }
 const queryClient = useQueryClient()
 const settingQuery = createQuery(() => ({ queryKey, queryFn: () => admin.settings.get(settingKey) }))
 const rulesQuery = createQuery(() => ({
   queryKey: ['credential-protection-rules'],
   queryFn: admin.credentialProtection.rules,
+}))
+const customRulesQuery = createQuery(() => ({
+  queryKey: customRulesKey,
+  queryFn: admin.credentialProtection.customRules.list,
 }))
 let saving = $state(false)
 let saveError = $state('')
@@ -53,8 +65,23 @@ let tab = $state('rules')
 let ruleOpen = $state(false)
 let detailsOpen = $state(false)
 let selectedRule = $state.raw<CredentialRule>()
+let customSheet = $state<{ show: (rule: CustomCredentialRule | null) => void }>()
+let originFilter = $state('all')
 const rules = $derived(rulesQuery.data?.rules ?? [])
-const ruleNames = $derived(new Map(rules.map((rule) => [rule.id, rule.name])))
+const customRules = $derived(customRulesQuery.data ?? [])
+const ruleRows = $derived<RuleRow[]>([
+  ...customRules.map((rule): RuleRow => ({ origin: 'custom', id: rule.id, name: rule.name, rule })),
+  ...rules.map((rule): RuleRow => ({ origin: 'builtin', id: rule.id, name: rule.name, rule })),
+])
+const visibleRows = $derived(originFilter === 'all' ? ruleRows : ruleRows.filter((row) => row.origin === originFilter))
+const ruleNames = $derived(new Map(ruleRows.map((row) => [row.id, row.name])))
+const originFilterLabel = $derived(
+  originFilter === 'builtin'
+    ? m.credential_custom_filter_builtin()
+    : originFilter === 'custom'
+      ? m.credential_custom_filter_custom()
+      : m.credential_custom_filter_all(),
+)
 const tableLabels = $derived({
   ...getDataTableLabels(),
   rowsPerPage: m.credential_protection_rows_per_page(),
@@ -65,16 +92,23 @@ const tableLabels = $derived({
   lastPage: m.credential_protection_last_page(),
   loading: m.credential_protection_catalog_loading(),
 })
-const ruleColumn = createDataTableColumnHelper<CredentialRule>()
+const ruleColumn = createDataTableColumnHelper<RuleRow>()
 const ruleColumns = ruleColumn.columns([
-  ruleColumn.accessor((rule) => `${rule.name} ${rule.id} ${rule.target} ${rule.description}`, {
-    id: 'rule',
-    header: () => m.credential_protection_rule_name(),
-    meta: { label: () => m.credential_protection_rule_name() },
-    cell: (context) => renderSnippet(ruleNameCell, context),
-    size: 380,
-  }),
-  ruleColumn.accessor((rule) => rule.keywords.join(' '), {
+  // 自定义规则的匹配文本可能就是凭据本身，不参与搜索索引。
+  ruleColumn.accessor(
+    (row) =>
+      row.origin === 'builtin'
+        ? `${row.name} ${row.id} ${row.rule.target} ${row.rule.description}`
+        : `${row.name} ${row.id} ${row.rule.description}`,
+    {
+      id: 'rule',
+      header: () => m.credential_protection_rule_name(),
+      meta: { label: () => m.credential_protection_rule_name() },
+      cell: (context) => renderSnippet(ruleNameCell, context),
+      size: 380,
+    },
+  ),
+  ruleColumn.accessor((row) => (row.origin === 'builtin' ? row.rule.keywords.join(' ') : ''), {
     id: 'conditions',
     header: () => m.credential_protection_rule_conditions(),
     meta: { label: () => m.credential_protection_rule_conditions() },
@@ -84,8 +118,16 @@ const ruleColumns = ruleColumn.columns([
   }),
 ])
 
-function openRule(rule: CredentialRule): void {
-  selectedRule = rule
+function patternKeywords(rule: CustomCredentialRule): string[] {
+  return rule.spec.mode === 'pattern' ? rule.spec.keywords : []
+}
+
+function openRule(row: RuleRow): void {
+  if (row.origin === 'custom') {
+    customSheet?.show(row.rule)
+    return
+  }
+  selectedRule = row.rule
   ruleOpen = true
 }
 
@@ -222,16 +264,44 @@ function selectMatch(match: CredentialMatch): void {
     }}>
     <InfoIcon data-icon="inline-start" />{m.credential_protection_details()}
   </Button>
+  <Button onclick={() => customSheet?.show(null)}>
+    <PlusIcon data-icon="inline-start" />{m.credential_custom_add()}
+  </Button>
 {/snippet}
 
-{#snippet ruleNameCell(context: DataTableCellContext<CredentialRule>)}
-  <button type="button" class="rule-link" onclick={() => openRule(context.row.original)}>
-    <span class="font-medium">{context.row.original.name}</span>
+{#snippet ruleNameCell(context: DataTableCellContext<RuleRow>)}
+  {@const row = context.row.original}
+  <button type="button" class="rule-link" onclick={() => openRule(row)}>
+    <span class="flex flex-wrap items-center gap-2">
+      <span class="font-medium">{row.name}</span>
+      {#if row.origin === 'custom'}
+        <Badge variant="secondary">{m.credential_custom_badge()}</Badge>
+        {#if !row.rule.enabled}<Badge variant="outline">{m.common_disabled_status()}</Badge>{/if}
+      {/if}
+    </span>
   </button>
 {/snippet}
 
-{#snippet ruleConditionsCell(context: DataTableCellContext<CredentialRule>)}
-  {@const rule = context.row.original}
+{#snippet customConditions(rule: CustomCredentialRule)}
+  {@const spec = rule.spec}
+  <div class="flex flex-wrap items-center gap-1.5">
+    {#if spec.mode === 'simple'}
+      <Badge variant="outline">{m.credential_custom_simple_condition()}</Badge>
+    {:else}
+      {@const keywords = patternKeywords(rule)}
+      {#each keywords.slice(0, 3) as keyword (keyword)}
+        <Badge variant="secondary" class="h-auto max-w-full"
+          ><code class="whitespace-normal break-all">{keyword}</code></Badge>
+      {/each}
+      {#if keywords.length > 3}
+        <span class="text-xs text-muted-foreground">+{formatNumber(keywords.length - 3)}</span>
+      {/if}
+      <Badge variant="outline">{m.credential_custom_pattern_condition()}</Badge>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet builtinConditions(rule: CredentialRule)}
   <div class="flex flex-wrap items-center gap-1.5">
     {#each rule.keywords.slice(0, 3) as keyword (keyword)}
       <Badge variant="secondary" class="h-auto max-w-full"
@@ -247,6 +317,15 @@ function selectMatch(match: CredentialMatch): void {
       <span class="text-xs text-muted-foreground">{m.credential_protection_no_keywords()}</span>
     {/if}
   </div>
+{/snippet}
+
+{#snippet ruleConditionsCell(context: DataTableCellContext<RuleRow>)}
+  {@const row = context.row.original}
+  {#if row.origin === 'custom'}
+    {@render customConditions(row.rule)}
+  {:else}
+    {@render builtinConditions(row.rule)}
+  {/if}
 {/snippet}
 
 <div class={['route-page protection-page', { 'rules-workspace': tab === 'rules' }]}>
@@ -295,7 +374,7 @@ function selectMatch(match: CredentialMatch): void {
     <Tabs.List aria-label={m.reversible_redaction_title()}>
       <Tabs.Trigger value="rules"
         ><ListFilterIcon />{m.credential_protection_catalog_title()}
-        {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(rules.length)}</Badge>{/if}
+        {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(ruleRows.length)}</Badge>{/if}
       </Tabs.Trigger>
       <Tabs.Trigger value="records"><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
       <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
@@ -309,12 +388,21 @@ function selectMatch(match: CredentialMatch): void {
             ><Alert.Description>{m.credential_protection_catalog_failed()}</Alert.Description></Alert.Root>
           <Button class="mt-3" variant="outline" onclick={() => void rulesQuery.refetch()}>{m.common_retry()}</Button>
         {:else}
+          {#if customRulesQuery.isError}
+            <Alert.Root variant="destructive" class="mb-3"
+              ><Alert.Description class="flex flex-wrap items-center justify-between gap-3"
+                >{m.credential_custom_load_failed()}
+                <Button variant="outline" size="sm" onclick={() => void customRulesQuery.refetch()}
+                  >{m.common_retry()}</Button
+                ></Alert.Description
+              ></Alert.Root>
+          {/if}
           <DataTable
             class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
-            data={rules}
+            data={visibleRows}
             columns={ruleColumns}
             labels={tableLabels}
-            getRowId={(rule: CredentialRule) => rule.id}
+            getRowId={(row: RuleRow) => row.id}
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
@@ -327,11 +415,24 @@ function selectMatch(match: CredentialMatch): void {
             paginator
             pagination={{ pageIndex: 0, pageSize: 10 }}
             pageSizeOptions={[10, 25, 50]}
-            onRowClick={({ row }: DataTableRowPointerEvent<CredentialRule>) => openRule(row.original)}>
-            {#snippet toolbar(table: DataTableInstance<CredentialRule>)}
-              <p class="text-sm text-muted-foreground" role="status">
-                {m.credential_protection_rule_count({ count: formatNumber(table.getFilteredRowModel().rows.length) })}
-              </p>
+            onRowClick={({ row }: DataTableRowPointerEvent<RuleRow>) => openRule(row.original)}>
+            {#snippet toolbar(table: DataTableInstance<RuleRow>)}
+              <div class="flex flex-wrap items-center gap-3">
+                <Select.Root type="single" bind:value={originFilter}>
+                  <Select.Trigger class="w-40" aria-label={m.credential_custom_filter_label()}
+                    >{originFilterLabel}</Select.Trigger>
+                  <Select.Content>
+                    <Select.Group>
+                      <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
+                      <Select.Item value="builtin">{m.credential_custom_filter_builtin()}</Select.Item>
+                      <Select.Item value="custom">{m.credential_custom_filter_custom()}</Select.Item>
+                    </Select.Group>
+                  </Select.Content>
+                </Select.Root>
+                <p class="text-sm text-muted-foreground" role="status">
+                  {m.credential_protection_rule_count({ count: formatNumber(table.getFilteredRowModel().rows.length) })}
+                </p>
+              </div>
             {/snippet}
             {#snippet empty()}
               <Empty.Root
@@ -339,10 +440,13 @@ function selectMatch(match: CredentialMatch): void {
                   ><Empty.Media variant="icon"><ListFilterIcon /></Empty.Media>
                   <Empty.Title>{m.credential_protection_catalog_title()}</Empty.Title>
                   <Empty.Description
-                    >{rules.length
-                      ? m.credential_protection_catalog_no_results()
-                      : m.credential_protection_catalog_empty()}</Empty.Description>
-                </Empty.Header></Empty.Root>
+                    >{originFilter === 'custom' && !customRules.length
+                      ? m.credential_custom_empty()
+                      : ruleRows.length
+                        ? m.credential_protection_catalog_no_results()
+                        : m.credential_protection_catalog_empty()}</Empty.Description>
+                </Empty.Header>
+              </Empty.Root>
             {/snippet}
           </DataTable>
         {/if}
@@ -554,6 +658,10 @@ function selectMatch(match: CredentialMatch): void {
     </Tabs.Content>
   </Tabs.Root>
 </div>
+
+<CustomRuleSheet
+  bind:this={customSheet}
+  onchanged={() => void queryClient.invalidateQueries({ queryKey: customRulesKey })} />
 
 <Sheet.Root bind:open={ruleOpen}>
   <Sheet.Content

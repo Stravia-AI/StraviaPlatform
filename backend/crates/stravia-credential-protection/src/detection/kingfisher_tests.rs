@@ -1,5 +1,10 @@
 use super::*;
-use crate::detection::{detector, test_text};
+use crate::detection::{CompiledCustomRules, CredentialMatch, detector};
+
+async fn test_text(text: String) -> Result<Vec<CredentialMatch>, crate::RedactionError> {
+    let none = std::sync::Arc::new(CompiledCustomRules::compile([]).unwrap());
+    crate::detection::test_text(text, none).await
+}
 
 fn matched(rule: &str, text: &str) -> Vec<String> {
     let detector = detector().unwrap();

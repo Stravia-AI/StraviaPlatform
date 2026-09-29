@@ -724,23 +724,7 @@ impl Expr {
                     .map(|a| a.evaluate(context, bindings))
                     .collect::<Result<Vec<_>>>()?;
                 match function {
-                    Function::Entropy => {
-                        let input = args[0].bytes()?;
-                        let mut frequencies = [0usize; 256];
-                        for b in input {
-                            frequencies[*b as usize] += 1;
-                        }
-                        Value::Number(
-                            frequencies
-                                .iter()
-                                .filter(|n| **n > 0)
-                                .map(|n| {
-                                    let p = *n as f64 / input.len() as f64;
-                                    -p * p.log2()
-                                })
-                                .sum(),
-                        )
-                    }
+                    Function::Entropy => Value::Number(entropy(args[0].bytes()?)),
                     Function::TokenRatio | Function::FailsTokenEfficiency => {
                         let input = std::str::from_utf8(args[0].bytes()?).map_err(|_| invalid())?;
                         let analyzed = if input.len() < 20 && input.contains(['\r', '\n']) {
@@ -822,6 +806,22 @@ impl Expr {
         })
     }
 }
+/// 字节级 Shannon 熵（bit/byte），内置过滤表达式与自定义规则的最小熵共用。
+pub(super) fn entropy(input: &[u8]) -> f64 {
+    let mut frequencies = [0usize; 256];
+    for b in input {
+        frequencies[*b as usize] += 1;
+    }
+    frequencies
+        .iter()
+        .filter(|n| **n > 0)
+        .map(|n| {
+            let p = *n as f64 / input.len() as f64;
+            -p * p.log2()
+        })
+        .sum()
+}
+
 fn index(value: f64) -> Result<usize> {
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > usize::MAX as f64 {
         return Err(invalid());

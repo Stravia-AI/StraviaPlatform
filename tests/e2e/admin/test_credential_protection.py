@@ -246,3 +246,90 @@ def test_observation_write_gap_follows_retention_changes(admin_env: dict[str, An
                 payload={"value": "7"}, headers=env["auth"],
             )
             assert status == 200, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_custom_rules_crud_validation_and_protected_roundtrip(admin_env: dict[str, Any]) -> None:
+    custom = f"{BASE}/custom-rules"
+    literal = "Team Alpha internal phrase"
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "custom-credential-rules"
+        _, key = _create_route(env, model)
+        set_enabled(env, True)
+        created: list[str] = []
+        try:
+            status, body = http_request("GET", f"{env['admin']}{custom}", headers=env["auth"])
+            assert status == 200 and body["data"] == [], body
+
+            for payload, field in [
+                ({"name": "x", "spec": {"mode": "simple", "text": "   "}}, "text"),
+                ({"name": "x", "spec": {"mode": "pattern", "regex": "(unclosed"}}, "regex"),
+                ({"name": "", "spec": {"mode": "simple", "text": "abc"}}, "name"),
+            ]:
+                status, body = http_request("POST", f"{env['admin']}{custom}", payload=payload, headers=env["auth"])
+                assert status == 400, body
+                assert body["code"] == "custom_credential_rule_invalid"
+                assert body["params"]["field"] == field
+            status, body = http_request(
+                "POST", f"{env['admin']}{custom}",
+                payload={"name": "x", "spec": {"mode": "simple", "text": "abc"}},
+                headers={name: value for name, value in env["auth"].items() if name.lower() != "x-stravia-csrf"},
+            )
+            assert status == 403
+
+            status, body = http_request(
+                "POST", f"{env['admin']}{custom}",
+                payload={"name": "Phrase", "description": "e2e", "spec": {"mode": "simple", "text": literal}},
+                headers=env["auth"],
+            )
+            assert status == 200, body
+            simple = body["data"]
+            created.append(simple["id"])
+            assert simple["id"].startswith("custom.") and simple["enabled"] is True
+            status, body = http_request(
+                "POST", f"{env['admin']}{custom}",
+                payload={"name": "Ticket", "spec": {
+                    "mode": "pattern", "regex": r"tkt-([A-Za-z0-9]{12})", "secret_group": 1, "keywords": ["tkt-"],
+                }},
+                headers=env["auth"],
+            )
+            assert status == 200, body
+            pattern = body["data"]
+            created.append(pattern["id"])
+
+            text = f"say {literal} and tkt-Ab3dE6gH9jK2, not team alpha internal phrase"
+            matches = detect_text(env, text)
+            by_rule = {item["rule_id"]: item for item in matches}
+            encoded = text.encode("utf-16-le")
+            assert encoded[by_rule[simple["id"]]["start"] * 2:by_rule[simple["id"]]["end"] * 2].decode("utf-16-le") == literal
+            assert encoded[by_rule[pattern["id"]]["start"] * 2:by_rule[pattern["id"]]["end"] * 2].decode("utf-16-le") == "Ab3dE6gH9jK2"
+
+            status, response = _proxy(env, key, model, [{"role": "user", "content": text}])
+            assert status == 200, response
+            assert response["choices"][0]["message"]["content"] == text
+            outbound = received[0]["body"]["messages"][-1]["content"]
+            assert literal not in outbound and "Ab3dE6gH9jK2" not in outbound
+            assert "tkt-" in outbound and "not team alpha internal phrase" in outbound
+            assert len(REFERENCE.findall(outbound)) == 2
+
+            status, body = http_request(
+                "PUT", f"{env['admin']}{custom}/{simple['id']}",
+                payload={"name": "Phrase", "enabled": False, "spec": {"mode": "simple", "text": literal}},
+                headers=env["auth"],
+            )
+            assert status == 200 and body["data"]["enabled"] is False, body
+            assert simple["id"] not in {item["rule_id"] for item in detect_text(env, text)}
+
+            status, body = http_request(
+                "PUT", f"{env['admin']}{custom}/custom.missing",
+                payload={"name": "x", "spec": {"mode": "simple", "text": "abc"}}, headers=env["auth"],
+            )
+            assert status == 404 and body["code"] == "custom_credential_rule_not_found"
+        finally:
+            for rule_id in created:
+                http_request("DELETE", f"{env['admin']}{custom}/{rule_id}", headers=env["auth"])
+            set_enabled(env, False)
+        status, body = http_request("GET", f"{env['admin']}{custom}", headers=env["auth"])
+        assert status == 200 and body["data"] == [], body

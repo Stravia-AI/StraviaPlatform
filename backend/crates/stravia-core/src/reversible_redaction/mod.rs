@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::interaction_observation::{RunObserver, RunPublicationGuard};
 use crate::storage::DynStorage;
 use stravia_credential_protection::store::{Mapping, MappingStore};
-use stravia_credential_protection::{CredentialDiscovery, RedactionHost, RedactionObserver};
+use stravia_credential_protection::{
+    CredentialDiscovery, RedactionHost, RedactionObserver, SqlCustomRuleStore,
+};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::model_turn::CanonicalEventStream;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -56,17 +58,31 @@ impl RedactionObserver for ObservationHost {
 pub(crate) struct ReversibleRedaction {
     capability: stravia_credential_protection::ReversibleRedaction,
     pub(crate) mappings: Arc<dyn MappingStore>,
+    pub(crate) custom_rules: Arc<SqlCustomRuleStore>,
 }
 
 impl ReversibleRedaction {
-    pub(crate) fn new(storage: DynStorage, mappings: Arc<dyn MappingStore>) -> Self {
+    pub(crate) fn new(
+        storage: DynStorage,
+        mappings: Arc<dyn MappingStore>,
+        custom_rules: Arc<SqlCustomRuleStore>,
+    ) -> Self {
         Self {
             capability: stravia_credential_protection::ReversibleRedaction::new(
                 Arc::new(SettingsHost(storage)),
                 mappings.clone(),
+                custom_rules.clone(),
             ),
             mappings,
+            custom_rules,
         }
+    }
+
+    pub(crate) async fn test_text(
+        &self,
+        text: String,
+    ) -> Result<Vec<stravia_credential_protection::CredentialMatch>, RedactionError> {
+        self.capability.test_text(text).await
     }
 
     pub(crate) async fn protect(
@@ -101,5 +117,7 @@ impl ReversibleRedaction {
     }
 }
 
+#[cfg(test)]
+mod custom_rule_tests;
 #[cfg(test)]
 mod mapping_tests;
