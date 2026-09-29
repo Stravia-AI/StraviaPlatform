@@ -39,7 +39,7 @@ pub(super) fn materialize_generation_nodes_with_catalog(
 ) -> Result<(MaterializedGeneration, Result<Vec<AiItem>, String>), String> {
     let mut catalog = Ok(Vec::new());
     // 保留原有错误优先级：完整验证历史后再报告引用目录的协议投影错误。
-    // 目录只服务本次引用解析，不进入跨请求缓存。
+    // 目录按 (materialized, ingress) 缓存；此处仅负责本次构建，缓存归调用方。
     let materialized = materialize_generation_nodes_inner(nodes, expires_at, |node| {
         if let Ok(items) = catalog.as_mut()
             && let Err(error) = append_history_catalog_node(items, node, ingress)
@@ -101,8 +101,23 @@ fn materialize_generation_nodes_inner(
     // upstream proofs: they may describe a reversible-redaction Provider view,
     // not these retained items. An old incompatible proof safely declines
     // Target Continuation while automatic parent discovery remains available.
+    let mut client_item_units = 0usize;
     if let Some(history) = client_history.as_mut() {
-        history.context_fingerprint = history_context_fingerprint(&client_items);
+        let mut context =
+            stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[]);
+        for item in &client_items {
+            let values =
+                stravia_runtime_contract::protocol::ir::canonical::history_item_values(item);
+            client_item_units += values.len();
+            for value in values {
+                context =
+                    stravia_runtime_contract::protocol::ir::canonical::append_history_value_hash(
+                        context, value,
+                    );
+            }
+        }
+        history.context_fingerprint =
+            stravia_runtime_contract::protocol::ir::canonical::hash_hex(&context);
         history.context_messages = client_items.len();
     }
     Ok(MaterializedGeneration {
@@ -110,6 +125,7 @@ fn materialize_generation_nodes_inner(
         compaction_record_ids,
         effective_items,
         client_items,
+        client_item_units,
         effective_request,
         effective_system,
         upstream_response_id,
@@ -135,12 +151,8 @@ pub(crate) fn rebuilt_prefix(
             .session_fingerprint
             .clone()
             .unwrap_or(history.context_fingerprint.clone()),
-        item_count: u32::try_from(
-            stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
-                &materialized.client_items,
-            ),
-        )
-        .map_err(|error| error.to_string())?,
+        item_count: u32::try_from(materialized.client_item_units)
+            .map_err(|error| error.to_string())?,
         completed_at,
     }))
 }

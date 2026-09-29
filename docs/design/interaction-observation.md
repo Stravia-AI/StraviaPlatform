@@ -401,7 +401,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 
 Layer 只保留静态操作名、内部生成的 span／parent ID、时间、白名单状态，以及 `node_count`、`reference_count`、`candidate_count`、`event_count` 四个非负整数工作量字段；忽略其他 span 字段，不使用 `ret`／`err` 自动记录业务值。默认终态为 `closed`，仅表示 span 生命周期结束；业务代码在已知结果时显式记录 `completed`、`error`、`cancelled` 或 `abandoned`。不能把函数返回、future 被丢弃或父 span 关闭自动解释为成功。
 
-时间线最多保留 1,024 个活动 span 与 2,048 个结束记录；活动区满时拒收新 span（相应耗时也不入直方图），结束区满时淘汰最旧记录。JSON `metadata.capacity`、`dropped_active`、`dropped_completed`、`incomplete` 与 `incomplete_total` 显式描述容量、丢弃数、当前未完成记录数与累计未完成数，不承诺完整请求树。关闭 Debug 将活动记录冻结为未完成记录；随后关闭的旧 span 不补写终态或直方图，重新开启只接收新周期的数据。
+时间线默认保留 1,024 个活动 span 与 10,000 个结束记录，可用 `STRAVIA_PERF_TRACE_ACTIVE_CAPACITY` 与 `STRAVIA_PERF_TRACE_COMPLETED_CAPACITY` 环境变量在进程启动时调整；活动区满时拒收新 span（相应耗时也不入直方图），结束区满时淘汰最旧记录。JSON `metadata.capacity`、`dropped_active`、`dropped_completed`、`incomplete` 与 `incomplete_total` 显式描述容量、丢弃数、当前未完成记录数与累计未完成数，不承诺完整请求树。关闭 Debug 将活动记录冻结为未完成记录；随后关闭的旧 span 不补写终态或直方图，重新开启只接收新周期的数据。
 
 导出使用标准 Chrome Trace 事件：已结束 span 为 `X`，未结束或被 Debug 关闭截断的 span 只有 `B`，不伪造结束时间；可见父子间附带 flow。每个 span 使用合成 track，`tid` 不是操作系统线程。可导入 Perfetto 或 Chrome trace viewer 查看墙钟时长与父子关联；`active_us` 仅表示 span 被 enter 的区间并集（重入或并发 enter 不重复累加），不是 CPU 时间，未 enter 的 span 不输出该值。该时间线不是 CPU／堆 profiler；进程 CPU／RSS 仍是独立全局采样，不能归因到单个 span。
 

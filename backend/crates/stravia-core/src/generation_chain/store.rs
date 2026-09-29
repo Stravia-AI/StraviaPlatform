@@ -19,6 +19,9 @@ pub(super) struct MaterializedGeneration {
     pub(super) effective_state: GenerationChainState,
     pub(super) media_turn_messages: Vec<(usize, Vec<String>)>,
     pub(super) client_history: Option<ClientHistoryState>,
+    /// `history_unit_count(client_items)`，物化时与 context fingerprint 同遍算出，
+    /// 供候选匹配直接引用，避免每次命中前重复投影整段历史。
+    pub(super) client_item_units: usize,
     pub(super) payload_version: u32,
     pub(super) expires_at: std::time::Instant,
 }
@@ -32,6 +35,9 @@ struct GenerationMaterializationCacheKey {
 
 struct CachedMaterialization {
     materialized: MaterializedGeneration,
+    /// 引用目录按 ingress 惰性缓存：命中时可跳过整条 `load_generation_chain`
+    /// SQL 与节点 decode。Err 同样确定性，一并缓存。
+    catalogs: HashMap<Option<ProtocolId>, Result<Vec<AiItem>, String>>,
     bytes: usize,
     expires_at: std::time::Instant,
 }
@@ -42,6 +48,31 @@ struct GenerationMaterializationCache {
     entries: HashMap<GenerationMaterializationCacheKey, CachedMaterialization>,
     head_versions: HashMap<(String, TurnNodeId), u32>,
     lru: VecDeque<GenerationMaterializationCacheKey>,
+}
+
+/// 超预算时从 LRU 头部驱逐，直到回到容量内；被驱逐 key 的 head_versions
+/// 一并移除，避免悬空指向已删除版本。
+fn materialization_cache_evict(cache: &mut GenerationMaterializationCache) {
+    while cache.bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
+        let Some(evicted) = cache.lru.pop_front() else {
+            break;
+        };
+        if let Some(evicted_entry) = cache.entries.remove(&evicted) {
+            cache.bytes = cache.bytes.saturating_sub(evicted_entry.bytes);
+        }
+        cache
+            .head_versions
+            .remove(&(evicted.principal, evicted.node_id));
+    }
+}
+
+fn catalog_size_bytes(catalog: &Result<Vec<AiItem>, String>) -> usize {
+    match catalog {
+        Ok(items) => serde_json::to_vec(items)
+            .map(|value| value.len())
+            .unwrap_or(usize::MAX),
+        Err(error) => error.len(),
+    }
 }
 
 #[derive(Clone)]
@@ -273,20 +304,26 @@ impl GenerationChainStore {
         }
         let state = ClientHistoryState::from_request(&client_request, &client_request.items);
         let mut context_fingerprints = Vec::with_capacity(limit);
+        let mut prefix_units = Vec::with_capacity(limit);
         let mut context =
             stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[]);
         let mut semantic_units = 0usize;
         for item in &client_request.items[..limit] {
-            context =
-                stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(
-                    &context, item,
-                );
-            semantic_units += stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
-                std::slice::from_ref(item),
-            );
+            // 单遍投影：units 计数与 hash 折叠共享同一次 canonical Value 构建。
+            let values =
+                stravia_runtime_contract::protocol::ir::canonical::history_item_values(item);
+            semantic_units += values.len();
+            for value in values {
+                context =
+                    stravia_runtime_contract::protocol::ir::canonical::append_history_value_hash(
+                        context, value,
+                    );
+            }
+            let units = u32::try_from(semantic_units).unwrap_or(u32::MAX);
+            prefix_units.push(units);
             context_fingerprints.push((
                 stravia_runtime_contract::protocol::ir::canonical::hash_hex(&context),
-                u32::try_from(semantic_units).unwrap_or(u32::MAX),
+                units,
             ));
         }
 
@@ -330,28 +367,33 @@ impl GenerationChainStore {
         tracing::Span::current().record("candidate_count", candidates.len() as u64);
         for candidate in candidates {
             let matched_units = usize::try_from(candidate.item_count).unwrap_or(usize::MAX);
-            let Some(matched_items) =
-                history_prefix_item_count(&client_request.items, matched_units)
-            else {
+            // prefix_units 已带累计 units，直接定位前缀边界，不再对
+            // client_items 做第二次逐 item 投影。饱和到 u32::MAX 的相等由
+            // 下方 items_equal 兜底，语义不变。
+            let matched_items = prefix_units
+                .iter()
+                .position(|units| *units as usize >= matched_units)
+                .filter(|index| prefix_units[*index] as usize == matched_units)
+                .map(|index| index + 1);
+            let Some(matched_items) = matched_items else {
                 continue;
             };
-            if matched_items > limit {
-                continue;
-            }
             let materialized = self
                 .materialize_generation(principal, &candidate.node_id)
                 .await?;
-            let history_matches =
-                stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
+            // 便宜的标量比较先短路：fingerprint 相等只是索引命中，units 与
+            // controls 相同才值得对两侧前缀做完整 canonical 投影比较。
+            let history_matches = materialized
+                .client_history
+                .as_ref()
+                .is_some_and(|history| {
+                    history.controls_fingerprint == state.controls_fingerprint
+                })
+                && materialized.client_item_units == matched_units
+                && items_equal(
                     &materialized.client_items,
-                ) == matched_units
-                    && items_equal(
-                        &materialized.client_items,
-                        &client_request.items[..matched_items],
-                    )
-                    && materialized.client_history.as_ref().is_some_and(|history| {
-                        history.controls_fingerprint == state.controls_fingerprint
-                    });
+                    &client_request.items[..matched_items],
+                );
             if !history_matches {
                 continue;
             }
@@ -566,11 +608,14 @@ impl GenerationChainStore {
         let principal_key = principal.continuation_key();
         let cached = self.materialization_cache_get(&principal_key, id);
         crate::performance::record_generation_cache_access(cached.is_some());
-        let chain = self
-            .load_generation_chain(principal, id)
-            .await
-            .map_err(|_| not_found.to_string())?;
         if let Some(materialized) = cached {
+            if let Some(catalog) = self.materialization_catalog_get(&principal_key, id, ingress) {
+                return Ok((materialized, catalog));
+            }
+            let chain = self
+                .load_generation_chain(principal, id)
+                .await
+                .map_err(|_| not_found.to_string())?;
             let mut catalog = Ok(Vec::new());
             for node in chain.nodes {
                 let (_, node) = super::materialize::decode_response_node(node)
@@ -581,12 +626,18 @@ impl GenerationChainStore {
                     catalog = Err(error);
                 }
             }
+            self.materialization_catalog_insert(&principal_key, id, ingress, &catalog);
             return Ok((materialized, catalog));
         }
+        let chain = self
+            .load_generation_chain(principal, id)
+            .await
+            .map_err(|_| not_found.to_string())?;
         let (materialized, catalog) =
             materialize_generation_nodes_with_catalog(chain.nodes, chain.expires_at, ingress)
                 .map_err(|_| not_found.to_string())?;
-        self.materialization_cache_insert(principal_key, id.clone(), materialized.clone());
+        self.materialization_cache_insert(principal_key.clone(), id.clone(), materialized.clone());
+        self.materialization_catalog_insert(&principal_key, id, ingress, &catalog);
         Ok((materialized, catalog))
     }
 
@@ -672,27 +723,75 @@ impl GenerationChainStore {
             }
             cache.lru.retain(|candidate| candidate != &previous);
         }
-        while cache.bytes.saturating_add(bytes) > GENERATION_MATERIALIZATION_CACHE_BYTES {
-            let Some(evicted) = cache.lru.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = cache.entries.remove(&evicted) {
-                cache.bytes = cache.bytes.saturating_sub(evicted.bytes);
-            }
-            cache
-                .head_versions
-                .remove(&(evicted.principal, evicted.node_id));
-        }
         cache.bytes = cache.bytes.saturating_add(bytes);
         cache.entries.insert(
             key.clone(),
             CachedMaterialization {
+                catalogs: HashMap::new(),
                 expires_at: materialized.expires_at,
                 materialized,
                 bytes,
             },
         );
         cache.lru.push_back(key);
+        materialization_cache_evict(&mut cache);
+        crate::performance::record_generation_cache_bytes(cache.bytes);
+    }
+
+    fn materialization_catalog_get(
+        &self,
+        principal: &str,
+        id: &TurnNodeId,
+        ingress: Option<ProtocolId>,
+    ) -> Option<Result<Vec<AiItem>, String>> {
+        let cache = self.materializations.lock();
+        let version = *cache
+            .head_versions
+            .get(&(principal.to_owned(), id.clone()))?;
+        let key = GenerationMaterializationCacheKey {
+            principal: principal.to_owned(),
+            node_id: id.clone(),
+            payload_version: version,
+        };
+        cache.entries.get(&key)?.catalogs.get(&ingress).cloned()
+    }
+
+    fn materialization_catalog_insert(
+        &self,
+        principal: &str,
+        id: &TurnNodeId,
+        ingress: Option<ProtocolId>,
+        catalog: &Result<Vec<AiItem>, String>,
+    ) {
+        let bytes = catalog_size_bytes(catalog);
+        if bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
+            return;
+        }
+        let mut cache = self.materializations.lock();
+        let Some(version) = cache
+            .head_versions
+            .get(&(principal.to_owned(), id.clone()))
+            .copied()
+        else {
+            return;
+        };
+        let key = GenerationMaterializationCacheKey {
+            principal: principal.to_owned(),
+            node_id: id.clone(),
+            payload_version: version,
+        };
+        let removed = if let Some(entry) = cache.entries.get_mut(&key) {
+            let removed = entry
+                .catalogs
+                .insert(ingress, catalog.clone())
+                .map_or(0, |previous| catalog_size_bytes(&previous));
+            entry.bytes = entry.bytes.saturating_sub(removed).saturating_add(bytes);
+            removed
+        } else {
+            return;
+        };
+        cache.bytes = cache.bytes.saturating_sub(removed).saturating_add(bytes);
+        materialization_cache_evict(&mut cache);
         crate::performance::record_generation_cache_bytes(cache.bytes);
     }
 
