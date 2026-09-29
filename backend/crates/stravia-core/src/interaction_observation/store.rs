@@ -6,6 +6,9 @@ use super::types::{
     RunStart, TraceManifest, project_event_for_management,
 };
 
+/// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
+pub(super) const TURN_SEPARATOR: &str = "\n\n";
+
 #[derive(Clone)]
 pub(super) enum ObservationStore {
     Sqlite(SqlitePool),
@@ -899,6 +902,13 @@ impl ObservationStore {
                     if let RunEvent::ClientVisibleContentDelta { text } = run_event {
                         visible.push_str(text);
                     } else {
+                        if matches!(run_event, RunEvent::ModelTurnStarted { .. }) {
+                            if visible.is_empty() {
+                                sqlx::query("UPDATE interaction_observations SET visible_tail=visible_tail || ?1 WHERE id=?2 AND visible_tail<>'' AND substr(visible_tail,-2)<>?1").bind(TURN_SEPARATOR).bind(interaction_id).execute(&mut *tx).await?;
+                            } else if !visible.ends_with(TURN_SEPARATOR) {
+                                visible.push_str(TURN_SEPARATOR);
+                            }
+                        }
                         apply_sqlite(&mut tx, interaction_id, run_id, run_event, sequence, at)
                             .await?;
                     }
@@ -950,6 +960,13 @@ impl ObservationStore {
                     if let RunEvent::ClientVisibleContentDelta { text } = run_event {
                         visible.push_str(text);
                     } else {
+                        if matches!(run_event, RunEvent::ModelTurnStarted { .. }) {
+                            if visible.is_empty() {
+                                sqlx::query("UPDATE interaction_observations SET visible_tail=visible_tail || $1 WHERE id=$2 AND visible_tail<>'' AND RIGHT(visible_tail,2)<>$1").bind(TURN_SEPARATOR).bind(interaction_id).execute(&mut *tx).await?;
+                            } else if !visible.ends_with(TURN_SEPARATOR) {
+                                visible.push_str(TURN_SEPARATOR);
+                            }
+                        }
                         apply_postgres(&mut tx, interaction_id, run_id, run_event, sequence, at)
                             .await?;
                     }
@@ -3506,6 +3523,41 @@ mod tests {
             (3, 3),
             "late content must not move activity backwards"
         );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_turns_separate_visible_tail_paragraphs() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        admit_tool_run(&store, "turns", None, "alice").await?;
+        let turn = |id: &str| RunEvent::ModelTurnStarted {
+            model_turn_id: id.into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        };
+        let text = |text: &str| RunEvent::ClientVisibleContentDelta { text: text.into() };
+        // 首个 Turn 之前无输出：不产生前导分隔；同批与跨批的 Turn 边界都要分隔；无输出的 Turn 不叠加分隔。
+        for batch in [
+            vec![turn("t1"), text("first")],
+            vec![turn("t2")],
+            vec![turn("t3"), text("second"), turn("t4"), text("third")],
+        ] {
+            let events: Vec<_> = batch.into_iter().map(|event| (event, None, 2)).collect();
+            store
+                .persist_run_events("turns", "turns", &events, i64::MAX)
+                .await?;
+        }
+        let tail: String = sqlx::query_scalar(
+            "SELECT visible_tail FROM interaction_observations WHERE id='turns'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(tail, "first\n\nsecond\n\nthird");
         pool.close().await;
         Ok(())
     }

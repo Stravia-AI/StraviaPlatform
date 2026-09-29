@@ -64,7 +64,7 @@ Generation parent 存在但对应父观察不可用时，新准入记录 `genera
 4. 既无活动分支，也无最终生成响应，且仍有因客户端连接关闭或等待超时结束等待的叶分支：`disconnected`，显示“已断开”；
 5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
 
-`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。`visible_tail` 为空而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。
+`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。`visible_tail` 在每个 Model Turn 开始时（已有输出且尚未以空行结尾）追加一个空行，使预览按 Markdown 段落分隔各 Turn 的输出。`visible_tail` 为空而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。
 
 响应完成不等于后台工具完成。仅在最后一个 `RunObserver` 释放、确认不会再产生该 Run 的事件后，writer 才把残留运行中的 Model Turn／Target attempt 记为 `interrupted`，释放残留活动计数并追加 `unfinished_observation_activity` gap。后台执行持有的观察句柄继续保护真实活动；收口不改写 Run 的交付状态、Generation 关联或已确认 usage，不将缺失的结束事实推断为成功。
 

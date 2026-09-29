@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- The Observation "Model output preview" now starts a new paragraph for each model turn instead of running the text of consecutive turns together. Previews recorded before this change keep their existing text.
+
 ### Changed
 
 - Request History Conversation and Diagnostics views now open at the latest content and follow new events while you stay at the bottom. Scrolling to the top shows a loading indicator and loads earlier events in place without shifting what you are reading. Diagnostics no longer shows earlier runs as empty before their events load.

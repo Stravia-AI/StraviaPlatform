@@ -1807,6 +1807,11 @@ fn project_bundle_summary(
                     }
                 }
             }
+            "model_turn_started"
+                if !visible_tail.is_empty() && !visible_tail.ends_with(store::TURN_SEPARATOR) =>
+            {
+                visible_tail.push_str(store::TURN_SEPARATOR);
+            }
             "observation_gap" => observation_gap = true,
             _ => {}
         }
