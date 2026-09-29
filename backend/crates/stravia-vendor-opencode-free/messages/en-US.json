@@ -1,0 +1,9 @@
+{
+  "default_channel": "Default",
+  "credentials_group": "Credentials",
+  "advanced_group": "Advanced",
+  "api_key": "API key",
+  "api_key_description": "Optional OpenCode Zen API key. Free-tier models are reachable without one; the key does not raise the free-tier quota.",
+  "user_agent": "Client user-agent",
+  "user_agent_description": "User-Agent sent upstream. Defaults to the pinned official client string; override only when the upstream requires a newer opencode version."
+}

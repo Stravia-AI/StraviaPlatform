@@ -7940,6 +7940,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stravia-vendor-opencode-free"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "stravia-runtime-contract",
+ "stravia-vendor-common",
+ "stravia-vendor-runtime",
+ "stravia-vendor-sdk",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "stravia-vendor-runtime"
 version = "0.3.1"
 dependencies = [

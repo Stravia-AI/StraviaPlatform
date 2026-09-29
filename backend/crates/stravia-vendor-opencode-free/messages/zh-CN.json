@@ -1,0 +1,9 @@
+{
+  "default_channel": "默认",
+  "credentials_group": "凭据",
+  "advanced_group": "高级",
+  "api_key": "API 密钥",
+  "api_key_description": "可选的 OpenCode Zen API 密钥。免费模型无需密钥即可访问；密钥不会提高免费层配额。",
+  "user_agent": "客户端 User-Agent",
+  "user_agent_description": "发送给上游的 User-Agent。默认使用内置的官方客户端串；仅当上游要求更高 opencode 版本时才覆盖。"
+}
