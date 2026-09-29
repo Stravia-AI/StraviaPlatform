@@ -73,6 +73,10 @@ pub struct TurnInput {
     pub(crate) observer: Option<RunObserver>,
     pub(crate) compaction_records: CompactionPublications,
     pub(crate) compaction_source_generation_id: Option<String>,
+    /// 本地链路根（Generation Chain 根节点或 Agent Run 根 Turn）。宿主据此
+    /// 派生 `session_affinity` 交给插件，同一链路各轮与压缩共享上游会话键；
+    /// 与客户端自报的 session 无关。
+    pub(crate) generation_root_id: Option<String>,
 }
 
 impl TurnInput {
@@ -90,6 +94,7 @@ impl TurnInput {
             observer: None,
             compaction_records: Arc::default(),
             compaction_source_generation_id: None,
+            generation_root_id: None,
         }
     }
 

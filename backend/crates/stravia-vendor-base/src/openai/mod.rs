@@ -251,6 +251,7 @@ fn infer(
     let url = endpoint(&provider.base_url, &path);
     let mut headers = common::header_pairs(&encoded.headers)?;
     append_client_headers(&provider, &mut headers);
+    crate::apply_session_affinity(&provider, &mut headers);
     set_header(&mut headers, "content-type", "application/json".into());
     if !headers
         .iter()
@@ -380,6 +381,8 @@ fn infer_responses_websocket(
     preserve_upstream_errors: bool,
 ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
     let mut headers = common::header_pairs(codec_headers)?;
+    // 不附加 session_affinity：socket 本身已把会话固定在同一上游节点，而宿主按
+    // 握手标头匹配可复用连接，逐链变化的标头会拆散同一客户端会话的复用。
     append_client_headers(provider, &mut headers);
     headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
     if let Some(api_key) = credential(provider, "apiKey") {

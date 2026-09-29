@@ -1032,6 +1032,95 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
 }
 
 #[tokio::test]
+async fn upstream_session_id_follows_the_local_generation_chain() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind provider");
+    let address = listener.local_addr().expect("provider address");
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    tokio::spawn(async move {
+        for answer in ["first answer", "second answer", "other answer"] {
+            let (mut socket, _) = listener.accept().await.expect("accept provider request");
+            let request = read_test_http_request(&mut socket).await;
+            captured.lock().push(request.clone());
+            write_test_openai_response(&mut socket, &request, openai_response(answer)).await;
+        }
+    });
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_protocol(
+        &gateway,
+        "session-affinity",
+        &[format!("http://{address}/v1")],
+        "custom",
+        "openai-compatible",
+    )
+    .await;
+    // 客户端对三次请求自报同一会话；上游键仍须按本地链路区分。
+    let mut headers = authorized_headers(&gateway).await;
+    headers.insert(
+        header::HeaderName::from_static("session-id"),
+        header::HeaderValue::from_static("client-conversation"),
+    );
+    let user = |text: &str| {
+        let mut item = stravia_runtime_contract::protocol::ir::AiItem::output_text(text);
+        item.role = stravia_runtime_contract::protocol::ir::Role::User;
+        item
+    };
+    for items in [
+        vec![user("first")],
+        vec![
+            user("first"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
+            user("second"),
+        ],
+        vec![user("unrelated")],
+    ] {
+        let response = execute_non_stream_request_with_headers(
+            gateway.clone(),
+            headers.clone(),
+            AiRequest::new("session-affinity", items),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+    }
+
+    let session_ids = requests
+        .lock()
+        .iter()
+        .map(|request| {
+            request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("x-session-id")
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap_or_else(|| panic!("upstream session header missing: {request}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids.len(), 3);
+    assert_eq!(
+        session_ids[0], session_ids[1],
+        "continued chain keeps its key"
+    );
+    assert_ne!(session_ids[0], session_ids[2], "new chain gets a new key");
+    assert!(
+        session_ids.iter().all(|id| id != "client-conversation"),
+        "{session_ids:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() {
     let (base_url, connections, requests) = serve_missing_previous_websocket(false).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");

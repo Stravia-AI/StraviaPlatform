@@ -1341,6 +1341,20 @@ async fn prepare_attempt(
             serde_json::Value::String(ingress.to_string()),
         );
     }
+    // 上游会话亲和键只由本地链路根派生，不取客户端自报的 session：同一链路
+    // 各轮与压缩共享同一键，上游据此把前缀缓存留在同一节点。按主体与 Target
+    // 命名空间隔离，与 websocket_affinity 一致。
+    if let Some(root_id) = input.generation_root_id.as_deref() {
+        metadata.insert(
+            "session_affinity".into(),
+            serde_json::Value::String(namespace_fingerprint(&(
+                "session",
+                input.principal.continuation_key(),
+                target_key.as_str(),
+                root_id,
+            ))),
+        );
+    }
     if !protocol_hint.is_empty() {
         metadata.insert(
             "egress_protocol".into(),

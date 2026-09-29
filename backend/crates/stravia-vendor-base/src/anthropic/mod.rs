@@ -138,6 +138,7 @@ fn infer(
     let codec_headers = encoded.headers;
     let egress_path = encoded.path;
     let mut headers = common::header_pairs(&codec_headers)?;
+    crate::apply_session_affinity(&provider, &mut headers);
     set_header(&mut headers, "content-type", "application/json".into());
     set_header(
         &mut headers,

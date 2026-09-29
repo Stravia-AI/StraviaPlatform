@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_protocol_codec::transform::{EncodedRequest, ProtocolTransform, TransformError};
@@ -9,7 +10,8 @@ use stravia_runtime_contract::protocol::ir::{
     AiError, AiErrorKind, AiItem, AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
 };
 use stravia_vendor_sdk::{
-    ErrorKind, GuestHost, HttpResponse, OperationOutput, PluginError, read_http_body,
+    ErrorKind, GuestHost, HttpResponse, OperationOutput, PluginError, ProviderSnapshot,
+    read_http_body,
 };
 
 const MAX_ERROR_BODY: usize = 256 * 1024;
@@ -87,6 +89,21 @@ pub fn header_pairs(headers: &http::HeaderMap) -> Result<Vec<(String, String)>, 
                 })
         })
         .collect()
+}
+
+/// 宿主下发的上游会话亲和键（`operation_metadata.session_affinity`），供插件
+/// 落到上游认识的会话/缓存亲和位置（`x-session-id`、`x-opencode-session` 等）。
+///
+/// 宿主只从本地链路根（Generation Chain 根节点或 Agent Run 根 Turn）派生，
+/// 按主体与 Target 隔离，输出为 64 位 hex；同一链路各轮与压缩请求共享同一键，
+/// 与客户端自报的 session 无关。无链路的操作返回 None；调用方不得以随机值
+/// 代替——逐请求随机会话键会打散上游亲和视图，比缺失更差。
+pub fn session_affinity(provider: &ProviderSnapshot) -> Option<&str> {
+    provider
+        .operation_metadata
+        .get("session_affinity")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 /// Join a codec-owned absolute path to a configured base URL without producing

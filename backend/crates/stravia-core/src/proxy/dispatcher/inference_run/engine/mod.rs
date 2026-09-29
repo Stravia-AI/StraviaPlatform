@@ -746,7 +746,7 @@ pub(super) async fn orchestrate(
     let ledger = RunLedger::new(
         super::RunTerminalContext::new(
             generation_node_id,
-            generation_root_id,
+            generation_root_id.clone(),
             client_request.items.clone(),
             gw.compaction.clone(),
             principal.clone(),
@@ -763,6 +763,7 @@ pub(super) async fn orchestrate(
         turn_input.purpose = crate::model_turn::ModelTurnPurpose::Compact;
         turn_input.compaction_records = compaction_records.clone();
         turn_input.compaction_source_generation_id = compaction_source_generation_id;
+        turn_input.generation_root_id = generation_root_id;
         let mut turn = match executor.execute(turn_input).await {
             Ok(turn) => turn,
             Err(error) => {
@@ -1093,6 +1094,10 @@ async fn acquire_turn(
             .with_extra_headers(forwarded_client_headers(headers));
         input.compaction_records = ledger.compaction_records.clone();
         input.compaction_source_generation_id = generation.compaction_source_generation_id.clone();
+        input.generation_root_id = generation
+            .write
+            .as_ref()
+            .map(|write| write.root_id().to_owned());
         input
     };
 

@@ -533,6 +533,8 @@ impl AgentRunner {
                                 turn_input = turn_input
                                     .with_authorization(ModelTurnAuthorization::CapabilityGrant);
                             }
+                            turn_input.generation_root_id =
+                                Some(generation_session_id.as_str().to_owned());
                             turn_input
                         },
                         events,

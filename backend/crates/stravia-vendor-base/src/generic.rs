@@ -110,6 +110,7 @@ pub(crate) fn execute_inference(
     for (name, value) in &provider.client_headers {
         set_header(&mut headers, name, value.clone());
     }
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "content-type", "application/json".into());
     apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;

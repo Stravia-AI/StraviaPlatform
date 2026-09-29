@@ -252,6 +252,19 @@ pub fn sync_catalog(
     Ok(outcome)
 }
 
+/// 宿主按本地链路派生的会话亲和键统一以 `x-session-id` 发给所有上游：
+/// OpenRouter 等据此把前缀缓存 sticky 到同一节点，不认识的上游忽略该标头。
+/// 调用方须在客户端标头之后、请求签名之前调用，使宿主值生效且纳入签名。
+pub(crate) fn apply_session_affinity(
+    provider: &ProviderSnapshot,
+    headers: &mut Vec<(String, String)>,
+) {
+    if let Some(session) = common::session_affinity(provider) {
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-session-id"));
+        headers.push(("x-session-id".to_owned(), session.to_owned()));
+    }
+}
+
 pub(crate) fn encode_inference_request(
     protocol: &str,
     request: &AiRequest,

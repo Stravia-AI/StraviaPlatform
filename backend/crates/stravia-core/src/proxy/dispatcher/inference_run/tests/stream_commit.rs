@@ -1105,6 +1105,11 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
 
 #[tokio::test]
 async fn reasoning_tags_are_canonicalized_across_delivery_modes() {
+    // 串行六次网关请求的 future 在调试构建下超出默认测试线程栈；放到堆上执行。
+    Box::pin(reasoning_tags_are_canonicalized_across_delivery_modes_impl()).await;
+}
+
+async fn reasoning_tags_are_canonicalized_across_delivery_modes_impl() {
     let tagged = "<think>reason</think>answer";
     let (unary_url, _) = serve_openai_response(200, openai_response(tagged)).await;
     let (responses_unary_url, _) =

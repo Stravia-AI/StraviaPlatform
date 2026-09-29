@@ -152,6 +152,7 @@ fn infer_azure(
     url.query_pairs_mut().append_pair("api-version", &version);
     let api_key = required_string(provider, "apiKey", "Azure API key is required")?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "api-key", api_key);
     send_inference(
         host,
@@ -173,6 +174,7 @@ fn infer_bedrock(
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "content-type", "application/json");
     if let Some(api_key) = string_value(provider, "apiKey") {
         set_header(&mut headers, "authorization", format!("Bearer {api_key}"));
@@ -203,6 +205,7 @@ fn infer_vertex(
     };
     let token = vertex_access_token(host, provider)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     send_inference(
         host,
@@ -239,6 +242,7 @@ fn infer_vertex_anthropic(
     );
     let token = vertex_access_token(host, provider)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     send_inference(
         host,
@@ -261,6 +265,7 @@ fn infer_sap(
     let url = common::endpoint_url(&provider.base_url, path)?;
     let token = sap_access_token(host, provider)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     if let Some(group) = string_value(provider, "resourceGroup") {
         set_header(&mut headers, "AI-Resource-Group", group);
@@ -284,7 +289,8 @@ fn infer_gitlab(
     let encoded = crate::encode_inference_request("openai-chat-completions", request)?;
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
-    let base_headers = common::header_pairs(&encoded.headers)?;
+    let mut base_headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut base_headers);
 
     let access = gitlab_direct_access(host, provider, false)?;
     host.emit_started()?;
@@ -348,6 +354,7 @@ fn infer_watsonx(
     url.query_pairs_mut().append_pair("version", &version);
     let token = ibm_access_token(host, provider)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
+    crate::apply_session_affinity(provider, &mut headers);
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     send_inference(
         host,

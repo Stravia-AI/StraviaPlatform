@@ -9,6 +9,7 @@
 
 ### Changed
 
+- HTTP requests from the embedded base Vendor now carry an `x-session-id` header that stays the same for every turn of a conversation, so upstreams that route prompt caching by session (such as OpenRouter) can keep a conversation on the same cache node. Stravia derives the value from its own conversation tracking rather than from client-supplied session IDs; a new conversation gets a new value. The OpenCode Zen `x-opencode-session` header now follows the same conversation value instead of changing on every request.
 - Request History Conversation and Diagnostics views now open at the latest content and follow new events while you stay at the bottom. Scrolling to the top shows a loading indicator and loads earlier events in place without shifting what you are reading. Diagnostics no longer shows earlier runs as empty before their events load.
 
 ### Fixed
