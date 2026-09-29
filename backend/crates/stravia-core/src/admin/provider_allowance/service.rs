@@ -590,7 +590,8 @@ fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allo
         limit,
         used_percent,
         window_seconds: item.window_seconds,
-        reset_at: item.resets_at_unix_ms,
+        // 上游对未启用/未开始计时的窗口会返回 0 作为占位；epoch 0 不是有效重置时间。
+        reset_at: item.resets_at_unix_ms.filter(|millis| *millis > 0),
         condition,
         forecast: ExhaustionForecast::default(),
     };
@@ -983,6 +984,21 @@ mod tests {
         );
         assert_eq!(cny.condition, None);
         assert_eq!(usd.condition, None);
+    }
+
+    #[test]
+    fn non_positive_reset_timestamp_means_no_reset() {
+        for raw in [0, -1] {
+            let mut item = sdk_item("USD");
+            item.resets_at_unix_ms = Some(raw);
+            assert_eq!(map_allowance(item).expect("allowance").reset_at, None);
+        }
+        let mut item = sdk_item("USD");
+        item.resets_at_unix_ms = Some(1_790_000_000_000);
+        assert_eq!(
+            map_allowance(item).expect("allowance").reset_at,
+            Some(1_790_000_000_000)
+        );
     }
 
     #[test]

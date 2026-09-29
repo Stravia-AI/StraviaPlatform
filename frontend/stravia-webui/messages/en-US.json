@@ -1278,7 +1278,7 @@
   "allowances_label_daily": "Daily window",
   "allowances_label_monthly": "Monthly window",
   "allowances_label_billing_cycle": "Billing cycle",
-  "allowances_label_credit_balance": "Credit balance",
+  "allowances_label_balance": "Account balance",
   "allowances_label_unlimited_credits": "Unlimited credits",
   "allowances_label_premium_interactions": "Premium interactions",
   "allowances_label_mcp_tools": "MCP tools",
