@@ -72,7 +72,7 @@ function clearSelection(): void {
       </Button>
     {/snippet}
   </Popover.Trigger>
-  <Popover.Content align="start" class="w-(--bits-popover-anchor-width) p-0">
+  <Popover.Content align="start" class="w-(--bits-popover-anchor-width) max-w-[calc(100vw-2rem)] min-w-80 p-0">
     <Command.Root {value} label={ariaLabel}>
       {#if value && onClear}
         <div class="border-b p-1">
@@ -93,8 +93,10 @@ function clearSelection(): void {
         <Command.Group>
           {#each models as model (model.id)}
             <Command.Item value={model.id} keywords={[model.name]} onSelect={() => selectModel(model.id)}>
-              <span class="truncate">{model.name}</span>
-              <span class="truncate font-technical text-muted-foreground">{model.id}</span>
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="overflow-x-auto whitespace-nowrap">{model.name}</span>
+                <span class="overflow-x-auto font-technical text-xs whitespace-nowrap text-muted-foreground">{model.id}</span>
+              </span>
             </Command.Item>
           {/each}
         </Command.Group>
