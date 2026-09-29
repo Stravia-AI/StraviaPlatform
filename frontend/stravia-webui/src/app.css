@@ -6,6 +6,7 @@
 @import '@fontsource/ibm-plex-mono/latin-500.css';
 @import '@fontsource-variable/noto-sans-sc';
 @import 'tailwindcss';
+@import 'tw-animate-css';
 
 @custom-variant dark (&:is(.dark *));
 @custom-variant data-active (&[data-state='active']);

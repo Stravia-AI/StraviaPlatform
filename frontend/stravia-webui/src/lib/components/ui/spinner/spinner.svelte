@@ -15,13 +15,18 @@ let {
   ...restProps
 }: SVGAttributes<SVGSVGElement> = $props()
 const accessibleLabel = $derived(ariaLabel ?? m.common_loading())
+// Lucide spreads rest props over the svg defaults, so a forwarded `undefined`
+// would erase the built-in stroke. Only forward values the caller set.
+const forwardedProps = $derived({
+  ...(name != null ? { name } : {}),
+  ...(color != null ? { color } : {}),
+  ...(stroke != null ? { stroke } : {}),
+})
 </script>
 
 <Loader2Icon
   {role}
-  name={name === null ? undefined : name}
-  color={color === null ? undefined : color}
-  stroke={stroke === null ? undefined : stroke}
+  {...forwardedProps}
   aria-label={accessibleLabel}
   class={cn('size-4 animate-spin', className)}
   {...restProps} />
