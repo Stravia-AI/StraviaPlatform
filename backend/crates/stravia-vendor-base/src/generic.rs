@@ -192,29 +192,7 @@ fn protected_reasoning_rejected(vendor: &str) -> PluginError {
     )
 }
 
-/// Anthropic Messages：`{"type":"error","error":{"type":"invalid_request_error",
-/// "message":..}}`。只有推理签名校验失败可剥离重试——官方文案为
-/// ``messages.N: Invalid `signature` in `thinking` block``（docs.claude.com
-/// thinking 文档与 anthropics/skills error-codes.md，新版还会追加
-/// "bound to a different conversation"），或 redacted_thinking 数据无效。
-/// 其它 400（角色交替、参数形状等）与推理载荷无关，保持原分类。
-pub(crate) fn classify_anthropic_error(
-    value: &Value,
-    saw_response_event: bool,
-) -> Option<PluginError> {
-    if saw_response_event {
-        return None;
-    }
-    if value.pointer("/error/type").and_then(Value::as_str) != Some("invalid_request_error") {
-        return None;
-    }
-    let message = value
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    anthropic_protected_reasoning_message(message)
-        .then(|| protected_reasoning_rejected("Anthropic"))
-}
+pub(crate) use common::classify_anthropic_error;
 
 /// Bedrock Converse：校验失败有两种外形——HTTP 错误体
 /// `{"message": .., "__type"/"code": "..ValidationException"}`（异常类型常在
@@ -262,16 +240,9 @@ pub(crate) fn classify_bedrock_error(
                 ty.to_ascii_lowercase()
                     .replace(['_', '-', '.', '#'], "")
                     .contains("validationexception")
-            }) && anthropic_protected_reasoning_message(message)
+            }) && common::anthropic_protected_reasoning_message(message)
         })
         .then(|| protected_reasoning_rejected("Bedrock"))
-}
-
-/// Anthropic 系推理签名校验文案：`thinking` 签名无效（包括新版
-/// "bound to a different conversation" 变体），或 `redacted_thinking` 数据无效。
-fn anthropic_protected_reasoning_message(message: &str) -> bool {
-    message.contains("Invalid `signature` in `thinking` block")
-        || (message.contains("redacted_thinking") && message.to_lowercase().contains("invalid"))
 }
 
 /// Gemini generateContent / Vertex：400 错误体

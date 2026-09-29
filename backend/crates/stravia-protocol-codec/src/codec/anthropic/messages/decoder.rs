@@ -42,9 +42,17 @@ impl AnthropicDecoder {
         // ── Cache-control / exotic-block detection (for raw preservation) ──────
         let needs_raw_msgs = req.messages.iter().any(|m| {
             if let AnthropicContent::Blocks(blocks) = &m.content {
-                blocks
-                    .iter()
-                    .any(|b| b.cache_control().is_some() || b.is_exotic())
+                blocks.iter().any(|b| {
+                    b.cache_control().is_some()
+                        || b.is_exotic()
+                        || matches!(
+                            b,
+                            AnthropicContentBlock::ToolResult {
+                                is_error: Some(_),
+                                ..
+                            }
+                        )
+                })
             } else {
                 false
             }
@@ -57,10 +65,15 @@ impl AnthropicDecoder {
             _ => false,
         };
 
+        // `strict` 与 `tool_result.is_error` 只经原样快照到达同协议上游：IR 不承载
+        // 它们，写入 IR 会改变跨协议路由（strict 丢失校验、OpenAI 严格模式等）。
         let needs_raw_tools = req
             .tools
             .as_ref()
-            .map(|ts| ts.iter().any(|t| t.cache_control.is_some()))
+            .map(|ts| {
+                ts.iter()
+                    .any(|t| t.cache_control.is_some() || t.strict.is_some())
+            })
             .unwrap_or(false);
 
         // Snapshot raw wire values before consuming req.

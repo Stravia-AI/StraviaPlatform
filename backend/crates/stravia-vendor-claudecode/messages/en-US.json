@@ -1,0 +1,9 @@
+{
+  "channel_oauth": "Claude subscription",
+  "channel_description": "Sign in with a Claude Pro or Max account and use its subscription allowance through the Anthropic Messages API.",
+  "callback_url": "Callback URL",
+  "callback_description": "If the browser cannot reach this machine, paste the full localhost callback URL shown after authorization.",
+  "advanced_group": "Advanced",
+  "client_version": "Claude Code version",
+  "client_version_description": "Claude Code CLI version reported upstream. Raise it when Anthropic rejects requests as coming from an outdated client."
+}

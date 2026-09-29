@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -8,7 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{FutureExt, SinkExt, StreamExt};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER};
+use http_body_util::BodyExt as _;
+use reqwest::header::{ACCEPT_ENCODING, HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER};
 use reqwest::{Client, Method, Response, Url};
 use reqwest_websocket::{Message, Upgrade, WebSocket};
 use serde_json::Value;
@@ -22,6 +24,8 @@ use stravia_vendor_runtime::{
 use stravia_vendor_sdk::{ErrorKind, TransportFailure};
 use tokio::sync::{Mutex, MutexGuard, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
+use tower::ServiceExt as _;
+use tower_http::decompression::{Decompression, DecompressionBody};
 
 use crate::interaction_observation::{RunEvent, RunObserver};
 
@@ -373,14 +377,22 @@ impl VendorNetwork {
             return Err(invalid("HTTP CONNECT is not a vendor operation"));
         }
         let headers = request_headers(request.headers, &url)?;
+        // 插件自行协商内容编码时响应体可能被压缩；插件只处理明文，由宿主解码。
+        // 未协商的请求保持原样，旧插件的线上行为不变。
+        let decode = headers.contains_key(ACCEPT_ENCODING);
         let network = self.clone();
         let sending = network.clone();
         // The task owns the operation lease only while the imported response
         // resource exists. Resource drop aborts the task before version drain.
         let task = tokio::spawn(async move {
-            sending
+            let response = sending
                 .send_http(method, url, headers, Bytes::from(request.body))
-                .await
+                .await?;
+            Ok(if decode {
+                UpstreamResponse::decoded(response).await
+            } else {
+                UpstreamResponse::Plain(response)
+            })
         });
         let abort = task.abort_handle();
         Ok(Arc::new(PendingHttp {
@@ -693,15 +705,21 @@ fn request_headers(values: Vec<(String, String)>, url: &Url) -> Result<HeaderMap
     for (name, value) in values {
         let name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| invalid("invalid upstream header name"))?;
-        if matches!(
-            name.as_str(),
-            "connection"
-                | "transfer-encoding"
-                | "content-length"
-                | "proxy-authorization"
-                | "proxy-connection"
-                | "upgrade"
-        ) {
+        // 真实客户端常发 `Connection: keep-alive`；它不改变宿主连接管理，
+        // 其他取值（close、upgrade、逐跳头名）仍由宿主独占。HTTP/2 下由 hyper 移除。
+        let keep_alive =
+            name == reqwest::header::CONNECTION && value.trim().eq_ignore_ascii_case("keep-alive");
+        if !keep_alive
+            && matches!(
+                name.as_str(),
+                "connection"
+                    | "transfer-encoding"
+                    | "content-length"
+                    | "proxy-authorization"
+                    | "proxy-connection"
+                    | "upgrade"
+            )
+        {
             return Err(invalid(
                 "upstream header is controlled by the host transport",
             ));
@@ -738,9 +756,85 @@ fn canonical_headers(headers: &HeaderMap) -> [u8; 32] {
     digest.finalize().into()
 }
 
+/// 交给插件读取的上游响应。
+enum UpstreamResponse {
+    Plain(Response),
+    /// 按 `Content-Encoding` 解码后的响应；解码时已移除 `Content-Encoding`
+    /// 与 `Content-Length`，插件看到的头与读到的明文一致。
+    Decoded {
+        url: Url,
+        status: u16,
+        headers: HeaderMap,
+        body: Pin<Box<DecompressionBody<reqwest::Body>>>,
+    },
+}
+
+impl UpstreamResponse {
+    async fn decoded(response: Response) -> Self {
+        let url = response.url().clone();
+        let mut response = Some(axum::http::Response::from(response));
+        let decoded = Decompression::new(tower::service_fn(move |_: axum::http::Request<()>| {
+            std::future::ready(Ok::<_, std::convert::Infallible>(
+                response.take().expect("oneshot calls the service once"),
+            ))
+        }))
+        .oneshot(axum::http::Request::new(()))
+        .await
+        .unwrap_or_else(|never| match never {});
+        let (parts, body) = decoded.into_parts();
+        Self::Decoded {
+            url,
+            status: parts.status.as_u16(),
+            headers: parts.headers,
+            body: Box::pin(body),
+        }
+    }
+
+    fn url(&self) -> &Url {
+        match self {
+            Self::Plain(response) => response.url(),
+            Self::Decoded { url, .. } => url,
+        }
+    }
+
+    fn status(&self) -> u16 {
+        match self {
+            Self::Plain(response) => response.status().as_u16(),
+            Self::Decoded { status, .. } => *status,
+        }
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        match self {
+            Self::Plain(response) => response.headers(),
+            Self::Decoded { headers, .. } => headers,
+        }
+    }
+
+    async fn chunk(&mut self) -> Result<Option<Bytes>, HostFailure> {
+        match self {
+            Self::Plain(response) => response.chunk().await.map_err(transport_failure),
+            Self::Decoded { body, .. } => loop {
+                match body.frame().await {
+                    None => return Ok(None),
+                    Some(Ok(frame)) => {
+                        // 尾部头不属于响应体；空数据帧继续读，None 只表示结束。
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            return Ok(Some(data));
+                        }
+                    }
+                    Some(Err(error)) => return Err(transport_failure(error)),
+                }
+            },
+        }
+    }
+}
+
 enum HttpState {
-    Pending(JoinHandle<Result<Response, HostFailure>>),
-    Ready(Response),
+    Pending(JoinHandle<Result<UpstreamResponse, HostFailure>>),
+    Ready(UpstreamResponse),
     Failed(HostFailure),
 }
 
@@ -787,7 +881,7 @@ impl HostHttpResponse for PendingHttp {
         let HttpState::Ready(response) = &*state else {
             unreachable!("resolved HTTP state")
         };
-        Ok(response.status().as_u16())
+        Ok(response.status())
     }
 
     async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
@@ -816,6 +910,7 @@ impl HostHttpResponse for PendingHttp {
             _ = self.network.cancelled() => return Err(cancelled()),
             chunk = response.chunk() => chunk,
         };
+
         match result {
             Ok(chunk) => {
                 if let Some(chunk) = &chunk {
@@ -825,7 +920,7 @@ impl HostHttpResponse for PendingHttp {
                             transport: "http",
                             message_type: "body_chunk",
                             url: response.url(),
-                            status_code: Some(response.status().as_u16()),
+                            status_code: Some(response.status()),
                             headers: None,
                         },
                         || bytes_value(chunk),
@@ -834,7 +929,6 @@ impl HostHttpResponse for PendingHttp {
                 Ok(chunk.map(|chunk| chunk.to_vec()))
             }
             Err(error) => {
-                let error = transport_failure(error);
                 *state = HttpState::Failed(error.clone());
                 Err(error)
             }

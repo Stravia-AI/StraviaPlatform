@@ -77,7 +77,7 @@ Alternatively, download a platform archive from Releases (verify against `SHA256
 **First run (both):**
 
 1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator.
-2. **Add a provider** — API key or OAuth channel (Codex, Grok device flow, Devin). Stravia syncs the available model inventory.
+2. **Add a provider** — API key or OAuth channel (Codex, Claude subscription, Grok device flow, Devin). Stravia syncs the available model inventory.
 3. **Add a model** — select upstream model IDs; the Model ID is the route clients call.
 4. **Create an API key**, then open **Connect clients** — Stravia generates a ready-to-apply provider patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode; the desktop app can write the config for you.
 
@@ -107,7 +107,7 @@ Cross-protocol tool calls, reasoning, and usage reporting are preserved; request
 
 ### Providers and model routing
 
-OpenAI (incl. Codex OAuth) · Anthropic (API key) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
+OpenAI (incl. Codex OAuth) · Anthropic (API key; Claude Pro/Max subscription OAuth via the Claude Code plugin — using a subscription outside Claude Code may violate Anthropic's terms) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
 
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
@@ -131,7 +131,7 @@ Availability depends on upstream account and model support. Size preferences do 
 
 ### Vendor plugins
 
-All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; Codex, Grok, Command Code, and Devin are dedicated plugins distributed as separate Release attachments. Import the corresponding local `.wasm` file in **Vendor Plugins** before adding a connection. Dedicated plugins own their full supplier identity and never fall back to the base package.
+All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; Codex, Claude Code, Grok, Command Code, and Devin are dedicated plugins distributed as separate Release attachments. Import the corresponding local `.wasm` file in **Vendor Plugins** before adding a connection. Dedicated plugins own their full supplier identity and never fall back to the base package.
 
 **Vendor Plugins** also supports local plugin updates without a marketplace. A plugin is trusted with the selected connection's upstream credentials and approved network destinations, so review its source and requested origins before use. See the [plugin design](docs/design/vendor-plugins.md) for setup, supported capabilities, isolation, updates, and lifecycle details.
 

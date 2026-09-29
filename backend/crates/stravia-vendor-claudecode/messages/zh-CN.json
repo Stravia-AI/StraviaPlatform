@@ -1,0 +1,9 @@
+{
+  "channel_oauth": "Claude 订阅",
+  "channel_description": "使用 Claude Pro 或 Max 账号登录，通过 Anthropic Messages API 使用订阅额度。",
+  "callback_url": "回调 URL",
+  "callback_description": "如果浏览器无法访问本机，请在授权完成后粘贴完整的 localhost 回调 URL。",
+  "advanced_group": "高级设置",
+  "client_version": "Claude Code 版本",
+  "client_version_description": "向上游报告的 Claude Code CLI 版本。Anthropic 以客户端版本过旧为由拒绝请求时调高此值。"
+}

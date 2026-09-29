@@ -1,0 +1,37 @@
+[package]
+name = "stravia-vendor-claudecode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dedicated Claude Code subscription (Anthropic OAuth) Wasm vendor guest for Stravia"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+stravia-vendor-common = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+semver = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+stravia-protocol-codec = { workspace = true }
+stravia-vendor-runtime = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }

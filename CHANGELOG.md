@@ -2,9 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- Added the dedicated `claude-code` Vendor Plugin for Claude Pro/Max subscriptions. It is published as a standalone release asset for local import; sign in through the browser to use subscription models through the Anthropic Messages API, with model discovery and 5-hour, weekly, and extra usage allowance monitoring. Requests are sent in the Claude Code CLI format, and the reported CLI version can be changed in the connection's advanced settings. Using a subscription outside Claude Code may violate Anthropic's terms and can get the account restricted. Connections on the removed `anthropic/claude-code` channel are not migrated; create a new `claude-code` connection and rebind its Routes.
+
 ### Changed
 
 - Request History Conversation and Diagnostics views now open at the latest content and follow new events while you stay at the bottom. Scrolling to the top shows a loading indicator and loads earlier events in place without shifting what you are reading. Diagnostics no longer shows earlier runs as empty before their events load.
+
+### Fixed
+
+- Anthropic Messages requests forwarded to an Anthropic-protocol upstream now keep tool `strict` flags and `tool_result.is_error` (including `false`). Routes to other protocols behave as before.
+- Vendor Plugins can now send `Connection: keep-alive` and negotiate `Accept-Encoding`. When a plugin sends `Accept-Encoding`, Stravia decodes gzip, deflate, Brotli, and zstd responses before handing them to the plugin. Plugins that do not send it, including already installed older plugins, receive responses unchanged.
 
 ## [0.3.1] - 2026-09-29
 

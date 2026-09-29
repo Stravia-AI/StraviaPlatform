@@ -79,3 +79,40 @@ fn explicit_effort_does_not_accept_unknown_thinking_type() {
             .is_err()
     );
 }
+
+#[test]
+fn same_protocol_round_trip_keeps_tool_strict_and_tool_result_is_error() {
+    let body = serde_json::json!({
+        "model": "model",
+        "max_tokens": 1024,
+        "tools": [
+            {"name": "read", "description": "Read", "input_schema": {"type": "object"}, "strict": true},
+            {"name": "grep", "description": "Grep", "input_schema": {"type": "object"}}
+        ],
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "read", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok", "is_error": false}
+            ]}
+        ]
+    });
+
+    let request = AnthropicDecoder.decode_request(body).expect("decode");
+    // 两个字段只随原样快照到达同协议上游；IR 不带它们，跨协议路由不变。
+    assert!(
+        request
+            .tools
+            .as_ref()
+            .expect("tools")
+            .iter()
+            .all(|tool| tool.strict.is_none())
+    );
+    let (encoded, _) = crate::codec::anthropic::messages::encoder::AnthropicEncoder
+        .encode_request(&request)
+        .expect("encode");
+
+    assert_eq!(encoded["tools"][0]["strict"], true);
+    assert!(encoded["tools"][1].get("strict").is_none());
+    assert_eq!(encoded["messages"][2]["content"][0]["is_error"], false);
+}

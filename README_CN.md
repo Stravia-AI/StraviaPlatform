@@ -77,7 +77,7 @@ docker run --rm \
 **首次启动（两种形态相同）：**
 
 1. 打开 <http://127.0.0.1:23471/setup>，输入控制台打印的一次性设置令牌。选择 SQLite 或 PostgreSQL，创建管理员。
-2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Grok device flow、Devin）。Stravia 会同步可用模型清单。
+2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Claude 订阅、Grok device flow、Devin）。Stravia 会同步可用模型清单。
 3. **添加模型** —— 选择上游模型 ID；Model ID 即客户端调用的路由。
 4. **创建 API Key**，然后打开**接入客户端** —— Stravia 为 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 生成可直接应用的 provider 补丁；桌面端可直接写入客户端配置。
 
@@ -107,7 +107,7 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 ### 提供商与模型路由
 
-OpenAI（含 Codex OAuth）· Anthropic（API Key）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
+OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 由 Claude Code 插件提供，在 Claude Code 之外使用订阅可能违反 Anthropic 条款）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
 
 客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
 
@@ -131,7 +131,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key）· Google Gemini + Vertex AI
 
 ### 供应商插件
 
-所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；Codex、Grok、Command Code 和 Devin 通过独立 Release 附件分发专属插件。添加连接前，先在**供应商插件**中导入对应的本地 `.wasm` 文件。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
+所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；Codex、Claude Code、Grok、Command Code 和 Devin 通过独立 Release 附件分发专属插件。添加连接前，先在**供应商插件**中导入对应的本地 `.wasm` 文件。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
 
 **供应商插件**也支持导入本地包更新，不依赖插件市场。插件会获得所选连接的上游凭据和已批准网络目标，因此使用前应核对来源与请求的 origin。接入步骤、支持能力、隔离、更新与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
 
