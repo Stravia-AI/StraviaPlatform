@@ -1,0 +1,34 @@
+[package]
+name = "stravia-vendor-opencode-free"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dedicated OpenCode Zen free-tier Wasm vendor guest"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+stravia-vendor-common = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+stravia-vendor-runtime = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "stream"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }

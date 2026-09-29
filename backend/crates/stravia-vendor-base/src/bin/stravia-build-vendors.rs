@@ -13,6 +13,7 @@ const COMPONENTS: &[(&str, &str)] = &[
     ("xai-grok", "stravia-vendor-grok"),
     ("command-code", "stravia-vendor-command-code"),
     ("devin", "stravia-vendor-devin"),
+    ("opencode-free", "stravia-vendor-opencode-free"),
 ];
 
 #[derive(Serialize)]
