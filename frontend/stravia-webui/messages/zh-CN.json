@@ -1278,7 +1278,7 @@
   "allowances_label_daily": "每日窗口",
   "allowances_label_monthly": "每月窗口",
   "allowances_label_billing_cycle": "计费周期",
-  "allowances_label_credit_balance": "点数余额",
+  "allowances_label_balance": "账户余额",
   "allowances_label_unlimited_credits": "无限点数",
   "allowances_label_premium_interactions": "高级请求",
   "allowances_label_mcp_tools": "MCP 工具",

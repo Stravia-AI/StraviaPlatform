@@ -398,12 +398,17 @@ function remainingDisplay(allowance: Allowance): string {
 }
 
 function allowanceLabel(allowance: Allowance): string {
-  // DeepSeek 余额 key 带币种后缀（credits_balance_cny 等），统一显示同一标签
-  if (allowance.key === 'credits' || allowance.key.startsWith('credits_balance')) {
-    return m.allowances_label_credit_balance()
+  // 各供应商余额 key 不一致（credits、credits_balance_cny、balance_usd 等），统一显示为账户余额
+  if (
+    allowance.key === 'credits' ||
+    allowance.key.startsWith('credits_balance') ||
+    allowance.key.startsWith('balance_')
+  ) {
+    return m.allowances_label_balance()
   }
   switch (allowance.key) {
     case '5h':
+    case 'five_hour':
       return m.allowances_label_five_hour()
     case '7d':
     case 'weekly':
