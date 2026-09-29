@@ -20,8 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use semver::Version;
 use serde_json::{Value, json};
-use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::canonical::{hash_bytes, hash_hex};
 use stravia_runtime_contract::protocol::ir::request::{ToolChoice, ToolSpec};
+use stravia_runtime_contract::protocol::ir::{AiRequest, ProtocolExt};
+use stravia_vendor_common::common;
 #[cfg(target_arch = "wasm32")]
 use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
@@ -30,7 +32,6 @@ use stravia_vendor_sdk::{
     HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
     ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
-use stravia_vendor_common::common;
 
 const VENDOR_ID: &str = "opencode-free";
 const CHANNEL_ID: &str = "default";
@@ -50,8 +51,7 @@ const PLACEHOLDER_TOOL_NAMES: &[&str] = &["bash", "read"];
 
 /// 官方客户端 UA 形态（`opencode/<version>` + ai-sdk/bun runtime 串）。
 /// 可通过 Provider 配置的 `userAgent` 字段覆盖，应对上游抬高版本下限。
-const CLIENT_USER_AGENT: &str =
-    "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14";
+const CLIENT_USER_AGENT: &str = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14";
 
 fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(FREE_MODEL_SUFFIX) || UNSUFFIXED_FREE_MODELS.contains(&model)
@@ -125,22 +125,96 @@ fn setting<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> {
 
 fn random_suffix() -> String {
     // 26 位 hex 满足 `ses_`/`msg_` 形状校验；上游只查格式不查值，
-    // 按请求生成即可（限流身份是公网 IP，不是 session 值）。
+    // 无客户端会话键时按请求随机即可（限流身份是公网 IP，不是 session 值）。
     uuid::Uuid::new_v4().simple().to_string()[..26].to_owned()
 }
 
+/// 从客户端显式会话键确定性派生 `ses_` 后缀：真实 opencode 客户端的
+/// session 在一次会话内保持稳定，上游若按它做亲和路由（如前缀缓存），
+/// 稳定值才有意义；随机化则会把会话打散。无键时退回随机。
+fn session_suffix(request: &AiRequest, provider: &ProviderSnapshot) -> String {
+    conversation_key(request, provider).map_or_else(random_suffix, |key| {
+        hash_hex(&hash_bytes(format!("opencode-session\0{key}").as_bytes()))[..26].to_owned()
+    })
+}
+
+/// 提取客户端显式声明的稳定会话键：宿主归一化结果
+/// `__stravia_generation_session_id`（覆盖全部入站协议的 session 标头与
+/// `prompt_cache_key`）→ Responses `prompt_cache_key`/`safety_identifier`
+/// → 其它协议入站透传的同名 body 字段 → 宿主白名单内的 session 标头。
+///
+/// `__stravia_*` 前缀字段按约定不进上游 body；此处取用其值派生会话标头，
+/// 正是该字段的存在目的。
+fn conversation_key(request: &AiRequest, provider: &ProviderSnapshot) -> Option<String> {
+    if let Some(key) = request
+        .meta
+        .vendor
+        .ingress
+        .get("__stravia_generation_session_id")
+        .and_then(Value::as_str)
+        .and_then(|value| sanitize_session_key(Some(value)))
+    {
+        return Some(key);
+    }
+    if let Some(ProtocolExt::OpenResponses(ext)) = request.ext.as_ref() {
+        for value in [
+            ext.prompt_cache_key.as_deref(),
+            ext.safety_identifier.as_deref(),
+        ] {
+            if let Some(key) = sanitize_session_key(value) {
+                return Some(key);
+            }
+        }
+    }
+    for field in ["prompt_cache_key", "safety_identifier"] {
+        if let Some(key) = request
+            .meta
+            .vendor
+            .ingress
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(|value| sanitize_session_key(Some(value)))
+        {
+            return Some(key);
+        }
+    }
+    for (name, value) in &provider.client_headers {
+        if matches!(
+            name.as_str(),
+            "session-id" | "session_id" | "conversation_id" | "thread-id"
+        ) && let Some(key) = sanitize_session_key(Some(value))
+        {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// 会话键必须能安全进入标头值：可见 ASCII、非空、有界。
+fn sanitize_session_key(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)))
+    .then(|| value.to_owned())
+}
+
 /// 注入 opencode 客户端指纹头。先调用本函数再叠加 `client_headers`，
-/// 使管理员显式配置的头优先于指纹缺省值。
-fn apply_client_fingerprint(provider: &ProviderSnapshot, headers: &mut Vec<(String, String)>) {
+/// 使管理员显式配置的头优先于指纹缺省值。`request` 仅推理路径提供，
+/// 用于派生稳定的 `x-opencode-session`；发现等无会话路径传 None。
+fn apply_client_fingerprint(
+    provider: &ProviderSnapshot,
+    request: Option<&AiRequest>,
+    headers: &mut Vec<(String, String)>,
+) {
     let user_agent = setting(provider, "userAgent").unwrap_or(CLIENT_USER_AGENT);
     set_header(headers, "user-agent", user_agent.to_owned());
     set_header(headers, "x-opencode-client", "cli".into());
     set_header(headers, "x-opencode-project", "global".into());
-    set_header(
-        headers,
-        "x-opencode-session",
-        format!("ses_{}", random_suffix()),
-    );
+    let session = request
+        .map(|request| session_suffix(request, provider))
+        .unwrap_or_else(random_suffix);
+    set_header(headers, "x-opencode-session", format!("ses_{session}"));
     set_header(
         headers,
         "x-opencode-request",
@@ -194,7 +268,7 @@ fn execute_inference(
     }
     let encoded = common::encode_inference_request(PROTOCOL, &request)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    apply_client_fingerprint(provider, &mut headers);
+    apply_client_fingerprint(provider, Some(&request), &mut headers);
     for (name, value) in &provider.client_headers {
         set_header(&mut headers, name, value.clone());
     }
@@ -217,13 +291,10 @@ fn execute_inference(
     common::decode_inference(host, PROTOCOL, response)
 }
 
-fn discover(
-    host: &GuestHost,
-    provider: &ProviderSnapshot,
-) -> Result<OperationOutput, PluginError> {
+fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOutput, PluginError> {
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
-    apply_client_fingerprint(provider, &mut headers);
+    apply_client_fingerprint(provider, None, &mut headers);
     apply_auth(provider, &mut headers);
     let response = host.http_start(HttpRequest {
         method: "GET".to_owned(),
@@ -237,9 +308,8 @@ fn discover(
     if !(200..300).contains(&status) {
         return Err(common::upstream_error(status, &response_headers, &body));
     }
-    let value: Value = serde_json::from_slice(&body).map_err(|_| {
-        common::plugin_error(ErrorKind::Invalid, "model list is not valid JSON")
-    })?;
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| common::plugin_error(ErrorKind::Invalid, "model list is not valid JSON"))?;
     // 本插件只暴露免费模型：付费模型走 base 的 `opencode` Profile。
     let models = value
         .get("data")
@@ -280,10 +350,7 @@ pub fn execute(
     input: OperationInput,
 ) -> Result<OperationOutput, PluginError> {
     match input {
-        OperationInput::Infer {
-            provider,
-            request,
-        } if operation == Operation::Infer => {
+        OperationInput::Infer { provider, request } if operation == Operation::Infer => {
             check_provider(channel, &provider)?;
             execute_inference(host, &provider, request)
         }
@@ -492,10 +559,7 @@ mod tests {
         assert!(instructions.contains("`read`"));
         let bash = &request.tools.as_ref().unwrap()[0];
         assert_eq!(bash.description, None);
-        assert_eq!(
-            bash.parameters,
-            json!({"type": "object", "properties": {}})
-        );
+        assert_eq!(bash.parameters, json!({"type": "object", "properties": {}}));
     }
 
     #[test]
@@ -531,7 +595,7 @@ mod tests {
     fn fingerprint_and_auth_headers() {
         let mut headers = Vec::new();
         let provider = provider("big-pickle");
-        apply_client_fingerprint(&provider, &mut headers);
+        apply_client_fingerprint(&provider, None, &mut headers);
         apply_auth(&provider, &mut headers);
         let get = |name: &str| {
             headers
@@ -548,6 +612,71 @@ mod tests {
         assert_eq!(get("authorization").as_deref(), Some("Bearer public"));
     }
 
+    fn session_header(provider: &ProviderSnapshot, request: &AiRequest) -> String {
+        let mut headers = Vec::new();
+        apply_client_fingerprint(provider, Some(request), &mut headers);
+        headers
+            .into_iter()
+            .find(|(n, _)| n == "x-opencode-session")
+            .map(|(_, v)| v)
+            .expect("session header")
+    }
+
+    #[test]
+    fn session_is_stable_per_client_key() {
+        // 同一客户端会话键必须派生同一 ses_ 值；不同键不同值。
+        // 上游若按 session 做亲和路由，稳定性是缓存命中的前提。
+        let provider = provider("big-pickle");
+        let mut req = request("big-pickle");
+        req.ext = Some(ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                prompt_cache_key: Some("conv-a".into()),
+                ..Default::default()
+            },
+        ));
+        let first = session_header(&provider, &req);
+        let second = session_header(&provider, &req);
+        assert_eq!(first, second);
+        assert!(first.starts_with("ses_") && first.len() == 30);
+
+        let mut other = request("big-pickle");
+        other.ext = Some(ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                prompt_cache_key: Some("conv-b".into()),
+                ..Default::default()
+            },
+        ));
+        assert_ne!(session_header(&provider, &other), first);
+    }
+
+    #[test]
+    fn session_prefers_host_resolved_key_and_falls_back_to_random() {
+        let provider = provider("big-pickle");
+        let mut req = request("big-pickle");
+        req.meta.vendor.ingress.insert(
+            "__stravia_generation_session_id".into(),
+            Value::String("host-session".into()),
+        );
+        req.ext = Some(ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                prompt_cache_key: Some("other".into()),
+                ..Default::default()
+            },
+        ));
+        let expected = format!(
+            "ses_{}",
+            &hash_hex(&hash_bytes(b"opencode-session\0host-session"))[..26]
+        );
+        assert_eq!(session_header(&provider, &req), expected);
+
+        // 无键：随机 ses_，两次调用不同——上游只查形状时语义等价。
+        let plain = request("big-pickle");
+        let a = session_header(&provider, &plain);
+        let b = session_header(&provider, &plain);
+        assert!(a.starts_with("ses_") && b.starts_with("ses_"));
+        assert_ne!(a, b);
+    }
+
     #[test]
     fn api_key_and_user_agent_override() {
         let mut provider = provider("big-pickle");
@@ -558,9 +687,14 @@ mod tests {
             .options
             .insert("userAgent".into(), Value::String("opencode/9.9.9".into()));
         let mut headers = Vec::new();
-        apply_client_fingerprint(&provider, &mut headers);
+        apply_client_fingerprint(&provider, None, &mut headers);
         apply_auth(&provider, &mut headers);
-        let get = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("user-agent").as_deref(), Some("opencode/9.9.9"));
         assert_eq!(get("authorization").as_deref(), Some("Bearer zen-key"));
     }
