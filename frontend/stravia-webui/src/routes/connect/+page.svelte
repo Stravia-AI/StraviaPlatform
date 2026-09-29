@@ -417,7 +417,7 @@ function cliModelName(modelId: string): string | undefined {
               </RequestFailure>
             {/if}
             {#if generatedCliConfig}
-              <pre class="route-code-plane min-h-24">{generatedCliConfig}</pre>
+              <pre class="route-code-plane min-h-24 flex-1 min-[1100px]:max-h-none">{generatedCliConfig}</pre>
             {:else}
               <Empty.Root class="min-h-72 border-y"
                 ><Empty.Header
@@ -551,7 +551,7 @@ function cliModelName(modelId: string): string | undefined {
               </Tabs.List>
               <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
                 {#if codeModel}
-                  <pre class="route-code-plane min-h-24">{generatedCode}</pre>
+                  <pre class="route-code-plane min-h-24 flex-1 min-[1100px]:max-h-none">{generatedCode}</pre>
                   {#if !selectedCodeKey}<Alert.Root class="mt-3 shrink-0" variant="warning" role="status"
                       ><Alert.Description
                         >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description

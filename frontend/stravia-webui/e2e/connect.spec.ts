@@ -119,6 +119,25 @@ test('Copy failure never reports success and leaves the configuration available'
   await expect(page.locator('pre')).toBeVisible()
 })
 
+test('Connect config preview fills the available page height', async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 853 })
+  await setup(page, [key('Personal')])
+  await page.goto('/connect')
+  const cliPreview = page.getByRole('tabpanel').locator('pre.route-code-plane')
+  await expect(cliPreview).toBeVisible()
+  const cliBox = await cliPreview.boundingBox()
+  // 短配置也应撑满输出列：底部贴近页面下缘，而不是停在固定高度上限。
+  expect(cliBox!.y + cliBox!.height).toBeGreaterThan(853 - 80)
+
+  await page.getByRole('tab', { name: 'Code', exact: true }).click()
+  await page.locator('#code-model').click()
+  await page.getByRole('option', { name: /My model/ }).click()
+  const codePreview = page.getByRole('tabpanel').locator('pre.route-code-plane')
+  await expect(codePreview).toBeVisible()
+  const codeBox = await codePreview.boundingBox()
+  expect(codeBox!.y + codeBox!.height).toBeGreaterThan(853 - 80)
+})
+
 test('Connect shrinks the config preview on short windows instead of scrolling the page', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 640 })
   await setup(page, [key('Personal')])
