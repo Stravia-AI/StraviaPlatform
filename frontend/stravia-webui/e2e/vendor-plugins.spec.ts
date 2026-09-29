@@ -124,14 +124,14 @@ test('an unavailable dedicated bundled plugin can be cancelled, retried, and uni
   })
 
   await page.goto('/vendor-plugins')
-  const baseCard = page.locator('[data-slot="card"]').filter({ hasText: basePlugin.name })
-  const dedicatedCard = page.locator('[data-slot="card"]').filter({ hasText: dedicatedPlugin.name })
-  await expect(dedicatedCard.getByText('Bundled', { exact: true })).toBeVisible()
-  await expect(dedicatedCard.getByText('Unavailable', { exact: true })).toBeVisible()
-  await expect(dedicatedCard.getByRole('button', { name: 'Uninstall', exact: true })).toBeVisible()
-  await expect(baseCard.getByRole('button', { name: 'Uninstall', exact: true })).toHaveCount(0)
+  const baseRow = page.getByRole('listitem').filter({ hasText: basePlugin.name })
+  const dedicatedRow = page.getByRole('listitem').filter({ hasText: dedicatedPlugin.name })
+  await expect(dedicatedRow.getByText('Bundled', { exact: true })).toBeVisible()
+  await expect(dedicatedRow.getByText('Unavailable', { exact: true })).toBeVisible()
+  await expect(dedicatedRow.getByRole('button', { name: 'Uninstall', exact: true })).toBeVisible()
+  await expect(baseRow.getByRole('button', { name: 'Uninstall', exact: true })).toHaveCount(0)
 
-  await dedicatedCard.getByRole('button', { name: 'Uninstall', exact: true }).click()
+  await dedicatedRow.getByRole('button', { name: 'Uninstall', exact: true }).click()
   let dialog = page.getByRole('alertdialog', { name: `Uninstall ${dedicatedPlugin.name}?` })
   await expect(dialog).toBeVisible()
 
@@ -139,7 +139,7 @@ test('an unavailable dedicated bundled plugin can be cancelled, retried, and uni
   await expect(dialog).toHaveCount(0)
   expect(uninstallRequests).toBe(0)
 
-  await dedicatedCard.getByRole('button', { name: 'Uninstall', exact: true }).click()
+  await dedicatedRow.getByRole('button', { name: 'Uninstall', exact: true }).click()
   dialog = page.getByRole('alertdialog', { name: `Uninstall ${dedicatedPlugin.name}?` })
   const confirm = dialog.getByRole('button', { name: /Uninstall/ })
   const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true })
@@ -156,8 +156,8 @@ test('an unavailable dedicated bundled plugin can be cancelled, retried, and uni
   await confirm.click()
 
   await expect(dialog).toHaveCount(0)
-  await expect(dedicatedCard).toHaveCount(0)
-  await expect(baseCard).toBeVisible()
+  await expect(dedicatedRow).toHaveCount(0)
+  await expect(baseRow).toBeVisible()
   await expect(page.getByText('Vendor plugin uninstalled.', { exact: true })).toBeVisible()
   await expect.poll(() => uninstallRequests).toBe(2)
   await expect.poll(() => listRequests).toBeGreaterThan(1)
