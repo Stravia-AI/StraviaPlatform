@@ -589,6 +589,17 @@ html[lang='zh-CN'] .font-structural {
   }
 }
 
+.route-plugin-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+}
+
+.route-plugin-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
 .route-mobile-row {
   display: grid;
   min-width: 0;
