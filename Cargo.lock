@@ -7657,15 +7657,18 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "futures",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "stravia-runtime-contract",
+ "thiserror 2.0.21",
  "tiktoken-rs",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]

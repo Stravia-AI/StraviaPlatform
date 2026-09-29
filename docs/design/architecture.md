@@ -583,6 +583,8 @@ Anthropic 原先编码成 Tool Text 的数组保留原有字符串报文，通�
 
 关闭开关停止检测和出站替换，但已有有效引用仍在回答、客户端工具参数及平台工具执行参数中还原。未知、过期与跨 Key 引用均原样保留，不暴露归属差异。检测、替换、映射访问或发布错误按既有 typed error / 流式失败流程终止，不发送绕过保护的明文，不提交失败的 Generation Chain。映射不提供数据库静态加密，也不阻止工具把还原后的秘密发给外部地址；既有认证、工具出站约束和诊断永久脱敏仍然适用。
 
+自定义凭据规则保存在 `credential_custom_rules` 表（SQLite 与 PostgreSQL 各有 `0005` 迁移），`spec` 是带 `mode` 标签的 JSON：`simple` 只保存要精确匹配的文本（区分大小写、按原样保存、不可全为空白）；`pattern` 保存正则、提取分组、关键词与最小熵，语义与内置规则一致（正则经同一 RE2 翻译器，关键词不区分大小写做预检，最小熵按提取内容的 Shannon 熵计算）。规则 ID 固定为 `custom.<uuid>`，与内置规则目录分开：`GET /reversible-redaction/rules` 仍只返回内置目录，自定义规则通过 `/reversible-redaction/custom-rules`（GET/POST）与 `/custom-rules/{id}`（PUT/DELETE）管理。保存前用与运行时相同的编译器校验，字段级错误以 `custom_credential_rule_invalid` 的 `params{field,reason}` 返回，因此已保存的规则必能被检测路径加载；检测时读取失败按 `RedactionError` 终止请求，不放行明文。已启用的自定义规则与内置规则产出同一种命中，之后共用 `intern` → 替换 → 还原管线，`POST /reversible-redaction/test` 也包含它们；简易模式的匹配文本可能就是凭据，管理接口按明文返回给已认证管理员，界面表格与搜索索引不展示它。删除规则不清除既有映射，保留期内仍可还原。
+
 ---
 
 ## 5. 协议层（codec/）详情

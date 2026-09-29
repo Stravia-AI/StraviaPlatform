@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Credential Protection now supports custom rules. Add an exact-text rule (a request containing the text is replaced and restored like any detected credential) or a pattern rule with a regular expression, capture group, keywords, and minimum entropy. The rules table can be filtered by Built-in or Custom, and the match test includes enabled custom rules. Deleting a rule does not remove mappings it already created; they remain restorable until they expire.
+
 ### Changed
 
 - Request History Conversation and Diagnostics views now open at the latest content and follow new events while you stay at the bottom. Scrolling to the top shows a loading indicator and loads earlier events in place without shifting what you are reading. Diagnostics no longer shows earlier runs as empty before their events load.

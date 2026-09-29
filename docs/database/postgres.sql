@@ -181,6 +181,21 @@ CREATE TABLE public.artifacts (
 
 
 --
+-- Name: credential_custom_rules; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credential_custom_rules (
+    id text NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    enabled boolean NOT NULL,
+    spec text NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+
+--
 -- Name: debug_trace_manifests; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -941,6 +956,14 @@ ALTER TABLE ONLY public.artifact_uploads
 
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: credential_custom_rules credential_custom_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credential_custom_rules
+    ADD CONSTRAINT credential_custom_rules_pkey PRIMARY KEY (id);
 
 
 --

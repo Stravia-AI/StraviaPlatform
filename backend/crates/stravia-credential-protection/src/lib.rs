@@ -1,13 +1,18 @@
+mod custom;
 mod detection;
 pub mod marker;
 pub mod store;
 mod stream;
 mod text;
 
+pub use custom::{
+    CustomRule, CustomRuleError, CustomRuleInput, CustomRuleSpec,
+    ID_PREFIX as CUSTOM_RULE_ID_PREFIX, SqlCustomRuleStore,
+};
+pub use detection::rule_catalog;
 pub use detection::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
 };
-pub use detection::{rule_catalog, test_text};
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -47,11 +52,25 @@ pub struct CredentialDiscovery {
 pub struct ReversibleRedaction {
     host: Arc<dyn RedactionHost>,
     mappings: Arc<dyn MappingStore>,
+    custom_rules: Arc<SqlCustomRuleStore>,
 }
 
 impl ReversibleRedaction {
-    pub fn new(host: Arc<dyn RedactionHost>, mappings: Arc<dyn MappingStore>) -> Self {
-        Self { host, mappings }
+    pub fn new(
+        host: Arc<dyn RedactionHost>,
+        mappings: Arc<dyn MappingStore>,
+        custom_rules: Arc<SqlCustomRuleStore>,
+    ) -> Self {
+        Self {
+            host,
+            mappings,
+            custom_rules,
+        }
+    }
+
+    /// 只检测本次提交的文本，规则集与实际保护一致（内置规则加已启用的自定义规则）。
+    pub async fn test_text(&self, text: String) -> Result<Vec<CredentialMatch>, RedactionError> {
+        detection::test_text(text, self.custom_rules.compiled().await?).await
     }
 
     pub async fn protect(
@@ -64,7 +83,7 @@ impl ReversibleRedaction {
         let mut mappings = self.mappings.active(principal).await?;
         if enabled {
             let (texts, sources) = text::request_texts(request, true)?;
-            let detected = detection::detect(texts).await?;
+            let detected = detection::detect(texts, self.custom_rules.compiled().await?).await?;
             if !detected.is_empty() {
                 let (secrets, findings): (Vec<_>, Vec<_>) = detected
                     .into_iter()

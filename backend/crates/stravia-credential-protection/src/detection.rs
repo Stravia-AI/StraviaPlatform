@@ -11,13 +11,17 @@
 mod expression;
 #[path = "detection/kingfisher.rs"]
 mod kingfisher;
+#[path = "detection/user_rules.rs"]
+mod user_rules;
+
+pub use user_rules::CompiledCustomRules;
 
 use super::RedactionError;
 use expression::{Context, Program};
 use regex::bytes::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Serialize)]
 pub struct CredentialRuleCatalog {
@@ -90,18 +94,49 @@ pub async fn rule_catalog() -> Result<CredentialRuleCatalog> {
         .map_err(|_| RedactionError::Detection)?
 }
 
-pub(super) async fn detect(texts: Vec<String>) -> Result<Vec<DetectedCredential>> {
+pub(super) async fn detect(
+    texts: Vec<String>,
+    custom: Arc<CompiledCustomRules>,
+) -> Result<Vec<DetectedCredential>> {
     tokio::task::spawn_blocking(move || {
-        detector()?.detect(&texts.iter().map(String::as_str).collect::<Vec<_>>())
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        detect_all(&texts, &custom)
     })
     .await
     .map_err(|_| RedactionError::Detection)?
 }
 
-pub async fn test_text(text: String) -> Result<Vec<CredentialMatch>> {
+/// 内置与自定义规则共用一份按秘密去重的结果；同一秘密的命中位置合并保留。
+fn detect_all(texts: &[&str], custom: &CompiledCustomRules) -> Result<Vec<DetectedCredential>> {
+    let mut credentials = detector()?.detect(texts)?;
+    for extra in custom.detect(texts) {
+        match credentials
+            .iter_mut()
+            .find(|credential| credential.secret == extra.secret)
+        {
+            Some(existing) => existing.findings.extend(extra.findings),
+            None => credentials.push(extra),
+        }
+    }
+    Ok(credentials)
+}
+
+/// 与 `Detector::find` 使用同一套判定：已有脱敏标记是协议原子，不能再被命中。
+fn reference_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
+    raw.match_indices(super::marker::PREFIX)
+        .filter_map(|(start, _)| {
+            super::marker::reference_prefix(&raw[start..])
+                .map(|reference| start..start + reference.len())
+        })
+        .collect()
+}
+
+pub async fn test_text(
+    text: String,
+    custom: Arc<CompiledCustomRules>,
+) -> Result<Vec<CredentialMatch>> {
     tokio::task::spawn_blocking(move || {
-        let mut findings: Vec<_> = detector()?
-            .detect(&[&text])?
+        let mut findings: Vec<_> = detect_all(&[&text], &custom)?
             .into_iter()
             .flat_map(|credential| credential.findings)
             .collect();
@@ -521,13 +556,7 @@ impl Detector {
         } else {
             self.find_betterleaks(raw, index)?
         };
-        let references: Vec<_> = raw
-            .match_indices(super::marker::PREFIX)
-            .filter_map(|(start, _)| {
-                super::marker::reference_prefix(&raw[start..])
-                    .map(|reference| start..start + reference.len())
-            })
-            .collect();
+        let references = reference_ranges(raw);
         findings.retain(|finding| {
             !references
                 .iter()
@@ -660,7 +689,8 @@ mod tests {
             "-----END PRIVATE KEY-----"
         );
         let text = format!("中文😀 api_key={secret}\n次行 api_key={secret}\n{private_key}\n结束");
-        let matches = test_text(text.clone()).await.unwrap();
+        let none = Arc::new(CompiledCustomRules::compile([]).unwrap());
+        let matches = test_text(text.clone(), none).await.unwrap();
         let utf16: Vec<_> = text.encode_utf16().collect();
         let generic: Vec<_> = matches
             .iter()

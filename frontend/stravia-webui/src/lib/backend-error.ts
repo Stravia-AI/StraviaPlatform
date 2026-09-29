@@ -165,6 +165,12 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.credential_protection_catalog_failed({}, options)
     case 'credential_test_failed':
       return m.credential_protection_tester_failed({}, options)
+    case 'custom_credential_rule_invalid':
+      return m.credential_custom_error_invalid({}, options)
+    case 'custom_credential_rule_not_found':
+      return m.credential_custom_error_not_found({}, options)
+    case 'custom_credential_rule_unavailable':
+      return m.credential_custom_error_unavailable({}, options)
     case 'WEB_ACCESS_BROWSER_REQUIRED':
       return m.web_access_browser_required({}, options)
     case 'PROVIDER_NAME_CONFLICT':

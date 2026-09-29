@@ -15,7 +15,10 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["clock", "std"] }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 regex = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 tiktoken-rs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }

@@ -95,6 +95,16 @@ CREATE TABLE artifacts (
     created_at   INTEGER NOT NULL
 , storage_backend TEXT NOT NULL DEFAULT 'internal', storage_endpoint TEXT, storage_bucket TEXT);
 
+CREATE TABLE credential_custom_rules (
+    id          TEXT PRIMARY KEY NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL,
+    enabled     INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    spec        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE debug_trace_manifests (
     trace_id TEXT PRIMARY KEY,
     run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
