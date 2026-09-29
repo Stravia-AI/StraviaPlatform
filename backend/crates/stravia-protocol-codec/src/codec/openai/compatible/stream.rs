@@ -15,8 +15,45 @@ use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 pub struct OpenAIResponseParser;
 
+/// Some OpenAI-compatible gateways (observed: ClinePass) wrap non-streaming
+/// completions in an envelope `{"success": true, "data": {…completion…}}`.
+/// Unwrap `data` only when the top level carries no `choices` itself, so
+/// standard completions and error bodies pass through unchanged.
+fn unwrap_gateway_envelope(resp: Value) -> Result<Value> {
+    if resp.get("choices").is_some() {
+        return Ok(resp);
+    }
+    if resp.get("success").and_then(Value::as_bool) == Some(false) {
+        let detail = resp
+            .pointer("/error/message")
+            .or_else(|| resp.get("error"))
+            .or_else(|| resp.get("message"))
+            .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()));
+        anyhow::bail!(
+            "upstream gateway reported failure: {}",
+            detail.unwrap_or_else(|| "success=false".to_string())
+        );
+    }
+    match resp.get("data") {
+        Some(data) if data.get("choices").and_then(Value::as_array).is_some() => {
+            Ok(data.clone())
+        }
+        _ => Ok(resp),
+    }
+}
+
 impl OpenAIResponseParser {
     pub(crate) fn parse_response(&self, resp: Value) -> Result<AiResponse> {
+        let resp = unwrap_gateway_envelope(resp)?;
+        if resp.get("choices").is_none() {
+            tracing::warn!(
+                top_level_keys = ?resp
+                    .as_object()
+                    .map(|o| o.keys().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "chat completion response has no choices; returning empty output"
+            );
+        }
         let id = resp
             .get("id")
             .and_then(|v| v.as_str())

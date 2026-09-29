@@ -202,6 +202,40 @@ fn test_parse_response_basic() {
 }
 
 #[test]
+fn test_parse_response_unwraps_gateway_envelope() {
+    // ClinePass (api.cline.bot) wraps non-streaming completions in
+    // `{"success": true, "data": {…completion…}}`.
+    let resp = serde_json::json!({
+        "data": {
+            "id": "chatcmpl-env",
+            "model": "cline-pass/deepseek-v4.1-flash",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "enveloped answer"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 2523, "completion_tokens": 83, "total_tokens": 2606}
+        },
+        "success": true
+    });
+    let r = OpenAIResponseParser.parse_response(resp).unwrap();
+    assert_eq!(r.output_text(), "enveloped answer");
+    assert_eq!(r.stop_reason.as_deref(), Some("stop"));
+    assert_eq!(r.usage.prompt_tokens, 2523);
+    assert_eq!(r.usage.completion_tokens, 83);
+}
+
+#[test]
+fn test_parse_response_envelope_failure_is_error() {
+    let resp = serde_json::json!({
+        "success": false,
+        "error": {"message": "model unavailable"}
+    });
+    let err = OpenAIResponseParser.parse_response(resp).unwrap_err();
+    assert!(err.to_string().contains("model unavailable"), "{err}");
+}
+
+#[test]
 fn test_parse_response_with_reasoning_content() {
     let resp = serde_json::json!({
         "id": "chatcmpl-2",
