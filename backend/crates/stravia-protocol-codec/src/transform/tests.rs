@@ -1826,29 +1826,138 @@ fn open_responses_client_rejects_unknown_provider_output_items() {
 }
 
 #[test]
-fn image_detail_fails_closed_for_targets_without_an_equivalent_control() {
-    let pair = ProtocolTransform::global()
-        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
-        .expect("registered protocol pair");
-    let request = pair
-        .decode_request(json!({
-            "model": "model",
-            "input": [{
-                "role": "user",
-                "content": [{
-                    "type": "input_image",
-                    "image_url": "https://example.test/image.png",
-                    "detail": "high"
-                }]
-            }]
-        }))
-        .expect("dated request");
+fn image_detail_is_ignored_without_losing_images_on_targets_without_the_control() {
+    for ingress in [
+        OPEN_RESPONSES_2026_04_24,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+    ] {
+        for target in [
+            ANTHROPIC_MESSAGES_2023_06_01,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        ] {
+            let pair = ProtocolTransform::global()
+                .bind(ingress, target)
+                .expect("registered protocol pair");
+            let details: &[&str] = if ingress == OPEN_RESPONSES_2026_04_24 {
+                &["auto", "low", "high"]
+            } else {
+                &["auto", "low", "high", "original", "future"]
+            };
+            for detail in details {
+                let body = if ingress == OPEN_RESPONSES_2026_04_24 {
+                    json!({
+                        "model": "model",
+                        "input": [{
+                            "role": "user",
+                            "content": [{
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+                                "detail": detail
+                            }]
+                        }]
+                    })
+                } else {
+                    json!({
+                        "model": "model",
+                        "messages": [{
+                            "role": "user",
+                            "content": [{
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+                                    "detail": detail
+                                }
+                            }]
+                        }]
+                    })
+                };
+                let request = pair.decode_request(body).expect("image request");
+                let body = pair
+                    .encode_request(&request)
+                    .expect("unsupported image resolution hints do not block requests")
+                    .body;
 
-    assert!(matches!(
-        pair.encode_request(&request),
-        Err(TransformError::Unrepresentable { .. })
-    ));
+                if target == ANTHROPIC_MESSAGES_2023_06_01 {
+                    assert_eq!(
+                        body["messages"][0]["content"],
+                        json!([{
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+                            }
+                        }])
+                    );
+                } else {
+                    assert_eq!(
+                        body["contents"][0]["parts"],
+                        json!([{
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+                            }
+                        }])
+                    );
+                }
+            }
+        }
+    }
 }
+#[test]
+fn image_detail_is_preserved_on_openai_targets() {
+    for ingress in [
+        OPEN_RESPONSES_2026_04_24,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+    ] {
+        for target in [
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ] {
+            let pair = ProtocolTransform::global()
+                .bind(ingress, target)
+                .expect("registered protocol pair");
+            for detail in ["auto", "low", "high"] {
+                let body = if ingress == OPEN_RESPONSES_2026_04_24 {
+                    json!({
+                        "model": "model",
+                        "input": [{
+                            "role": "user",
+                            "content": [{
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+                                "detail": detail
+                            }]
+                        }]
+                    })
+                } else {
+                    json!({
+                        "model": "model",
+                        "messages": [{
+                            "role": "user",
+                            "content": [{
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+                                    "detail": detail
+                                }
+                            }]
+                        }]
+                    })
+                };
+                let request = pair.decode_request(body).expect("image request");
+                let body = pair.encode_request(&request).expect("supported hint").body;
+                let encoded_detail = if target == OPEN_RESPONSES_2026_04_24 {
+                    &body["input"][0]["content"][0]["detail"]
+                } else {
+                    &body["messages"][0]["content"][0]["image_url"]["detail"]
+                };
+                assert_eq!(encoded_detail, detail);
+            }
+        }
+    }
+}
+
 #[test]
 fn google_structured_output_is_representable_for_open_responses_requests() {
     let pair = ProtocolTransform::global()

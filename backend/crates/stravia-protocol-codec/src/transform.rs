@@ -949,20 +949,6 @@ fn request_loss_paths(
             if !request_block_representable(pair.egress.protocol, block) {
                 lost.push(format!("messages[{message_index}].content[{block_index}]"));
             }
-            if matches!(
-                block,
-                stravia_runtime_contract::protocol::ir::ContentBlock::Image {
-                    detail: Some(_),
-                    ..
-                }
-            ) && matches!(
-                pair.egress.protocol,
-                Protocol::AnthropicMessages | Protocol::GoogleGemini
-            ) {
-                lost.push(format!(
-                    "messages[{message_index}].content[{block_index}].detail"
-                ));
-            }
         }
     }
     if matches!(
