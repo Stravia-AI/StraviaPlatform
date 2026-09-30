@@ -383,17 +383,14 @@ impl GenerationChainStore {
                 .await?;
             // 便宜的标量比较先短路：fingerprint 相等只是索引命中，units 与
             // controls 相同才值得对两侧前缀做完整 canonical 投影比较。
-            let history_matches = materialized
-                .client_history
-                .as_ref()
-                .is_some_and(|history| {
+            let history_matches =
+                materialized.client_history.as_ref().is_some_and(|history| {
                     history.controls_fingerprint == state.controls_fingerprint
-                })
-                && materialized.client_item_units == matched_units
-                && items_equal(
-                    &materialized.client_items,
-                    &client_request.items[..matched_items],
-                );
+                }) && materialized.client_item_units == matched_units
+                    && items_equal(
+                        &materialized.client_items,
+                        &client_request.items[..matched_items],
+                    );
             if !history_matches {
                 continue;
             }

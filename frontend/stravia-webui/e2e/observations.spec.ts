@@ -3223,7 +3223,8 @@ test.describe('Interaction Observation canvas', () => {
 
     await page.getByRole('switch', { name: 'Debug' }).click()
     await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Enable Debug' }).click()
-    const clearButton = page.getByRole('button', { name: 'Clear debug data' })
+    // 关闭中的 AlertDialog 退出动画期间按钮仍驻留 DOM，按区块收窄以避开同名对话框按钮。
+    const clearButton = page.locator('#diagnostics').getByRole('button', { name: 'Clear debug data' })
     await expect(clearButton).toBeVisible()
 
     await clearButton.click()

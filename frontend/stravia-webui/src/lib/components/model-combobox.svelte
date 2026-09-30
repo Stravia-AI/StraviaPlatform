@@ -95,7 +95,8 @@ function clearSelection(): void {
             <Command.Item value={model.id} keywords={[model.name]} onSelect={() => selectModel(model.id)}>
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span class="overflow-x-auto whitespace-nowrap">{model.name}</span>
-                <span class="overflow-x-auto font-technical text-xs whitespace-nowrap text-muted-foreground">{model.id}</span>
+                <span class="overflow-x-auto font-technical text-xs whitespace-nowrap text-muted-foreground"
+                  >{model.id}</span>
               </span>
             </Command.Item>
           {/each}

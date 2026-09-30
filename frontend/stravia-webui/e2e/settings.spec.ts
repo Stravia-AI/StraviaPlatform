@@ -1099,6 +1099,8 @@ for (const locale of ['en-US', 'zh-CN']) {
             },
           },
         })
+      } else if (url.pathname.endsWith('/custom-rules')) {
+        await route.fulfill({ json: { data: [] } })
       } else {
         expect(route.request().method()).toBe('POST')
         expect(url.search).toBe('')
@@ -1259,6 +1261,8 @@ test('credential protection distinguishes failed saves, unavailable observations
       await route.fulfill({ status: 503, json: { error: 'Fixture observation unavailable' } })
     } else if (path.endsWith('/rules')) {
       await route.fulfill({ json: { data: credentialCatalog } })
+    } else if (path.endsWith('/custom-rules')) {
+      await route.fulfill({ json: { data: [] } })
     } else {
       await route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: true } } })
     }
@@ -1322,12 +1326,15 @@ test('credential protection separates setting load failure from empty rules and 
     )
   })
   await page.route('**/api/v1/reversible-redaction/**', async (route) => {
-    const rules = new URL(route.request().url()).pathname.endsWith('/rules')
+    const pathname = new URL(route.request().url()).pathname
+    const rules = pathname.endsWith('/rules') && !pathname.endsWith('/custom-rules')
     await route.fulfill({
       json: {
         data: rules
           ? { rules: [], prefilter: '', filter: '' }
-          : { items: [], next_cursor: null, observation_gap: false },
+          : pathname.endsWith('/custom-rules')
+            ? []
+            : { items: [], next_cursor: null, observation_gap: false },
       },
     })
   })

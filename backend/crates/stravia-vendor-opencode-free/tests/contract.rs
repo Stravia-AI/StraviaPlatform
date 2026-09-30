@@ -58,10 +58,7 @@ impl HostHttpResponse for MockResponse {
     }
 
     async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
-        Ok(vec![(
-            "content-type".into(),
-            "text/event-stream".into(),
-        )])
+        Ok(vec![("content-type".into(), "text/event-stream".into())])
     }
 
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -97,7 +94,10 @@ impl HostServices for MockServices {
         _protocols: Vec<String>,
         _continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
-        Err(HostFailure::new(ErrorKind::Trapped, "no websocket upstream"))
+        Err(HostFailure::new(
+            ErrorKind::Trapped,
+            "no websocket upstream",
+        ))
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -121,8 +121,7 @@ impl HostServices for MockServices {
 
 const SSE_OK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"big-pickle\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"big-pickle\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
 
-const MODELS_JSON: &str =
-    r#"{"object":"list","data":[{"id":"big-pickle"},{"id":"gpt-5.5"},{"id":"mimo-v2.5-free"},{"id":"claude-opus-5"}]}"#;
+const MODELS_JSON: &str = r#"{"object":"list","data":[{"id":"big-pickle"},{"id":"gpt-5.5"},{"id":"mimo-v2.5-free"},{"id":"claude-opus-5"}]}"#;
 
 fn provider(model: &str) -> ProviderSnapshot {
     ProviderSnapshot {
@@ -250,7 +249,10 @@ async fn free_model_request_carries_full_contract() {
     };
 
     // 指纹头
-    assert_eq!(sent_header(&recorded, "authorization").as_deref(), Some("Bearer public"));
+    assert_eq!(
+        sent_header(&recorded, "authorization").as_deref(),
+        Some("Bearer public")
+    );
     assert!(
         sent_header(&recorded, "user-agent")
             .unwrap()
@@ -266,7 +268,10 @@ async fn free_model_request_carries_full_contract() {
             .unwrap()
             .starts_with("msg_")
     );
-    assert_eq!(sent_header(&recorded, "x-opencode-client").as_deref(), Some("cli"));
+    assert_eq!(
+        sent_header(&recorded, "x-opencode-client").as_deref(),
+        Some("cli")
+    );
 
     // Body 契约
     let body = sent_body(&recorded);
@@ -292,9 +297,15 @@ async fn client_named_tool_overrides_placeholder() {
     let mut request = request("mimo-v2.5-free");
     request.tools = Some(vec![client_tool("bash")]);
     let recorded = Arc::new(Recorded::default());
-    infer_once(&runtime, &plugin, provider("mimo-v2.5-free"), request, &recorded)
-        .await
-        .expect("inference succeeds");
+    infer_once(
+        &runtime,
+        &plugin,
+        provider("mimo-v2.5-free"),
+        request,
+        &recorded,
+    )
+    .await
+    .expect("inference succeeds");
 
     let body = sent_body(&recorded);
     let names = sent_tool_names(&body);
@@ -384,15 +395,17 @@ async fn discovery_lists_only_free_models() {
 
 struct RealServices;
 
+type RealResponseData = (u16, Vec<(String, String)>, Vec<u8>);
+
 struct RealResponse {
     builder: Mutex<Option<reqwest::RequestBuilder>>,
-    cell: tokio::sync::OnceCell<(u16, Vec<(String, String)>, Vec<u8>)>,
+    cell: tokio::sync::OnceCell<RealResponseData>,
     body_taken: Mutex<bool>,
 }
 
 impl RealResponse {
     /// 惰性发起请求并共享结果给 status/headers/read_body 三个读取入口。
-    async fn fetch(&self) -> Result<&(u16, Vec<(String, String)>, Vec<u8>), HostFailure> {
+    async fn fetch(&self) -> Result<&RealResponseData, HostFailure> {
         self.cell
             .get_or_try_init(|| async {
                 let builder = self
@@ -407,11 +420,7 @@ impl RealResponse {
                     .iter()
                     .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
                     .collect();
-                let body = response
-                    .bytes()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .to_vec();
+                let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
                 Ok((status, headers, body))
             })
             .await
@@ -466,7 +475,10 @@ impl HostServices for RealServices {
         _protocols: Vec<String>,
         _continuation_id: Option<String>,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
-        Err(HostFailure::new(ErrorKind::Trapped, "no websocket upstream"))
+        Err(HostFailure::new(
+            ErrorKind::Trapped,
+            "no websocket upstream",
+        ))
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -516,7 +528,11 @@ async fn live_free_model_infer_against_real_zen() {
     let OperationOutput::Infer(response) = output else {
         panic!("expected Infer output");
     };
-    assert!(response.error.is_none(), "upstream error: {:?}", response.error);
+    assert!(
+        response.error.is_none(),
+        "upstream error: {:?}",
+        response.error
+    );
     let text: String = response
         .items
         .iter()
@@ -525,5 +541,9 @@ async fn live_free_model_infer_against_real_zen() {
             _ => None,
         })
         .collect();
-    assert!(!text.is_empty(), "expected assistant text, got {:?}", response.items);
+    assert!(
+        !text.is_empty(),
+        "expected assistant text, got {:?}",
+        response.items
+    );
 }

@@ -152,7 +152,7 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('0 USD')).toBeVisible()
   // 币种后缀 key（credits_balance_cny）与普通 credits_balance 共用同一标签展示
   await expect(matrix.getByText('9.99 CNY')).toBeVisible()
-  await expect(matrix.getByText('Credit balance', { exact: true })).toHaveCount(2)
+  await expect(matrix.getByText('Account balance', { exact: true })).toHaveCount(2)
   await expect(matrix.getByText('Showing the last successful result because this refresh failed.')).toBeVisible()
   await expect(matrix.getByText('Reconnect this model service or update its credential.')).toBeVisible()
 
@@ -263,8 +263,8 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
     '55.625',
   )
   // 两条余额行（USD 耗尽 + CNY 充值）均无利用率，进度条都应为不确定态
-  await expect(matrix.getByRole('progressbar', { name: 'Credit balance Utilization' })).toHaveCount(2)
-  for (const bar of await matrix.getByRole('progressbar', { name: 'Credit balance Utilization' }).all()) {
+  await expect(matrix.getByRole('progressbar', { name: 'Account balance Utilization' })).toHaveCount(2)
+  for (const bar of await matrix.getByRole('progressbar', { name: 'Account balance Utilization' }).all()) {
     await expect(bar).not.toHaveAttribute('aria-valuenow')
   }
 
@@ -273,7 +273,7 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
     page.getByRole('progressbar', { name: 'Weekly window Utilization', includeHidden: false }),
   ).toHaveAttribute('aria-valuenow', '55.625')
   for (const bar of await page
-    .getByRole('progressbar', { name: 'Credit balance Utilization', includeHidden: false })
+    .getByRole('progressbar', { name: 'Account balance Utilization', includeHidden: false })
     .all()) {
     await expect(bar).not.toHaveAttribute('aria-valuenow')
   }

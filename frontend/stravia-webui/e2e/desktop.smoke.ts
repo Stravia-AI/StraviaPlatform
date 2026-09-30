@@ -169,7 +169,7 @@ describe('Stravia desktop smoke', () => {
     await preview.$('button=Apply plugin change').click()
     await preview.waitForExist({ reverse: true })
 
-    const card = await $('//*[@data-slot="card"][.//*[normalize-space()="fixture.lifecycle"]]')
+    const card = await $('//*[contains(@class,"route-plugin-list")]/li[.//*[normalize-space()="fixture.lifecycle"]]')
     await expect(card).toHaveText(expect.stringContaining('1.0.0'))
     await expect(card).toHaveText(expect.stringContaining('Local'))
     const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number

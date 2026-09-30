@@ -28,16 +28,18 @@ fn unwrap_gateway_envelope(resp: Value) -> Result<Value> {
             .pointer("/error/message")
             .or_else(|| resp.get("error"))
             .or_else(|| resp.get("message"))
-            .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()));
+            .map(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string())
+            });
         anyhow::bail!(
             "upstream gateway reported failure: {}",
             detail.unwrap_or_else(|| "success=false".to_string())
         );
     }
     match resp.get("data") {
-        Some(data) if data.get("choices").and_then(Value::as_array).is_some() => {
-            Ok(data.clone())
-        }
+        Some(data) if data.get("choices").and_then(Value::as_array).is_some() => Ok(data.clone()),
         _ => Ok(resp),
     }
 }

@@ -171,7 +171,15 @@ impl Timeline {
 /// Perfetto/Chrome Trace JSON：已结束的是 X，仍活动或因 Debug 关闭中断的是只有 B 的不完整 span。
 /// 每个 span 使用自己的合成 track，tid 不是 CPU 线程；异步并发不会破坏同一 track 的嵌套约束。
 pub fn timeline_snapshot() -> Value {
-    let (records, live, active_capacity, completed_capacity, dropped_active, dropped_completed, incomplete_total) = {
+    let (
+        records,
+        live,
+        active_capacity,
+        completed_capacity,
+        dropped_active,
+        dropped_completed,
+        incomplete_total,
+    ) = {
         let state = TIMELINE.lock();
         (
             state.completed.iter().cloned().collect::<Vec<_>>(),
