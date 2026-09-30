@@ -14,7 +14,7 @@ import type { ModelSpecification } from '$lib/types'
 import * as Tooltip from '$lib/components/ui/tooltip'
 import { Badge } from '$lib/components/ui/badge'
 
-type Density = 'compact' | 'detail'
+type Density = 'compact' | 'target' | 'detail'
 
 interface Props {
   specification: ModelSpecification
@@ -118,40 +118,48 @@ function featureStatus(value: boolean | null | undefined): string {
   </div>
 {/snippet}
 
-{#if density === 'compact'}
+{#if density !== 'detail'}
   <div
     role="group"
     aria-label={m.model_specification_title()}
     class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-    <Tooltip.Root>
-      <Tooltip.Trigger
-        type="button"
-        class="inline-flex min-h-7 cursor-default items-center gap-1.5 rounded-md bg-muted px-2 font-technical text-xs tabular-nums text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
-        aria-label={`${m.model_specification_token_limits()}: ${limitSummary()}`}>
+    {#if density === 'compact'}
+      <Tooltip.Root>
+        <Tooltip.Trigger
+          type="button"
+          class="inline-flex min-h-7 cursor-default items-center gap-1.5 rounded-md bg-muted px-2 font-technical text-xs tabular-nums text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          aria-label={`${m.model_specification_token_limits()}: ${limitSummary()}`}>
+          <GaugeIcon class="size-3.5" aria-hidden="true" />
+          <span
+            >{m.model_specification_context_short()}
+            {limit?.context == null
+              ? m.model_specification_not_registered()
+              : formatSpecificationTokens(limit.context)}</span>
+          <span aria-hidden="true">·</span>
+          <span
+            >{m.model_specification_maximum_output_short()}
+            {limit?.output == null
+              ? m.model_specification_not_registered()
+              : formatSpecificationTokens(limit.output)}</span>
+        </Tooltip.Trigger>
+        <Tooltip.Content role="tooltip" side="top" sideOffset={8} class="max-w-80">
+          <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left">
+            <dt>{m.model_specification_context()}</dt>
+            <dd class="font-technical tabular-nums">{fullTokens(limit?.context)}</dd>
+            <dt>{m.model_specification_maximum_input()}</dt>
+            <dd class="font-technical tabular-nums">{fullTokens(limit?.input)}</dd>
+            <dt>{m.model_specification_maximum_output()}</dt>
+            <dd class="font-technical tabular-nums">{fullTokens(limit?.output)}</dd>
+          </dl>
+        </Tooltip.Content>
+      </Tooltip.Root>
+    {:else}
+      <span class="inline-flex min-h-7 items-center gap-1.5 font-technical text-xs tabular-nums text-muted-foreground">
         <GaugeIcon class="size-3.5" aria-hidden="true" />
-        <span
-          >{m.model_specification_context_short()}
-          {limit?.context == null
-            ? m.model_specification_not_registered()
-            : formatSpecificationTokens(limit.context)}</span>
-        <span aria-hidden="true">·</span>
-        <span
-          >{m.model_specification_maximum_output_short()}
-          {limit?.output == null
-            ? m.model_specification_not_registered()
-            : formatSpecificationTokens(limit.output)}</span>
-      </Tooltip.Trigger>
-      <Tooltip.Content role="tooltip" side="top" sideOffset={8} class="max-w-80">
-        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left">
-          <dt>{m.model_specification_context()}</dt>
-          <dd class="font-technical tabular-nums">{fullTokens(limit?.context)}</dd>
-          <dt>{m.model_specification_maximum_input()}</dt>
-          <dd class="font-technical tabular-nums">{fullTokens(limit?.input)}</dd>
-          <dt>{m.model_specification_maximum_output()}</dt>
-          <dd class="font-technical tabular-nums">{fullTokens(limit?.output)}</dd>
-        </dl>
-      </Tooltip.Content>
-    </Tooltip.Root>
+        {m.model_specification_context_short()}
+        {limit?.context == null ? m.model_specification_not_registered() : formatSpecificationTokens(limit.context)}
+      </span>
+    {/if}
 
     <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
       {@render compactModalities('input', inputModalities)}
