@@ -231,8 +231,8 @@ pub(super) fn validate_request_fields(req: &AiRequest) -> anyhow::Result<()> {
         bail!("Devin Connect does not expose an embeddings endpoint");
     }
     // A zero penalty (±0.0) is a no-op upstreams often send unconditionally
-    // — encode it as absent. A nonzero value would change sampling, which
-    // the wire cannot express, so it stays a hard rejection.
+    // — encode it as absent. The vendor removes unsupported optional controls
+    // before validation; the raw encoder still rejects unnormalized input.
     if req.generation.seed.is_some()
         || req
             .generation
@@ -2503,8 +2503,7 @@ mod tests {
         req.generation.seed = Some(1);
         assert!(encode_test_chat_request(&req, "t", &shape(&req), None).is_err());
 
-        // A nonzero penalty changes sampling and must not be dropped
-        // silently — the wire cannot express it.
+        // Raw codec callers must normalize unsupported optional controls first.
         let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
         req.generation.presence_penalty = Some(0.5);
         assert!(encode_test_chat_request(&req, "t", &shape(&req), None).is_err());

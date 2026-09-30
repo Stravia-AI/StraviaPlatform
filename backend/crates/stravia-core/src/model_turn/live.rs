@@ -1539,10 +1539,15 @@ struct VendorPublishedResult {
 }
 
 const VENDOR_OUTPUT_BUFFER_SIZE: usize = 32;
-const PRECOMMIT_BUFFER_BUDGET: usize = 1024 * 1024;
+const PRECOMMIT_BUFFER_BUDGET: usize = 16 * 1024 * 1024;
 // 包含事件槽及 Vec 初始/倍增预留空间；预算是保守占用估算，不是进程 RSS。
 const PRECOMMIT_EVENT_OVERHEAD: usize =
     4 * std::mem::size_of::<(AiStreamDelta, VendorPublicationFence)>();
+
+// 每个 JSON 对象条目的固定占用：键、值槽以及稀疏占用的 map 节点/索引，按 (String, Value)
+// 的 4 倍保守估算。过大的值会让 schema 密集的 `tools` 回显（大量小键）在真实体积远低于
+// 预算时被拒绝。
+const JSON_OBJECT_ENTRY_OVERHEAD: usize = 4 * std::mem::size_of::<(String, serde_json::Value)>();
 
 #[derive(Default)]
 struct PrecommitBuffer {
@@ -1564,7 +1569,7 @@ impl PrecommitBuffer {
             if bytes > PRECOMMIT_BUFFER_BUDGET.saturating_sub(self.bytes) {
                 return Err(AttemptFailure::terminal(
                     "vendor_event_limit_exceeded",
-                    "Vendor pre-output event buffer exceeded its 1 MiB budget",
+                    "Vendor pre-output event buffer exceeded its 16 MiB budget",
                 ));
             }
             self.bytes += bytes;
@@ -1665,7 +1670,7 @@ fn json_payload_bytes(value: &serde_json::Value) -> usize {
             ),
         serde_json::Value::Object(values) => values.iter().fold(0usize, |bytes, (key, value)| {
             bytes
-                .saturating_add(1024) // includes sparsely occupied map nodes/index
+                .saturating_add(JSON_OBJECT_ENTRY_OVERHEAD)
                 .saturating_add(key.capacity())
                 .saturating_add(json_payload_bytes(value))
         }),
@@ -3635,6 +3640,48 @@ mod tests {
                 .code,
             "vendor_event_limit_exceeded"
         );
+    }
+
+    #[test]
+    fn schema_dense_response_metadata_stays_within_the_precommit_budget() {
+        // Codex echoes the full `tools` schema in response.created. A schema is
+        // key-dense but small; realistic tool collections must fit even when
+        // their conservative storage estimate exceeds the former 1 MiB budget.
+        let properties: serde_json::Map<String, serde_json::Value> = (0..2000)
+            .map(|index| {
+                (
+                    format!("property_{index}"),
+                    serde_json::json!({"type": "string", "description": "x".repeat(40)}),
+                )
+            })
+            .collect();
+        let metadata = serde_json::json!({
+            "tools": [{"type": "function", "name": "tool", "parameters": {
+                "type": "object",
+                "properties": properties,
+            }}]
+        });
+        let mut buffer = PrecommitBuffer::default();
+        assert!(
+            !buffer
+                .push(
+                    AiStreamDelta::ResponseMetadata {
+                        metadata: metadata.clone(),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            buffer
+                .push(AiStreamDelta::TextDelta("answer".into()), publication())
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        let events = buffer.take();
+        assert!(
+            matches!(&events[0].0, AiStreamDelta::ResponseMetadata { metadata: actual } if actual == &metadata)
+        );
+        assert!(matches!(&events[1].0, AiStreamDelta::TextDelta(text) if text == "answer"));
     }
 
     #[test]
