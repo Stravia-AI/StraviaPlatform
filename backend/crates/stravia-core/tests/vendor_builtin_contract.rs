@@ -2515,7 +2515,7 @@ fn devin_chat_fixture() -> Vec<u8> {
 #[tokio::test]
 async fn manually_installed_devin_discovers_families_assigns_a_router_and_streams_real_protobuf()
 -> anyhow::Result<()> {
-    let (base_url, server) = local_upstream(3, |request| {
+    let (base_url, server) = local_upstream(4, |request| {
         if request.path.ends_with("/GetCliModelConfigs") {
             MockResponse::bytes("application/proto", devin_catalog_fixture())
         } else if request.path.ends_with("/AssignModel") {
@@ -2655,19 +2655,76 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
         "model": route.model_id,
         "stream": false,
         "messages": [{"role": "user", "content": "hello"}],
-        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+        "tool_choice": "required",
+        "parallel_tool_calls": false,
+        "seed": 7,
+        "presence_penalty": 0.5,
+        "frequency_penalty": 0.5,
+        "stop": ["END"],
+        "response_format": {"type": "json_object"},
+        "n": 2,
+        "logprobs": true,
+        "top_logprobs": 2,
+        "logit_bias": {"1": 1},
+        "prediction": {"type": "content", "content": "draft"},
+        "prompt_cache_retention": "24h",
+        "verbosity": "low"
     });
-    let mut constrained = request.clone();
-    constrained["tool_choice"] = json!("required");
-    let (status, response) = chat(gateway.clone(), &key.token, constrained).await?;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "vendor_request_invalid");
-    assert_native_compaction_rejected(&gateway, &key.token, &route.model_id).await?;
-    let (status, response) = chat(gateway, &key.token, request).await?;
+    let response = stravia_core::proxy::server::create_router(gateway.clone())
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("authorization", format!("Bearer {}", key.token))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "model": route.model_id,
+                    "stream": false,
+                    "input": [
+                        {"role": "user", "content": "hello"},
+                        {"type": "compaction_trigger"}
+                    ]
+                }))?))?,
+        )
+        .await?;
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024 * 1024).await?)?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "compaction_unsupported");
+    let (status, response) = chat(gateway.clone(), &key.token, request).await?;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["choices"][0]["message"]["content"], "devin answer");
     assert_eq!(response["usage"]["prompt_tokens"], 13);
     assert_eq!(response["usage"]["completion_tokens"], 5);
+
+    let response = stravia_core::proxy::server::create_router(gateway)
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("authorization", format!("Bearer {}", key.token))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "model": route.model_id,
+                    "input": "hello",
+                    "stream": false,
+                    "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+                    "tool_choice": {
+                        "type": "allowed_tools",
+                        "mode": "required",
+                        "tools": [{"type": "function", "name": "lookup"}]
+                    },
+                    "parallel_tool_calls": true,
+                    "max_tool_calls": 1,
+                    "truncation": "auto",
+                    "context_management": [{"type": "compaction", "compact_threshold": 2000}],
+                    "text": {"format": {"type": "json_schema", "name": "answer", "schema": {"type": "object"}}}
+                }))?))?,
+        )
+        .await?;
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024 * 1024).await?)?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["output"][0]["content"][0]["text"], "devin answer");
 
     let requests = server.await??;
     let catalog = requests

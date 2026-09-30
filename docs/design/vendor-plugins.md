@@ -279,7 +279,14 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - 供应商网络客户端不另设固定的 HTTP 总时长上限，默认连接与显式代理遵循同一操作 deadline。推理入口的共享 deadline 默认在 300 秒无插件与宿主边界活动后到期，有活动则续期，因此持续输出可以超过 300 秒；显式固定 deadline、首 token 超时和取消仍按各自契约生效。
 - 各类操作复用受控网络能力，但权限、凭据范围及资源生命周期绑定对应操作，不能借模型发现或额度查询获得其他连接的访问权。
 - 模型请求重试、Target failover 与请求重放决策继续归宿主，插件不得自行重放生成请求；供应商辅助调用编排不意味着拥有平台调度策略。
-- 首个有效输出前的插件事件按原顺序暂存，每次 Target attempt 使用 1 MiB 的保守占用估算预算，不以事件条数判定异常。预算包含事件槽与预留空间、字符串及数组容量、嵌套 JSON 的动态载荷与对象节点估算；它不是整个请求或进程的精确内存上限。首个有效输出和正常终态触发提交，不因此前缓存达到预算而被拒绝；超预算仍以 `vendor_event_limit_exceeded` 明确终止，不丢弃事件或新增重试。事件的 publication fence、上游错误、deadline、取消与背压语义保持不变。
+- 首个有效输出前的插件事件按原顺序暂存，每次 Target attempt 使用 16 MiB 的保守占用估算预算，不以事件条数判定异常。预算包含事件槽与预留空间、字符串及数组容量、嵌套 JSON 的动态载荷与对象节点估算；它不是整个请求或进程的精确内存上限。首个有效输出和正常终态触发提交，不因此前缓存达到预算而被拒绝；超预算仍以 `vendor_event_limit_exceeded` 明确终止，不丢弃事件或新增重试。事件的 publication fence、上游错误、deadline、取消与背压语义保持不变。
+- Devin 推理出站采用兼容优先的可选控制降级策略，在 representability 校验和辅助网络调用之前静默移除其无法表达的控制字段：
+  - Canonical：`tool_choice`、`parallel_tool_calls`、`disable_parallel_tool_calls`、`seed`、`stop`、presence/frequency penalties、`response_format`，以及非 Effort 类型的 Target thinking control。支持的 `temperature`、`top_p`、`max_tokens` 和 Effort selector 保留。
+  - OpenAI Chat：候选数 `n`、`logit_bias`、logprobs、`prediction`、`prompt_cache_retention`、`verbosity`。
+  - Responses：扩展 `tool_choice`、`background`、`max_tool_calls`、`top_logprobs`、`truncation`、`text` 格式控制及 `context_management`。
+  - Anthropic：`top_k`、`output_config`、`service_tier`；Google：`top_k`、候选数、logprobs、响应 MIME/schema、`tool_config`、`thinking_config`。
+  - 降级后使用 Devin 原生行为，不承诺强制/禁止工具调用、串行调用、停止序列、确定性、JSON/schema 输出、多候选或后台执行等原请求约束；不以提示词伪装成这些约束已被支持。这是 [ADR-0006](../adr/0006-own-protocol-conversion-behind-canonical-stages.md) 的供应商可选控制例外，不放宽共享 codec 校验。
+  - 此策略不删除消息、媒体、工具定义或工具结果，不忽略安全设置、数据位置约束、引用型缓存输入或原生压缩状态；这些内容无法表示时仍明确拒绝。既有 Responses hosted/namespace passthrough tools 不会因此转换为 Devin 工具。策略只作用于已到达插件的合法请求，不能绕过 HTTP 入口校验；例如 `background=true` 仍在平台入口被拒绝。其他供应商的出站行为不变。
 - Devin 仅在上游模型标识首次出现或变化时生成对应 metadata 事件；重复标识不跳过同帧用量或其他内容。宿主不依赖这一去重来接收长 metadata 前导流，也不统一合并不同协议的 metadata、用量、思考签名或其他增量。
 - WebSocket 失败通过强类型传输事实跨越 WIT 边界，不直接授权重试。只有未提交结果且既有 Route 策略允许同 Target 重试时，宿主才将下一次尝试设为 HTTP-only，并去除仅当前 WebSocket 可用的续接状态，以完整历史重放；下一次客户端请求恢复自动传输选择。
 - `ws-request.continuation-id` 只用于依赖连接本地状态的续接。宿主在池锁内匹配精确身份和 response tip、独占取出 socket，再检查其可用性；找不到时返回 `continuation-unavailable`，不新建握手、不发送增量请求。Executor 直接使用已保留的完整 Effective Model Request，不消耗上游恢复预算或增加 Target 失败计数。
