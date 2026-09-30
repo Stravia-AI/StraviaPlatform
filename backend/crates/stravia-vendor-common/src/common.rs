@@ -804,12 +804,43 @@ pub fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) ->
         };
     }
 
-    model_error_with_facts(
-        AiError::kind_from_status(status, Some(&value)),
-        Some(status),
-        retry_after(headers),
-        message,
-    )
+    let kind = if status == 429 && anthropic_subscription_exhausted(headers) {
+        AiErrorKind::QuotaExceeded
+    } else {
+        AiError::kind_from_status(status, Some(&value))
+    };
+    model_error_with_facts(kind, Some(status), retry_after(headers), message)
+}
+
+/// Unified subscription headers are distinct from ordinary Anthropic request/token
+/// rate limits. Require the claimed window to be exhausted and extra usage to be
+/// explicitly unavailable; a rejected header or long Retry-After alone is not quota.
+fn anthropic_subscription_exhausted(headers: &[(String, String)]) -> bool {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+    };
+    let (status_header, utilization_header) =
+        match header("anthropic-ratelimit-unified-representative-claim") {
+            Some("five_hour") => (
+                "anthropic-ratelimit-unified-5h-status",
+                "anthropic-ratelimit-unified-5h-utilization",
+            ),
+            Some("seven_day") => (
+                "anthropic-ratelimit-unified-7d-status",
+                "anthropic-ratelimit-unified-7d-utilization",
+            ),
+            _ => return false,
+        };
+    header(status_header) == Some("rejected")
+        && header(utilization_header)
+            .and_then(|value| value.parse::<f64>().ok())
+            .is_some_and(|value| value.is_finite() && value >= 1.0)
+        && header("anthropic-ratelimit-unified-overage-status") == Some("rejected")
+        && header("anthropic-ratelimit-unified-overage-disabled-reason")
+            == Some("org_level_disabled")
 }
 
 fn model_error_with_facts(
@@ -926,6 +957,112 @@ mod tests {
             Some(AiErrorKind::RateLimitError)
         );
         assert_eq!(rate_limit.kind.retry_after(), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn claude_subscription_allowance_exhaustion_is_quota() {
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"Usage limit reached"}}"#;
+        let headers = vec![
+            (
+                "anthropic-ratelimit-unified-5h-status".into(),
+                "rejected".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-5h-utilization".into(),
+                "1.0".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-representative-claim".into(),
+                "five_hour".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-reset".into(),
+                "1790768400".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-status".into(),
+                "rejected".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason".into(),
+                "org_level_disabled".into(),
+            ),
+            ("retry-after".into(), "11450".into()),
+        ];
+        let error = upstream_error(429, &headers, body);
+        assert_eq!(
+            error.kind.model_error_kind(),
+            Some(AiErrorKind::QuotaExceeded)
+        );
+        assert_eq!(error.upstream_status, Some(429));
+        assert_eq!(error.kind.retry_after(), Some(Duration::from_secs(11450)));
+        let mut weekly = headers.clone();
+        weekly[0].0 = "anthropic-ratelimit-unified-7d-status".into();
+        weekly[1].0 = "anthropic-ratelimit-unified-7d-utilization".into();
+        weekly[2].1 = "seven_day".into();
+        assert_eq!(
+            upstream_error(429, &weekly, body).kind.model_error_kind(),
+            Some(AiErrorKind::QuotaExceeded)
+        );
+        weekly[1].1 = "0.9".into();
+        assert_eq!(
+            upstream_error(429, &weekly, body).kind.model_error_kind(),
+            Some(AiErrorKind::RateLimitError)
+        );
+        let normalized = headers
+            .iter()
+            .map(|(name, value)| (name.to_ascii_uppercase(), format!(" {value} ")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            upstream_error(429, &normalized, body)
+                .kind
+                .model_error_kind(),
+            Some(AiErrorKind::QuotaExceeded)
+        );
+
+        for status in [400, 403, 503] {
+            let error = upstream_error(status, &headers, body);
+            assert_ne!(
+                error.kind.model_error_kind(),
+                Some(AiErrorKind::QuotaExceeded)
+            );
+        }
+        for omitted in [0, 1, 2, 4, 5] {
+            let mut ambiguous = headers.clone();
+            ambiguous.remove(omitted);
+            assert_eq!(
+                upstream_error(429, &ambiguous, body)
+                    .kind
+                    .model_error_kind(),
+                Some(AiErrorKind::RateLimitError)
+            );
+        }
+        for (index, value) in [
+            (0, "allowed"),
+            (1, "0.9"),
+            (1, "unknown"),
+            (1, "NaN"),
+            (1, "inf"),
+            (2, "unknown"),
+            (2, "seven_day"),
+            (4, "allowed"),
+            (5, "unknown"),
+        ] {
+            let mut transient = headers.clone();
+            transient[index].1 = value.into();
+            assert_eq!(
+                upstream_error(429, &transient, body)
+                    .kind
+                    .model_error_kind(),
+                Some(AiErrorKind::RateLimitError)
+            );
+        }
+        assert_eq!(
+            upstream_error(429, &headers[6..], body)
+                .kind
+                .model_error_kind(),
+            Some(AiErrorKind::RateLimitError)
+        );
     }
 
     #[test]
