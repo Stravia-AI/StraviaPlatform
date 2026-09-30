@@ -257,6 +257,34 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
     for (id, owner, namespace, fingerprint, item_count, completed_at, reusable) in [
         ("contract-short", "owner", "target-a", "short", 2, 20, true),
         (
+            "contract-long-new-z",
+            "owner",
+            "target-a",
+            "long",
+            4,
+            30,
+            true,
+        ),
+        (
+            "contract-cross-short",
+            "owner",
+            "target-a",
+            "short",
+            4,
+            90,
+            true,
+        ),
+        (
+            "contract-cross-long",
+            "owner",
+            "target-a",
+            "long",
+            2,
+            90,
+            true,
+        ),
+        ("contract-expired", "owner", "target-a", "long", 4, 90, true),
+        (
             "contract-long-old",
             "owner",
             "target-a",
@@ -310,7 +338,11 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
                 principal: principal(owner),
                 payload_version: 1,
                 payload: serde_json::json!({"response": id}),
-                idle_ttl: Duration::from_secs(60),
+                idle_ttl: if id == "contract-expired" {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(60)
+                },
                 reusable_prefix: reusable.then(|| ReusablePrefixMetadata {
                     namespace: namespace.into(),
                     fingerprint: fingerprint.into(),
@@ -323,7 +355,7 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
     }
     let query = ReusablePrefixQuery {
         namespace: "target-a".into(),
-        fingerprints: vec![("short".into(), 2), ("long".into(), 4)],
+        fingerprints: vec![("short".into(), 2), ("long".into(), 4), ("long".into(), 4)],
     };
     let candidates = store
         .find_reusable_prefixes(&principal("owner"), TurnNodeKind::Response, &query)
@@ -334,7 +366,12 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
             .iter()
             .map(|candidate| candidate.node_id.as_str())
             .collect::<Vec<_>>(),
-        ["contract-long-new", "contract-long-old", "contract-short"]
+        [
+            "contract-long-new-z",
+            "contract-long-new",
+            "contract-long-old",
+            "contract-short",
+        ]
     );
     assert_eq!(
         store
@@ -345,6 +382,27 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
             .map(|candidate| candidate.node_id.as_str())
             .collect::<Vec<_>>(),
         ["contract-other-owner"]
+    );
+    assert!(
+        store
+            .find_reusable_prefixes(
+                &principal("owner"),
+                TurnNodeKind::Response,
+                &ReusablePrefixQuery {
+                    namespace: "target-a".into(),
+                    fingerprints: Vec::new(),
+                },
+            )
+            .await
+            .expect("query empty prefix set")
+            .is_empty()
+    );
+    assert!(
+        store
+            .find_reusable_prefixes(&principal("owner"), TurnNodeKind::Agent, &query)
+            .await
+            .expect("query isolated node kind")
+            .is_empty()
     );
     assert!(
         store
@@ -617,4 +675,88 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         "TICKS commit={}",
         ticks.load(std::sync::atomic::Ordering::Relaxed)
     );
+}
+
+/// Long pair lists must probe the prefix index rather than evaluate every pair
+/// against every unrelated node in the same principal and namespace.
+#[tokio::test]
+async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
+    const PAIRS: u32 = 104;
+    const OPS_PER_TICK: i32 = 1_000;
+    const TICK_BUDGET: u32 = 100;
+
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let owner = principal("owner");
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000) \
+         INSERT INTO turn_chain_nodes \
+         (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, \
+          prefix_namespace, prefix_fingerprint, prefix_item_count, prefix_completed_at) \
+         SELECT 'prefix-budget-' || i, ?, NULL, ?, 1, '{}', ?, ?, \
+          'budget', 'fingerprint-' || i, i, i FROM n",
+    )
+    .bind(TurnNodeKind::Response.as_str())
+    .bind(owner.continuation_key())
+    .bind(now)
+    .bind(now + 60_000)
+    .execute(&pool)
+    .await
+    .expect("insert matching and unrelated prefix nodes");
+
+    let ticks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let handler_ticks = ticks.clone();
+    let budgeted = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let ticks = handler_ticks.clone();
+            Box::pin(async move {
+                connection
+                    .lock_handle()
+                    .await?
+                    .set_progress_handler(OPS_PER_TICK, move || {
+                        ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < TICK_BUDGET
+                    });
+                Ok(())
+            })
+        })
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("budgeted SQLite pool");
+    let candidates = SqlTurnChainStore::sqlite(budgeted)
+        .find_reusable_prefixes(
+            &owner,
+            TurnNodeKind::Response,
+            &ReusablePrefixQuery {
+                namespace: "budget".into(),
+                fingerprints: (1..=PAIRS)
+                    .map(|i| (format!("fingerprint-{i}"), i))
+                    .collect(),
+            },
+        )
+        .await
+        .expect("prefix lookup within VM-step budget");
+    assert_eq!(
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.node_id.as_str().to_owned(),
+                    candidate.item_count,
+                    candidate.completed_at,
+                )
+            })
+            .collect::<Vec<_>>(),
+        (1..=PAIRS)
+            .rev()
+            .map(|i| { (format!("prefix-budget-{i}"), i, i64::from(i)) })
+            .collect::<Vec<_>>()
+    );
+    assert!(ticks.load(std::sync::atomic::Ordering::Relaxed) <= TICK_BUDGET);
 }

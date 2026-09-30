@@ -157,16 +157,32 @@ pub(crate) fn rebuilt_prefix(
     }))
 }
 
+pub(super) fn serialized_size_bytes(value: &impl serde::Serialize) -> usize {
+    #[derive(Default)]
+    struct ByteCounter(usize);
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter::default();
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => usize::MAX,
+    }
+}
+
 pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) -> usize {
-    let items = serde_json::to_vec(&materialized.effective_items)
-        .map(|value| value.len())
-        .unwrap_or(usize::MAX);
-    let client_items = serde_json::to_vec(&materialized.client_items)
-        .map(|value| value.len())
-        .unwrap_or(usize::MAX);
-    let profile = serde_json::to_vec(&materialized.effective_request)
-        .map(|value| value.len())
-        .unwrap_or(usize::MAX);
+    let items = serialized_size_bytes(&materialized.effective_items);
+    let client_items = serialized_size_bytes(&materialized.client_items);
+    let profile = serialized_size_bytes(&materialized.effective_request);
     items
         .saturating_add(client_items)
         .saturating_add(profile)

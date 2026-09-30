@@ -440,15 +440,15 @@ impl TurnChainStore for SqlTurnChainStore {
                     .push_bind(&query.namespace)
                     .push(" AND expires_at > ")
                     .push_bind(now)
-                    .push(" AND (");
+                    .push(" AND (prefix_fingerprint, prefix_item_count) IN (VALUES ");
                 for (index, (fingerprint, item_count)) in query.fingerprints.iter().enumerate() {
                     if index > 0 {
-                        builder.push(" OR ");
+                        builder.push(", ");
                     }
                     builder
-                        .push("(prefix_fingerprint = ")
+                        .push("(")
                         .push_bind(fingerprint)
-                        .push(" AND prefix_item_count = ")
+                        .push(", ")
                         .push_bind(i64::from(*item_count))
                         .push(")");
                 }
@@ -469,15 +469,15 @@ impl TurnChainStore for SqlTurnChainStore {
                     .push_bind(&query.namespace)
                     .push(" AND expires_at > ")
                     .push_bind(now)
-                    .push(" AND (");
+                    .push(" AND (prefix_fingerprint, prefix_item_count) IN (");
                 for (index, (fingerprint, item_count)) in query.fingerprints.iter().enumerate() {
                     if index > 0 {
-                        builder.push(" OR ");
+                        builder.push(", ");
                     }
                     builder
-                        .push("(prefix_fingerprint = ")
+                        .push("(")
                         .push_bind(fingerprint)
-                        .push(" AND prefix_item_count = ")
+                        .push(", ")
                         .push_bind(i64::from(*item_count))
                         .push(")");
                 }

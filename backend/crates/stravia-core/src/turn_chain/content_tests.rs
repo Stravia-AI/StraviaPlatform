@@ -203,6 +203,49 @@ async fn contract(store: SqlTurnChainStore) {
         0
     );
 
+    // The first node batch has 401 unique contents (one shared and 400
+    // distinct), so content reads must batch independently of node reads.
+    let shared = "shared instructions ".repeat(20);
+    let mut expected = Vec::new();
+    let mut head = None;
+    for index in 0..402 {
+        let id = TurnNodeId::response();
+        let value = if index == 401 {
+            json!({"legacy": "no references"})
+        } else {
+            json!({
+                "effective_system": shared,
+                "effective_request": {"instructions": format!("{index}: {}", "unique ".repeat(50))}
+            })
+        };
+        store
+            .commit(TurnCommit {
+                id: id.clone(),
+                kind: TurnNodeKind::Response,
+                parent_id: head,
+                principal: owner.clone(),
+                payload_version: 6,
+                payload: value.clone(),
+                idle_ttl: Duration::from_secs(60),
+                reusable_prefix: None,
+            })
+            .await
+            .unwrap();
+        head = Some(id);
+        expected.push(value);
+    }
+    let restored = store
+        .materialize(&owner, TurnNodeKind::Response, head.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .into_iter()
+            .map(|node| node.payload)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
     store
         .commit(TurnCommit {
             id: root.clone(),

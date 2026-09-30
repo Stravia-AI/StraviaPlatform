@@ -7,7 +7,6 @@ pub(super) struct GenerationChainStore {
     materializations: Arc<Mutex<GenerationMaterializationCache>>,
 }
 
-#[derive(Clone)]
 pub(super) struct MaterializedGeneration {
     pub(super) root_id: String,
     pub(super) compaction_record_ids: Vec<String>,
@@ -34,7 +33,7 @@ struct GenerationMaterializationCacheKey {
 }
 
 struct CachedMaterialization {
-    materialized: MaterializedGeneration,
+    materialized: Arc<MaterializedGeneration>,
     /// 引用目录按 ingress 惰性缓存：命中时可跳过整条 `load_generation_chain`
     /// SQL 与节点 decode。Err 同样确定性，一并缓存。
     catalogs: HashMap<Option<ProtocolId>, Result<Vec<AiItem>, String>>,
@@ -68,9 +67,7 @@ fn materialization_cache_evict(cache: &mut GenerationMaterializationCache) {
 
 fn catalog_size_bytes(catalog: &Result<Vec<AiItem>, String>) -> usize {
     match catalog {
-        Ok(items) => serde_json::to_vec(items)
-            .map(|value| value.len())
-            .unwrap_or(usize::MAX),
+        Ok(items) => super::materialize::serialized_size_bytes(items),
         Err(error) => error.len(),
     }
 }
@@ -302,7 +299,12 @@ impl GenerationChainStore {
         if limit == 0 {
             return Ok(None);
         }
-        let state = ClientHistoryState::from_request(&client_request, &client_request.items);
+        let controls_fingerprint = stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+            &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                &client_request,
+            ),
+        );
+        let session_fingerprint = generation_session_fingerprint(&client_request);
         let mut context_fingerprints = Vec::with_capacity(limit);
         let mut prefix_units = Vec::with_capacity(limit);
         let mut context =
@@ -328,7 +330,7 @@ impl GenerationChainStore {
         }
 
         let mut candidates = Vec::new();
-        if let Some(session_fingerprint) = state.session_fingerprint.as_ref() {
+        if let Some(session_fingerprint) = session_fingerprint.as_ref() {
             let fingerprints = context_fingerprints
                 .iter()
                 .map(|(_, item_count)| (session_fingerprint.clone(), *item_count))
@@ -339,7 +341,7 @@ impl GenerationChainStore {
                         principal,
                         TurnNodeKind::Response,
                         &ReusablePrefixQuery {
-                            namespace: state.reusable_namespace(),
+                            namespace: format!("{GENERATION_PREFIX_NAMESPACE}session"),
                             fingerprints,
                         },
                     )
@@ -356,7 +358,7 @@ impl GenerationChainStore {
                     &ReusablePrefixQuery {
                         namespace: format!(
                             "{}{}",
-                            GENERATION_PREFIX_NAMESPACE, state.controls_fingerprint
+                            GENERATION_PREFIX_NAMESPACE, controls_fingerprint
                         ),
                         fingerprints: context_fingerprints,
                     },
@@ -383,14 +385,15 @@ impl GenerationChainStore {
                 .await?;
             // 便宜的标量比较先短路：fingerprint 相等只是索引命中，units 与
             // controls 相同才值得对两侧前缀做完整 canonical 投影比较。
-            let history_matches =
-                materialized.client_history.as_ref().is_some_and(|history| {
-                    history.controls_fingerprint == state.controls_fingerprint
-                }) && materialized.client_item_units == matched_units
-                    && items_equal(
-                        &materialized.client_items,
-                        &client_request.items[..matched_items],
-                    );
+            let history_matches = materialized
+                .client_history
+                .as_ref()
+                .is_some_and(|history| history.controls_fingerprint == controls_fingerprint)
+                && materialized.client_item_units == matched_units
+                && items_equal(
+                    &materialized.client_items,
+                    &client_request.items[..matched_items],
+                );
             if !history_matches {
                 continue;
             }
@@ -564,18 +567,18 @@ impl GenerationChainStore {
             request.meta.vendor.ingress.remove("previous_response_id");
         }
         Ok(ActiveGenerationChain {
-            root_id: Some(materialized.root_id),
+            root_id: Some(materialized.root_id.clone()),
             parent_id: Some(parent_id.to_owned()),
-            parent_upstream_response_id: materialized.upstream_response_id,
-            parent_state: Some(materialized.effective_state),
-            media_turn_messages: materialized.media_turn_messages,
-            parent_effective_items: materialized.effective_items,
-            parent_client_items: materialized.client_items,
+            parent_upstream_response_id: materialized.upstream_response_id.clone(),
+            parent_state: Some(materialized.effective_state.clone()),
+            media_turn_messages: materialized.media_turn_messages.clone(),
+            parent_effective_items: materialized.effective_items.clone(),
+            parent_client_items: materialized.client_items.clone(),
             replace_effective_history: false,
             replacement_client_items: None,
             compaction_input_range: None,
             fresh_inline_states: Vec::new(),
-            compaction_record_ids: materialized.compaction_record_ids,
+            compaction_record_ids: materialized.compaction_record_ids.clone(),
         })
     }
 
@@ -601,7 +604,7 @@ impl GenerationChainStore {
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
         not_found: &str,
-    ) -> Result<(MaterializedGeneration, Result<Vec<AiItem>, String>), String> {
+    ) -> Result<(Arc<MaterializedGeneration>, Result<Vec<AiItem>, String>), String> {
         let principal_key = principal.continuation_key();
         let cached = self.materialization_cache_get(&principal_key, id);
         crate::performance::record_generation_cache_access(cached.is_some());
@@ -633,7 +636,12 @@ impl GenerationChainStore {
         let (materialized, catalog) =
             materialize_generation_nodes_with_catalog(chain.nodes, chain.expires_at, ingress)
                 .map_err(|_| not_found.to_string())?;
-        self.materialization_cache_insert(principal_key.clone(), id.clone(), materialized.clone());
+        let materialized = Arc::new(materialized);
+        self.materialization_cache_insert(
+            principal_key.clone(),
+            id.clone(),
+            Arc::clone(&materialized),
+        );
         self.materialization_catalog_insert(&principal_key, id, ingress, &catalog);
         Ok((materialized, catalog))
     }
@@ -642,7 +650,7 @@ impl GenerationChainStore {
         &self,
         principal: &Principal,
         id: &TurnNodeId,
-    ) -> Result<MaterializedGeneration, String> {
+    ) -> Result<Arc<MaterializedGeneration>, String> {
         let principal_key = principal.continuation_key();
         if let Some(materialized) = self.materialization_cache_get(&principal_key, id) {
             crate::performance::record_generation_cache_access(true);
@@ -650,8 +658,8 @@ impl GenerationChainStore {
         }
         crate::performance::record_generation_cache_access(false);
         let chain = self.load_generation_chain(principal, id).await?;
-        let materialized = materialize_generation_nodes(chain.nodes, chain.expires_at)?;
-        self.materialization_cache_insert(principal_key, id.clone(), materialized.clone());
+        let materialized = Arc::new(materialize_generation_nodes(chain.nodes, chain.expires_at)?);
+        self.materialization_cache_insert(principal_key, id.clone(), Arc::clone(&materialized));
         Ok(materialized)
     }
 
@@ -659,7 +667,7 @@ impl GenerationChainStore {
         &self,
         principal: &str,
         id: &TurnNodeId,
-    ) -> Option<MaterializedGeneration> {
+    ) -> Option<Arc<MaterializedGeneration>> {
         let mut cache = self.materializations.lock();
         let version = *cache
             .head_versions
@@ -684,7 +692,7 @@ impl GenerationChainStore {
                 .remove(&(principal.to_owned(), id.clone()));
             return None;
         }
-        let materialized = cache.entries.get(&key)?.materialized.clone();
+        let materialized = Arc::clone(&cache.entries.get(&key)?.materialized);
         cache.lru.retain(|candidate| candidate != &key);
         cache.lru.push_back(key);
         Some(materialized)
@@ -694,7 +702,7 @@ impl GenerationChainStore {
         &self,
         principal: String,
         id: TurnNodeId,
-        materialized: MaterializedGeneration,
+        materialized: Arc<MaterializedGeneration>,
     ) {
         let bytes = materialization_size_bytes(&materialized);
         if bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
@@ -816,7 +824,7 @@ impl GenerationChainStore {
         };
         let active = ActiveGenerationChain {
             parent_id: Some(parent_id.to_owned()),
-            parent_upstream_response_id: materialized.upstream_response_id,
+            parent_upstream_response_id: materialized.upstream_response_id.clone(),
             parent_state: Some(materialized.effective_state.clone()),
             ..ActiveGenerationChain::default()
         };

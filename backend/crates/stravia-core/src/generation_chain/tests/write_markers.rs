@@ -625,7 +625,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .expect("discover exact projected parent");
     assert_eq!(exact_write.parent.parent_id.as_deref(), Some(id.as_str()));
 
-    let mut edited_items = materialized.client_items;
+    let mut edited_items = materialized.client_items.clone();
     let edited_index = edited_items
         .iter()
         .position(|item| {
