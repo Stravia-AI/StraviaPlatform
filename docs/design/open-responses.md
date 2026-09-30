@@ -416,6 +416,7 @@ Extension final item 仍使用标准 `response.output_item.added` / `response.ou
 - `reasoning.effort`
 - `service_tier`
 - `prompt_cache_key`
+- 图片 `detail` 提示（如 `auto`、`low`、`high`）：目标协议没有等价控制时允许省略，图片本体与工具结果关联仍必须保留；目标协议支持时继续传递该提示。省略仅发生在目标 wire 编码，不改写 canonical 历史，也不放宽入站字段值校验。
 - `client_metadata` 与其它 additive metadata
 - 普通 item 的附加字段（包括未知提供方字段）：canonical 与同协议输出保留，跨协议请求回放、完整响应及流式交付允许省略，不维护字段白名单。附加字段不等同于未知 item/content 类型或原生压缩状态，后者继续按其实际语义检查。
 - `include`、`stream_options.include_obfuscation`、`top_logprobs`、`text.verbosity`

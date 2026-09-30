@@ -197,7 +197,7 @@ OpenAI 端点和字段事实以上述官方 create、streaming-events、resource
 
 - **媒体类型冲突：** 正文 RFC2119 MUST JSON vs Reference/OpenAPI form allowance；实现以正文 MUST 为准，向 TSC 提交澄清并在版本升级时重新验证。
 - **rolling OpenAI fields：** OpenAI `conversation`、`context_management`、`prompt`、`moderation`、cache fields、`user` 以及 hosted tools 会不断扩展；Stravia 需 unknown-field policy（core strict、namespaced extension）和版本化 adapter，不能把 OpenAI SDK 类型直接作为标准 schema。
-- **语义丢失：** `input_image.detail=original`、audio、普通 user-message video、OpenAI tool result/include、phase、reasoning encryption 等存在 capability 差异；adapter 必须在 call 前做 representability check，拒绝或显式告警，不 silently drop。
+- **语义丢失：** audio、普通 user-message video、OpenAI tool result/include、phase、reasoning encryption 等存在 capability 差异；adapter 必须在 call 前做 representability check，拒绝或显式告警，不 silently drop。图片 `detail` 属于 advisory hint：目标协议没有等价控制时允许省略，但必须保留图片本体与工具结果关联；目标协议支持时继续传递，入站字段值仍按协议校验。兼容省略边界见 [`open-responses.md` 第 10.3 节](../design/open-responses.md#103-compatibility-omission)。
 - **状态与数据保留：** `store`、`previous_response_id`、WS connection-local state、compaction 和 gateway persistence 组合可能泄露上下文或使 continuation 失效；默认 tenant isolation、TTL、删除/eviction，并把 `previous_response_not_found` 原样可诊断返回。
 - **SSE correctness：** sequence/index 错误、漏发 done、错误后没有 `response.failed`、错误地把 `[DONE]` 当 JSON，会导致 SDK hanging 或错配；为每种 lifecycle 做 conformance test。
 - **工具副作用：** function call 只是模型请求，不代表 gateway 已执行；Stravia 必须分离 model output 与 tool executor，校验 `call_id`、权限、重放和幂等。

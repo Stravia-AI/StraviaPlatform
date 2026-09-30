@@ -1904,6 +1904,40 @@ fn image_detail_is_ignored_without_losing_images_on_targets_without_the_control(
         }
     }
 }
+
+#[test]
+fn image_detail_does_not_block_anthropic_tool_continuation() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+        .expect("registered protocol pair");
+    let request = pair
+        .decode_request(json!({
+            "model": "model",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": [
+                    {"type": "input_text", "text": "Screenshot captured"},
+                    {"type": "input_image", "image_url": "data:image/webp;base64,d2VicA==", "detail": "auto"}
+                ]}
+            ]
+        }))
+        .expect("image tool result");
+    let body = pair
+        .encode_request(&request)
+        .expect("image tool continuation")
+        .body;
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": [
+                {"type": "text", "text": "Screenshot captured"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "d2VicA=="}}
+            ]
+        }])
+    );
+}
 #[test]
 fn image_detail_is_preserved_on_openai_targets() {
     for ingress in [
