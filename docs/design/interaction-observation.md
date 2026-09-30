@@ -351,6 +351,8 @@ diagnostics/observation-debug/
 
 传输失败、协议解码失败和规范化错误沿用普通 Observation 的错误分类、阶段、状态与安全原因摘要，不作为 Debug 内容记录。对应方向没有实际收发时不得补造 Wire；Trace manifest 如实表达缺失或 `partial`。这些诊断不改变重试、回退、超时或成功判定，也不为旧 Trace 补录原因。
 
+宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。完整摘要沿用普通 Observation 的既有脱敏规则后进入日志与失败请求记录；不改变 Wire Debug 的捕获与脱敏边界，也不能恢复旧记录中已丢失的原因。
+
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 
 ### 6.3 容量与失败

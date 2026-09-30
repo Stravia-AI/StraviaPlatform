@@ -825,7 +825,7 @@ impl UpstreamResponse {
                             return Ok(Some(data));
                         }
                     }
-                    Some(Err(error)) => return Err(transport_failure(error)),
+                    Some(Err(error)) => return Err(transport_failure(error.as_ref())),
                 }
             },
         }
@@ -1291,13 +1291,19 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     Some(Duration::from_millis(milliseconds as u64))
 }
 
-/// 底层错误文本脱敏后作为失败原因：同时进 debug 日志与 HostFailure.message，
-/// 后者最终落入失败请求记录，是打包环境唯一可靠的诊断出口。
-fn transport_cause(error: &impl std::fmt::Display) -> String {
-    crate::interaction_observation::redact_text(&error.to_string())
+/// 包装错误的 Display 可能只有类别名；保留 source 链后统一脱敏，
+/// 让日志与最终失败请求记录都能区分真实传输原因。
+fn transport_cause(error: &(impl std::error::Error + ?Sized)) -> String {
+    let mut cause = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        let _ = write!(cause, ": {error}");
+        source = error.source();
+    }
+    crate::interaction_observation::redact_text(&cause)
 }
 
-fn transport_failure(error: impl std::fmt::Display) -> HostFailure {
+fn transport_failure(error: impl std::error::Error) -> HostFailure {
     let cause = transport_cause(&error);
     tracing::debug!(error = %cause, "vendor transport failed");
     HostFailure::upstream(
@@ -1308,7 +1314,7 @@ fn transport_failure(error: impl std::fmt::Display) -> HostFailure {
     )
 }
 
-fn websocket_transport_failure(error: impl std::fmt::Display) -> HostFailure {
+fn websocket_transport_failure(error: impl std::error::Error) -> HostFailure {
     let cause = transport_cause(&error);
     tracing::debug!(error = %cause, "vendor transport failed");
     HostFailure::upstream_transport(
