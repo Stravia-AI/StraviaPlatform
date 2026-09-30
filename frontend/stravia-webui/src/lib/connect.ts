@@ -30,7 +30,6 @@ export interface ClientModelDefinition {
   supportedThinkingLevels: readonly ThinkingLevel[]
   supportsImageInput: boolean
   contextWindow?: number
-  outputMaxTokens?: number
 }
 
 export type ConnectClientApplyRequest =
@@ -95,7 +94,6 @@ export function defineClientModel(model: Route): ClientModelDefinition {
     supportedThinkingLevels: [...new Set(model.supported_thinking_levels ?? [])],
     supportsImageInput: model.supports_image_input ?? false,
     ...(model.context_window ? { contextWindow: model.context_window } : {}),
-    ...(model.output_max_tokens ? { outputMaxTokens: model.output_max_tokens } : {}),
   }
 }
 

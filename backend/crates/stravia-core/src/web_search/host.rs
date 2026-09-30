@@ -82,7 +82,6 @@ fn model_snapshot(model: crate::provider_models::ProviderModelRecord) -> SearchM
     SearchModel {
         available: model.effective_available(),
         model_id: model.model_id,
-        tool_call: model.metadata.tool_call,
     }
 }
 #[async_trait]

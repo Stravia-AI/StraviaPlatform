@@ -161,7 +161,6 @@ pub(crate) async fn route_metadata(
                 .and_then(|metadata| metadata.modalities.as_ref())
                 .map(|modalities| modalities.input.clone())
                 .unwrap_or_default(),
-            tool_call: metadata.as_ref().and_then(|metadata| metadata.tool_call),
         });
     }
     MediaRoute {

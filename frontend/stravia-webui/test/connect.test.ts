@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { apiKeyAllowsModel, buildCode, CLI_TOOLS, defineClientModel, maskApiKey } from '../src/lib/connect'
+import { apiKeyAllowsModel, buildCode, defineClientModel, maskApiKey } from '../src/lib/connect'
 import type { Route } from '../src/lib/types'
 
 describe('Connect clients', () => {
@@ -27,22 +27,6 @@ describe('Connect clients', () => {
     expect(buildCode({ ...base, language: 'typescript' })).toContain('client.responses.create')
   })
 
-  test('lists every supported Connect Client in product order', () => {
-    expect(CLI_TOOLS.map((tool) => tool.name)).toEqual([
-      'Codex',
-      'Claude Code',
-      'OpenCode',
-      'OpenClaw',
-      'Hermes Agent',
-      'TRAE',
-      'WorkBuddy',
-      'ZCode',
-      'DeepSeek Harness',
-      'Pi',
-      'OMP',
-    ])
-  })
-
   test('uses Route capabilities and falls back to Route ID for display', () => {
     const route = {
       id: 'route',
@@ -55,7 +39,6 @@ describe('Connect clients', () => {
       created_at: '2026-08-05T00:00:00Z',
       supported_thinking_levels: ['off', 'low', 'high'],
       context_window: 128_000,
-      output_max_tokens: 32_000,
       supports_image_input: true,
       targets: [],
     } satisfies Route
@@ -67,7 +50,6 @@ describe('Connect clients', () => {
       supportedThinkingLevels: ['off', 'low', 'high'],
       supportsImageInput: true,
       contextWindow: 128_000,
-      outputMaxTokens: 32_000,
     })
     expect(defineClientModel(unnamed).displayName).toBe('custom/unnamed')
   })

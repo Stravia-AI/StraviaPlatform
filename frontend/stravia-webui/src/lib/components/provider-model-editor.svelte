@@ -4,18 +4,15 @@ import PlusIcon from '@lucide/svelte/icons/plus'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack } from 'svelte'
 
+import { specificationReasoningEfforts } from '$lib/model-specification'
 import { localeState } from '$lib/localization.svelte'
 import { providerModelSelectionPolicyLabel } from '$lib/provider-model-labels'
-import type {
-  ProviderModelDetail,
-  ProviderModelMetadata,
-  ProviderModelReasoningOption,
-  ProviderModelSelectionPolicy,
-} from '$lib/types'
+import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelSelectionPolicy } from '$lib/types'
 import {
   buildProviderModelMetadataJson,
   emptyProviderModelCost,
   emptyProviderModelPrices,
+  normalizeProviderModelEfforts,
   providerModelCostFromMetadata,
   providerModelFormFingerprint,
   type ProviderModelCostForm,
@@ -27,7 +24,6 @@ import * as Collapsible from '$lib/components/ui/collapsible'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
-import { Switch } from '$lib/components/ui/switch'
 import { Textarea } from '$lib/components/ui/textarea'
 import { inputValue } from '$lib/utils.js'
 
@@ -40,33 +36,13 @@ interface Props {
 }
 
 type StringField = 'name' | 'description'
-type BooleanField = 'attachment' | 'reasoning' | 'tool_call' | 'structured_output' | 'temperature'
 type PriceField = keyof ProviderModelPriceForm
-const reasoningOptionTypes: ProviderModelReasoningOption['type'][] = ['toggle', 'effort', 'budget_tokens']
-const knownEffortValues: Array<string | null> = [
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-  'default',
-  null,
-]
 const knownModalities = ['text', 'image', 'audio', 'video', 'pdf']
 const modalityTargets = ['input', 'output'] as const
 
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },
-]
-const booleanFields: Array<{ key: BooleanField; label: () => string }> = [
-  { key: 'attachment', label: m.provider_model_field_attachments },
-  { key: 'reasoning', label: m.provider_model_field_reasoning },
-  { key: 'tool_call', label: m.provider_model_field_tool_calls },
-  { key: 'structured_output', label: m.provider_model_field_structured_output },
-  { key: 'temperature', label: m.provider_model_field_temperature },
 ]
 const priceFields: Array<{ key: PriceField; label: () => string }> = [
   { key: 'input', label: m.provider_model_field_input },
@@ -77,30 +53,16 @@ const priceFields: Array<{ key: PriceField; label: () => string }> = [
   { key: 'input_audio', label: m.provider_model_field_audio_input },
   { key: 'output_audio', label: m.provider_model_field_audio_output },
 ]
-const visiblePriceFields = priceFields.filter(
-  ({ key }) => key !== 'reasoning' && key !== 'input_audio' && key !== 'output_audio',
-)
 let { detail, draft = false, onSave, onSelectionChange, onDirtyChange }: Props = $props()
 let metadata = $state<ProviderModelMetadata>({})
 let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
 let structuralErrors = $state<string[]>([])
-let advancedOpen = $state(false)
+let customEffort = $state('')
 let extensionsOpen = $state(false)
 let errorAlert = $state<HTMLDivElement>()
 let initialFingerprint = $state('')
 let editorRoot = $state<HTMLDivElement>()
 
-const semanticWarnings = $derived.by(() => {
-  const warnings: string[] = []
-  const context = metadata.limit?.context
-  if (context != null && metadata.limit?.input != null && metadata.limit.input > context) {
-    warnings.push(m.provider_model_editor_input_limit_exceeds_context_limit())
-  }
-  if (context != null && metadata.limit?.output != null && metadata.limit.output > context) {
-    warnings.push(m.provider_model_editor_output_limit_exceeds_context_limit())
-  }
-  return warnings
-})
 const extensionEntries = $derived(Object.entries(detail.extensions ?? {}))
 const currentFingerprint = $derived(fingerprint())
 const dirty = $derived(Boolean(initialFingerprint) && currentFingerprint !== initialFingerprint)
@@ -122,14 +84,18 @@ $effect.pre(() => {
 
 $effect(() => {
   const snapshot = $state.snapshot(detail.metadata)
-  metadata = structuredClone(snapshot)
+  const nextMetadata = structuredClone(snapshot)
+  if (nextMetadata.reasoning_efforts) {
+    nextMetadata.reasoning_efforts = normalizeProviderModelEfforts(nextMetadata.reasoning_efforts)
+  }
+  metadata = nextMetadata
   cost = providerModelCostFromMetadata(snapshot)
   structuralErrors = []
+  customEffort = ''
   initialFingerprint = untrack(fingerprint)
 })
 $effect(() => {
   if (structuralErrors.length > 0) {
-    advancedOpen = true
     void tick().then(() => errorAlert?.focus())
   }
 })
@@ -155,14 +121,6 @@ function setStringField(key: StringField, value: string): void {
   metadata[key] = value
 }
 
-function addBooleanField(key: BooleanField): void {
-  metadata[key] = true
-}
-
-function setBooleanField(key: BooleanField, value: boolean): void {
-  metadata[key] = value
-}
-
 function modalityOptions(target: 'input' | 'output'): string[] {
   const values = [...knownModalities]
   const knownValues = new Set(values)
@@ -178,89 +136,23 @@ function setModalityValues(target: 'input' | 'output', selectedValues: string[])
   metadata.modalities[target] = modalityOptions(target).filter((value) => selected.has(value))
 }
 
-function setLimit(key: 'context' | 'input' | 'output', value: string): void {
-  metadata.limit ??= {}
-  metadata.limit[key] = value === '' ? null : Number(value)
+function setLimit(value: string): void {
+  metadata.limit = { context: value === '' ? null : Number(value) }
 }
 
-function addReasoningOption(type: ProviderModelReasoningOption['type'] = 'toggle'): void {
-  if (hasReasoningOption(type)) return
-  metadata.reasoning_options ??= []
-  metadata.reasoning_options.push(reasoningOptionForType(type))
+function effortOptions(): string[] {
+  return [...new Set([...specificationReasoningEfforts, ...(metadata.reasoning_efforts ?? [])])]
 }
 
-function hasReasoningOption(type: ProviderModelReasoningOption['type'], exceptIndex = -1): boolean {
-  return metadata.reasoning_options?.some((option, index) => index !== exceptIndex && option.type === type) ?? false
+function setEffortValues(values: string[]): void {
+  metadata.reasoning_efforts = effortOptions().filter((value) => values.includes(value))
 }
 
-function reasoningOptionForType(type: ProviderModelReasoningOption['type']): ProviderModelReasoningOption {
-  if (type === 'effort') return { type, values: ['low', 'medium', 'high'] }
-  if (type === 'budget_tokens') return { type, min: -1, max: 32768 }
-  return { type: 'toggle' }
-}
-
-function changeReasoningType(index: number, type: ProviderModelReasoningOption['type']): void {
-  const option = metadata.reasoning_options?.[index]
-  if (!option || hasReasoningOption(type, index)) return
-  // 保持行身份与 Select 焦点，同时删除旧变体的字段。
-  if (option.type === 'effort') Reflect.deleteProperty(option, 'values')
-  else if (option.type === 'budget_tokens') {
-    Reflect.deleteProperty(option, 'min')
-    Reflect.deleteProperty(option, 'max')
-  }
-  Object.assign(option, reasoningOptionForType(type))
-}
-
-function effortValueKey(value: string | null): string {
-  return JSON.stringify(value)
-}
-
-function effortValueLabel(value: string | null): string {
-  return value ?? m.provider_model_editor_use_service_default()
-}
-
-function effortValueOptions(
-  option: Extract<ProviderModelReasoningOption, { type: 'effort' }>,
-): Array<{ key: string; label: string; value: string | null }> {
-  const values = [...knownEffortValues]
-  const knownKeys = new Set(values.map(effortValueKey))
-  for (const value of option.values) {
-    if (!knownKeys.has(effortValueKey(value))) values.push(value)
-  }
-  return values.map((value) => ({ key: effortValueKey(value), label: effortValueLabel(value), value }))
-}
-
-function setEffortValues(
-  option: Extract<ProviderModelReasoningOption, { type: 'effort' }>,
-  selectedKeys: string[],
-): void {
-  const selected = new Set(selectedKeys)
-  option.values = effortValueOptions(option)
-    .filter(({ key }) => selected.has(key))
-    .map(({ value }) => value)
-}
-function setBudgetValue(
-  option: Extract<ProviderModelReasoningOption, { type: 'budget_tokens' }>,
-  key: 'min' | 'max',
-  value: string,
-): void {
-  option[key] = value === '' ? null : Number(value)
-}
-
-function removeReasoningOption(index: number): void {
-  metadata.reasoning_options?.splice(index, 1)
-}
-
-function interleavedMode(): 'unset' | 'enabled' | 'disabled' | 'field' {
-  if (!hasField('interleaved')) return 'unset'
-  if (typeof metadata.interleaved === 'object') return 'field'
-  return metadata.interleaved ? 'enabled' : 'disabled'
-}
-
-function setInterleavedMode(mode: 'unset' | 'enabled' | 'disabled' | 'field'): void {
-  if (mode === 'unset') delete metadata.interleaved
-  else if (mode === 'field') metadata.interleaved = { field: '' }
-  else metadata.interleaved = mode === 'enabled'
+function addCustomEffort(): void {
+  const value = customEffort.trim()
+  if (!value || ['default', 'null'].includes(value.toLowerCase())) return
+  metadata.reasoning_efforts = [...new Set([...(metadata.reasoning_efforts ?? []), value])]
+  customEffort = ''
 }
 
 function addTier(): void {
@@ -312,81 +204,47 @@ export function submit(): void {
     </Field.Group>
   {/if}
 
-  <div class="grid min-w-0 gap-5 @4xl/model-editor:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-    <section class="flex min-w-0 flex-col gap-4 rounded-xl border p-4">
-      <div class="flex items-center justify-between gap-3">
-        <h4 class="text-sm font-semibold">{m.provider_model_editor_model_information()}</h4>
-      </div>
-      <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-2">
-        <Field.Field orientation="vertical">
-          <Field.Label for="provider-model-id">{m.provider_model_editor_model_id()}</Field.Label>
-          <Input id="provider-model-id" class="font-technical" value={detail.id} readonly />
-        </Field.Field>
-        {#each stringFields as field (field.key)}
-          {#if hasField(field.key)}
-            <Field.Field orientation="vertical" class={field.multiline ? '@xl/model-editor:col-span-2' : ''}>
-              <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
-              {#if field.multiline}
-                <Textarea
-                  id={`provider-model-${field.key}`}
-                  class="min-h-24 resize-y"
-                  value={String(metadata[field.key] ?? '')}
-                  oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
-              {:else}
-                <Input
-                  id={`provider-model-${field.key}`}
-                  value={String(metadata[field.key] ?? '')}
-                  oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
-              {/if}
-            </Field.Field>
-          {/if}
-        {/each}
-      </Field.Group>
-      <div class="flex flex-wrap gap-2 empty:hidden">
-        {#each stringFields.filter((field) => !hasField(field.key)) as field (field.key)}
-          <Button type="button" variant="outline" size="sm" class="min-h-10" onclick={() => addStringField(field.key)}>
-            <PlusIcon data-icon="inline-start" />{field.label()}
-          </Button>
-        {/each}
-      </div>
-    </section>
-
-    <div class="min-w-0 rounded-xl border p-4">
-      <Field.Set class="gap-4">
-        <Field.Legend variant="label">{m.provider_model_editor_supported_features()}</Field.Legend>
-        <Field.Group class="grid gap-2 @xl/model-editor:grid-cols-2">
-          {#each booleanFields as field (field.key)}
-            {#if hasField(field.key)}
-              <Field.Field orientation="horizontal" class="rounded-lg bg-muted/30 px-3 py-1">
-                <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
-                <Switch
-                  id={`provider-model-${field.key}`}
-                  size="sm"
-                  checked={metadata[field.key] === true}
-                  onCheckedChange={(checked: boolean) => setBooleanField(field.key, checked)} />
-              </Field.Field>
-            {/if}
-          {/each}
-        </Field.Group>
-        <div class="flex flex-wrap gap-2 empty:hidden">
-          {#each booleanFields.filter((field) => !hasField(field.key)) as field (field.key)}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              class="min-h-10"
-              onclick={() => addBooleanField(field.key)}>
-              <PlusIcon data-icon="inline-start" />{field.label()}
-            </Button>
-          {/each}
-        </div>
-      </Field.Set>
-    </div>
-  </div>
-
-  <section class="flex min-w-0 flex-col gap-4 rounded-xl border p-4">
+  <section class="flex min-w-0 flex-col gap-4 border-t pt-4">
     <div class="flex items-center justify-between gap-3">
-      <h4 class="text-sm font-semibold">{m.provider_model_editor_inputs_outputs_limits()}</h4>
+      <h4 class="text-sm font-semibold">{m.provider_model_editor_model_information()}</h4>
+    </div>
+    <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-2">
+      <Field.Field orientation="vertical">
+        <Field.Label for="provider-model-id">{m.provider_model_editor_model_id()}</Field.Label>
+        <Input id="provider-model-id" class="font-technical" value={detail.id} readonly />
+      </Field.Field>
+      {#each stringFields as field (field.key)}
+        {#if hasField(field.key)}
+          <Field.Field orientation="vertical" class={field.multiline ? '@xl/model-editor:col-span-2' : ''}>
+            <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+            {#if field.multiline}
+              <Textarea
+                id={`provider-model-${field.key}`}
+                class="min-h-24 resize-y"
+                value={String(metadata[field.key] ?? '')}
+                oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
+            {:else}
+              <Input
+                id={`provider-model-${field.key}`}
+                value={String(metadata[field.key] ?? '')}
+                oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
+            {/if}
+          </Field.Field>
+        {/if}
+      {/each}
+    </Field.Group>
+    <div class="flex flex-wrap gap-2 empty:hidden">
+      {#each stringFields.filter((field) => !hasField(field.key)) as field (field.key)}
+        <Button type="button" variant="outline" size="sm" class="min-h-10" onclick={() => addStringField(field.key)}>
+          <PlusIcon data-icon="inline-start" />{field.label()}
+        </Button>
+      {/each}
+    </div>
+  </section>
+
+  <section class="flex min-w-0 flex-col gap-4 border-t pt-4">
+    <div class="flex items-center justify-between gap-3">
+      <h4 class="text-sm font-semibold">{m.provider_model_editor_context_modalities()}</h4>
     </div>
     {#if hasField('modalities') && metadata.modalities}
       <div class="rounded-lg border p-3">
@@ -401,8 +259,9 @@ export function submit(): void {
               </Field.Label>
               <Select.Root
                 type="multiple"
-                value={metadata.modalities[target]}
-                onValueChange={(values: string[]) => setModalityValues(target, values)}>
+                bind:value={
+                  () => metadata.modalities?.[target] ?? [], (values: string[]) => setModalityValues(target, values)
+                }>
                 <Select.Trigger
                   id={`provider-model-${target}-modalities`}
                   class="w-full min-w-0"
@@ -426,25 +285,17 @@ export function submit(): void {
         </Field.Group>
       </div>
     {/if}
-    {#if hasField('limit') && metadata.limit}
-      <div class="rounded-lg border p-3">
-        <p class="mb-3 text-sm font-medium">{m.provider_model_editor_token_limits()}</p>
-        <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-3">
-          {#each ['context', 'input', 'output'] as key (key)}
-            <Field.Field orientation="vertical">
-              <Field.Label for={`provider-model-limit-${key}`}>{key}</Field.Label>
-              <Input
-                id={`provider-model-limit-${key}`}
-                type="number"
-                min="0"
-                step="1"
-                value={metadata.limit[key as keyof typeof metadata.limit] ?? ''}
-                oninput={(event: Event) => setLimit(key as 'context' | 'input' | 'output', inputValue(event))} />
-            </Field.Field>
-          {/each}
-        </Field.Group>
-      </div>
-    {/if}
+    <Field.Field orientation="vertical">
+      <Field.Label for="provider-model-limit-context">{m.provider_model_editor_context()}</Field.Label>
+      <Input
+        id="provider-model-limit-context"
+        type="number"
+        min="0"
+        step="1"
+        value={metadata.limit?.context ?? ''}
+        placeholder={m.model_specification_not_registered()}
+        oninput={(event: Event) => setLimit(inputValue(event))} />
+    </Field.Field>
     <div class="flex flex-wrap gap-2 empty:hidden">
       {#if !hasField('modalities')}
         <Button
@@ -455,263 +306,132 @@ export function submit(): void {
           onclick={() => (metadata.modalities = { input: [], output: [] })}
           ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_modalities()}</Button>
       {/if}
-      {#if !hasField('limit')}
-        <Button type="button" variant="outline" size="sm" class="min-h-10" onclick={() => (metadata.limit = {})}
-          ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_token_limits()}</Button>
-      {/if}
     </div>
   </section>
 
-  <Collapsible.Root class="rounded-xl border" bind:open={advancedOpen}>
-    <Collapsible.Trigger type="button" class="min-h-12 w-full px-4 text-left">
-      {m.provider_model_editor_advanced_model_settings()}
-      <span class="ml-2 font-normal text-muted-foreground">
-        {m.provider_model_editor_advanced_fields_help()}
-      </span>
-    </Collapsible.Trigger>
-    <Collapsible.Content class="flex flex-col gap-5 border-t p-4">
-      <section class="flex flex-col gap-3 border-t pt-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <h4 class="text-sm font-semibold">{m.provider_model_editor_reasoning_behavior()}</h4>
-          <div class="flex items-center gap-2">
-            <span class="text-xs text-muted-foreground">{m.common_interleaved()}</span>
-            <Select.Root
-              type="single"
-              value={interleavedMode()}
-              onValueChange={(value: string) =>
-                value && setInterleavedMode(value as ReturnType<typeof interleavedMode>)}>
-              <Select.Trigger class="w-32" aria-label={m.common_interleaved()}>{interleavedMode()}</Select.Trigger>
-              <Select.Content>
-                <Select.Group>
-                  <Select.Item value="unset">{m.provider_model_editor_unspecified()}</Select.Item>
-                  <Select.Item value="enabled">{m.common_enable_action()}</Select.Item>
-                  <Select.Item value="disabled">{m.common_disable_action()}</Select.Item>
-                  <Select.Item value="field">{m.provider_model_editor_request_field()}</Select.Item>
-                </Select.Group>
-              </Select.Content>
-            </Select.Root>
-          </div>
-        </div>
-        {#if typeof metadata.interleaved === 'object' && metadata.interleaved}
-          <Field.Field>
-            <Field.Label for="provider-model-interleaved-field"
-              >{m.provider_model_editor_interleaved_request_field()}</Field.Label>
-            <Input
-              id="provider-model-interleaved-field"
-              class="font-technical"
-              bind:value={metadata.interleaved.field} />
-          </Field.Field>
-        {/if}
-        {#if hasField('reasoning_options') && metadata.reasoning_options}
-          <div class="flex flex-col gap-2">
-            {#each metadata.reasoning_options as option, index (option)}
-              <div class="grid gap-2 rounded-lg border p-3 sm:grid-cols-[10rem_1fr_auto]">
-                <Select.Root
-                  type="single"
-                  value={option.type}
-                  onValueChange={(value: string) =>
-                    value && changeReasoningType(index, value as ProviderModelReasoningOption['type'])}>
-                  <Select.Trigger aria-label={m.provider_model_editor_reasoning_behavior()}
-                    >{option.type}</Select.Trigger>
-                  <Select.Content>
-                    <Select.Group>
-                      {#each reasoningOptionTypes as type (type)}
-                        {#if type === option.type || !hasReasoningOption(type, index)}
-                          <Select.Item value={type}>{type}</Select.Item>
-                        {/if}
-                      {/each}
-                    </Select.Group>
-                  </Select.Content>
-                </Select.Root>
-                {#if option.type === 'effort'}
-                  <Select.Root
-                    type="multiple"
-                    value={option.values.map(effortValueKey)}
-                    onValueChange={(values: string[]) => setEffortValues(option, values)}>
-                    <Select.Trigger
-                      class="w-full min-w-0"
-                      aria-label={m.provider_model_editor_reasoning_options()}
-                      data-effort-values-select>
-                      <span class="truncate">{option.values.map(effortValueLabel).join(', ')}</span>
-                    </Select.Trigger>
-                    <Select.Content>
-                      <Select.Group>
-                        {#each effortValueOptions(option) as choice (choice.key)}
-                          <Select.Item value={choice.key} label={choice.label}>{choice.label}</Select.Item>
-                        {/each}
-                      </Select.Group>
-                    </Select.Content>
-                  </Select.Root>
-                {:else if option.type === 'budget_tokens'}
-                  <div class="grid grid-cols-2 gap-2">
-                    <Input
-                      type="number"
-                      step="1"
-                      value={option.min ?? ''}
-                      aria-label={m.provider_model_editor_minimum_reasoning_tokens()}
-                      oninput={(event: Event) => setBudgetValue(option, 'min', inputValue(event))} />
-                    <Input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={option.max ?? ''}
-                      aria-label={m.provider_model_editor_maximum_reasoning_tokens()}
-                      oninput={(event: Event) => setBudgetValue(option, 'max', inputValue(event))} />
-                  </div>
-                {:else}
-                  <p class="self-center text-xs text-muted-foreground">
-                    {m.provider_model_editor_boolean_reasoning_control()}
-                  </p>
-                {/if}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={m.provider_model_editor_remove_reasoning_option()}
-                  onclick={() => removeReasoningOption(index)}><Trash2Icon /></Button>
-              </div>
-            {/each}
-            <div class="flex flex-wrap gap-2">
-              {#if !hasReasoningOption('toggle')}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  data-reasoning-option-add="toggle"
-                  onclick={() => addReasoningOption()}>
-                  <PlusIcon data-icon="inline-start" />toggle
-                </Button>
-              {/if}
-              {#if !hasReasoningOption('effort')}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  data-reasoning-option-add="effort"
-                  onclick={() => addReasoningOption('effort')}>
-                  <PlusIcon data-icon="inline-start" />effort
-                </Button>
-              {/if}
-              {#if !hasReasoningOption('budget_tokens')}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  data-reasoning-option-add="budget_tokens"
-                  onclick={() => addReasoningOption('budget_tokens')}>
-                  <PlusIcon data-icon="inline-start" />budget
-                </Button>
-              {/if}
-              <Button type="button" variant="ghost" size="xs" onclick={() => removeField('reasoning_options')}
-                >{m.provider_model_editor_remove_group()}</Button>
-            </div>
-          </div>
-        {:else}
-          <Button type="button" variant="outline" size="xs" onclick={() => (metadata.reasoning_options = [])}
-            ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_reasoning_options()}</Button>
-        {/if}
-      </section>
+  <section class="flex min-w-0 flex-col gap-4 border-t pt-4">
+    <h4 class="text-sm font-semibold">{m.provider_model_editor_reasoning_efforts()}</h4>
+    <Field.Field orientation="vertical">
+      <Field.Label for="provider-model-reasoning-efforts" class="sr-only"
+        >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
+      <Select.Root type="multiple" bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
+        <Select.Trigger id="provider-model-reasoning-efforts" class="w-full min-w-0" data-effort-values-select>
+          <span class="truncate"
+            >{metadata.reasoning_efforts?.length
+              ? metadata.reasoning_efforts.join(', ')
+              : m.provider_model_editor_select_efforts()}</span>
+        </Select.Trigger>
+        <Select.Content
+          ><Select.Group>
+            {#each effortOptions() as value (value)}<Select.Item {value}>{value}</Select.Item>{/each}
+          </Select.Group></Select.Content>
+      </Select.Root>
+      <Field.Description>{m.provider_model_editor_effort_help()}</Field.Description>
+    </Field.Field>
+    <Field.Field orientation="vertical">
+      <Field.Label for="provider-model-custom-effort">{m.provider_model_editor_custom_effort()}</Field.Label>
+      <div class="flex flex-wrap gap-2">
+        <Input id="provider-model-custom-effort" class="min-w-0 flex-1 font-technical" bind:value={customEffort} />
+        <Button
+          type="button"
+          variant="outline"
+          onclick={addCustomEffort}
+          disabled={!customEffort.trim() || ['default', 'null'].includes(customEffort.trim().toLowerCase())}>
+          <PlusIcon data-icon="inline-start" />{m.provider_model_editor_add_effort()}
+        </Button>
+      </div>
+    </Field.Field>
+  </section>
 
-      <section class="flex flex-col gap-3 border-t pt-4">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <h4 class="text-sm font-semibold">{m.provider_model_editor_pricing()}</h4>
-            <p class="text-xs text-muted-foreground">
-              {m.provider_model_editor_pricing_unit_help()}
-            </p>
-          </div>
-          {#if hasField('cost')}
-            <Button type="button" variant="ghost" size="sm" onclick={() => removeField('cost')}
-              ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
-          {/if}
-        </div>
-        {#if hasField('cost')}
-          <div class="rounded-lg border p-3">
-            <p class="mb-3 text-sm font-medium">{m.provider_model_editor_base_pricing()}</p>
-            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {#each visiblePriceFields as field (field.key)}
-                <Field.Field>
-                  <Field.Label for={`provider-model-cost-${field.key}`}>{field.label()}</Field.Label>
-                  <Input
-                    id={`provider-model-cost-${field.key}`}
-                    class="font-technical"
-                    inputmode="decimal"
-                    bind:value={cost.base[field.key]}
-                    placeholder="0.00" />
-                </Field.Field>
-              {/each}
-            </div>
-          </div>
-          {#each cost.tiers as tier, index (tier)}
-            <div class="rounded-lg border p-3">
-              <div class="mb-3 flex items-end justify-between gap-3">
-                <Field.Field class="max-w-64">
-                  <Field.Label for={`provider-model-tier-${index}`}
-                    >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
-                  <Input
-                    id={`provider-model-tier-${index}`}
-                    type="number"
-                    min="0"
-                    step="1"
-                    class="font-technical"
-                    bind:value={tier.threshold} />
-                </Field.Field>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={m.provider_model_editor_remove_tier()}
-                  onclick={() => removeTier(index)}><Trash2Icon /></Button>
-              </div>
-              <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                {#each visiblePriceFields as field (field.key)}
-                  <Field.Field>
-                    <Field.Label for={`provider-model-tier-${index}-${field.key}`}>{field.label()}</Field.Label>
-                    <Input
-                      id={`provider-model-tier-${index}-${field.key}`}
-                      class="font-technical"
-                      inputmode="decimal"
-                      bind:value={tier[field.key]}
-                      placeholder="0.00" />
-                  </Field.Field>
-                {/each}
-              </div>
-            </div>
-          {/each}
-          <Button type="button" variant="outline" size="xs" onclick={addTier}
-            ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
-        {:else}
-          <Button type="button" variant="outline" size="xs" onclick={() => (metadata.cost = { tiers: [] })}
-            ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
-        {/if}
-      </section>
-
-      {#if extensionEntries.length > 0}
-        <Collapsible.Root class="rounded-lg border p-3" bind:open={extensionsOpen}>
-          <Collapsible.Trigger type="button" class="w-full text-left"
-            >{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}</Collapsible.Trigger>
-          <Collapsible.Content>
-            <pre
-              class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-technical text-xs">{JSON.stringify(
-                detail.extensions,
-                null,
-                2,
-              )}</pre>
-          </Collapsible.Content>
-        </Collapsible.Root>
+  <section class="flex flex-col gap-3 border-t pt-4">
+    <div class="flex items-center justify-between gap-3">
+      <div>
+        <h4 class="text-sm font-semibold">{m.provider_model_editor_pricing()}</h4>
+        <p class="text-xs text-muted-foreground">
+          {m.provider_model_editor_pricing_unit_help()}
+        </p>
+      </div>
+      {#if hasField('cost')}
+        <Button type="button" variant="ghost" size="sm" onclick={() => removeField('cost')}
+          ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
       {/if}
-    </Collapsible.Content>
-  </Collapsible.Root>
+    </div>
+    {#if hasField('cost')}
+      <div>
+        <p class="mb-3 text-sm font-medium">{m.provider_model_editor_base_pricing()}</p>
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {#each priceFields as field (field.key)}
+            <Field.Field>
+              <Field.Label for={`provider-model-cost-${field.key}`}>{field.label()}</Field.Label>
+              <Input
+                id={`provider-model-cost-${field.key}`}
+                class="font-technical"
+                inputmode="decimal"
+                bind:value={cost.base[field.key]}
+                placeholder="0.00" />
+            </Field.Field>
+          {/each}
+        </div>
+      </div>
+      {#each cost.tiers as tier, index (tier)}
+        <div class="border-t pt-4">
+          <div class="mb-3 flex items-end justify-between gap-3">
+            <Field.Field class="max-w-64">
+              <Field.Label for={`provider-model-tier-${index}`}
+                >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
+              <Input
+                id={`provider-model-tier-${index}`}
+                type="number"
+                min="0"
+                step="1"
+                class="font-technical"
+                bind:value={tier.threshold} />
+            </Field.Field>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={m.provider_model_editor_remove_tier()}
+              onclick={() => removeTier(index)}><Trash2Icon /></Button>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {#each priceFields as field (field.key)}
+              <Field.Field>
+                <Field.Label for={`provider-model-tier-${index}-${field.key}`}>{field.label()}</Field.Label>
+                <Input
+                  id={`provider-model-tier-${index}-${field.key}`}
+                  class="font-technical"
+                  inputmode="decimal"
+                  bind:value={tier[field.key]}
+                  placeholder="0.00" />
+              </Field.Field>
+            {/each}
+          </div>
+        </div>
+      {/each}
+      <Button type="button" variant="outline" size="xs" onclick={addTier}
+        ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
+    {:else}
+      <Button type="button" variant="outline" size="xs" onclick={() => (metadata.cost = { tiers: [] })}
+        ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
+    {/if}
+  </section>
 
-  {#if semanticWarnings.length > 0}
-    <Alert.Root variant="warning" role="status">
-      <Alert.Title>{m.provider_model_editor_review_saving()}</Alert.Title>
-      <Alert.Description
-        ><ul class="list-disc pl-5">
-          {#each semanticWarnings as warning (warning)}<li>{warning}</li>{/each}
-        </ul></Alert.Description>
-    </Alert.Root>
+  {#if extensionEntries.length > 0}
+    <Collapsible.Root class="rounded-lg border p-3" bind:open={extensionsOpen}>
+      <Collapsible.Trigger type="button" class="w-full text-left"
+        >{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}</Collapsible.Trigger>
+      <Collapsible.Content>
+        <pre
+          class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-technical text-xs">{JSON.stringify(
+            detail.extensions,
+            null,
+            2,
+          )}</pre>
+      </Collapsible.Content>
+    </Collapsible.Root>
   {/if}
+
   {#if structuralErrors.length > 0}
     <Alert.Root bind:ref={errorAlert} tabindex={-1} variant="destructive" role="alert">
       <Alert.Title>{m.provider_model_editor_cannot_save()}</Alert.Title>

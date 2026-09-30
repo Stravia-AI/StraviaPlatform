@@ -45,7 +45,7 @@ def _create_route(env: dict[str, Any], name: str) -> tuple[str, str]:
     status, body = http_request(
         "POST",
         f"{env['admin']}/api/v1/providers/{provider_id}/models",
-        payload={"model_id": "gpt-4o-mini", "metadata": {"name": name, "tool_call": True}},
+        payload={"model_id": "gpt-4o-mini", "metadata": {"name": name}},
         headers=env["auth"],
     )
     assert status == 201, body

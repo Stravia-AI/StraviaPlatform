@@ -79,7 +79,6 @@ def wire_route(env: dict[str, Any], url: str, protocol: str, model: str) -> str:
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/providers/{provider_id}/models", headers=env["auth"],
         payload={"model_id": "wire-model", "metadata": {
-            "tool_call": True,
             "modalities": {"input": ["text", "image"], "output": ["text"]},
         }},
     )

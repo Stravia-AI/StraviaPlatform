@@ -651,18 +651,13 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     metadata = {
         "id": model_id,
         "name": "Saved specification model",
-        "attachment": True,
-        "reasoning": False,
-        "structured_output": None,
-        "temperature": True,
+        "reasoning_efforts": ["none", "low", "high", "custom-effort"],
         "modalities": {
             "input": ["text", "image", "pdf"],
             "output": ["text", "audio", "custom-output"],
         },
         "limit": {
             "context": 1_050_000,
-            "input": 1_048_576,
-            "output": 65_537,
         },
     }
 
@@ -677,18 +672,12 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     expected_specification = {
         "limit": {
             "context": 1_050_000,
-            "input": 1_048_576,
-            "output": 65_537,
         },
         "modalities": {
             "input": ["text", "image", "pdf"],
             "output": ["text", "audio", "custom-output"],
         },
-        "reasoning": False,
-        "tool_call": None,
-        "structured_output": None,
-        "attachment": True,
-        "temperature": True,
+        "reasoning_efforts": ["none", "low", "high", "custom-effort"],
     }
 
     status, listed = http_request(
@@ -708,11 +697,7 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     assert unknown_summary["specification"] == {
         "limit": None,
         "modalities": None,
-        "reasoning": None,
-        "tool_call": None,
-        "structured_output": None,
-        "attachment": None,
-        "temperature": None,
+        "reasoning_efforts": None,
     }
 
     status, detail = http_request(
@@ -728,15 +713,9 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
 
     revised_metadata = {
         **metadata,
-        "attachment": False,
-        "reasoning": True,
-        "tool_call": True,
-        "structured_output": False,
-        "temperature": None,
+        "reasoning_efforts": ["minimal", "medium", "max"],
         "limit": {
             "context": 1_048_576,
-            "input": 65_537,
-            "output": 1_050_000,
         },
     }
     status, updated = http_request(
@@ -753,11 +732,7 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     revised_specification = {
         **expected_specification,
         "limit": revised_metadata["limit"],
-        "reasoning": True,
-        "tool_call": True,
-        "structured_output": False,
-        "attachment": False,
-        "temperature": None,
+        "reasoning_efforts": revised_metadata["reasoning_efforts"],
     }
     assert updated["data"]["revision"] > saved["revision"]
     assert {

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 struct ClientModelCapabilities {
     context_window: Option<u64>,
-    output_max_tokens: Option<u64>,
     supports_image_input: bool,
 }
 
@@ -238,7 +237,6 @@ impl RouteModule<'_> {
                     key,
                     ClientModelCapabilities {
                         context_window: limits.context,
-                        output_max_tokens: limits.output,
                         supports_image_input: modalities
                             .input
                             .iter()
@@ -252,10 +250,6 @@ impl RouteModule<'_> {
             route.context_window =
                 common_target_limit(&route.targets, &capabilities_by_target, |capabilities| {
                     capabilities.context_window
-                });
-            route.output_max_tokens =
-                common_target_limit(&route.targets, &capabilities_by_target, |capabilities| {
-                    capabilities.output_max_tokens
                 });
             route.supports_image_input =
                 all_targets_support_image_input(&route.targets, &capabilities_by_target);

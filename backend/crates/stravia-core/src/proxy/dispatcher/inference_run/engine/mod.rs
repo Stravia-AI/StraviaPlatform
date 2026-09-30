@@ -1076,7 +1076,6 @@ async fn acquire_turn(
     request: &AiRequest,
     request_context: &RequestContext,
     ledger: &RunLedger,
-    inference_run: &mut crate::hook::InferenceRun,
     generation: &mut GenerationChainRun,
 ) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
@@ -1101,7 +1100,7 @@ async fn acquire_turn(
         input
     };
 
-    let mut effective_request = request.clone();
+    let effective_request = request.clone();
     use tracing::Instrument as _;
     let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.acquire", status = tracing::field::Empty);
     let first_attempt = executor
@@ -1117,31 +1116,7 @@ async fn acquire_turn(
         },
     );
     drop(span);
-    let turn = match first_attempt {
-        Ok(turn) => turn,
-        Err(error)
-            if error.code == "tools_unsupported"
-                && !stravia_web_search::native_web_search_requested(&effective_request)
-                && !stravia_protocol_codec::codec::compaction::native_compaction_requested(
-                    &effective_request,
-                ) =>
-        {
-            let original_tools = effective_request.tools.clone();
-            inference_run.remove_exposed_tools(&mut effective_request);
-            if effective_request.tools == original_tools {
-                return Err(model_turn_execute_failure(error));
-            }
-            let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.acquire", status = tracing::field::Empty);
-            let retry = executor
-                .execute(make_input(effective_request.clone()))
-                .instrument(span.clone())
-                .await;
-            span.record("status", if retry.is_ok() { "completed" } else { "error" });
-            drop(span);
-            retry.map_err(model_turn_execute_failure)?
-        }
-        Err(error) => return Err(model_turn_execute_failure(error)),
-    };
+    let turn = first_attempt.map_err(model_turn_execute_failure)?;
     if let Some(write) = generation.write.as_mut() {
         write.observe_effective(effective_request.clone());
     }
@@ -1168,7 +1143,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         request,
         request_context,
         ledger,
-        inference_run.as_mut().expect("buffered Inference Run"),
         &mut generation,
     )
     .await

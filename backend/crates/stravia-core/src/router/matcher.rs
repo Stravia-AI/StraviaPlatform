@@ -38,7 +38,6 @@ mod tests {
             created_at: String::new(),
             supported_thinking_levels: Vec::new(),
             context_window: None,
-            output_max_tokens: None,
             supports_image_input: false,
             targets: Vec::new(),
             default_thinking_level: None,

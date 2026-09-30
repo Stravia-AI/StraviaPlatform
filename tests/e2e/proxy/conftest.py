@@ -143,15 +143,10 @@ def _configure_proxy_routes(
 
     for protocol in PROTOCOLS:
         for replay_model in replay_models.get(protocol, []):
-            metadata = (
-                {"reasoning_options": [{"type": "budget_tokens"}]}
-                if protocol == "anthropic-messages"
-                else {}
-            )
             status, body = http_request(
                 "POST",
                 f"{admin_base}/api/v1/providers/{provider_ids[protocol]}/models",
-                payload={"model_id": replay_model, "metadata": metadata},
+                payload={"model_id": replay_model, "metadata": {}},
                 headers=admin_headers,
             )
             assert status == 201, f"create replay provider model failed: {status} {body}"

@@ -465,7 +465,6 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     );
     assert!(second.targets[0].enabled);
     assert_eq!(second.context_window, Some(200_000));
-    assert_eq!(second.output_max_tokens, Some(32_000));
     assert!(second.supports_image_input);
     Ok(())
 }
@@ -550,7 +549,6 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
     );
     // 能力元数据经宽松匹配解析成功
     assert_eq!(route.context_window, Some(131_072));
-    assert_eq!(route.output_max_tokens, Some(16_384));
     assert!(!route.supports_image_input);
     Ok(())
 }
@@ -872,10 +870,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
                 template_id: None,
                 metadata: json!({
                     "id": "effort-model",
-                    "reasoning_options": [{
-                        "type": "effort",
-                        "values": ["none", "low", "high", "max"]
-                    }]
+                    "reasoning_efforts": ["none", "low", "high", "max"]
                 }),
             },
         )
@@ -980,10 +975,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
                 template_id: None,
                 metadata: json!({
                     "id": "max-effort-model",
-                    "reasoning_options": [{
-                        "type": "effort",
-                        "values": ["none", "max"]
-                    }]
+                    "reasoning_efforts": ["none", "max"]
                 }),
             },
         )
@@ -1024,7 +1016,7 @@ async fn create_toggle_route(
     model: &str,
     protocol: &str,
     capabilities: &[&str],
-    reasoning: Option<bool>,
+    submit_toggle: bool,
 ) -> anyhow::Result<RouteConfig> {
     let data_dir = tempfile::tempdir()?;
     let gateway = Gateway::from_storage(
@@ -1066,8 +1058,6 @@ async fn create_toggle_route(
                 template_id: None,
                 metadata: json!({
                     "id": model,
-                    "reasoning": reasoning,
-                    "reasoning_options": [{"type": "toggle"}],
                     "capabilities": capabilities,
                 }),
             },
@@ -1087,7 +1077,24 @@ async fn create_toggle_route(
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
-                thinking_level_map: Vec::new(),
+                thinking_level_map: if submit_toggle {
+                    vec![
+                        crate::thinking::ThinkingLevelMapping {
+                            level: ThinkingLevel::Off,
+                            control:
+                                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled,
+                            source: ThinkingMappingSource::Overridden,
+                        },
+                        crate::thinking::ThinkingLevelMapping {
+                            level: ThinkingLevel::Medium,
+                            control:
+                                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled,
+                            source: ThinkingMappingSource::Overridden,
+                        },
+                    ]
+                } else {
+                    Vec::new()
+                },
             }],
             default_thinking_level: None,
         })
@@ -1096,7 +1103,7 @@ async fn create_toggle_route(
 
 #[tokio::test]
 async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Result<()> {
-    let route = create_toggle_route("xiaomi", "mimo-v2.5", "openai-compatible", &[], None).await?;
+    let route = create_toggle_route("xiaomi", "mimo-v2.5", "openai-compatible", &[], true).await?;
 
     assert_eq!(
         route.supported_thinking_levels,
@@ -1112,7 +1119,7 @@ async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow
         "custom-toggle-model",
         "openai-compatible",
         &[],
-        None,
+        false,
     )
     .await?;
 
@@ -1134,7 +1141,7 @@ async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::
         "unknown-wire-toggle-model",
         "vendor-private-wire",
         &[],
-        None,
+        false,
     )
     .await?;
 
@@ -1151,39 +1158,33 @@ async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::
 #[tokio::test]
 async fn model_capability_declaration_authorizes_compatible_toggle_controls() -> anyhow::Result<()>
 {
+    let generated = create_toggle_route(
+        "openai-compatible",
+        "declared-toggle-model",
+        "openai-compatible",
+        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
+        false,
+    )
+    .await?;
+    assert!(generated.supported_thinking_levels.is_empty());
+    assert!(
+        generated.targets[0]
+            .thinking_level_map
+            .iter()
+            .all(|row| row.control.is_hidden())
+    );
     let route = create_toggle_route(
         "openai-compatible",
         "declared-toggle-model",
         "openai-compatible",
         &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
-        None,
+        true,
     )
     .await?;
 
     assert_eq!(
         route.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn reasoning_false_rejects_declared_toggle_controls() -> anyhow::Result<()> {
-    let route = create_toggle_route(
-        "xiaomi",
-        "non-reasoning-model",
-        "openai-compatible",
-        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
-        Some(false),
-    )
-    .await?;
-
-    assert!(route.supported_thinking_levels.is_empty());
-    assert!(
-        route.targets[0]
-            .thinking_level_map
-            .iter()
-            .all(|row| row.control.is_hidden())
     );
     Ok(())
 }
@@ -1231,8 +1232,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             CreateManualProviderModel {
                 template_id: None,
                 metadata: json!({
-                    "id": "custom-toggle-model",
-                    "reasoning_options": [{"type": "toggle"}]
+                    "id": "custom-toggle-model"
                 }),
             },
         )
@@ -1329,10 +1329,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
                 template_id: None,
                 metadata: json!({
                     "id": "gemini-effort-model",
-                    "reasoning_options": [{
-                        "type": "effort",
-                        "values": ["low", "high"]
-                    }]
+                    "reasoning_efforts": ["low", "high"]
                 }),
             },
         )
@@ -1368,19 +1365,17 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    for (model, values, context, output, input_modalities) in [
+    for (model, values, context, input_modalities) in [
         (
             "wide-effort-model",
             vec!["none", "low", "high", "max"],
             200_000,
-            64_000,
             vec!["text", "image"],
         ),
         (
             "narrow-effort-model",
             vec!["low", "high"],
             128_000,
-            32_000,
             vec!["text"],
         ),
     ] {
@@ -1392,13 +1387,9 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                     template_id: None,
                     metadata: json!({
                         "id": model,
-                        "reasoning_options": [{
-                            "type": "effort",
-                            "values": values
-                        }],
+                        "reasoning_efforts": values,
                         "limit": {
-                            "context": context,
-                            "output": output
+                            "context": context
                         },
                         "modalities": {
                             "input": input_modalities,
@@ -1452,7 +1443,6 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
         ]
     );
     assert_eq!(route.context_window, Some(128_000));
-    assert_eq!(route.output_max_tokens, Some(32_000));
     assert!(!route.supports_image_input);
     Ok(())
 }
@@ -1485,7 +1475,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
                 template_id: None,
                 metadata: json!({
                     "id": "toggle-model",
-                    "reasoning_options": [{"type": "toggle"}]
+                    "reasoning_efforts": ["none", "medium"]
                 }),
             },
         )
@@ -1535,12 +1525,27 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         ]
     );
 
+    assert_eq!(
+        updated.targets[0]
+            .thinking_level_map
+            .iter()
+            .find(|row| row.level == ThinkingLevel::High)
+            .expect("high row")
+            .source,
+        ThinkingMappingSource::Overridden
+    );
     let regenerated = admin
         .regenerate_target_thinking_map(&route.model_id, &updated.targets[0].id)
         .await?;
     assert_eq!(
         regenerated.supported_thinking_levels,
         vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+    );
+    assert!(
+        regenerated.targets[0]
+            .thinking_level_map
+            .iter()
+            .all(|row| row.source == ThinkingMappingSource::Generated)
     );
     Ok(())
 }

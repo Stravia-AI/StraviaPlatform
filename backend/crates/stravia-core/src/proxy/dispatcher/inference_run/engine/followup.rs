@@ -225,7 +225,6 @@ pub(super) async fn acquire_followup_model_turn(
         request,
         request_context,
         ledger,
-        inference_run,
         generation,
     )
     .await?;

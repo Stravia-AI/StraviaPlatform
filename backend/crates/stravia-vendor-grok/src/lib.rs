@@ -382,7 +382,10 @@ fn discovered_model(value: &Value) -> Result<DiscoveredModel, PluginError> {
         .and_then(Value::as_str)
         .unwrap_or(&id)
         .to_owned();
-    let metadata = value.as_object().cloned().unwrap_or_default();
+    let metadata = value
+        .as_object()
+        .map(stravia_vendor_common::thinking::source_metadata)
+        .unwrap_or_default();
     let mut model = DiscoveredModel {
         id,
         display_name,

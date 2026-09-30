@@ -482,7 +482,7 @@ async fn media_test_app_with_answer(
             crate::provider_models::CreateManualProviderModel {
                 metadata: json!({
                     "id": "vision",
-                    "attachment": true,
+                    "reasoning_efforts": ["medium"],
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
                 template_id: None,

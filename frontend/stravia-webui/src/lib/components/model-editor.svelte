@@ -1036,16 +1036,12 @@ async function saveModel(): Promise<void> {
                                     : 'warning'} />
                             {/if}
                           </div>
-                          {#if issueLabels.length > 0 || summary}
-                            <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
-                              {#each issueLabels as label (label)}
-                                <Badge variant="destructive">{label}</Badge>
-                              {/each}
-                              {#if summary}<ModelSpecification
-                                  specification={summary.specification}
-                                  density="target" />{/if}
-                            </div>
-                          {/if}
+                          <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
+                            {#each issueLabels as label (label)}
+                              <Badge variant="destructive">{label}</Badge>
+                            {/each}
+                            <ModelSpecification specification={summary?.specification ?? {}} density="target" />
+                          </div>
                         </div>
                       {/each}
                       {#if isDraggingTarget}

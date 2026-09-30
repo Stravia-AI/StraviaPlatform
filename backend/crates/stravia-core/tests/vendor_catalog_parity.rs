@@ -275,7 +275,7 @@ async fn editor_created_provider_imports_scoped_reasoning_levels() -> anyhow::Re
         .await?;
     assert_eq!(
         stravia_core::thinking::visible_levels(&toggle.thinking_level_map),
-        [ThinkingLevel::Off, ThinkingLevel::Medium]
+        []
     );
     gw.shutdown().await;
     drop(gw);
@@ -285,8 +285,8 @@ async fn editor_created_provider_imports_scoped_reasoning_levels() -> anyhow::Re
         .get_provider_model(&provider.id, "glm-5.3")
         .await?;
     assert_eq!(
-        persisted.metadata.reasoning_options,
-        model.metadata.reasoning_options
+        persisted.metadata.reasoning_efforts,
+        model.metadata.reasoning_efforts
     );
     reopened.shutdown().await;
     Ok(())
@@ -325,7 +325,7 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
         };
         let mut metadata = json!({"id": model_id, "reasoning": true});
         if edited {
-            metadata["reasoning_options"] = json!([{"type": "effort", "values": ["high"]}]);
+            metadata["reasoning_efforts"] = json!(["high"]);
         }
         gw.storage
             .provider_models()

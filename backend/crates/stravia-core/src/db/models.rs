@@ -117,7 +117,6 @@ pub struct RouteConfig {
     pub created_at: String,
     pub supported_thinking_levels: Vec<ThinkingLevel>,
     pub context_window: Option<u64>,
-    pub output_max_tokens: Option<u64>,
     pub supports_image_input: bool,
     pub targets: Vec<TargetConfig>,
 }
@@ -176,7 +175,6 @@ pub struct RouteView<'a> {
     pub created_at: &'a str,
     pub supported_thinking_levels: &'a [ThinkingLevel],
     pub context_window: Option<u64>,
-    pub output_max_tokens: Option<u64>,
     pub supports_image_input: bool,
     #[serde(serialize_with = "serialize_target_views")]
     pub targets: &'a [TargetConfig],
@@ -204,7 +202,6 @@ impl<'a> From<&'a RouteConfig> for RouteView<'a> {
             created_at: &route.created_at,
             supported_thinking_levels: &route.supported_thinking_levels,
             context_window: route.context_window,
-            output_max_tokens: route.output_max_tokens,
             supports_image_input: route.supports_image_input,
             targets: &route.targets,
         }
@@ -869,9 +866,6 @@ pub struct ModelCapabilities {
     pub model_id: String,
     pub context_window: u64,
     pub embedding_length: Option<u64>,
-    pub output_max_tokens: Option<u64>,
-    pub tool_call: bool,
-    pub reasoning: bool,
     pub input_modalities: Vec<String>,
     pub output_modalities: Vec<String>,
     pub input_cost: Option<f64>,

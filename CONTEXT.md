@@ -534,7 +534,7 @@ _避免使用_：reasoningEffortMap、Reasoning Options Map、Route Thinking Map
 
 ## Generated Mapping
 
-Generated Mapping 是 Thinking Level Map 中仍由 Provider Model 快照的 reasoning_options 推导、可在该快照显式 re-import 时重算的一行。
+Generated Mapping 是 Thinking Level Map 中仍由 Provider Model 快照明确登记的 Effort 值推导、可在该快照显式 re-import 时重算的一行。未登记 Effort 时，不推测可用档位。
 _避免使用_：Synced Mapping、Catalog Mapping
 
 ## Overridden Mapping
@@ -549,7 +549,7 @@ _避免使用_：Omitted Mapping、Null Level、Unsupported Level（当指对照
 
 ## Supported Thinking Levels
 
-Supported Thinking Levels 是一条 Route 的所有已启用 Target 非 Hidden Mapping 的并集，供管理面、模型发现面及客户端配置导出展示至少一个已启用 Target 支持的等级；无已启用 Target 时为空。它不由管理员单独配置，也不是请求执行的准入集合或钳制集合；实际档位仍按选中 Target 的映射匹配，不保证每个 Target 都提供同一档位。它不是 catalog 的 reasoning_options，也不是对照表里的上游值。
+Supported Thinking Levels 是一条 Route 的所有已启用 Target 非 Hidden Mapping 的并集，供管理面、模型发现面及客户端配置导出展示至少一个已启用 Target 支持的等级；无已启用 Target 时为空。它不由管理员单独配置，也不是请求执行的准入集合或钳制集合；实际档位仍按选中 Target 的映射匹配，不保证每个 Target 都提供同一档位。它不是 Provider Model 登记的 Effort 值列表，也不是对照表里的上游值。
 _避免使用_：Advertised Thinking Levels、Visible Thinking Levels、Supported Reasoning
 
 ## Default Thinking Level

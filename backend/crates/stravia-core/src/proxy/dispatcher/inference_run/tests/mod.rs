@@ -1300,13 +1300,14 @@ async fn configure_route_with_protocol(
     protocol: &str,
 ) -> String {
     let mut targets = Vec::with_capacity(base_urls.len());
-    let reasoning_options = match protocol {
-        "open-responses" => Some(serde_json::json!([{
-            "type": "effort",
-            "values": ["none", "low", "medium", "high", "xhigh"]
-        }])),
-        "anthropic-messages" => Some(serde_json::json!([{"type": "toggle"}])),
-        _ => None,
+    let reasoning_efforts = match protocol {
+        "open-responses" => Some(serde_json::json!([
+            "none", "low", "medium", "high", "xhigh"
+        ])),
+        "anthropic-messages" => None,
+        _ => Some(serde_json::json!([
+            "none", "minimal", "low", "medium", "high"
+        ])),
     };
     for (priority, base_url) in base_urls.iter().enumerate() {
         let mut vendor_options = serde_json::Map::new();
@@ -1355,8 +1356,7 @@ async fn configure_route_with_protocol(
                 crate::provider_models::CreateManualProviderModel {
                     metadata: serde_json::json!({
                         "id": "provider-model",
-                        "tool_call": true,
-                        "reasoning_options": reasoning_options.clone()
+                        "reasoning_efforts": reasoning_efforts.clone()
                     }),
                     template_id: None,
                 },
@@ -1371,7 +1371,24 @@ async fn configure_route_with_protocol(
             first_token_timeout_ms: None,
             target_retry_budget: Some(0),
             target_cooldown_ms: None,
-            thinking_level_map: Vec::new(),
+            thinking_level_map: if protocol == "anthropic-messages" {
+                use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
+                use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+                vec![
+                    ThinkingLevelMapping {
+                        level: ThinkingLevel::Off,
+                        control: TargetThinkingControl::Disabled,
+                        source: ThinkingMappingSource::Overridden,
+                    },
+                    ThinkingLevelMapping {
+                        level: ThinkingLevel::Medium,
+                        control: TargetThinkingControl::Enabled,
+                        source: ThinkingMappingSource::Overridden,
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
         });
     }
     gateway

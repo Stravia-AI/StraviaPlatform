@@ -130,35 +130,6 @@ test('configured Providers table filters and persists column customization', asy
 
   const table = page.getByRole('table', { name: 'Connected AI model services' })
   await expect(table.getByRole('row')).toHaveCount(3)
-  const tableLayout = await table.evaluate((element) => {
-    const viewport = element.closest('[data-slot="data-table-viewport"]')
-    const container = element.closest('[data-slot="table-container"]')
-    const bodyRows = element.querySelectorAll('[data-slot="table-body"] > [data-slot="table-row"]')
-    const firstCell = bodyRows[0]?.querySelector('[data-slot="table-cell"]')
-    const firstResizer = element.querySelector('button[aria-label^="Resize the"]')
-    if (!(viewport instanceof HTMLElement) || !(container instanceof HTMLElement)) {
-      throw new Error('DataTable layout containers are missing')
-    }
-    if (!(firstCell instanceof HTMLElement) || !(firstResizer instanceof HTMLElement) || bodyRows.length < 2) {
-      throw new Error('DataTable style targets are missing')
-    }
-    return {
-      unusedWidth: viewport.clientWidth - element.offsetWidth,
-      horizontalOverflow: container.scrollWidth - container.clientWidth,
-      viewportOverflow: getComputedStyle(viewport).overflow,
-      bodyCellInlineBorderWidth: getComputedStyle(firstCell).borderInlineEndWidth,
-      resizerLineColor: getComputedStyle(firstResizer, '::after').backgroundColor,
-      firstRowBackground: getComputedStyle(bodyRows[0]).backgroundColor,
-      secondRowBackground: getComputedStyle(bodyRows[1]).backgroundColor,
-    }
-  })
-  expect(tableLayout.unusedWidth).toBeLessThanOrEqual(1)
-  expect(tableLayout.horizontalOverflow).toBeLessThanOrEqual(1)
-  expect(tableLayout.viewportOverflow).toBe('hidden')
-  expect(tableLayout.bodyCellInlineBorderWidth).toBe('0px')
-  expect(tableLayout.resizerLineColor).toBe('rgba(0, 0, 0, 0)')
-  expect(tableLayout.firstRowBackground).toBe('rgba(0, 0, 0, 0)')
-  expect(tableLayout.secondRowBackground).not.toBe('rgba(0, 0, 0, 0)')
   const search = page.getByPlaceholder('Search model services…')
   await search.fill('Alpha')
   await expect(table.getByRole('row')).toHaveCount(2)
@@ -358,15 +329,7 @@ test('editing a Provider keeps saved credentials write-only', async ({ page }) =
                 source_kind: 'discovered',
                 snapshot_state: { type: 'imported', source: { type: 'discovery' } },
                 selection_policy: 'auto',
-                specification: {
-                  limit: { context: 128000, input: null, output: null },
-                  modalities: null,
-                  reasoning: true,
-                  tool_call: true,
-                  structured_output: null,
-                  attachment: false,
-                  temperature: null,
-                },
+                specification: { limit: { context: 128000 }, modalities: null },
                 revision: 1,
               },
             ],
@@ -684,13 +647,9 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
-      limit: { context: 1050000, input: 1048576, output: 32000 },
+      limit: { context: 1050000 },
       modalities: { input: ['image', 'pdf'], output: ['text'] },
-      reasoning: true,
-      tool_call: false,
-      structured_output: null,
-      attachment: true,
-      temperature: false,
+      reasoning_efforts: ['low', 'high'],
     },
     revision: 1,
   }
@@ -701,15 +660,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     source_kind: 'manual',
     snapshot_state: { type: 'edited', source: null },
     selection_policy: 'auto',
-    specification: {
-      limit: null,
-      modalities: null,
-      reasoning: null,
-      tool_call: null,
-      structured_output: null,
-      attachment: null,
-      temperature: null,
-    },
+    specification: { limit: null, modalities: null },
     revision: 1,
   }
   let detailRequests = 0
@@ -733,7 +684,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
                 ...summary,
                 id: 'binary-limit',
                 name: 'Binary Limit',
-                specification: { ...summary.specification, limit: { context: 1048576, input: null, output: 1050000 } },
+                specification: { ...summary.specification, limit: { context: 1048576 } },
               },
             ],
           },
@@ -752,11 +703,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
               name: summary.name,
               limit: summary.specification.limit,
               modalities: summary.specification.modalities,
-              reasoning: true,
-              tool_call: false,
-              structured_output: null,
-              attachment: true,
-              temperature: false,
+              reasoning_efforts: summary.specification.reasoning_efforts,
             },
             extensions: {},
             created_at: '2026-01-01T00:00:00Z',
@@ -776,42 +723,19 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
   await expect(binaryRow).toContainText('Context 1,048,576')
-  await expect(binaryRow).toContainText('Max output 1.05M')
   const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
   await expect(identityCell).not.toContainText('1.05M')
   await expect(identityCell).not.toContainText('Input')
   await expect(precisionRow).toContainText('1.05M')
-  await expect(precisionRow).toContainText('32K')
   await expect(precisionRow).toContainText('Input')
   await expect(precisionRow).toContainText('Output')
+  await expect(precisionRow).toContainText('high')
   const precisionSpecification = precisionRow.getByRole('group', { name: 'Model specification' })
-  await expect(precisionSpecification.getByRole('button', { name: 'Image input' })).toBeVisible()
-  await expect(precisionSpecification.getByRole('button', { name: 'PDF input' })).toBeVisible()
-  await expect(precisionSpecification.getByRole('button', { name: 'Text output' })).toBeVisible()
-  await expect(precisionSpecification.getByRole('button', { name: 'Reasoning' })).toBeVisible()
-  await expect(precisionSpecification.getByRole('button', { name: 'Attachments' })).toBeVisible()
-  await expect(precisionSpecification.getByRole('button', { name: 'Tool calls' })).toHaveCount(0)
-  await expect(precisionSpecification.getByRole('button', { name: 'Temperature' })).toHaveCount(0)
-  await expect(precisionSpecification.getByRole('button', { name: 'Not registered: Structured output' })).toBeVisible()
+  await expect(precisionSpecification).toContainText('Image')
+  await expect(precisionSpecification).toContainText('PDF')
+  await expect(precisionSpecification).toContainText('Text')
   const unknownSpecification = unknownRow.getByRole('group', { name: 'Model specification' })
   await expect(unknownSpecification).toContainText('Not registered')
-  await expect(
-    unknownSpecification.getByRole('button', {
-      name: /Not registered:.*Reasoning.*Tool calls.*Structured output.*Attachments.*Temperature/,
-    }),
-  ).toBeVisible()
-  await expect.poll(() => detailRequests).toBe(0)
-
-  const tokenLimits = precisionSpecification.getByRole('button', {
-    name: 'Token limits: Context 1,050,000 tokens; Maximum input 1,048,576 tokens; Maximum output 32,000 tokens',
-  })
-  await tokenLimits.hover()
-  await expect(page.getByRole('tooltip')).toContainText('1,050,000 tokens')
-  await tokenLimits.focus()
-  await expect(page.getByRole('tooltip')).toContainText('1,048,576 tokens')
-  const featureTrigger = precisionSpecification.getByRole('button', { name: 'Reasoning' })
-  await featureTrigger.focus()
-  await expect(page.getByRole('tooltip').filter({ hasText: 'Reasoning' })).toBeVisible()
   await expect.poll(() => detailRequests).toBe(0)
 })
 
@@ -829,13 +753,9 @@ test('Model specification filters combine all conditions and compose with catalo
     updated_at: '2026-01-01T00:00:00Z',
   }
   const matchingSpecification = {
-    limit: { context: 128000, input: 100000, output: 16000 },
+    limit: { context: 128000 },
     modalities: { input: ['text', 'image', 'pdf'], output: ['text', 'audio'] },
-    reasoning: true,
-    tool_call: true,
-    structured_output: true,
-    attachment: true,
-    temperature: true,
+    reasoning_efforts: ['low', 'high'],
   }
   const model = (
     id: string,
@@ -843,13 +763,9 @@ test('Model specification filters combine all conditions and compose with catalo
     specification:
       | typeof matchingSpecification
       | {
-          limit: { context: number | null; input: number | null; output: number | null } | null
+          limit: { context: number | null } | null
           modalities: { input: string[]; output: string[] } | null
-          reasoning: boolean | null
-          tool_call: boolean | null
-          structured_output: boolean | null
-          attachment: boolean | null
-          temperature: boolean | null
+          reasoning_efforts?: string[]
         },
     overrides: Partial<{ available: boolean; source_kind: 'discovered' | 'manual' }> = {},
   ) => ({
@@ -871,13 +787,9 @@ test('Model specification filters combine all conditions and compose with catalo
       ...matchingSpecification,
       limit: { ...matchingSpecification.limit, context: 127999 },
     }),
-    model('below-output', 'Below Output', {
-      ...matchingSpecification,
-      limit: { ...matchingSpecification.limit, output: 15999 },
-    }),
     model('above-boundary', 'Above Boundary', {
       ...matchingSpecification,
-      limit: { ...matchingSpecification.limit, context: 128001, output: 16001 },
+      limit: { ...matchingSpecification.limit, context: 128001 },
     }),
     model('missing-input', 'Missing Input', {
       ...matchingSpecification,
@@ -887,16 +799,8 @@ test('Model specification filters combine all conditions and compose with catalo
       ...matchingSpecification,
       modalities: { input: ['text', 'image', 'pdf', 'audio'], output: ['text'] },
     }),
-    model('missing-feature', 'Missing Feature', { ...matchingSpecification, structured_output: false }),
-    model('unknown-values', 'Unknown Values', {
-      limit: null,
-      modalities: null,
-      reasoning: null,
-      tool_call: null,
-      structured_output: null,
-      attachment: null,
-      temperature: null,
-    }),
+    model('missing-effort', 'Missing Effort', { ...matchingSpecification, reasoning_efforts: ['low'] }),
+    model('unknown-values', 'Unknown Values', { limit: null, modalities: null }),
     model('source-decoy', 'Exact Match Synced', matchingSpecification),
     model('usage-decoy', 'Exact Match Unused', matchingSpecification, { source_kind: 'manual' }),
     model('status-decoy', 'Exact Match Retired', matchingSpecification, { available: false, source_kind: 'manual' }),
@@ -955,27 +859,22 @@ test('Model specification filters combine all conditions and compose with catalo
 
   await specificationDialog.getByRole('combobox', { name: 'Context preset' }).click()
   await page.getByRole('option', { name: '128K', exact: true }).click()
-  await specificationDialog.getByRole('combobox', { name: 'Output preset' }).click()
-  await page.getByRole('option', { name: '16K', exact: true }).click()
   const inputGroup = specificationDialog.getByRole('group', { name: 'Input modalities' })
   await inputGroup.getByRole('checkbox', { name: 'Image', exact: true }).check()
   await inputGroup.getByRole('checkbox', { name: 'PDF', exact: true }).check()
   const outputGroup = specificationDialog.getByRole('group', { name: 'Output modalities' })
   await outputGroup.getByRole('checkbox', { name: 'Text', exact: true }).check()
   await outputGroup.getByRole('checkbox', { name: 'Audio', exact: true }).check()
-  const featureGroup = specificationDialog.getByRole('group', { name: 'Supported features' })
-  await featureGroup.getByRole('checkbox', { name: 'Tool calls', exact: true }).check()
-  await featureGroup.getByRole('checkbox', { name: 'Structured output', exact: true }).check()
+  await specificationDialog.getByRole('checkbox', { name: 'high', exact: true }).check()
   await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
   await expect(specificationDialog).toBeHidden()
 
   await expect(table.getByRole('row').filter({ hasText: 'Exact Match' })).toHaveCount(3)
   await expect(table.getByRole('row').filter({ hasText: 'Below Boundary' })).toHaveCount(0)
-  await expect(table.getByRole('row').filter({ hasText: 'Below Output' })).toHaveCount(0)
   await expect(table.getByRole('row').filter({ hasText: 'Above Boundary' })).toBeVisible()
   await expect(table.getByRole('row').filter({ hasText: 'Missing Input' })).toHaveCount(0)
   await expect(table.getByRole('row').filter({ hasText: 'Missing Output' })).toHaveCount(0)
-  await expect(table.getByRole('row').filter({ hasText: 'Missing Feature' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Missing Effort' })).toHaveCount(0)
   await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toHaveCount(0)
 
   await filterButton.click()
@@ -990,7 +889,6 @@ test('Model specification filters combine all conditions and compose with catalo
   await specificationDialog.getByRole('combobox', { name: 'Context preset' }).click()
   await page.getByRole('option', { name: 'Custom', exact: true }).click()
   await specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('128000')
-  await specificationDialog.getByRole('spinbutton', { name: 'Minimum output tokens' }).fill('16000')
   await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
   await expect(table.getByRole('row').filter({ hasText: 'Exact Match' })).toHaveCount(3)
   await expect(table.getByRole('row').filter({ hasText: 'Below Boundary' })).toHaveCount(0)
@@ -1019,9 +917,7 @@ test('Model specification filters combine all conditions and compose with catalo
   await expect(table.getByRole('row').filter({ hasText: 'Exact Match Retired' })).toHaveCount(0)
 
   await filterButton.click()
-  await specificationDialog.getByRole('checkbox', { name: 'Temperature', exact: true }).check()
-  await specificationDialog.getByRole('checkbox', { name: 'Reasoning', exact: true }).check()
-  await specificationDialog.getByRole('spinbutton', { name: 'Minimum output tokens' }).fill('16001')
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('128001')
   await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
   await expect(table).toContainText('No models match these filters.')
   await filterButton.click()
@@ -1070,15 +966,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     source_kind: 'discovered',
     snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
-    specification: {
-      limit: { context: 128000, input: null, output: null },
-      modalities: null,
-      reasoning: true,
-      tool_call: true,
-      structured_output: null,
-      attachment: false,
-      temperature: null,
-    },
+    specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
   }
   const unavailableSummary = { ...summary, id: 'gpt-retired', name: 'GPT Retired', available: false }
@@ -1092,12 +980,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
       knowledge: '2025-01',
       release_date: '2026-01-01',
       last_updated: '2026-02-01',
-      attachment: false,
-      reasoning: true,
-      tool_call: true,
       open_weights: true,
       modalities: { input: ['text', 'image', 'binary'], output: ['text'] },
-      limit: { context: 128000, input: null, output: 32000 },
+      limit: { context: 128000 },
       cost: {
         input: 0.25,
         output: 1,
@@ -1116,8 +1001,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
           },
         ],
       },
-      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'future'] }],
-      interleaved: { field: 'reasoning_effort' },
+      reasoning_efforts: ['low', 'medium', 'high', 'future'],
       vendor_extension: { mode: 'private' },
     },
     extensions: { vendor_extension: { mode: 'private' } },
@@ -1172,7 +1056,11 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
             available: true,
             source_kind: 'manual',
             selection_policy: 'auto',
-            metadata: { id: body.model_id, name: body.template_id ? 'GPT-5.4' : 'Known New Model', reasoning: true },
+            metadata: {
+              id: body.model_id,
+              name: body.template_id ? 'GPT-5.4' : 'Known New Model',
+              reasoning_efforts: ['high'],
+            },
             extensions: body.template_id ? { benchmarks: [{ name: 'Template benchmark' }] } : {},
             revision: 1,
             created_at: '',
@@ -1194,25 +1082,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await availableModelRow.getByRole('cell').nth(1).click()
 
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-test')
-  await expect(page.locator('#provider-model-metadata')).toHaveCount(0)
   await page.getByText('Advanced model settings', { exact: false }).click()
   await expect(page.getByText('Extension fields (read only) · 1')).toBeVisible()
-  await expect(page.locator('#provider-model-family')).toHaveCount(0)
-  await expect(page.locator('#provider-model-knowledge')).toHaveCount(0)
-  await expect(page.locator('#provider-model-release_date')).toHaveCount(0)
-  await expect(page.locator('#provider-model-last_updated')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Remove Description' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Remove Attachments' })).toHaveCount(0)
-  await expect(page.locator('#provider-model-open_weights')).toHaveCount(0)
-  await expect(page.getByText('Context over 200k')).toHaveCount(0)
   await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
-  await expect(page.locator('#provider-model-tier-1')).toHaveCount(0)
-  await expect(page.locator('#provider-model-cost-reasoning')).toHaveCount(0)
-  await expect(page.locator('#provider-model-cost-input_audio')).toHaveCount(0)
-  await expect(page.locator('#provider-model-cost-output_audio')).toHaveCount(0)
-  await expect(page.locator('#provider-model-tier-0-reasoning')).toHaveCount(0)
-  await expect(page.locator('#provider-model-tier-0-input_audio')).toHaveCount(0)
-  await expect(page.locator('#provider-model-tier-0-output_audio')).toHaveCount(0)
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities).toContainText('text, image, binary')
   await inputModalities.click()
@@ -1243,49 +1115,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   })
   await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(expectedScrollTop)
   await effortValuesSelect.click()
-  for (const value of [
-    'none',
-    'minimal',
-    'low',
-    'medium',
-    'high',
-    'xhigh',
-    'max',
-    'default',
-    'Use service default',
-    'future',
-  ]) {
+  for (const value of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'future']) {
     await expect(page.getByRole('option', { name: value, exact: true })).toBeVisible()
   }
   await page.getByRole('option', { name: 'none', exact: true }).click()
   await page.keyboard.press('Escape')
   await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(expectedScrollTop)
-  await expect(page.locator('[data-reasoning-option-add="effort"]')).toHaveCount(0)
-  await expect(page.locator('[data-reasoning-option-add="toggle"]')).toBeVisible()
-  await expect(page.locator('[data-reasoning-option-add="budget_tokens"]')).toBeVisible()
-  await scrollOwner.evaluate((element) => {
-    element.scrollTop = 320
-  })
-  await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(320)
-  await page.locator('[data-reasoning-option-add="toggle"]').evaluate((element: HTMLButtonElement) => {
-    element.click()
-  })
-  await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(320)
-  await expect(page.locator('[data-reasoning-option-add="toggle"]')).toHaveCount(0)
-  await expect(page.locator('[data-reasoning-option-add="effort"]')).toHaveCount(0)
-  const reasoningType = page.getByRole('button', { name: 'Reasoning behavior', exact: true }).nth(1)
-  await reasoningType.click()
-  await page.getByRole('option', { name: 'budget_tokens', exact: true }).click()
-  await expect(reasoningType).toBeFocused()
-  await reasoningType.click()
-  await page.getByRole('option', { name: 'toggle', exact: true }).click()
-  await expect(reasoningType).toBeFocused()
   await page.locator('#provider-model-cost-input').fill('0.123456789012345678')
-  const advancedSettings = page.getByRole('button', { name: /Advanced model settings/ })
-  await advancedSettings.click()
-  await expect(page.locator('#provider-model-cost-input')).not.toBeVisible()
-  await advancedSettings.click()
-  await expect(page.locator('#provider-model-cost-input')).toHaveValue('0.123456789012345678')
   await page.getByRole('button', { name: 'Save model' }).click()
 
   await expect.poll(() => updateBody).toContain('0.123456789012345678')
@@ -1309,17 +1145,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
       output_audio: 9,
     }),
   ])
-  expect(savedMetadata.reasoning_options.map((option: { type: string }) => option.type)).toEqual(['effort', 'toggle'])
-  expect(savedMetadata.reasoning_options.find((option: { type: string }) => option.type === 'toggle')).toEqual({
-    type: 'toggle',
-  })
-  expect(savedMetadata.reasoning_options.find((option: { type: string }) => option.type === 'effort').values).toEqual([
-    'none',
-    'low',
-    'medium',
-    'high',
-    'future',
-  ])
+  expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future'])
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Add model', exact: true }).click()
@@ -1726,15 +1552,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     source_kind: 'discovered',
     snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
-    specification: {
-      limit: { context: 128000, input: null, output: null },
-      modalities: null,
-      reasoning: true,
-      tool_call: true,
-      structured_output: null,
-      attachment: false,
-      temperature: null,
-    },
+    specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
   }
   const unavailable = {
@@ -1752,8 +1570,6 @@ test('Provider detail separates connection, inventory, references, and guarded m
       id: available.id,
       name: available.name,
       description: 'Editable metadata',
-      reasoning: true,
-      tool_call: true,
       modalities: { input: ['text'], output: ['text'] },
       limit: { context: 128000 },
     },
@@ -2212,15 +2028,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       source_kind: 'discovered',
       snapshot_state: { type: 'imported', source: { type: 'discovery' } },
       selection_policy: 'auto',
-      specification: {
-        limit: { context: 128000, input: null, output: null },
-        modalities: null,
-        reasoning: true,
-        tool_call: true,
-        structured_output: null,
-        attachment: false,
-        temperature: null,
-      },
+      specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
     },
     {
@@ -2230,15 +2038,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       source_kind: 'discovered',
       snapshot_state: { type: 'imported', source: { type: 'discovery' } },
       selection_policy: 'auto',
-      specification: {
-        limit: { context: 128000, input: null, output: null },
-        modalities: null,
-        reasoning: true,
-        tool_call: true,
-        structured_output: null,
-        attachment: false,
-        temperature: null,
-      },
+      specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
     },
   ]

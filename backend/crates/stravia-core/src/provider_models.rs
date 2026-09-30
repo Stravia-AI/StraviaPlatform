@@ -126,14 +126,8 @@ pub struct ProviderModelMetadata {
     pub name: Option<String>,
     pub description: Option<String>,
     pub family: Option<String>,
-    pub attachment: Option<bool>,
-    pub reasoning: Option<bool>,
-    pub tool_call: Option<bool>,
     pub open_weights: Option<bool>,
-    pub reasoning_options: Option<Vec<ReasoningOption>>,
-    pub interleaved: Option<Interleaved>,
-    pub structured_output: Option<bool>,
-    pub temperature: Option<bool>,
+    pub reasoning_efforts: Option<Vec<String>>,
     pub knowledge: Option<String>,
     pub release_date: Option<String>,
     pub last_updated: Option<String>,
@@ -143,8 +137,49 @@ pub struct ProviderModelMetadata {
     pub status: Option<String>,
     pub experimental: Option<Value>,
     pub provider: Option<Value>,
-    #[serde(flatten)]
+    #[serde(
+        flatten,
+        deserialize_with = "deserialize_metadata_extensions",
+        serialize_with = "serialize_metadata_extensions"
+    )]
     pub extensions: BTreeMap<String, Value>,
+}
+
+fn legacy_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "attachment"
+            | "reasoning"
+            | "tool_call"
+            | "structured_output"
+            | "temperature"
+            | "interleaved"
+            | "reasoning_options"
+            | "reasoning_levels"
+            | "thinking_toggle"
+    )
+}
+
+fn deserialize_metadata_extensions<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Value>, D::Error> {
+    let mut values = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    values.retain(|key, _| !legacy_metadata_key(key));
+    Ok(values)
+}
+
+fn serialize_metadata_extensions<S: serde::Serializer>(
+    values: &BTreeMap<String, Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    for (key, value) in values {
+        if !legacy_metadata_key(key) {
+            map.serialize_entry(key, value)?;
+        }
+    }
+    map.end()
 }
 
 impl ProviderModelMetadata {
@@ -167,6 +202,10 @@ impl ProviderModelMetadata {
         let object = value
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+        let efforts = crate::provider_catalog::source_reasoning_efforts(object)?;
+        if let Some(efforts) = efforts {
+            object.insert("reasoning_efforts".into(), serde_json::to_value(efforts)?);
+        }
         for field in [
             "name",
             "description",
@@ -196,22 +235,17 @@ impl ProviderModelMetadata {
     }
 
     pub fn has_specification(&self) -> bool {
-        let declared_limit = self.limit.as_ref().is_some_and(|limit| {
-            limit.context.is_some() || limit.input.is_some() || limit.output.is_some()
-        });
+        let declared_limit = self
+            .limit
+            .as_ref()
+            .is_some_and(|limit| limit.context.is_some());
         let declared_modalities = self.modalities.as_ref().is_some_and(|modalities| {
             !modalities.input.is_empty() || !modalities.output.is_empty()
         });
         declared_limit
             || declared_modalities
-            || self.reasoning.is_some()
-            || self.tool_call.is_some()
-            || self.structured_output.is_some()
-            || self.attachment.is_some()
-            || self.temperature.is_some()
             || self.open_weights.is_some()
-            || self.reasoning_options.is_some()
-            || self.interleaved.is_some()
+            || self.reasoning_efforts.is_some()
             || self.cost.is_some()
     }
 
@@ -223,6 +257,7 @@ impl ProviderModelMetadata {
         Value::Object(Map::from_iter(
             self.extensions
                 .iter()
+                .filter(|(key, _)| !legacy_metadata_key(key))
                 .map(|(key, value)| (key.clone(), value.clone())),
         ))
     }
@@ -274,15 +309,13 @@ impl ProviderModelMetadata {
             validate_string_values("modalities.input", &modalities.input)?;
             validate_string_values("modalities.output", &modalities.output)?;
         }
-        if let Some(options) = &self.reasoning_options {
-            let mut seen_types = 0_u8;
-            for option in options {
-                let (type_name, type_bit) = option.discriminator();
-                if seen_types & type_bit != 0 {
-                    anyhow::bail!("duplicate Provider Model reasoning option type `{type_name}`");
-                }
-                seen_types |= type_bit;
-                option.validate()?;
+        if let Some(efforts) = &self.reasoning_efforts {
+            validate_string_values("reasoning_efforts", efforts)?;
+            if efforts.iter().any(|value| {
+                let value = value.trim();
+                value.eq_ignore_ascii_case("default") || value.eq_ignore_ascii_case("null")
+            }) {
+                anyhow::bail!("reasoning_efforts cannot contain default or null");
             }
         }
         if let Some(cost) = &self.cost {
@@ -303,50 +336,6 @@ pub struct ModelModalities {
 #[serde(default)]
 pub struct ModelLimit {
     pub context: Option<u64>,
-    pub input: Option<u64>,
-    pub output: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Interleaved {
-    Enabled(bool),
-    Field { field: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ReasoningOption {
-    Toggle,
-    Effort { values: Vec<Option<String>> },
-    BudgetTokens { min: Option<i64>, max: Option<u64> },
-}
-
-impl ReasoningOption {
-    fn discriminator(&self) -> (&'static str, u8) {
-        match self {
-            Self::Toggle => ("toggle", 1),
-            Self::Effort { .. } => ("effort", 2),
-            Self::BudgetTokens { .. } => ("budget_tokens", 4),
-        }
-    }
-
-    fn validate(&self) -> anyhow::Result<()> {
-        match self {
-            Self::Toggle => Ok(()),
-            Self::Effort { values } => {
-                validate_optional_string_values("reasoning_options.values", values)
-            }
-            Self::BudgetTokens { min, max } => {
-                if min.is_some_and(|min| min < -1)
-                    || matches!((min, max), (Some(min), Some(max)) if *min >= 0 && *min as u64 > *max)
-                {
-                    anyhow::bail!("invalid reasoning token budget");
-                }
-                Ok(())
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -605,13 +594,9 @@ pub struct ProviderModelSummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpecification {
+    pub reasoning_efforts: Option<Vec<String>>,
     pub limit: Option<ModelLimit>,
     pub modalities: Option<ModelModalities>,
-    pub reasoning: Option<bool>,
-    pub tool_call: Option<bool>,
-    pub structured_output: Option<bool>,
-    pub attachment: Option<bool>,
-    pub temperature: Option<bool>,
 }
 
 impl From<&ProviderModelRecord> for ProviderModelSummary {
@@ -628,13 +613,9 @@ impl From<&ProviderModelRecord> for ProviderModelSummary {
             snapshot_state: record.snapshot_state.clone(),
             selection_policy: record.selection_policy,
             specification: ModelSpecification {
+                reasoning_efforts: record.metadata.reasoning_efforts.clone(),
                 limit: record.metadata.limit.clone(),
                 modalities: record.metadata.modalities.clone(),
-                reasoning: record.metadata.reasoning,
-                tool_call: record.metadata.tool_call,
-                structured_output: record.metadata.structured_output,
-                attachment: record.metadata.attachment,
-                temperature: record.metadata.temperature,
             },
             revision: record.revision,
         }
@@ -734,18 +715,6 @@ fn validate_string_values(field: &str, values: &[String]) -> anyhow::Result<()> 
     }
     Ok(())
 }
-fn validate_optional_string_values(field: &str, values: &[Option<String>]) -> anyhow::Result<()> {
-    if values.len() > 128 {
-        anyhow::bail!("too many Provider Model {field} values");
-    }
-    for value in values.iter().flatten() {
-        if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            anyhow::bail!("invalid Provider Model {field} value");
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -771,8 +740,7 @@ mod tests {
         assert!(!bare.has_specification());
         assert!(bare.limit.is_none());
         assert!(bare.modalities.is_none());
-        assert!(bare.reasoning.is_none());
-        assert!(bare.tool_call.is_none());
+        assert!(bare.reasoning_efforts.is_none());
 
         let state = SnapshotState::Edited {
             source: Some(SourceStamp::Canonical {
@@ -792,34 +760,59 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_option_types_are_unique() {
+    fn legacy_keys_never_escape_metadata_extensions() {
+        let metadata: ProviderModelMetadata = serde_json::from_value(json!({
+            "reasoning": true, "tool_call": true, "interleaved": true,
+            "reasoning_options": [{"type":"effort", "values":["low"]}],
+            "limit": {"context": 8192, "input": 4096, "output": 1024},
+            "native_protocol_fact": {"enabled":true}
+        }))
+        .unwrap();
+        let encoded = metadata.to_value().unwrap();
+        for key in ["reasoning", "tool_call", "interleaved", "reasoning_options"] {
+            assert!(encoded.get(key).is_none());
+            assert!(metadata.extension_value().get(key).is_none());
+        }
+        assert_eq!(encoded["limit"], json!({"context":8192}));
+        assert_eq!(encoded["native_protocol_fact"], json!({"enabled":true}));
+        let source = ProviderModelMetadata::from_source_value("model", json!({"reasoning_options":[{"type":"toggle"}, {"type":"effort","values":[null,"default","low","custom"]}]})).unwrap();
+        assert_eq!(source.reasoning_efforts.unwrap(), ["low", "custom"]);
+    }
+
+    #[test]
+    fn nullable_effort_spec_is_unknown_but_null_effort_is_invalid() {
+        let metadata = ProviderModelMetadata::from_source_value(
+            "model",
+            json!({"limit":{"context":8192}, "reasoning_efforts":null}),
+        )
+        .unwrap();
+        assert_eq!(metadata.limit.unwrap().context, Some(8192));
+        assert!(metadata.reasoning_efforts.is_none());
+        assert!(
+            ProviderModelMetadata::from_source_value("model", json!({"reasoning_efforts":[null]}),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn efforts_reject_default_null_and_empty_strings() {
+        for effort in ["default", "null", "", "  "] {
+            assert!(
+                ProviderModelMetadata::from_value(
+                    "test-model",
+                    json!({"reasoning_efforts": [effort]})
+                )
+                .is_err()
+            );
+        }
         let metadata = ProviderModelMetadata::from_value(
             "test-model",
-            json!({
-                "reasoning_options": [
-                    {"type": "toggle"},
-                    {"type": "effort", "values": ["low", "high"]},
-                    {"type": "budget_tokens", "min": 1024, "max": 32768}
-                ]
-            }),
+            json!({"reasoning_efforts": ["custom", "none", "max"]}),
         )
-        .expect("distinct reasoning option types should be accepted");
-        assert_eq!(metadata.reasoning_options.unwrap().len(), 3);
-
-        let error = ProviderModelMetadata::from_value(
-            "test-model",
-            json!({
-                "reasoning_options": [
-                    {"type": "effort", "values": ["low"]},
-                    {"type": "effort", "values": ["high"]}
-                ]
-            }),
-        )
-        .expect_err("duplicate reasoning option types should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("duplicate Provider Model reasoning option type `effort`")
+        .unwrap();
+        assert_eq!(
+            metadata.reasoning_efforts.unwrap(),
+            ["custom", "none", "max"]
         );
     }
 }

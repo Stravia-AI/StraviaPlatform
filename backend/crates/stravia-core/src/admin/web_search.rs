@@ -77,7 +77,6 @@ mod tests {
                 crate::provider_models::CreateManualProviderModel {
                     metadata: serde_json::json!({
                         "id": "tool-model",
-                        "tool_call": true,
                     }),
                     template_id: None,
                 },

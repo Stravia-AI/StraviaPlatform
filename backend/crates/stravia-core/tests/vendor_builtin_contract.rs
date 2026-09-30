@@ -506,7 +506,7 @@ struct StandardCase {
 }
 
 #[tokio::test]
-async fn supplemental_discovery_capabilities_preserve_explicit_model_specifications()
+async fn supplemental_discovery_discards_legacy_flags_and_preserves_modalities()
 -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(1, |_| MockResponse::json(json!({"data":[
         {"id":"minimax-m3","tool_call":true,"reasoning":true,"attachment":true,"structured_output":true},
@@ -539,22 +539,17 @@ async fn supplemental_discovery_capabilities_preserve_explicit_model_specificati
         .admin()
         .get_provider_model(&provider.id, "minimax-m3")
         .await?;
-    assert_eq!(enabled.metadata.tool_call, Some(true));
-    assert_eq!(enabled.metadata.reasoning, Some(true));
-    assert_eq!(enabled.metadata.attachment, Some(true));
-    assert_eq!(enabled.metadata.structured_output, Some(true));
+    assert!(enabled.metadata.reasoning_efforts.is_none());
+    assert!(!enabled.metadata.extensions.contains_key("tool_call"));
     let disabled = gateway
         .admin()
         .get_provider_model(&provider.id, "explicitly-disabled")
         .await?;
-    assert_eq!(disabled.metadata.tool_call, Some(false));
-    assert_eq!(disabled.metadata.reasoning, Some(false));
+    assert!(!disabled.metadata.extensions.contains_key("reasoning"));
     let inferred = gateway
         .admin()
         .get_provider_model(&provider.id, "capabilities-only")
         .await?;
-    assert_eq!(inferred.metadata.attachment, Some(true));
-    assert_eq!(inferred.metadata.structured_output, Some(true));
     assert_eq!(
         inferred
             .metadata
@@ -622,8 +617,6 @@ async fn discovery_declared_context_window_overrides_catalog_defaults() -> anyho
         .await?;
     let limit = overridden.metadata.limit.expect("canonical limit");
     assert_eq!(limit.context, Some(272_000));
-    assert_eq!(limit.input, None);
-    assert_eq!(limit.output, None);
 
     // 未被用户接管的已同步记录跟随上游声明值刷新。
     gateway.admin().sync_provider_models(&provider.id).await?;
@@ -1119,7 +1112,7 @@ async fn custom_profile_standard_protocols_preserve_tools_thinking_usage_and_ter
         );
         let (route, token) = provider_route_and_key(&gateway, case.name, ProviderSourceInput::Custom { vendor: case.vendor.to_string(), channel: "default".to_string(), protocol: Some(case.protocol.to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey {
             value: "test-standard-key".into(),
-        }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning": true, "tool_call": true}))
+        }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}))
         .await?;
 
         let (status, response) = chat(gateway, &token, standard_client_request(&route)).await?;
@@ -1233,7 +1226,7 @@ async fn base_owned_private_protocols_select_and_round_trip_inside_real_wasm() -
                 value: "private-codec-test-key".into(),
             },
             case.options,
-            json!({"id":"private-model","name":"private-model","tool_call":true}),
+            json!({"id":"private-model","name":"private-model","reasoning_efforts":["none","low","medium","high","xhigh","max"]}),
         )
         .await?;
         let (status, body) = chat(
@@ -1925,7 +1918,7 @@ async fn standard_plugin_rejects_an_unrepresentable_hard_requirement_before_netw
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let (_directory, gateway) = gateway().await?;
-    let (route, token) = provider_route_and_key(&gateway, "gemini-lossy", ProviderSourceInput::Custom { vendor: "custom".to_string(), channel: "default".to_string(), protocol: Some("google-gemini".to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey { value: "test-key".into() }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning": true, "tool_call": true}))
+    let (route, token) = provider_route_and_key(&gateway, "gemini-lossy", ProviderSourceInput::Custom { vendor: "custom".to_string(), channel: "default".to_string(), protocol: Some("google-gemini".to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey { value: "test-key".into() }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}))
     .await?;
     let mut request = standard_client_request(&route);
     request["tools"][0]["function"]["strict"] = json!(true);
@@ -2064,12 +2057,38 @@ async fn deepseek_builtin_applies_thinking_and_tool_history_on_the_real_wire() -
         json!({
             "id": "deepseek-v4",
             "name": "deepseek-v4",
-            "reasoning": true,
-            "reasoning_options": [{"type": "toggle"}],
-            "tool_call": true
         }),
     )
     .await?;
+    let saved = gateway.admin().get_model(&route).await?;
+    let target = &saved.targets[0];
+    let mut thinking_level_map = target.thinking_level_map.clone();
+    // 原生开关由 Target 显式配置，不由未知的 Effort 规格推导。
+    let medium = thinking_level_map
+        .iter_mut()
+        .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
+        .expect("medium mapping");
+    medium.control = stravia_runtime_contract::thinking::TargetThinkingControl::Enabled;
+    medium.source = stravia_core::thinking::ThinkingMappingSource::Overridden;
+    gateway
+        .admin()
+        .update_model(
+            &route,
+            stravia_core::db::models::UpdateRoute {
+                targets: Some(vec![stravia_core::db::models::CreateTarget {
+                    provider_id: target.provider_id().to_string(),
+                    model: target.model().map(ToString::to_string),
+                    enabled: target.enabled,
+                    priority: Some(target.priority),
+                    first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                    target_retry_budget: Some(target.target_retry_budget),
+                    target_cooldown_ms: Some(target.target_cooldown_ms),
+                    thinking_level_map,
+                }]),
+                ..Default::default()
+            },
+        )
+        .await?;
     let request = json!({
         "model": route,
         "stream": false,
@@ -2185,7 +2204,7 @@ async fn command_code_replays_unmatched_responses_reasoning_before_tool_continua
             values: BTreeMap::from([("apiKey".into(), json!("local-replay-key"))]),
         },
         Default::default(),
-        json!({"id": "deepseek/deepseek-v4.1-flash", "reasoning": true, "tool_call": true}),
+        json!({"id": "deepseek/deepseek-v4.1-flash", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}),
     )
     .await?;
     // 压缩或编辑后的历史没有可复用父链；可读思考仍须以原生推理进入后续工具轮的上下文。
@@ -2282,7 +2301,7 @@ async fn command_code_admin_option_reaches_initialization_and_inference_headers(
     install_distributed_vendor_plugin(&gateway, "command-code").await?;
     let (route, token) = provider_route_and_key(&gateway, "command-code", ProviderSourceInput::Custom { vendor: "command-code".to_string(), channel: "default".to_string(), protocol: Some("command-code".to_string()), base_url, models_source: None, static_models: None }, "command-r-plus", ProviderCredentialInput::Fields {
         values: BTreeMap::from([("apiKey".into(), json!("command-test-key"))]),
-    }, serde_json::Map::from_iter([("zdr".into(), json!(true))]), json!({"id": "command-r-plus", "name": "command-r-plus", "reasoning": true, "tool_call": true}))
+    }, serde_json::Map::from_iter([("zdr".into(), json!(true))]), json!({"id": "command-r-plus", "name": "command-r-plus", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}))
     .await?;
     let provider = gateway
         .admin()
@@ -2613,8 +2632,8 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     assert_eq!(modalities.input, ["text", "image"]);
     assert_eq!(modalities.output, ["text"]);
     assert_eq!(
-        serde_json::to_value(&family.metadata.reasoning_options)?,
-        json!([{"type": "effort", "values": ["medium", "high"]}])
+        serde_json::to_value(&family.metadata.reasoning_efforts)?,
+        json!(["medium", "high"])
     );
 
     let route = gateway

@@ -677,11 +677,9 @@ mod tests {
             name: Some("人工名称".to_owned()),
             description: Some("人工描述".to_owned()),
             family: Some("family-a".to_owned()),
-            reasoning: Some(true),
+            reasoning_efforts: Some(vec!["low".to_owned(), "high".to_owned()]),
             limit: Some(ModelLimit {
                 context: Some(128_000),
-                input: Some(120_000),
-                output: Some(8_000),
             }),
             cost: Some(ModelCost {
                 prices: PriceComponents {

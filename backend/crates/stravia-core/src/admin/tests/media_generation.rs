@@ -128,8 +128,6 @@ impl GenerationRouteFixture {
                         metadata: json!({
                             "id": CODEX_MODEL,
                             "name": "Local test model",
-                            "attachment": true,
-                            "tool_call": true,
                             "capabilities": ["media_image"],
                             "modalities": {"input": ["text", "image"], "output": ["text"]}
                         }),

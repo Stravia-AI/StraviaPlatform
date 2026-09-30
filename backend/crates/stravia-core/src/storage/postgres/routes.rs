@@ -25,7 +25,6 @@ impl RouteRow {
             created_at: self.created_at,
             supported_thinking_levels: Vec::new(),
             context_window: None,
-            output_max_tokens: None,
             supports_image_input: false,
             targets: Vec::new(),
         }

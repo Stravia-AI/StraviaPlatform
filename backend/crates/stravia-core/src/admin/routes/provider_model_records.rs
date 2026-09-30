@@ -743,13 +743,6 @@ fn metadata_from_discovered_model(
     let Value::Object(mut object) = base else {
         anyhow::bail!("Canonical Model metadata must be an object");
     };
-    // 记录上游是否自带 `limit` 输入/输出上限声明：下方 `context_window`
-    // 覆盖窗口时，未声明的目录默认配额随旧窗口一并失效。
-    let declared_limit = model
-        .metadata
-        .get("limit")
-        .and_then(Value::as_object)
-        .cloned();
     object.extend(model.metadata);
     object.insert("id".into(), Value::String(model_id.to_owned()));
     let discovered_name = model.display_name.trim();
@@ -782,31 +775,13 @@ fn metadata_from_discovered_model(
             Value::Array(capabilities.iter().cloned().map(Value::String).collect()),
         );
     }
-    if !capabilities.is_empty() {
-        for (field, names) in [
-            ("tool_call", ["tools", "tool_call"]),
-            ("reasoning", ["reasoning", "reasoning"]),
-            ("attachment", ["image_input", "image_input"]),
-            (
-                "structured_output",
-                ["structured_output", "structured_output"],
-            ),
-        ] {
-            if object.get(field).is_none_or(Value::is_null)
-                && names.iter().any(|name| capabilities.contains(*name))
-            {
-                object.insert(field.into(), Value::Bool(true));
-            }
-        }
-    }
     if capabilities.contains("image_input") {
         ensure_discovered_modality(&mut object, "input", "image")?;
     }
     if capabilities.contains("image_output") {
         ensure_discovered_modality(&mut object, "output", "image")?;
     }
-    // 上游直接声明的 `context_window` 是每模型权威数据，覆盖目录默认窗口；
-    // 上游未声明输入/输出上限时，目录默认配额随旧窗口一并失效。
+    // 上游直接声明的 context window 覆盖目录默认窗口。
     if let Some(context) = object.get("context_window").and_then(Value::as_u64) {
         let limit = object
             .entry("limit")
@@ -818,15 +793,6 @@ fn metadata_from_discovered_model(
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("Discovered Model limit metadata must be an object"))?;
         limit.insert("context".into(), Value::from(context));
-        for field in ["input", "output"] {
-            if declared_limit
-                .as_ref()
-                .and_then(|declared| declared.get(field))
-                .is_none_or(Value::is_null)
-            {
-                limit.remove(field);
-            }
-        }
     }
     ProviderModelMetadata::from_source_value(model_id, Value::Object(object))
 }
