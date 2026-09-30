@@ -107,10 +107,7 @@ pub(crate) fn execute(
     request: AuthRequest,
 ) -> Result<AuthResponse, PluginError> {
     match request.step {
-        AuthStep::Start {
-            redirect_uri,
-            state,
-        } => start(host, redirect_uri, state),
+        AuthStep::Start { redirect_uri, .. } => start(host, redirect_uri),
         AuthStep::Exchange { callback_url } => exchange(host, callback_url),
         AuthStep::Refresh => refresh(host, provider),
         AuthStep::ManualInput { .. } => Err(unsupported("Claude OAuth requires a callback URL")),
@@ -121,14 +118,14 @@ pub(crate) fn execute(
     }
 }
 
-fn start(
-    host: &GuestHost,
-    redirect_uri: String,
-    state: String,
-) -> Result<AuthResponse, PluginError> {
-    if redirect_uri.trim().is_empty() || state.trim().is_empty() {
-        return Err(invalid("OAuth start requires a redirect URI and state"));
+/// claude.ai 的授权提交会以 `Invalid request format` 拒绝宿主默认的 28 位字母
+/// state；改用 oh-my-pi `OAuthCallbackFlow.generateState` 的 16 字节小写 hex，
+/// 并通过 `AuthResponse::Authorization.state` 交给宿主做回调校验。
+fn start(host: &GuestHost, redirect_uri: String) -> Result<AuthResponse, PluginError> {
+    if redirect_uri.trim().is_empty() {
+        return Err(invalid("OAuth start requires a redirect URI"));
     }
+    let state = hex(&random_bytes::<16>());
     let code_verifier = base64url(&random_bytes::<96>());
     let code_challenge = base64url(&Sha256::digest(code_verifier.as_bytes()));
     host.write_private_state(
@@ -145,6 +142,7 @@ fn start(
         user_code: None,
         verification_uri: Some("https://claude.ai".into()),
         interval_seconds: None,
+        state: Some(state),
     })
 }
 

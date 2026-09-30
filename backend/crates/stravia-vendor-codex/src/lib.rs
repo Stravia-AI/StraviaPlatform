@@ -27,9 +27,10 @@ const VENDOR_ID: &str = "openai-codex";
 const CATALOG_ID: &str = "openai";
 const CHANNEL: &str = "codex";
 /// Spoofed Codex CLI version sent on every request. The backend version-gates
-/// model availability for `/models` and `/responses`; an older pin silently
-/// hides newer SKUs such as gpt-6-sol from discovery.
-const CLIENT_VERSION: &str = "0.156.1";
+/// model availability for `/models` and `/responses` by exact client version
+/// rather than the catalog's `minimal_client_version`; an older pin silently
+/// hides newer SKUs such as gpt-6-sol and gpt-6.1-sol from discovery.
+const CLIENT_VERSION: &str = "0.159.2";
 const MAX_ERROR_BODY: usize = 256 * 1024;
 const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 

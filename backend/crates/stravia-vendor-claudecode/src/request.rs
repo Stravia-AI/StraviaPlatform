@@ -11,6 +11,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::cache;
+use crate::capabilities::{self, ModelCapabilities};
+use crate::thinking::{self, ModelProfile};
 use crate::xxhash::xxh64;
 
 /// 未配置覆盖值时上报的 Claude Code CLI 版本（与 oh-my-pi v18.4.2 的
@@ -36,8 +39,6 @@ const CCH_SEARCH_WINDOW: usize = 150;
 const TOOL_PREFIX: &str = "_";
 /// 与 Anthropic 内置工具同名的自定义工具不加前缀，避免被上游当作内置工具冲突。
 const BUILTIN_TOOL_NAMES: [&str; 4] = ["web_search", "code_execution", "text_editor", "computer"];
-const MAX_CACHE_BREAKPOINTS: usize = 4;
-const LONG_CACHE_TTL: &str = "1h";
 
 const EFFORT_BETA: &str = "effort-2025-11-24";
 const FALLBACK_CREDIT_BETA: &str = "fallback-credit-2026-06-01";
@@ -106,6 +107,27 @@ const KEY_ORDER: &[&str] = &[
     "ttl",
 ];
 
+/// Claude Code（oh-my-pi）在订阅 OAuth 通道会写入的顶层字段。其余字段（
+/// `container`、`service_tier` 等）来自其他入口协议，真实客户端不会发送，
+/// 上游会据此拒绝或识别为非 Claude Code 流量，统一丢弃。
+const CLAUDE_CODE_FIELDS: &[&str] = &[
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "metadata",
+    "max_tokens",
+    "thinking",
+    "context_management",
+    "output_config",
+    "stream",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop_sequences",
+    "tool_choice",
+];
+
 /// 已登录账号在请求元数据里的身份。
 pub(crate) struct AccountIdentity<'a> {
     pub account_uuid: Option<&'a str>,
@@ -124,6 +146,7 @@ pub(crate) fn shape(
     mut body: Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
+    caps: &ModelCapabilities,
     fallback_session_id: impl FnOnce() -> String,
 ) -> Result<ShapedRequest, String> {
     let object = body
@@ -131,12 +154,16 @@ pub(crate) fn shape(
         .ok_or("Anthropic request body must be a JSON object")?;
     // Claude Code 只走流式推理；流式同时避开非流式请求的长输出时限。
     object.insert("stream".into(), Value::Bool(true));
+    restrict_to_claude_code_fields(object);
+    thinking::normalize(object, caps);
+    capabilities::constrain(object, caps);
+    drop_disallowed_sampling(object, caps);
     prefix_tool_names(object);
     default_tool_result_errors(object);
-    upgrade_cache_ttl(object);
     let session_id = client_session_id(object.get("metadata")).unwrap_or_else(fallback_session_id);
     let first_user_text = first_user_text(object.get("messages"));
     rebuild_system(object, &first_user_text, client_version)?;
+    cache::enforce(object);
     object.insert(
         "metadata".into(),
         json!({ "user_id": metadata_user_id(&session_id, identity) }),
@@ -193,6 +220,30 @@ pub(crate) fn cli_user_agent(client_version: &str) -> String {
 /// 响应侧还原：去掉请求时加上的一个 `_` 前缀。
 pub(crate) fn decode_tool_name(name: &str) -> Option<String> {
     name.strip_prefix(TOOL_PREFIX).map(str::to_owned)
+}
+
+/// 丢弃真实 Claude Code 不会发送的顶层字段。
+fn restrict_to_claude_code_fields(object: &mut Map<String, Value>) {
+    object.retain(|key, _| CLAUDE_CODE_FIELDS.contains(&key.as_str()));
+}
+
+/// 复刻 oh-my-pi `buildParams`：仅在模型支持自定义采样且思考未开启时才保留
+/// `temperature` / `top_p` / `top_k`。开启思考（含 adaptive）时上游要求 `temperature`
+/// 只能为 1，Opus ≥ 4.7 与 Sonnet/Fable/Mythos ≥ 5 则完全拒绝非默认采样参数。
+/// 必须在思考控制改写之后调用，以最终发送的 `thinking` 为准。
+fn drop_disallowed_sampling(object: &mut Map<String, Value>, caps: &ModelCapabilities) {
+    let thinking_off = object
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .is_none_or(|kind| kind == "disabled");
+    let model_rejects =
+        ModelProfile::of_request(object, caps).is_some_and(|model| model.adaptive_only());
+    if !thinking_off || model_rejects {
+        for key in ["temperature", "top_p", "top_k"] {
+            object.remove(key);
+        }
+    }
 }
 
 fn should_prefix(name: &str, typed_tool_names: &[String]) -> bool {
@@ -266,60 +317,6 @@ fn default_tool_result_errors(object: &mut Map<String, Value>) {
             block.entry("is_error").or_insert(Value::Bool(false));
         }
     }
-}
-
-fn cache_control_slots(object: &mut Map<String, Value>) -> Vec<&mut Map<String, Value>> {
-    let mut slots = Vec::new();
-    for (key, value) in object.iter_mut() {
-        match key.as_str() {
-            "system" | "tools" => {
-                if let Value::Array(entries) = value {
-                    slots.extend(entries.iter_mut().filter_map(Value::as_object_mut));
-                }
-            }
-            "messages" => {
-                let Value::Array(messages) = value else {
-                    continue;
-                };
-                for block in messages
-                    .iter_mut()
-                    .filter_map(|message| message.get_mut("content"))
-                    .filter_map(Value::as_array_mut)
-                    .flatten()
-                    .filter_map(Value::as_object_mut)
-                {
-                    slots.push(block);
-                }
-            }
-            _ => {}
-        }
-    }
-    slots
-}
-
-/// Claude Code 对订阅用户默认使用 1 小时提示缓存；统一升级也避免 1h 与 5m
-/// 断点混排时违反「长 TTL 必须在前」的上游约束。
-fn upgrade_cache_ttl(object: &mut Map<String, Value>) {
-    for slot in cache_control_slots(object) {
-        let Some(Value::Object(cache_control)) = slot.get_mut("cache_control") else {
-            continue;
-        };
-        if cache_control.get("type").and_then(Value::as_str) == Some("ephemeral")
-            && !cache_control.contains_key("ttl")
-        {
-            cache_control.insert("ttl".into(), Value::String(LONG_CACHE_TTL.into()));
-        }
-    }
-}
-
-fn cache_breakpoints(object: &mut Map<String, Value>) -> usize {
-    cache_control_slots(object)
-        .into_iter()
-        .filter(|slot| {
-            slot.get("cache_control")
-                .is_some_and(|value| !value.is_null())
-        })
-        .count()
 }
 
 /// 复用客户端元数据里的会话 ID：Claude Code JSON 形态取 `session_id`，旧版
@@ -408,13 +405,7 @@ fn rebuild_system(
         ),
     }));
     if client_blocks.first().and_then(text_block) != Some(IDENTITY_TEXT) {
-        let mut identity = json!({ "type": "text", "text": IDENTITY_TEXT });
-        // 身份块只在它是 system 尾块时承担缓存断点；客户端 system 已存在时，
-        // 断点留给客户端自己的块，避免多占一个 4 断点上限内的名额。
-        if client_blocks.is_empty() && cache_breakpoints(object) < MAX_CACHE_BREAKPOINTS {
-            identity["cache_control"] = json!({ "type": "ephemeral", "ttl": LONG_CACHE_TTL });
-        }
-        system.push(identity);
+        system.push(json!({ "type": "text", "text": IDENTITY_TEXT }));
     }
     system.extend(client_blocks);
     object.insert("system".into(), Value::Array(system));
@@ -549,7 +540,11 @@ mod tests {
     }
 
     fn shaped(body: Value) -> (Value, ShapedRequest) {
-        let shaped = shape(body, DEFAULT_CLIENT_VERSION, &identity(), || {
+        shaped_with(body, &ModelCapabilities::default())
+    }
+
+    fn shaped_with(body: Value, caps: &ModelCapabilities) -> (Value, ShapedRequest) {
+        let shaped = shape(body, DEFAULT_CLIENT_VERSION, &identity(), caps, || {
             "fallback-session".into()
         })
         .expect("request shapes");
@@ -590,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn system_carries_billing_then_identity_and_keeps_client_breakpoints() {
+    fn system_carries_billing_then_identity_then_client_blocks() {
         let (body, _) = shaped(json!({
             "model": "m",
             "max_tokens": 1,
@@ -610,18 +605,68 @@ mod tests {
         );
         assert!(system[0].get("cache_control").is_none());
         assert_eq!(system[1]["text"], IDENTITY_TEXT);
+        assert_eq!(system[2]["text"], "client prompt");
         assert!(
-            system[1].get("cache_control").is_none(),
-            "client already anchors the system head"
+            system[1].get("cache_control").is_none() && system[2].get("cache_control").is_none(),
+            "client breakpoint on a middle block is dropped"
         );
         assert_eq!(
-            system[2]["cache_control"],
-            json!({"type": "ephemeral", "ttl": "1h"})
+            system[3]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            "the anchor sits on the last system block"
         );
     }
 
     #[test]
-    fn identity_anchors_cache_only_without_client_system_and_with_free_breakpoint() {
+    fn requests_without_client_breakpoints_get_default_anchors() {
+        let (body, _) = shaped(json!({
+            "model": "m",
+            "max_tokens": 1,
+            "system": "client prompt",
+            "tools": [{"name": "a", "input_schema": {}}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        let ttl = json!({"type": "ephemeral", "ttl": "1h"});
+        assert_eq!(body["tools"][0]["cache_control"], ttl);
+        assert_eq!(body["system"][2]["cache_control"], ttl);
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"], ttl);
+    }
+
+    #[test]
+    fn client_breakpoints_never_reach_upstream_and_total_stays_within_limit() {
+        let marked = json!({"type": "ephemeral", "ttl": "5m"});
+        let (body, shaped) = shaped(json!({
+            "model": "m",
+            "max_tokens": 1,
+            "tools": [{"name": "a", "input_schema": {}, "cache_control": marked}],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "1", "cache_control": marked},
+                    {"type": "text", "text": "2", "cache_control": marked},
+                    {"type": "text", "text": "3", "cache_control": marked}
+                ]},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+                {"role": "user", "content": [{"type": "text", "text": "4"}]}
+            ],
+        }));
+        let wire = String::from_utf8(shaped.body).unwrap();
+        assert!(!wire.contains("5m"), "client TTL is overwritten");
+        assert_eq!(wire.matches("cache_control").count(), 4);
+        assert!(
+            body["messages"][0]["content"][2]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            body["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn identity_block_is_the_system_anchor_when_client_has_no_system() {
         let (body, _) = shaped(json!({
             "model": "m",
             "max_tokens": 1,
@@ -630,22 +675,6 @@ mod tests {
         assert_eq!(
             body["system"][1]["cache_control"],
             json!({"type": "ephemeral", "ttl": "1h"})
-        );
-
-        let marked = json!({"type": "ephemeral"});
-        let (body, _) = shaped(json!({
-            "model": "m",
-            "max_tokens": 1,
-            "tools": [{"name": "a", "input_schema": {}, "cache_control": marked}],
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "1", "cache_control": marked},
-                {"type": "text", "text": "2", "cache_control": marked},
-                {"type": "text", "text": "3", "cache_control": marked}
-            ]}],
-        }));
-        assert!(
-            body["system"][1].get("cache_control").is_none(),
-            "four breakpoints already used"
         );
     }
 
@@ -710,7 +739,7 @@ mod tests {
 
     #[test]
     fn tool_results_without_is_error_are_sent_as_explicit_false() {
-        let (_, shaped) = shaped(json!({
+        let (body, _) = shaped(json!({
             "model": "m",
             "max_tokens": 1,
             "messages": [
@@ -725,13 +754,9 @@ mod tests {
                 ]}
             ],
         }));
-        let wire = String::from_utf8(shaped.body).unwrap();
-        assert!(wire.contains(
-            r#"{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}"#
-        ));
-        assert!(wire.contains(
-            r#"{"type":"tool_result","tool_use_id":"t2","content":"boom","is_error":true}"#
-        ));
+        let results = &body["messages"][2]["content"];
+        assert_eq!(results[0]["is_error"], json!(false));
+        assert_eq!(results[1]["is_error"], json!(true));
     }
 
     #[test]
@@ -799,6 +824,118 @@ mod tests {
         assert_eq!(shaped.session_id, "12345678-1234-1234-1234-123456789012");
         let (_, shaped) = shaped_with_metadata("opaque-client-user");
         assert_eq!(shaped.session_id, "fallback-session");
+    }
+
+    #[test]
+    fn sampling_params_are_dropped_when_thinking_is_on() {
+        // 回归：adaptive 思考 + `temperature: 0` 被上游 400 拒绝。
+        for thinking in [
+            json!({"type": "adaptive"}),
+            json!({"type": "enabled", "budget_tokens": 1024}),
+        ] {
+            let (body, _) = shaped(json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 2048,
+                "temperature": 0,
+                "top_p": 0.9,
+                "top_k": 5,
+                "thinking": thinking,
+                "messages": [{"role": "user", "content": "hi"}],
+            }));
+            for key in ["temperature", "top_p", "top_k"] {
+                assert!(body.get(key).is_none(), "{key} must not be sent");
+            }
+        }
+    }
+
+    #[test]
+    fn sampling_params_survive_only_when_model_and_thinking_allow() {
+        let body = |model: &str, thinking: Option<Value>| {
+            let mut body = json!({
+                "model": model,
+                "max_tokens": 64,
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": "hi"}],
+            });
+            if let Some(thinking) = thinking {
+                body["thinking"] = thinking;
+            }
+            shaped(body).0
+        };
+        assert_eq!(body("claude-sonnet-4-5", None)["temperature"], json!(0.2));
+        assert_eq!(
+            body("claude-opus-4-6", Some(json!({"type": "disabled"})))["temperature"],
+            json!(0.2)
+        );
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4.8",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+        ] {
+            assert!(
+                body(model, Some(json!({"type": "disabled"})))
+                    .get("temperature")
+                    .is_none(),
+                "{model} rejects custom sampling"
+            );
+        }
+        // 日期后缀不是版本号。
+        assert!(
+            body("claude-opus-4-1-20250805", None)
+                .get("temperature")
+                .is_some()
+        );
+        assert!(
+            body("claude-3-opus-20240229", None)
+                .get("temperature")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn open_responses_title_request_matches_claude_code_wire_on_opus_5_5() {
+        // 回归抓包：omp 的标题请求（temperature 0、effort low）经 open-responses 入口
+        // 转成 Anthropic 后，上游因 adaptive 思考加 temperature 返回 400。
+        let (body, _) = shaped(json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 1024,
+            "temperature": 0,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "low"},
+            "messages": [{"role": "user", "content": "测试"}],
+        }));
+        assert!(body.get("temperature").is_none());
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+    }
+
+    #[test]
+    fn fields_claude_code_never_sends_are_dropped() {
+        let (body, _) = shaped(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "service_tier": "auto",
+            "container": "c1",
+            "presence_penalty": 0.1,
+            "stop_sequences": ["x"],
+            "tool_choice": {"type": "auto"},
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        let keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in &keys {
+            assert!(CLAUDE_CODE_FIELDS.contains(key), "unexpected field {key}");
+        }
+        assert!(keys.contains(&"stop_sequences") && keys.contains(&"tool_choice"));
     }
 
     fn shaped_with_metadata(user_id: &str) -> (Value, ShapedRequest) {

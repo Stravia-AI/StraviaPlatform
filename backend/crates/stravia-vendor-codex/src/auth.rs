@@ -101,6 +101,7 @@ fn start(
         user_code: None,
         verification_uri: Some("https://auth.openai.com".into()),
         interval_seconds: None,
+        state: None,
     })
 }
 

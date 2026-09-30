@@ -40,7 +40,7 @@ base 的 Anthropic Profile 仅提供 `default` API-key 通道；旧的 `anthropi
 
 Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claudecode`，channel `oauth`）提供，需从 Release 附件本地导入。旧 `anthropic/claude-code` 连接不会自动归入该插件；改用订阅时新建 `claude-code` 连接、完成登录并重新绑定 Route。
 
-- 登录：授权码 + PKCE，授权页 `https://claude.ai/oauth/authorize`，回调 `http://localhost:54545/callback`（备用 54546，手动粘贴回调 URL 使用 54547）；令牌交换与刷新走 `https://api.anthropic.com/v1/oauth/token`。令牌响应缺少账号身份时，向 `/api/claude_cli/bootstrap` 补取账号与组织；该补取失败不影响登录。登录时为连接生成随机 `device_id`，刷新沿用已保存的账号身份与 `device_id`。
+- 登录：授权码 + PKCE，授权页 `https://claude.ai/oauth/authorize`，回调 `http://localhost:54545/callback`（备用 54546，手动粘贴回调 URL 使用 54547）；claude.ai 授权提交会拒绝宿主默认 state，插件自行生成 16 字节小写 hex state 并交宿主做回调校验，因此该插件要求宿主支持插件自带 state；令牌交换与刷新走 `https://api.anthropic.com/v1/oauth/token`。令牌响应缺少账号身份时，向 `/api/claude_cli/bootstrap` 补取账号与组织；该补取失败不影响登录。登录时为连接生成随机 `device_id`，刷新沿用已保存的账号身份与 `device_id`。
 - 推理：上游只接受 Claude Code CLI 形态的订阅请求。插件在 Anthropic Messages 编码结果上改写为 CLI 线上形态：`POST /v1/messages?beta=true`，CLI User-Agent、Stainless 与 `anthropic-beta` 请求头；`system[0]` 为计费头 `x-anthropic-billing-header`（含由首条用户消息计算的版本指纹和对最终请求体计算的 `cch` 校验值），`system[1]` 为 Claude Code 身份块；自定义工具名在请求中加 `_` 前缀、在响应中还原；`metadata.user_id` 由连接的账号身份与会话 ID 重建；缓存断点默认使用 1 小时 TTL；始终流式请求。该形态以 oh-my-pi v18.4.2 的实现与抓包为基准，上报的 CLI 版本默认 `2.1.280`，可在连接高级设置 `client_version` 中调整。
 - 请求头与 CLI 相同，包括 `Accept-Encoding: gzip, deflate, br, zstd`（宿主解码响应）与 `Connection: keep-alive`；工具 `strict` 与 `tool_result.is_error` 原样转发，客户端协议没有 `is_error`（OpenAI、Gemini 等入口）时按 CLI 形态补 `is_error: false`。
 - 已知差异：Stainless 平台头固定为 Linux x64；网关解析 JSON 后不保留客户端对象内的键顺序，工具 schema 与工具入参的嵌套键按字典序发送；HTTP 版本由宿主协商，协商到 HTTP/2 时 `Connection` 头按协议不发送；TLS 与 HTTP 实现指纹不同于 Bun。
@@ -174,6 +174,7 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 - Command Code 的 zdr 等供应商选项通过同一声明机制呈现、校验和保存，不在宿主前端添加供应商专属表单代码。
 - OAuth 使用宿主提供的打开授权链接、输入授权码、等待完成等标准交互；供应商登录网站在浏览器打开，不作为插件自带页面嵌入管理面。
 - 此限制不缩减插件对 OAuth 请求构造、token 交换与供应商响应解析的所有权，也不授予插件访问管理会话的能力。
+- 宿主在 `AuthStep::Start` 中提议 `state`。上游要求特定格式时，插件可在 `AuthResponse::Authorization.state` 返回替换值（仅 URL 非保留字符 `A-Z a-z 0-9 - . _ ~`，1–256 字节，不合法则拒绝创建会话），宿主随后按该值校验回调。该字段是认证结果 JSON 中的可选字段，不改变 WIT 版本；不返回该字段的插件（含此前构建的旧插件）继续使用宿主提议的 `state`。返回该字段的插件在不认识此字段的旧宿主上会因回调 state 不一致而登录失败。
 
 ### 已确认的动态表单多语言契约
 

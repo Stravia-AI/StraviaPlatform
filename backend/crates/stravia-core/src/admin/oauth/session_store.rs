@@ -13,6 +13,20 @@ fn validate_auth_browser_url(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 插件替换的 state 会原样进入授权 URL 与回调比对；限定为 URL 非保留字符，
+/// 使查询参数编解码前后保持一致。
+fn validate_vendor_state(value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=256).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'.' | b'_' | b'~')),
+        "vendor authorization state is invalid"
+    );
+    Ok(())
+}
+
 impl AdminService {
     pub(super) async fn create_auth_session_record(
         &self,
@@ -31,18 +45,30 @@ impl AdminService {
                  — ensure the callback reaches this replica (session affinity required)"
             );
         }
-        let (auth_url, user_code, verification_uri, interval_seconds) = match response {
+        let (auth_url, user_code, verification_uri, interval_seconds, vendor_state) = match response
+        {
             Some(stravia_vendor_sdk::AuthResponse::Authorization {
                 url,
                 user_code,
                 verification_uri,
                 interval_seconds,
-            }) => (Some(url), user_code, verification_uri, interval_seconds),
+                state,
+            }) => (
+                Some(url),
+                user_code,
+                verification_uri,
+                interval_seconds,
+                state,
+            ),
             None if auth_descriptor.flow == stravia_vendor_sdk::AuthFlow::Manual => {
-                (None, None, None, None)
+                (None, None, None, None, None)
             }
             _ => anyhow::bail!("vendor auth start did not return an authorization response"),
         };
+        if let Some(value) = vendor_state.as_deref() {
+            validate_vendor_state(value)?;
+        }
+        let state = vendor_state.unwrap_or(state);
         if let Some(value) = auth_url.as_deref() {
             validate_auth_browser_url(value)?;
         }
@@ -349,8 +375,9 @@ mod tests {
     use crate::auth::{AuthSessionCandidate, OAuthCallbackMode, OAuthSessionStartOptions};
     use crate::config::GatewayConfig;
 
-    #[tokio::test]
-    async fn guest_script_authorization_url_is_not_stored() -> anyhow::Result<()> {
+    const REDIRECT_URI: &str = "http://localhost:1457/auth/callback";
+
+    async fn codex_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
         let data_dir = tempfile::tempdir()?;
         let gw = Gateway::from_storage(
             GatewayConfig {
@@ -365,6 +392,14 @@ mod tests {
         )
         .await?;
         crate::plugin::test_support::install_distributed_vendor(&gw, "openai-codex").await?;
+        Ok((data_dir, gw))
+    }
+
+    async fn record_start(
+        gw: &Gateway,
+        url: &str,
+        vendor_state: Option<&str>,
+    ) -> anyhow::Result<crate::auth::AuthSession> {
         let admin = gw.admin();
         let candidate = AuthSessionCandidate {
             vendor_id: "openai-codex".into(),
@@ -379,29 +414,82 @@ mod tests {
         let (provider, auth_descriptor) =
             admin.provider_auth_candidate_snapshot(&candidate).await?;
         let scope = gw.create_vendor_session_scope(&candidate.vendor_id, provider)?;
-        let error = admin
+        admin
             .create_auth_session_record(
                 candidate,
                 auth_descriptor,
-                "test-state".into(),
+                "host-state".into(),
                 Some(stravia_vendor_sdk::AuthResponse::Authorization {
-                    url: "javascript:alert('session-secret')".into(),
+                    url: url.into(),
                     user_code: None,
                     verification_uri: Some("https://auth.openai.com".into()),
                     interval_seconds: None,
+                    state: vendor_state.map(str::to_owned),
                 }),
                 scope,
                 OAuthSessionStartOptions {
                     callback_mode: OAuthCallbackMode::Manual,
-                    redirect_uri: "http://localhost:1457/auth/callback".into(),
+                    redirect_uri: REDIRECT_URI.into(),
                     listener_port: None,
                     fallback_reason: None,
                 },
             )
             .await
+    }
+
+    fn callback_error(session: &crate::auth::AuthSession, state: &str) -> Option<&'static str> {
+        super::super::validate_auth_callback(
+            session,
+            &format!("{REDIRECT_URI}?code=c&state={state}"),
+        )
+        .err()
+        .map(|(code, _, _)| code)
+    }
+
+    #[tokio::test]
+    async fn guest_script_authorization_url_is_not_stored() -> anyhow::Result<()> {
+        let (_data_dir, gw) = codex_gateway().await?;
+        let error = record_start(&gw, "javascript:alert('session-secret')", None)
+            .await
             .expect_err("guest script URL should be rejected");
 
         assert!(!error.to_string().contains("session-secret"));
+        assert!(gw.auth_sessions.read().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn callback_state_follows_vendor_override_or_host_proposal() -> anyhow::Result<()> {
+        let (_data_dir, gw) = codex_gateway().await?;
+        let vendor_state = "0123456789abcdef0123456789abcdef";
+
+        let overridden =
+            record_start(&gw, "https://auth.openai.com/authorize", Some(vendor_state)).await?;
+        assert_eq!(callback_error(&overridden, vendor_state), None);
+        assert_eq!(
+            callback_error(&overridden, "host-state"),
+            Some("AUTH_CALLBACK_STATE_MISMATCH")
+        );
+
+        // 旧版插件不返回 state：继续使用宿主提议的值。
+        let legacy = record_start(&gw, "https://auth.openai.com/authorize", None).await?;
+        assert_eq!(callback_error(&legacy, "host-state"), None);
+        assert_eq!(
+            callback_error(&legacy, vendor_state),
+            Some("AUTH_CALLBACK_STATE_MISMATCH")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vendor_state_outside_url_unreserved_set_is_rejected() -> anyhow::Result<()> {
+        let (_data_dir, gw) = codex_gateway().await?;
+        let oversized = "a".repeat(257);
+        for state in ["", "has space", "a&b=c", oversized.as_str()] {
+            record_start(&gw, "https://auth.openai.com/authorize", Some(state))
+                .await
+                .expect_err("invalid vendor state should be rejected");
+        }
         assert!(gw.auth_sessions.read().await.is_empty());
         Ok(())
     }

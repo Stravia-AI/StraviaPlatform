@@ -497,6 +497,7 @@ fn xai_auth_start(host: &GuestHost) -> Result<AuthResponse, PluginError> {
         user_code: Some(state.user_code),
         verification_uri: Some(state.verification_uri),
         interval_seconds: Some(state.interval_seconds),
+        state: None,
     })
 }
 

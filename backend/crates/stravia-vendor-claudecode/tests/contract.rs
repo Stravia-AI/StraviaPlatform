@@ -369,15 +369,28 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
         &services,
         auth(AuthStep::Start {
             redirect_uri: "http://localhost:54545/callback".into(),
-            state: "state-1".into(),
+            state: "hostproposedstate".into(),
         }),
     )
     .await
     .expect("auth starts");
-    let OperationOutput::Auth(AuthResponse::Authorization { url, .. }) = started else {
-        panic!("expected authorization URL");
+    let OperationOutput::Auth(AuthResponse::Authorization {
+        url,
+        state: Some(state),
+        ..
+    }) = started
+    else {
+        panic!("expected authorization URL with a plugin-owned state");
     };
     assert!(url.starts_with("https://claude.ai/oauth/authorize?client_id="));
+    // claude.ai 拒绝宿主默认 state 形态；插件必须改用 omp 同款 32 位小写 hex。
+    assert_eq!(state.len(), 32);
+    assert!(
+        state
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(url.contains(&format!("&state={state}&")));
 
     let rejected = run(
         &runtime,
@@ -399,7 +412,7 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
         &plugin,
         &services,
         auth(AuthStep::Exchange {
-            callback_url: "http://localhost:54545/callback?code=c&state=state-1".into(),
+            callback_url: format!("http://localhost:54545/callback?code=c&state={state}"),
         }),
     )
     .await
@@ -423,7 +436,7 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
     let token: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(token["grant_type"], "authorization_code");
     assert_eq!(token["code"], "c");
-    assert_eq!(token["state"], "state-1");
+    assert_eq!(token["state"], state.as_str());
     assert_eq!(token["redirect_uri"], "http://localhost:54545/callback");
     assert!(
         requests[1]

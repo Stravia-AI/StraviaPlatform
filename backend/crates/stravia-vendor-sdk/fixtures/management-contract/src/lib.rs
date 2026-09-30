@@ -251,6 +251,7 @@ fn auth(
                     provider.base_url.trim_end_matches('/')
                 )),
                 interval_seconds: None,
+                state: None,
             })
         }
         AuthStep::Exchange { callback_url } => {

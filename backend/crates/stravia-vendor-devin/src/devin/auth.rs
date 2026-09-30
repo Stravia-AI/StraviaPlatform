@@ -123,6 +123,7 @@ fn start(
         user_code: None,
         verification_uri: Some(WEBAPP_URL.to_string()),
         interval_seconds: None,
+        state: None,
     })
 }
 

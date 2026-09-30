@@ -6,13 +6,16 @@
 
 mod allowance;
 mod auth;
+mod cache;
+mod capabilities;
 mod request;
+mod thinking;
 mod xxhash;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -24,10 +27,10 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigGroup, DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput,
-    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor,
-    VendorKind, read_http_body,
+    ConfigGroup, DataCompatibility, DiscoverRequest, DiscoverResponse, ErrorKind, GuestHost,
+    HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
+    PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
+    read_http_body,
 };
 
 use request::{AccountIdentity, DEFAULT_CLIENT_VERSION};
@@ -224,7 +227,8 @@ fn infer(
         account_uuid: credential(provider, auth::ACCOUNT_UUID),
         device_id: credential(provider, auth::DEVICE_ID),
     };
-    let shaped = request::shape(encoded.body, client_version, &identity, || {
+    let caps = capabilities::ModelCapabilities::from_snapshot(provider);
+    let shaped = request::shape(encoded.body, client_version, &identity, &caps, || {
         fallback_session_id(provider)
     })
     .map_err(invalid)?;
@@ -315,7 +319,10 @@ fn discover(
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| retryable("Claude model discovery response has no model list"))?;
-    let models = entries.iter().filter_map(discovered_model).collect();
+    let models = entries
+        .iter()
+        .filter_map(capabilities::discovered_model)
+        .collect();
     let next_cursor = (value.get("has_more").and_then(Value::as_bool) == Some(true))
         .then(|| value.get("last_id").and_then(Value::as_str))
         .flatten()
@@ -323,25 +330,6 @@ fn discover(
     Ok(DiscoverResponse {
         models,
         next_cursor,
-    })
-}
-
-fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
-    let id = entry.get("id").and_then(Value::as_str)?.trim();
-    if id.is_empty() {
-        return None;
-    }
-    Some(DiscoveredModel {
-        id: id.to_owned(),
-        display_name: entry
-            .get("display_name")
-            .and_then(Value::as_str)
-            .unwrap_or(id)
-            .to_owned(),
-        family: None,
-        selector: None,
-        capabilities: Vec::new(),
-        metadata: BTreeMap::new(),
     })
 }
 

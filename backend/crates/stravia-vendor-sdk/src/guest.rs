@@ -435,6 +435,39 @@ mod media_bytes_tests {
     }
 }
 
+#[cfg(test)]
+mod auth_response_tests {
+    use super::AuthResponse;
+
+    #[test]
+    fn authorization_state_is_optional_on_the_wire() {
+        // 该字段之前构建的插件不输出 state，宿主仍须解码并沿用自身 state。
+        let legacy: AuthResponse = serde_json::from_value(serde_json::json!({
+            "status": "authorization",
+            "url": "https://example.com/authorize",
+            "user_code": null,
+            "verification_uri": null,
+            "interval_seconds": null
+        }))
+        .expect("decode legacy authorization");
+        let AuthResponse::Authorization { state, .. } = legacy else {
+            panic!("expected authorization");
+        };
+        assert_eq!(state, None);
+
+        // 不替换 state 的插件输出与旧线上形态一致，旧宿主解码不受影响。
+        let encoded = serde_json::to_value(AuthResponse::Authorization {
+            url: "https://example.com/authorize".into(),
+            user_code: None,
+            verification_uri: None,
+            interval_seconds: None,
+            state: None,
+        })
+        .expect("encode authorization");
+        assert!(encoded.get("state").is_none());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthStep {
@@ -459,6 +492,13 @@ pub enum AuthResponse {
         user_code: Option<String>,
         verification_uri: Option<String>,
         interval_seconds: Option<u32>,
+        /// Replaces the host-proposed `AuthStep::Start.state` when the upstream
+        /// requires a specific format; the host then validates the callback
+        /// against this value. Only URL-unreserved ASCII (`A-Z a-z 0-9 - . _ ~`),
+        /// 1..=256 bytes. `None`, and payloads from guests built before this
+        /// field existed, keep the host-proposed state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Pending {
         retry_after_seconds: Option<u32>,
