@@ -1135,6 +1135,8 @@ tests/stream/
 
 ### 12.8 Router 故障策略
 
+429 的显式 `Retry-After` 只在所需等待小于当前请求剩余 deadline 窗口时进行同 Target 重试；等待大于或等于剩余窗口时，推理和独立能力执行均跳过该 Target 并尝试其余合格目标。没有备用时立即返回原上游错误，不以等待耗尽后的 `deadline_exceeded` 覆盖它，也不缩短等待后提前重打限流目标。跳过等待仍只计入本次上游失败，不额外触发冷却或重复扣除 Target Retry Budget。
+
 `RouteAttemptPolicy` 统一 Target 分层选择、同 Target full-jitter 重试、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。普通状态下，每个 `provider_id:model` 只有一份共享连续失败计数：同 Target 内部重试与跨请求终态上游失败都递增，完整成功清零。Target Retry Budget 为 N 表示第 N+1 次连续失败才触发冷却；缺省 5，即第 6 次失败后冷却 120 秒。瞬时失败是否在同 Target 重试仍由错误分类决定；QuotaExceeded 与 Auth、InvalidRequest、ContextLength、ContentFiltered 等终态上游错误计数，但前者仍直接换 Target，后者仍终止请求，不因计数改成同 Target 重试。用户取消、消费者断开以及本地准备、Hook、存储错误不计数。Client Output Commit 后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的真实上游失败仍计数。冷却为 0 时仅关闭冷却调度门禁；共享失败仍计数，达到阈值后仍按错误分类更换或停止 Target，完整成功仍清零。
 
 冷却结束进入半开，只在满足现有路由条件并实际选中时原子领取一个探测名额；探测期间其他请求跳过该 Target。半开只有一次上游尝试，同时关闭同 Target 预算重试与 ProviderCall 内部重试和回退；完整成功清零并恢复正常，任何上游探测失败（含已发出上游请求后的超时）立即重新冷却。用户取消、消费者断开和本地准备失败只释放探测名额，不伪造成功或失败。

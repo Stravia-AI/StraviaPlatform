@@ -864,6 +864,84 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
 }
 
 #[tokio::test]
+async fn external_search_retry_after_outside_window() -> anyhow::Result<()> {
+    for backup in [true, false] {
+        let harness = TestHarness::new().await?;
+        install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;
+        let limited = LocalUpstream::start().await?;
+        let healthy = LocalUpstream::start().await?;
+        let primary = create_provider(
+            &harness.gateway,
+            "Limited",
+            "fixture.capability-search",
+            &limited.url,
+            "fixture-search",
+        )
+        .await?;
+        let fallback = create_provider(
+            &harness.gateway,
+            "Backup",
+            "fixture.capability-search",
+            &healthy.url,
+            "fixture-search",
+        )
+        .await?;
+        let mut targets = vec![(&primary, None, 20)];
+        if backup {
+            targets.push((&fallback, None, 10));
+        }
+        let route = create_route(&harness.gateway, "retry-window-search", targets, 5).await?;
+        configure_external_search(&harness.gateway, &route.model_id).await?;
+        let (entered, release, responded) = limited
+            .push_retry_barrier(
+                "/search",
+                json!({"error":{"message":"explicit upstream rate limit"}}),
+                11450,
+            )
+            .await;
+        healthy
+            .push_json(
+                "/search",
+                StatusCode::OK,
+                search_response("Window fallback [sc:fixture-source]"),
+            )
+            .await;
+        let gateway = harness.gateway.clone();
+        let principal = Principal::new(harness.key_id.clone());
+        let task = tokio::spawn(async move {
+            terminal_search_with_deadline(
+                &gateway,
+                principal,
+                "window query",
+                None,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+        });
+        entered.await?;
+        release.send(()).unwrap();
+        responded.await?;
+        let event = tokio::time::timeout(Duration::from_secs(2), task).await??;
+        if backup {
+            assert!(
+                completed_search(event)
+                    .report
+                    .answer
+                    .contains("Window fallback")
+            );
+            assert_eq!(healthy.call_count("/search").await, 1);
+        } else {
+            let error = failed_search(event);
+            assert_eq!(error.code, "upstream_failed");
+            assert_eq!(healthy.call_count("/search").await, 0);
+        }
+        assert_eq!(limited.call_count("/search").await, 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_search_switches_only_retryable_started_failures() -> anyhow::Result<()> {
     let harness = TestHarness::new().await?;
     install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;

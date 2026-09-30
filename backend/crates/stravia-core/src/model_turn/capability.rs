@@ -393,6 +393,14 @@ impl Gateway {
                         last_error = Some(failure.error);
                         match disposition {
                             AttemptFailureDisposition::RetrySame { delay } => {
+                                // Preserve the upstream error when its required wait
+                                // cannot fit; failover must not retry this Target early.
+                                if failure.retry_after.is_some()
+                                    && delay >= context.deadline.remaining()
+                                {
+                                    policy.skip_current();
+                                    break;
+                                }
                                 wait_for_retry(delay, &context, &vendor_leases).await?;
                             }
                             AttemptFailureDisposition::TryNextTarget => break,

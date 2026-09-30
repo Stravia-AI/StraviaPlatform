@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Requests no longer wait until a 504 when an upstream rate-limit `Retry-After` cannot fit within the remaining request window. Model inference and independent capability calls try an eligible backup Target immediately, or return the original upstream error when no backup is available; they do not shorten the upstream wait and retry early.
+- Explicit Claude subscription allowance exhaustion now triggers Target failover instead of same-Target rate-limit retries. Ordinary rate limiting and incomplete allowance evidence retain their existing classification. Update the standalone `claude-code` plugin as well as Stravia to receive the classification fix.
 - Raised each Vendor attempt's pre-output event buffer budget from 1 MiB to 16 MiB so large Codex tool-schema echoes can be retained before the first output. The buffer remains bounded and still fails explicitly when its budget is exceeded.
 - Image requests and tool results no longer fail with "Vendor operation input was rejected" when forwarded to Anthropic or Google Gemini because they include an image `detail` hint. Targets without an equivalent control omit the hint while preserving the image and tool-result association; OpenAI-compatible and Open Responses targets continue to receive it unchanged.
 - Codex OAuth now presents client version `0.159.2` on model discovery and generation requests. The upstream lists `gpt-6.1-sol` only for recent client versions, so connections pinned to `0.156.1` may not have shown it; rediscover models on existing Codex connections to pick it up.

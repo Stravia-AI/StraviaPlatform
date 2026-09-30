@@ -783,6 +783,13 @@ fn execute_inner(
                     },
                 ) {
                     AttemptFailureDisposition::RetrySame { delay } => {
+                        // An explicit upstream wait must fit in the current request
+                        // window. Never shorten it and hit the limited Target early.
+                        if failure.retry_after.is_some() && delay >= input.deadline.remaining() {
+                            attempts.skip_current();
+                            last_error = Some(failure);
+                            break;
+                        }
                         if retry_over_http {
                             transport_preference = TransportPreference::HttpOnly;
                         }

@@ -45,6 +45,7 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 - 请求头与 CLI 相同，包括 `Accept-Encoding: gzip, deflate, br, zstd`（宿主解码响应）与 `Connection: keep-alive`；工具 `strict` 与 `tool_result.is_error` 原样转发，客户端协议没有 `is_error`（OpenAI、Gemini 等入口）时按 CLI 形态补 `is_error: false`。
 - 已知差异：Stainless 平台头固定为 Linux x64；网关解析 JSON 后不保留客户端对象内的键顺序，工具 schema 与工具入参的嵌套键按字典序发送；HTTP 版本由宿主协商，协商到 HTTP/2 时 `Connection` 头按协议不发送；TLS 与 HTTP 实现指纹不同于 Bun。
 - 模型发现读取 `/v1/models`；额度监控读取 `/api/oauth/usage`，呈现 5 小时、每周、按模型的每周窗口与额外用量。
+- HTTP 429 同时明确报告代表额度窗口为 `five_hour` 或 `seven_day`、对应窗口 `rejected` 且使用率为有限值并达到 100%，以及额外用量 `rejected`、原因为 `org_level_disabled` 时，按 `QuotaExceeded` 交给宿主直接切换 Target；缺失、未知或互相不匹配的证据，以及普通请求限流，仍保留既有分类。该判定由共享 HTTP 错误解析执行，不改变状态码或 `Retry-After`。已安装的独立 `claude-code` 插件需导入重建的插件包才能获得此分类修复，单独更新宿主不会替换已安装插件。
 - 以订阅 OAuth 令牌在 Claude Code 以外的客户端调用可能违反 Anthropic 使用条款并导致账号受限；上游对客户端形态的校验可能随 Claude Code 版本变化而失效。
 
 ### Provider 图标标识
