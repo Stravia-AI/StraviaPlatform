@@ -19,6 +19,7 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatTime } from '$lib/format'
+import { formatSpecificationTokens, specificationModality } from '$lib/model-specification'
 import { localeState } from '$lib/localization.svelte'
 import {
   emptySpecificationFilter,
@@ -157,11 +158,11 @@ const providerModelColumns = $derived(
       cell: (context) => renderSnippet(providerModelIdentityCell, context),
       enableSorting: false,
       enableGlobalFilter: true,
-      meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-4' },
+      meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-2' },
       size: 260,
     }),
     providerModelColumnHelper.accessor('specification', {
-      header: () => m.model_specification_title(),
+      header: () => m.model_specification_context(),
       cell: (context) => renderSnippet(providerModelSpecificationCell, context),
       filterFn: (row, _columnId, value) =>
         matchesSpecification(row.original.specification, value as SpecificationFilter),
@@ -169,11 +170,29 @@ const providerModelColumns = $derived(
       enableGlobalFilter: false,
       meta: {
         label: () => m.model_specification_title(),
-        cellClass: 'whitespace-normal py-4',
+        cellClass: 'whitespace-normal py-2',
         exportable: false,
         filter: { variant: 'custom', content: providerModelSpecificationFilter },
       },
-      size: 360,
+      size: 150,
+    }),
+    providerModelColumnHelper.display({
+      id: 'modalities',
+      header: () => m.model_specification_modalities(),
+      cell: (context) => renderSnippet(providerModelModalitiesCell, context),
+      meta: { label: () => m.model_specification_modalities(), cellClass: 'whitespace-normal', exportable: false },
+      size: 230,
+    }),
+    providerModelColumnHelper.display({
+      id: 'efforts',
+      header: () => m.model_specification_reasoning_efforts(),
+      cell: (context) => renderSnippet(providerModelEffortsCell, context),
+      meta: {
+        label: () => m.model_specification_reasoning_efforts(),
+        cellClass: 'whitespace-normal',
+        exportable: false,
+      },
+      size: 170,
     }),
     providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
       id: 'availability',
@@ -582,14 +601,44 @@ async function deleteManualModel(): Promise<void> {
 {/snippet}
 
 {#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
-  <ModelSpecification specification={context.row.original.specification} />
+  {@const value = context.row.original.specification.limit?.context}
+  <span class="font-technical text-sm"
+    >{value == null ? m.model_specification_not_registered() : formatSpecificationTokens(value)}</span>
+{/snippet}
+
+{#snippet providerModelModalitiesCell(context: DataTableCellContext<ProviderModelSummary>)}
+  {@const modalities = context.row.original.specification.modalities}
+  <dl class="space-y-1 text-xs">
+    <div>
+      <dt class="inline text-muted-foreground">{m.model_specification_input()}</dt>
+      <dd class="inline">
+        {modalities?.input.length
+          ? modalities.input.map((value) => specificationModality(value).label()).join(', ')
+          : m.model_specification_not_registered()}
+      </dd>
+    </div>
+    <div>
+      <dt class="inline text-muted-foreground">{m.model_specification_output()}</dt>
+      <dd class="inline">
+        {modalities?.output.length
+          ? modalities.output.map((value) => specificationModality(value).label()).join(', ')
+          : m.model_specification_not_registered()}
+      </dd>
+    </div>
+  </dl>
+{/snippet}
+
+{#snippet providerModelEffortsCell(context: DataTableCellContext<ProviderModelSummary>)}
+  {@const efforts = context.row.original.specification.reasoning_efforts}
+  <span class="break-words font-technical text-xs"
+    >{efforts?.length ? efforts.join(', ') : m.model_specification_not_registered()}</span>
 {/snippet}
 
 {#snippet providerModelAvailabilityCell(context: DataTableCellContext<ProviderModelSummary>)}
   {@const model = context.row.original}
   {@const reason = availabilityReason(model)}
   <Badge variant={model.available ? 'secondary' : 'outline'}>
-    {model.available ? m.common_used() : m.common_unavailable()}
+    {model.available ? m.model_specification_available() : m.common_unavailable()}
   </Badge>
   {#if reason}<p class="mt-1 text-xs text-muted-foreground">{reason}</p>{/if}
 {/snippet}
@@ -679,7 +728,7 @@ async function deleteManualModel(): Promise<void> {
               {selectedDetail.metadata.name || selectedDetail.id}
             </h2>
             <Badge variant={selectedDetail.available ? 'secondary' : 'outline'}>
-              {selectedDetail.available ? m.common_used() : m.common_unavailable()}
+              {selectedDetail.available ? m.model_specification_available() : m.common_unavailable()}
             </Badge>
             <Badge variant="outline">
               {selectedDetail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
@@ -847,7 +896,7 @@ async function deleteManualModel(): Promise<void> {
             </div>
             <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-2">
               <Badge variant={model.available ? 'secondary' : 'outline'}
-                >{model.available ? m.common_used() : m.common_unavailable()}</Badge>
+                >{model.available ? m.model_specification_available() : m.common_unavailable()}</Badge>
               <Badge variant="outline"
                 >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
               {#if references.length > 0}

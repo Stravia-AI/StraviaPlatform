@@ -733,7 +733,10 @@ fn discovered_model(value: &Value) -> Result<DiscoveredModel, PluginError> {
         .and_then(Value::as_str)
         .unwrap_or(&id)
         .to_owned();
-    let metadata = value.as_object().cloned().unwrap_or_default();
+    let metadata = value
+        .as_object()
+        .map(stravia_vendor_common::thinking::source_metadata)
+        .unwrap_or_default();
     let family = value
         .get("family")
         .and_then(Value::as_str)
@@ -1149,53 +1152,6 @@ mod tests {
                 format!("{}/chat/completions", explicit.trim_end_matches('/'))
             );
         }
-    }
-
-    #[test]
-    fn static_and_catalog_discovery_declare_model_specific_thinking() {
-        let mut static_provider = provider(OPENAI_CHAT_PROTOCOL, "sk-test");
-        static_provider.operation_metadata.insert(
-            "static_models".into(),
-            json!(["minimaxai/minimax-m3", "other-model"]),
-        );
-        let static_models = explicit_discovery("nvidia", &static_provider)
-            .unwrap()
-            .unwrap()
-            .models;
-        assert_eq!(
-            static_models[0].capabilities,
-            vec![stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE.to_owned()]
-        );
-        assert!(static_models[1].capabilities.is_empty());
-
-        let mut catalog_provider = provider(OPENAI_CHAT_PROTOCOL, "sk-test");
-        catalog_provider
-            .operation_metadata
-            .insert("models_source".into(), json!(MODELS_SOURCE_CATALOG));
-        catalog_provider.operation_metadata.insert(
-            "catalog_models".into(),
-            json!([
-                {
-                    "id": "glm-4.6",
-                    "capabilities": ["thinking_toggle"]
-                },
-                {
-                    "id": "kimi-k2-thinking",
-                    "reasoning": false,
-                    "capabilities": ["thinking_toggle"]
-                }
-            ]),
-        );
-        let catalog_models = explicit_discovery("custom", &catalog_provider)
-            .unwrap()
-            .unwrap()
-            .models;
-        assert_eq!(
-            catalog_models[0].capabilities,
-            vec![stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE.to_owned()]
-        );
-        assert!(catalog_models[1].capabilities.is_empty());
-        assert_eq!(catalog_models[1].metadata["capabilities"], json!([]));
     }
 
     fn assert_protected_reasoning(error: Option<PluginError>) {

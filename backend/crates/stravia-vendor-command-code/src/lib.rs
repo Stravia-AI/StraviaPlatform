@@ -517,16 +517,8 @@ fn discover(
             .unwrap_or_default();
         let metadata = item
             .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(key, _)| {
-                !matches!(
-                    key.as_str(),
-                    "id" | "name" | "family" | "selector" | "capabilities"
-                )
-            })
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
+            .map(stravia_vendor_common::thinking::source_metadata)
+            .unwrap_or_default();
         models.insert(
             id.clone(),
             DiscoveredModel {

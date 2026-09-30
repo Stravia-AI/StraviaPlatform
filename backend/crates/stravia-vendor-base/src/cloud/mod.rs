@@ -530,7 +530,7 @@ fn extract_models(value: &Value) -> Vec<DiscoveredModel> {
             .to_string();
         let metadata = entry
             .as_object()
-            .map(|object| object.clone().into_iter().collect())
+            .map(stravia_vendor_common::thinking::source_metadata)
             .unwrap_or_default();
         by_id.insert(
             id.clone(),

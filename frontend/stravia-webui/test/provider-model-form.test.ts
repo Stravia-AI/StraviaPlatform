@@ -30,6 +30,66 @@ describe('provider model form', () => {
     expect(result.errors).toHaveLength(1)
   })
 
+  test('removes retired specification fields while preserving explicit supported efforts', () => {
+    const metadata = {
+      name: 'Model',
+      attachment: true,
+      reasoning: true,
+      tool_call: true,
+      structured_output: true,
+      temperature: true,
+      interleaved: { field: 'reasoning_content' },
+      reasoning_options: [{ type: 'toggle' }],
+      limit: { context: 128000, input: 100000, output: 32000 },
+      reasoning_efforts: [
+        'none',
+        'minimal',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+        ' custom ',
+        '',
+        'default',
+        'null',
+        'high',
+      ],
+    }
+    const result = buildProviderModelMetadataJson('model-id', metadata, emptyProviderModelCost())
+
+    expect(result.errors).toEqual([])
+    expect(JSON.parse(result.json!)).toEqual({
+      id: 'model-id',
+      name: 'Model',
+      limit: { context: 128000 },
+      reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'custom'],
+    })
+  })
+
+  test('preserves auxiliary prices when editing base and tier prices', () => {
+    const metadata = {
+      cost: {
+        input: 2,
+        context_over_200k: { input: 4, output: 8 },
+        tiers: [{ tier: { type: 'context', size: 200000 }, input: 4 }],
+      },
+    }
+    const cost = providerModelCostFromMetadata(metadata)
+    cost.base.input = '3'
+    cost.tiers[0].output = '9'
+    const result = buildProviderModelMetadataJson('model-id', metadata, cost)
+
+    expect(result.errors).toEqual([])
+    expect(JSON.parse(result.json!)).toMatchObject({
+      cost: {
+        input: 3,
+        context_over_200k: { input: 4, output: 8 },
+        tiers: [{ tier: { type: 'context', size: 200000 }, input: 4, output: 9 }],
+      },
+    })
+  })
+
   test('preserves an explicit null cost', () => {
     const metadata = { cost: null }
 

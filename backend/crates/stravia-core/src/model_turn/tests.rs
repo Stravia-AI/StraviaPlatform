@@ -445,7 +445,20 @@ async fn gateway_with_captured_thinking(
         })
         .await
         .expect("Provider");
-    add_test_provider_model(&gateway, &provider.id).await;
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "upstream-model",
+            CreateManualProviderModel {
+                metadata: serde_json::json!({
+                    "id": "upstream-model",
+                    "reasoning_efforts": ["none", "minimal", "low", "medium", "high"],
+                }),
+                template_id: None,
+            },
+        )
+        .await
+        .expect("Provider Model with declared thinking efforts");
     let model = admin
         .create_model(CreateRoute {
             model_id: model_name.into(),
@@ -1028,16 +1041,20 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
 }
 
 #[tokio::test]
-async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
+async fn execute_tools_without_model_capability_declarations() {
     let (base_url, calls) = serve_openai_response(serde_json::json!({
-        "id": "chatcmpl-unexpected",
+        "id": "chatcmpl-tool",
         "object": "chat.completion",
         "created": 1,
         "model": "upstream-model",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": "must not run"},
-            "finish_reason": "stop"
+            "message": {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call-lookup",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"query\":\"local\"}"}
+            }]},
+            "finish_reason": "tool_calls"
         }]
     }))
     .await;
@@ -1113,17 +1130,23 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         meta: None,
     }]);
 
-    let error = match gateway
+    let turn = gateway
         .model_turn
         .execute(TurnInput::new(Principal::new(key.id), request))
         .await
-    {
-        Ok(_) => panic!("unknown function-tool capability must fail closed"),
-        Err(error) => error,
+        .expect("protocol-supported tools must reach the provider");
+    let events = turn.output.collect::<Vec<_>>().await;
+    let Some(Ok(CanonicalEvent::Completed(response))) = events.last() else {
+        panic!("expected completed tool response: {events:?}");
     };
-
-    assert_eq!(error.code, "tools_unsupported");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let tool = response
+        .tool_calls()
+        .next()
+        .expect("returned function call");
+    assert_eq!(tool.id, "call-lookup");
+    assert_eq!(tool.name, "lookup");
+    assert_eq!(tool.arguments, "{\"query\":\"local\"}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

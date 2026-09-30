@@ -166,25 +166,11 @@ fn parse_known(model: &str) -> Option<(Family, Revision)> {
     }
 }
 
-/// 发现阶段写入 Provider Model 的 `reasoning_options`，让 Stravia 的思考档位表
-/// 与目标型号真实接受的 effort/预算一致。没有发现数据或型号不支持思考时返回 `None`。
-pub(crate) fn reasoning_options(model: &str, caps: &ModelCapabilities) -> Option<Vec<Value>> {
-    if caps.thinking == Some(false) {
-        return None;
-    }
-    let profile = ModelProfile::new(model, caps).filter(|_| !caps.is_empty())?;
-    let mut options = Vec::new();
-    let efforts = profile.efforts();
-    if !efforts.is_empty() {
-        // `none` 表示关闭思考；思考常开的型号没有关闭档，不提供。
-        let off = (!profile.always_on()).then_some("none");
-        let values = off.into_iter().chain(efforts).collect::<Vec<_>>();
-        options.push(json!({ "type": "effort", "values": values }));
-    }
-    if caps.enabled == Some(true) {
-        options.push(json!({ "type": "budget_tokens", "min": MIN_BUDGET, "max": null }));
-    }
-    (!options.is_empty()).then_some(options)
+/// 发现阶段仅发布上游明确声明的 effort；预算和开关仍由请求协议编码。
+pub(crate) fn reasoning_efforts(caps: &ModelCapabilities) -> Option<Vec<Value>> {
+    caps.efforts
+        .as_ref()
+        .map(|efforts| efforts.iter().map(|effort| json!(effort)).collect())
 }
 
 fn effort_rank(effort: &str) -> Option<usize> {
@@ -397,16 +383,6 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
         let budget = budget
             .unwrap_or_else(|| budget_from_effort(effort))
             .max(MIN_BUDGET);
-        // 预算必须小于 max_tokens，且要给正文留出空间，不能超过型号输出上限。
-        let budget = caps
-            .max_tokens
-            .map_or(budget, |cap| budget.min(cap.saturating_sub(OUTPUT_BUFFER)));
-        if budget < MIN_BUDGET {
-            object.remove("thinking");
-            drop_clear_thinking(object);
-            set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
-            return;
-        }
         let mut thinking = json!({ "type": "enabled", "budget_tokens": budget });
         if let Some(display) = display {
             thinking["display"] = Value::String(display);
@@ -756,30 +732,14 @@ mod tests {
     }
 
     #[test]
-    fn manual_budget_stays_inside_the_model_output_limit() {
-        let limited = ModelCapabilities {
-            max_tokens: Some(8000),
-            ..caps(false, true, &[])
-        };
+    fn manual_budget_preserves_explicit_budget_and_required_output_space() {
         let body = run_with(
             "claude-sonnet-4-5",
-            json!({"thinking": {"type": "enabled", "budget_tokens": 16000}}),
-            &limited,
+            json!({"thinking":{"type":"enabled","budget_tokens":16000}}),
+            &caps(false, true, &[]),
         );
-        assert_eq!(body["thinking"]["budget_tokens"], 4000);
-        assert_eq!(body["max_tokens"], 8000);
-
-        // 上限小到放不下最小预算与正文空间时，放弃思考而不是发出必然 400 的请求。
-        let tiny = ModelCapabilities {
-            max_tokens: Some(4500),
-            ..caps(false, true, &[])
-        };
-        let body = run_with(
-            "claude-sonnet-4-5",
-            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
-            &tiny,
-        );
-        assert!(body.get("thinking").is_none());
+        assert_eq!(body["thinking"]["budget_tokens"], 16000);
+        assert_eq!(body["max_tokens"], 16000 + OUTPUT_BUFFER);
     }
 
     #[test]

@@ -60,6 +60,17 @@ export function providerModelCostFromMetadata(value: ProviderModelMetadata): Pro
   }
 }
 
+export function normalizeProviderModelEfforts(values: readonly string[]): string[] {
+  return [
+    ...new Set(
+      values
+        .filter((value) => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter((value) => value !== '' && value !== 'default' && value !== 'null'),
+    ),
+  ]
+}
+
 export function providerModelFormFingerprint(metadata: ProviderModelMetadata, cost: ProviderModelCostForm): string {
   return JSON.stringify({ metadata, cost })
 }
@@ -109,9 +120,22 @@ export function buildProviderModelMetadataJson(
   const errors: string[] = []
   const value = structuredClone(metadata) as Record<string, unknown>
   value.id = detailId
+  for (const key of [
+    'attachment',
+    'reasoning',
+    'tool_call',
+    'structured_output',
+    'temperature',
+    'interleaved',
+    'reasoning_options',
+  ]) {
+    delete value[key]
+  }
+  if (metadata.limit) value.limit = { context: metadata.limit.context }
+  if (metadata.reasoning_efforts) value.reasoning_efforts = normalizeProviderModelEfforts(metadata.reasoning_efforts)
 
   if (Object.prototype.hasOwnProperty.call(metadata, 'limit') && metadata.limit) {
-    for (const [key, number] of Object.entries(metadata.limit)) {
+    for (const [key, number] of Object.entries({ context: metadata.limit.context })) {
       if (number != null && (!Number.isSafeInteger(number) || number < 0)) {
         errors.push(m.provider_model_editor_invalid_limit({ key }))
       }
@@ -119,7 +143,10 @@ export function buildProviderModelMetadataJson(
   }
 
   if (Object.prototype.hasOwnProperty.call(metadata, 'cost') && metadata.cost !== null) {
-    const costValue: Record<string, unknown> = buildPrices(cost.base, m.provider_model_editor_base_cost(), errors)
+    const costValue: Record<string, unknown> = {
+      ...buildPrices(cost.base, m.provider_model_editor_base_cost(), errors),
+      context_over_200k: metadata.cost?.context_over_200k,
+    }
     costValue.tiers = cost.tiers.map((tier, index) => {
       const threshold = Number(tier.threshold)
       if (!Number.isSafeInteger(threshold) || threshold < 0) {

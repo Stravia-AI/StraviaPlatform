@@ -25,7 +25,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     .expect("Gateway");
     let parent_provider = create_test_provider_with_model(
         &gateway, "Read scope parent", parent_url, "vision",
-        serde_json::json!({"id":"vision", "attachment":true, "tool_call":true, "modalities":{"input":["text","image"],"output":["text"]}}),
+        serde_json::json!({"id":"vision", "reasoning_efforts":["medium"], "modalities":{"input":["text","image"],"output":["text"]}}),
     ).await;
     let admin = gateway.admin();
     let parent = admin
@@ -223,7 +223,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             crate::provider_models::CreateManualProviderModel {
                 metadata: serde_json::json!({
                     "id": "vision",
-                    "attachment": true,
+                    "reasoning_efforts": ["medium"],
                     "modalities": {"input": ["text", "image"], "output": ["text"]}
                 }),
                 template_id: None,

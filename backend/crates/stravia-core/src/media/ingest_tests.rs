@@ -48,7 +48,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         .await
         .unwrap();
     admin.create_manual_provider_model(&provider.id, "vision", crate::provider_models::CreateManualProviderModel {
-        metadata: serde_json::json!({"id":"vision","name":"Vision","attachment":true,"tool_call":true,"modalities":{"input":["text","image"],"output":["text"]}}),
+        metadata: serde_json::json!({"id":"vision","name":"Vision","modalities":{"input":["text","image"],"output":["text"]}}),
         template_id: None,
     }).await.unwrap();
     let route = admin
@@ -311,7 +311,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         })
         .await
         .unwrap();
-    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","attachment":true,"modalities":{"input":["text","image"],"output":["text","image"]}}), template_id: None }).await.unwrap();
+    admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","modalities":{"input":["text","image"],"output":["text","image"]}}), template_id: None }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
             model_id: "painter".into(),

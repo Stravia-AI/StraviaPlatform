@@ -51,7 +51,6 @@ pub struct MediaTarget {
     pub provider_id: String,
     pub model: Option<String>,
     pub input_modalities: Vec<String>,
-    pub tool_call: Option<bool>,
 }
 #[derive(Clone)]
 pub struct MediaRoute {

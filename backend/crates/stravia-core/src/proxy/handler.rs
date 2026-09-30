@@ -234,10 +234,6 @@ mod tests {
         let listed =
             listed_models(models_list(State(gateway.clone()), valid_headers.clone()).await).await;
         assert_eq!(listed[0]["display_name"], "Shared label");
-        assert_eq!(
-            listed[0]["stravia:thinking_levels"],
-            serde_json::json!(["off", "minimal", "low", "medium", "high"])
-        );
         gateway
             .admin()
             .update_api_key(
@@ -374,7 +370,6 @@ mod tests {
                 created_at: "2000-01-01T00:00:00Z".into(),
                 supported_thinking_levels: Vec::new(),
                 context_window: None,
-                output_max_tokens: None,
                 supports_image_input: false,
                 targets: Vec::new(),
                 default_thinking_level: None,

@@ -115,16 +115,12 @@ pub struct CatalogModel {
     pub capabilities: Option<CatalogCapabilities>,
     pub limits: Option<CatalogLimits>,
     pub cost: Option<CatalogCost>,
-    pub reasoning_options: Option<CatalogReasoningOptions>,
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct CatalogCapabilities {
-    pub tool_call: bool,
-    pub reasoning: bool,
-    pub attachment: bool,
-    pub temperature: bool,
     pub input_modalities: Vec<String>,
     pub output_modalities: Vec<String>,
 }
@@ -133,7 +129,6 @@ pub struct CatalogCapabilities {
 #[serde(default)]
 pub struct CatalogLimits {
     pub context: Option<u64>,
-    pub output: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -143,23 +138,6 @@ pub struct CatalogCost {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CatalogReasoningOptions {
-    Effort { values: Vec<String> },
-    Toggle,
-    Budget { min: Option<u64>, max: Option<u64> },
-}
-
-impl CatalogReasoningOptions {
-    pub fn effort_values(&self) -> Option<&[String]> {
-        match self {
-            Self::Effort { values } => Some(values),
-            Self::Toggle | Self::Budget { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

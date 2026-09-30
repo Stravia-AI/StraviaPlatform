@@ -502,12 +502,7 @@ fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
             .collect(),
         metadata: entry
             .as_object()
-            .map(|object| {
-                object
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
+            .map(stravia_vendor_common::thinking::source_metadata)
             .unwrap_or_default(),
     };
     apply_declared_specifications(&mut model);
@@ -538,15 +533,17 @@ fn apply_declared_specifications(model: &mut DiscoveredModel) {
                 .or_else(|| level.get("effort").and_then(Value::as_str))
         })
         .map(str::trim)
-        .filter(|effort| !effort.is_empty())
+        .filter(|effort| {
+            !effort.is_empty()
+                && !effort.eq_ignore_ascii_case("default")
+                && !effort.eq_ignore_ascii_case("null")
+        })
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if !efforts.is_empty() {
-        model.metadata.insert("reasoning".into(), Value::Bool(true));
-        model.metadata.insert(
-            "reasoning_options".into(),
-            serde_json::json!([{ "type": "effort", "values": efforts }]),
-        );
+        model
+            .metadata
+            .insert("reasoning_efforts".into(), serde_json::json!(efforts));
     }
 }
 
@@ -829,10 +826,9 @@ mod tests {
             json!({"input": ["text", "image"], "output": ["text"]})
         );
         assert_eq!(model.metadata["context_window"], json!(272000));
-        assert_eq!(model.metadata["reasoning"], json!(true));
         assert_eq!(
-            model.metadata["reasoning_options"],
-            json!([{"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}])
+            model.metadata["reasoning_efforts"],
+            json!(["low", "medium", "high", "xhigh", "max"])
         );
     }
 
@@ -844,7 +840,7 @@ mod tests {
         });
         let model = discovered_model(&entry).expect("listed model");
         assert!(!model.metadata.contains_key("modalities"));
-        assert!(!model.metadata.contains_key("reasoning_options"));
+        assert!(!model.metadata.contains_key("reasoning_efforts"));
         assert!(!model.metadata.contains_key("reasoning"));
     }
 

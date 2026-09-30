@@ -313,7 +313,7 @@ impl SearchAdmin {
 }
 
 fn eligible_provider_model(model: &ProviderModelRecord) -> bool {
-    model.effective_available() && model.tool_call == Some(true)
+    model.effective_available()
 }
 
 fn validate_limits(config: &WebSearchConfig) -> Result<(), WebSearchConfigError> {

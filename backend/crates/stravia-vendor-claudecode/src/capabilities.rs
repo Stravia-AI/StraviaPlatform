@@ -1,5 +1,5 @@
 //! Anthropic `GET /v1/models` 返回的型号能力：发现阶段翻译成 Stravia 的模型元数据，
-//! 推理阶段按同一份数据约束请求。接口只覆盖思考类型、effort 档位、`max_tokens` 与
+//! 推理阶段按同一份数据约束请求。接口只覆盖思考类型、effort 档位与
 //! 上下文管理策略；其余型号规则见 `thinking.rs` 的静态回退。
 
 use std::collections::BTreeMap;
@@ -28,7 +28,6 @@ pub(crate) struct ModelCapabilities {
     pub enabled: Option<bool>,
     /// 受支持的 effort 档位，升序；`Some(空)` 表示型号不支持 effort。
     pub efforts: Option<Vec<&'static str>>,
-    pub max_tokens: Option<u64>,
     /// `context_management.supported`。
     pub context_management: Option<bool>,
     /// 各上下文编辑策略是否受支持，键为编辑类型。
@@ -40,8 +39,8 @@ impl ModelCapabilities {
         *self == Self::default()
     }
 
-    /// 解析 `/v1/models` 条目里的 `capabilities` 对象与顶层 `max_tokens`。
-    pub(crate) fn from_wire(capabilities: &Value, max_tokens: Option<u64>) -> Self {
+    /// 解析 `/v1/models` 条目里的原生 `capabilities` 对象。
+    pub(crate) fn from_wire(capabilities: &Value) -> Self {
         let supported = |path: &str| {
             capabilities
                 .pointer(&format!("{path}/supported"))
@@ -63,7 +62,6 @@ impl ModelCapabilities {
             adaptive: supported("/thinking/types/adaptive"),
             enabled: supported("/thinking/types/enabled"),
             efforts,
-            max_tokens,
             context_management: supported("/context_management"),
             context_edits: CONTEXT_EDIT_KEYS
                 .into_iter()
@@ -81,12 +79,8 @@ impl ModelCapabilities {
         else {
             return Self::default();
         };
-        let max_tokens = extensions
-            .get("limit")
-            .and_then(|limit| limit.get("output"))
-            .and_then(Value::as_u64);
         match extensions.get(METADATA_KEY) {
-            Some(capabilities) => Self::from_wire(capabilities, max_tokens),
+            Some(capabilities) => Self::from_wire(capabilities),
             None => Self::default(),
         }
     }
@@ -102,7 +96,7 @@ impl ModelCapabilities {
 }
 
 /// 把发现到的能力翻译成 Stravia 元数据：思考类型与 effort 决定档位表，
-/// `max_tokens`/`max_input_tokens` 决定上限，输入与结构化输出能力进入能力列表。
+/// `max_input_tokens` 提供 context，输入与结构化输出能力进入原生能力列表。
 pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
     let id = entry.get("id").and_then(Value::as_str)?.trim();
     if id.is_empty() {
@@ -121,21 +115,17 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
         metadata: BTreeMap::new(),
     };
     let max_input = entry.get("max_input_tokens").and_then(Value::as_u64);
-    let max_output = entry.get("max_tokens").and_then(Value::as_u64);
-    if max_input.is_some() || max_output.is_some() {
+    if max_input.is_some() {
         let mut limit = Map::new();
         if let Some(context) = max_input {
             limit.insert("context".into(), json!(context));
-        }
-        if let Some(output) = max_output {
-            limit.insert("output".into(), json!(output));
         }
         model.metadata.insert("limit".into(), Value::Object(limit));
     }
     let Some(capabilities) = entry.get("capabilities").filter(|value| value.is_object()) else {
         return Some(model);
     };
-    let caps = ModelCapabilities::from_wire(capabilities, max_output);
+    let caps = ModelCapabilities::from_wire(capabilities);
     let flag = |path: &str| {
         capabilities
             .pointer(&format!("{path}/supported"))
@@ -150,15 +140,10 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
             model.capabilities.push(name.to_owned());
         }
     }
-    if let Some(reasoning) = caps.thinking {
+    if let Some(efforts) = thinking::reasoning_efforts(&caps) {
         model
             .metadata
-            .insert("reasoning".into(), Value::Bool(reasoning));
-    }
-    if let Some(options) = thinking::reasoning_options(id, &caps) {
-        model
-            .metadata
-            .insert("reasoning_options".into(), Value::Array(options));
+            .insert("reasoning_efforts".into(), Value::Array(efforts));
     }
     model
         .metadata
@@ -166,17 +151,8 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
     Some(model)
 }
 
-/// 按型号能力约束请求：`max_tokens` 不超过型号上限，移除型号不支持的上下文编辑。
-/// 必须在思考控制改写之后调用，因为手动预算模式会抬高 `max_tokens`。
+/// 移除原生协议明确不支持的上下文编辑；不从模型元数据钳制输出预算。
 pub(crate) fn constrain(object: &mut Map<String, Value>, caps: &ModelCapabilities) {
-    if let Some(cap) = caps.max_tokens
-        && object
-            .get("max_tokens")
-            .and_then(Value::as_u64)
-            .is_some_and(|requested| requested > cap)
-    {
-        object.insert("max_tokens".into(), json!(cap));
-    }
     let Some(management) = object
         .get_mut("context_management")
         .and_then(Value::as_object_mut)
@@ -224,11 +200,10 @@ mod tests {
     fn wire_capabilities_are_parsed_and_unlisted_effort_levels_are_dropped() {
         let mut wire = opus_5_5();
         wire["effort"]["xhigh"] = json!(null);
-        let caps = ModelCapabilities::from_wire(&wire, Some(128_000));
+        let caps = ModelCapabilities::from_wire(&wire);
         assert_eq!(caps.adaptive, Some(true));
         assert_eq!(caps.enabled, Some(false));
         assert_eq!(caps.efforts, Some(vec!["low", "medium", "high", "max"]));
-        assert_eq!(caps.max_tokens, Some(128_000));
         assert_eq!(
             caps.context_edits.get("clear_tool_uses_20250919"),
             Some(&false)
@@ -237,10 +212,10 @@ mod tests {
 
         let unsupported = json!({"effort": {"supported": false}});
         assert_eq!(
-            ModelCapabilities::from_wire(&unsupported, None).efforts,
+            ModelCapabilities::from_wire(&unsupported).efforts,
             Some(Vec::new())
         );
-        assert!(ModelCapabilities::from_wire(&json!({}), None).is_empty());
+        assert!(ModelCapabilities::from_wire(&json!({})).is_empty());
     }
 
     #[test]
@@ -253,15 +228,11 @@ mod tests {
             "capabilities": opus_5_5(),
         }))
         .unwrap();
-        assert_eq!(
-            model.metadata["limit"],
-            json!({"context": 1_000_000, "output": 128_000})
-        );
-        assert_eq!(model.metadata["reasoning"], json!(true));
+        assert_eq!(model.metadata["limit"], json!({"context": 1_000_000}));
         // 思考常开的型号不提供 `none`（关闭）档。
         assert_eq!(
-            model.metadata["reasoning_options"],
-            json!([{"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}])
+            model.metadata["reasoning_efforts"],
+            json!(["low", "medium", "high", "xhigh", "max"])
         );
         assert_eq!(model.metadata[METADATA_KEY], opus_5_5());
         assert_eq!(
@@ -282,10 +253,7 @@ mod tests {
             },
         }))
         .unwrap();
-        assert_eq!(
-            model.metadata["reasoning_options"],
-            json!([{"type": "budget_tokens", "min": 1024, "max": null}])
-        );
+        assert_eq!(model.metadata["reasoning_efforts"], json!([]));
 
         let plain = discovered_model(&json!({
             "id": "claude-haiku-3",
@@ -294,16 +262,15 @@ mod tests {
                 "adaptive": {"supported": false}, "enabled": {"supported": false}}}},
         }))
         .unwrap();
-        assert_eq!(plain.metadata["reasoning"], json!(false));
-        assert!(!plain.metadata.contains_key("reasoning_options"));
+        assert!(!plain.metadata.contains_key("reasoning_efforts"));
 
         let bare = discovered_model(&json!({"id": "x", "capabilities": null})).unwrap();
         assert!(bare.metadata.is_empty() && bare.capabilities.is_empty());
     }
 
     #[test]
-    fn requests_are_constrained_to_the_advertised_limits_and_strategies() {
-        let caps = ModelCapabilities::from_wire(&opus_5_5(), Some(64_000));
+    fn requests_preserve_explicit_output_budget_and_constrain_native_context_strategies() {
+        let caps = ModelCapabilities::from_wire(&opus_5_5());
         let mut body = json!({
             "max_tokens": 200_000,
             "context_management": {"edits": [
@@ -312,18 +279,16 @@ mod tests {
             ]},
         });
         constrain(body.as_object_mut().unwrap(), &caps);
-        assert_eq!(body["max_tokens"], 64_000);
+        assert_eq!(body["max_tokens"], 200_000);
         assert_eq!(
             body["context_management"],
             json!({"edits": [{"type": "clear_thinking_20251015"}]})
         );
 
-        let no_management = ModelCapabilities::from_wire(
-            &json!({"context_management": {"supported": false}}),
-            None,
-        );
+        let no_management =
+            ModelCapabilities::from_wire(&json!({"context_management": {"supported": false}}));
         constrain(body.as_object_mut().unwrap(), &no_management);
         assert!(body.get("context_management").is_none());
-        assert_eq!(body["max_tokens"], 64_000, "未知上限时不改动 max_tokens");
+        assert_eq!(body["max_tokens"], 200_000, "未知上限时不改动 max_tokens");
     }
 }

@@ -17,7 +17,7 @@ Open Responses ingress 中显式声明的 `stravia:web_search` tool 不直接决
 ## Consequences
 
 - 只接受当前 `web_search` 及其当前 dated alias，不接入旧 `web_search_preview`，也不伪造 Responses `web_fetch`。domain filters 映射到统一 Search 请求；其余 hosted-tool 选项接受但忽略，包括 `external_web_access`、`search_context_size`、`user_location` 与内容类型提示。
-- 显式 Responses Search 只受全局 `web_access_enabled` 约束，不读取 API key 的 MCP 或透明注入权限。透明 Platform Tool 注入还要求调用 API key 的 `web_search_injection_enabled` 为真。显式 Responses Search 遇到不支持 function tools 的模型 Target 时返回 `web_search_unsupported`；自动 Platform 注入遇到同类 Target 时不注入并继续普通推理。
+- 显式 Responses Search 只受全局 `web_access_enabled` 约束，不读取 API key 的 MCP 或透明注入权限。透明 Platform Tool 注入还要求调用 API key 的 `web_search_injection_enabled` 为真。后续模型规格收敛取消了模型支持功能声明 Gate：工具请求按真实协议与上游执行，不再根据模型 `tool_call` 声明拒绝或撤回自动注入；无法表达或执行的请求明确失败，既有平台能力与权限 Gate 不变。当前规格契约见[架构文档](../design/architecture.md#92-provider-实例与-provider-model-快照)。
 - 客户端同时声明原生 `web_search` 与同名 function tool，或与注入的 `web_search`/`web_fetch` 保留名冲突时，返回 400，不覆盖或重命名客户端工具。
 - Codex 客户端兼容底线是正常的最终 message 与 `response.completed`。Stravia 尽力产生 `web_search_call` activity item，但不保证 sources、citation annotations 或完整 Hosted Tool 生命周期；Codex 当前只把 activity item 用于 UI，不依赖它推进工具控制流。
 - Codex agentic Web Provider 引用现有 Codex Provider 的 OAuth runtime，并以一次内部 Responses native web search 归一出 answer 与来源；不复制 refresh token，不新增用户风险或测试费用提示。

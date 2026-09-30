@@ -1,6 +1,10 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { formatSpecificationTokens, specificationFeatures, specificationModalities } from '$lib/model-specification'
+import {
+  formatSpecificationTokens,
+  specificationModalities,
+  specificationReasoningEfforts,
+} from '$lib/model-specification'
 import type { SpecificationFilter } from '$lib/model-specification-filter'
 import { Checkbox } from '$lib/components/ui/checkbox'
 import * as Field from '$lib/components/ui/field'
@@ -21,15 +25,9 @@ const limits = $derived([
     presetLabel: m.model_specification_context_preset(),
     presets: [32000, 128000, 200000, 1000000],
   },
-  {
-    key: 'output' as const,
-    label: m.model_specification_minimum_output(),
-    presetLabel: m.model_specification_output_preset(),
-    presets: [8000, 16000, 32000, 64000],
-  },
 ])
 
-function setLimit(key: 'context' | 'output', input: HTMLInputElement): void {
+function setLimit(key: 'context', input: HTMLInputElement): void {
   const number = input.valueAsNumber
   const valid = input.value === '' || (Number.isSafeInteger(number) && number >= 0)
   if (valid) onChange({ ...value, [key]: input.value === '' ? undefined : number })
@@ -105,18 +103,29 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
     </Field.FieldSet>
   {/each}
   <Field.FieldSet>
-    <Field.FieldLegend>{m.model_specification_supported_features()}</Field.FieldLegend>
+    <Field.FieldLegend>{m.model_specification_reasoning_efforts()}</Field.FieldLegend>
     <Field.FieldGroup class="grid grid-cols-2 gap-2">
-      {#each specificationFeatures as feature (feature.key)}
+      {#each [...new Set([...specificationReasoningEfforts, ...value.reasoningEfforts])] as effort (effort)}
         <Field.Field orientation="horizontal">
           <Checkbox
-            id={`${id}-${feature.key}`}
-            checked={value.features.includes(feature.key)}
+            id={`${id}-effort-${effort}`}
+            checked={value.reasoningEfforts.includes(effort)}
             onCheckedChange={(checked) =>
-              onChange({ ...value, features: toggle(value.features, feature.key, checked === true) })} />
-          <Field.FieldLabel for={`${id}-${feature.key}`}>{feature.label()}</Field.FieldLabel>
+              onChange({ ...value, reasoningEfforts: toggle(value.reasoningEfforts, effort, checked === true) })} />
+          <Field.FieldLabel for={`${id}-effort-${effort}`} class="font-technical">{effort}</Field.FieldLabel>
         </Field.Field>
       {/each}
     </Field.FieldGroup>
+    <Field.FieldLabel for={`${id}-custom-effort`}>{m.model_specification_custom_effort()}</Field.FieldLabel>
+    <Input
+      id={`${id}-custom-effort`}
+      class="font-technical"
+      onchange={(event: Event) => {
+        const input = event.currentTarget as HTMLInputElement
+        const effort = input.value.trim()
+        if (effort && !['default', 'null'].includes(effort.toLowerCase()) && !value.reasoningEfforts.includes(effort))
+          onChange({ ...value, reasoningEfforts: [...value.reasoningEfforts, effort] })
+        input.value = ''
+      }} />
   </Field.FieldSet>
 </Field.FieldGroup>

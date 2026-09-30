@@ -138,7 +138,10 @@ pub(super) fn parse_canonical_models(body: &[u8]) -> anyhow::Result<BTreeMap<Str
         }
         validate_canonical_model_id(&id)?;
         required_string(object, "name", &id)?;
-        models.insert(id, value.clone());
+        models.insert(
+            id.clone(),
+            ProviderModelMetadata::from_source_value(&id, value.clone())?.to_value()?,
+        );
     }
     Ok(models)
 }
@@ -166,11 +169,11 @@ pub(super) fn parse_scope(
                 format!("Provider Catalog Entry {provider_id}/{id} canonical_id")
             })?;
         }
-        ProviderModelMetadata::from_source_value(&id, metadata.clone())
+        let metadata = ProviderModelMetadata::from_source_value(&id, metadata.clone())
             .with_context(|| format!("invalid Provider Catalog Entry {provider_id}/{id}"))?;
         models.push(CatalogModelSource {
             provider_id: provider_id.to_string(),
-            metadata: metadata.clone(),
+            metadata: metadata.to_value()?,
         });
     }
     models.sort_by(|left, right| {
@@ -198,7 +201,7 @@ pub(super) fn parse_scope(
 
 pub(super) fn parse_catalog_model(
     provider_id: &str,
-    protocol: &str,
+    _protocol: &str,
     value: &Value,
 ) -> anyhow::Result<CatalogModel> {
     let object = value
@@ -209,7 +212,6 @@ pub(super) fn parse_catalog_model(
     let modalities = object.get("modalities").and_then(Value::as_object);
     let input_modalities = string_array(modalities.and_then(|item| item.get("input")))?;
     let output_modalities = string_array(modalities.and_then(|item| item.get("output")))?;
-    let reasoning = optional_bool(object.get("reasoning"))?;
     let limit = object.get("limit").and_then(Value::as_object);
     let cost = object.get("cost").and_then(Value::as_object);
     Ok(CatalogModel {
@@ -218,16 +220,11 @@ pub(super) fn parse_catalog_model(
         status: optional_string(object.get("status"))?,
         release_date: optional_string(object.get("release_date"))?,
         capabilities: Some(CatalogCapabilities {
-            tool_call: optional_bool(object.get("tool_call"))?,
-            reasoning,
-            attachment: optional_bool(object.get("attachment"))?,
-            temperature: optional_bool(object.get("temperature"))?,
             input_modalities,
             output_modalities,
         }),
         limits: Some(CatalogLimits {
             context: optional_u64(limit.and_then(|item| item.get("context")))?,
-            output: optional_u64(limit.and_then(|item| item.get("output")))?,
         }),
         cost: Some(CatalogCost {
             input: optional_f64(cost.and_then(|item| item.get("input")))?,
@@ -235,8 +232,7 @@ pub(super) fn parse_catalog_model(
             cache_read: optional_f64(cost.and_then(|item| item.get("cache_read")))?,
             cache_write: optional_f64(cost.and_then(|item| item.get("cache_write")))?,
         }),
-        reasoning_options: parse_reasoning_options(object.get("reasoning_options"))?
-            .or_else(|| infer_reasoning_options(provider_id, protocol, reasoning)),
+        reasoning_efforts: source_reasoning_efforts(object)?,
     })
 }
 
@@ -330,14 +326,6 @@ pub(super) fn optional_string(value: Option<&Value>) -> anyhow::Result<Option<St
     }
 }
 
-pub(super) fn optional_bool(value: Option<&Value>) -> anyhow::Result<bool> {
-    match value {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => bail!("expected a boolean or null"),
-    }
-}
-
 pub(super) fn optional_u64(value: Option<&Value>) -> anyhow::Result<Option<u64>> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -347,13 +335,6 @@ pub(super) fn optional_u64(value: Option<&Value>) -> anyhow::Result<Option<u64>>
             .ok_or_else(|| anyhow!("expected a non-negative integer")),
         Some(_) => bail!("expected a number or null"),
     }
-}
-
-pub(super) fn optional_budget_bound(value: Option<&Value>) -> anyhow::Result<Option<u64>> {
-    if value.and_then(Value::as_i64).is_some_and(|value| value < 0) {
-        return Ok(None);
-    }
-    optional_u64(value)
 }
 
 pub(super) fn optional_f64(value: Option<&Value>) -> anyhow::Result<Option<f64>> {
@@ -388,95 +369,58 @@ pub(super) fn string_array(value: Option<&Value>) -> anyhow::Result<Vec<String>>
         .collect()
 }
 
-pub(super) fn parse_reasoning_options(
-    value: Option<&Value>,
-) -> anyhow::Result<Option<CatalogReasoningOptions>> {
-    let Some(value) = value else {
+pub(crate) fn source_reasoning_efforts(
+    object: &Map<String, Value>,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let explicit = object
+        .get("reasoning_efforts")
+        .filter(|value| !value.is_null());
+    let legacy_options = object.get("reasoning_options");
+    let legacy_effort = legacy_options.and_then(|options| match options {
+        Value::Array(options) => options
+            .iter()
+            .find(|option| option.get("type").and_then(Value::as_str) == Some("effort")),
+        Value::Object(_) if options.get("type").and_then(Value::as_str) == Some("effort") => {
+            Some(options)
+        }
+        _ => None,
+    });
+    let legacy = legacy_effort.and_then(|option| option.get("values"));
+    let Some(value) = explicit.or(legacy) else {
         return Ok(None);
     };
-    let mut selected = None;
-    let entries: &[Value] = match value {
-        Value::Null => return Ok(None),
-        Value::Array(entries) => entries,
-        Value::Object(_) => std::slice::from_ref(value),
-        _ => bail!("reasoning_options must be an array"),
-    };
-    for entry in entries {
-        let object = entry
-            .as_object()
-            .ok_or_else(|| anyhow!("reasoning_options entries must be objects"))?;
-        let kind = required_string(object, "type", "reasoning_options")?;
-        let candidate = match kind.as_str() {
-            "effort" => Some(CatalogReasoningOptions::Effort {
-                values: reasoning_effort_values(object.get("values"))?,
-            }),
-            "toggle" => Some(CatalogReasoningOptions::Toggle),
-            "budget" | "budget_tokens" => Some(CatalogReasoningOptions::Budget {
-                min: optional_budget_bound(object.get("min"))?,
-                max: optional_budget_bound(object.get("max"))?,
-            }),
-            _ => None,
-        };
-        let selected_priority = selected
-            .as_ref()
-            .map(reasoning_option_priority)
-            .unwrap_or(0);
-        if candidate
-            .as_ref()
-            .is_some_and(|candidate| reasoning_option_priority(candidate) > selected_priority)
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow!("reasoning efforts must be an array"))?;
+    let mut efforts = Vec::new();
+    for value in values {
+        if value.is_null() && explicit.is_none() {
+            continue;
+        }
+        let effort = value
+            .as_str()
+            .ok_or_else(|| anyhow!("reasoning effort must be a string"))?
+            .trim();
+        if effort.is_empty()
+            || effort.eq_ignore_ascii_case("default")
+            || effort.eq_ignore_ascii_case("null")
         {
-            selected = candidate;
+            if explicit.is_some() {
+                bail!("invalid reasoning effort");
+            }
+            continue;
+        }
+        if effort.len() > 256 || effort.chars().any(char::is_control) {
+            bail!("invalid reasoning effort");
+        }
+        if !efforts.iter().any(|value| value == effort) {
+            efforts.push(effort.to_owned());
         }
     }
-    Ok(selected)
-}
-
-pub(super) fn reasoning_effort_values(value: Option<&Value>) -> anyhow::Result<Vec<String>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    value
-        .as_array()
-        .ok_or_else(|| anyhow!("expected an array"))?
-        .iter()
-        .filter_map(|value| match value {
-            Value::Null => None,
-            Value::String(value) => Some(Ok(value.clone())),
-            _ => Some(Err(anyhow!("expected string or null effort values"))),
-        })
-        .collect()
-}
-
-pub(super) fn reasoning_option_priority(option: &CatalogReasoningOptions) -> u8 {
-    match option {
-        CatalogReasoningOptions::Effort { .. } => 3,
-        CatalogReasoningOptions::Budget { .. } => 2,
-        CatalogReasoningOptions::Toggle => 1,
+    if efforts.len() > 128 {
+        bail!("too many reasoning efforts");
     }
-}
-
-pub(super) fn infer_reasoning_options(
-    provider_id: &str,
-    protocol: &str,
-    reasoning: bool,
-) -> Option<CatalogReasoningOptions> {
-    if !reasoning {
-        return None;
-    }
-    match provider_id {
-        "openai" => Some(CatalogReasoningOptions::Effort {
-            values: ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        }),
-        "anthropic" => Some(CatalogReasoningOptions::Budget {
-            min: Some(1024),
-            max: None,
-        }),
-        "google" if protocol == "google-gemini" => Some(CatalogReasoningOptions::Toggle),
-        _ => None,
-    }
+    Ok(Some(efforts))
 }
 
 // The `npm` → adapter/protocol/base-url vocabulary is contract surface shared

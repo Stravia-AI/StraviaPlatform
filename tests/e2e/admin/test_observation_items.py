@@ -202,7 +202,6 @@ def _create_media_route(env: dict[str, Any], name: str) -> tuple[str, str]:
             "model_id": "gpt-4o-mini",
             "metadata": {
                 "name": name,
-                "tool_call": True,
                 "modalities": {"input": ["text", "image"], "output": ["text"]},
             },
         },

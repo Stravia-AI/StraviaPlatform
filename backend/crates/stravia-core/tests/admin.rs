@@ -440,122 +440,10 @@ async fn provider_configuration_preview_uses_real_cloudflare_validation() -> any
 }
 
 #[tokio::test]
-async fn reimport_rejects_unwritable_overrides_without_changing_configuration() -> anyhow::Result<()>
-{
-    use stravia_core::thinking::ThinkingMappingSource;
-    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
-
+async fn synced_records_follow_upstream_reasoning_efforts() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
     let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
-    scope["gpt-5.4"]["reasoning"] = serde_json::json!(false);
-    scope["gpt-5.4"]["reasoning_options"] =
-        serde_json::json!([{"type": "effort", "values": ["low"]}]);
-    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
-    let provider = gw
-        .admin()
-        .create_provider(catalog_provider_input_for(&gw, "guarded-provider", "minimax").await?)
-        .await?;
-    gw.admin().sync_provider_models(&provider.id).await?;
-    let original = gw
-        .admin()
-        .get_provider_model(&provider.id, "gpt-5.4")
-        .await?;
-    let mut metadata = original.metadata.clone();
-    metadata.reasoning = Some(true);
-    let edited = gw
-        .admin()
-        .update_provider_model(
-            &provider.id,
-            "gpt-5.4",
-            UpdateProviderModel {
-                metadata: serde_json::to_value(metadata)?,
-                revision: original.revision,
-            },
-        )
-        .await?;
-    let mut mappings = edited.thinking_level_map.clone();
-    for row in &mut mappings {
-        if !row.control.is_hidden() {
-            row.control = TargetThinkingControl::Hidden;
-            row.source = ThinkingMappingSource::Overridden;
-        }
-    }
-    let high = mappings
-        .iter_mut()
-        .find(|row| row.level == ThinkingLevel::High)
-        .expect("high mapping");
-    high.control = TargetThinkingControl::Effort {
-        value: "low".into(),
-    };
-    high.source = ThinkingMappingSource::Overridden;
-    let route = gw
-        .admin()
-        .create_model(CreateRoute {
-            model_id: "guarded-model".into(),
-            display_name: None,
-            balance: None,
-            targets: vec![CreateTarget {
-                provider_id: provider.id.clone(),
-                model: Some("gpt-5.4".into()),
-                enabled: true,
-                priority: None,
-                first_token_timeout_ms: None,
-                target_retry_budget: None,
-                target_cooldown_ms: None,
-                thinking_level_map: mappings,
-            }],
-            default_thinking_level: None,
-        })
-        .await?;
-    let error = gw
-        .admin()
-        .reimport_provider_model(&provider.id, "gpt-5.4", edited.revision)
-        .await
-        .expect_err("new specification cannot represent the manual override");
-    assert!(
-        error
-            .to_string()
-            .contains("THINKING_CONTROL_UNREPRESENTABLE")
-    );
-    let persisted = gw
-        .admin()
-        .get_provider_model(&provider.id, "gpt-5.4")
-        .await?;
-    assert_eq!(persisted.revision, edited.revision);
-    assert_eq!(persisted.metadata, edited.metadata);
-    assert_eq!(persisted.snapshot_state, edited.snapshot_state);
-    let persisted_route = gw
-        .admin()
-        .list_models()
-        .await?
-        .into_iter()
-        .find(|route| route.model_id == "guarded-model")
-        .expect("persisted Route");
-    assert_eq!(
-        persisted_route.targets[0].thinking_level_map,
-        route.targets[0].thinking_level_map
-    );
-    assert_eq!(
-        gw.model_cache
-            .read()
-            .await
-            .match_model("guarded-model")
-            .expect("active Route")
-            .targets[0]
-            .thinking_level_map,
-        route.targets[0].thinking_level_map
-    );
-    gw.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn synced_records_follow_upstream_reasoning_options() -> anyhow::Result<()> {
-    let (data_dir, gw) = build_gateway().await?;
-    let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
-    // 旧版目录只声明 reasoning，没有 reasoning_options：记录已带完整规格，
-    // 不能再被当成待补全的占位快照。
-    scope["gpt-5.4"]["reasoning"] = serde_json::json!(true);
+    // context 与 modalities 已构成完整规格，无 effort 不得推测档位。
     seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
     let provider = gw
         .admin()
@@ -566,10 +454,9 @@ async fn synced_records_follow_upstream_reasoning_options() -> anyhow::Result<()
         .admin()
         .get_provider_model(&provider.id, "gpt-5.4")
         .await?;
-    assert!(imported.metadata.reasoning_options.is_none());
+    assert!(imported.metadata.reasoning_efforts.is_none());
 
-    scope["gpt-5.4"]["reasoning_options"] =
-        serde_json::json!([{"type": "effort", "values": ["low", "high", "max"]}]);
+    scope["gpt-5.4"]["reasoning_efforts"] = serde_json::json!(["low", "high", "max"]);
     seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
     gw.admin().sync_provider_models(&provider.id).await?;
 
@@ -578,22 +465,8 @@ async fn synced_records_follow_upstream_reasoning_options() -> anyhow::Result<()
         .get_provider_model(&provider.id, "gpt-5.4")
         .await?;
     assert_eq!(
-        refreshed
-            .metadata
-            .reasoning_options
-            .as_deref()
-            .and_then(|options| options.iter().find_map(|option| match option {
-                stravia_core::provider_models::ReasoningOption::Effort { values } => {
-                    Some(values.clone())
-                }
-                _ => None,
-            }))
-            .expect("effort reasoning option"),
-        vec![
-            Some("low".to_string()),
-            Some("high".to_string()),
-            Some("max".to_string())
-        ]
+        refreshed.metadata.reasoning_efforts,
+        Some(vec!["low".into(), "high".into(), "max".into()])
     );
     gw.shutdown().await;
     Ok(())
@@ -606,9 +479,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
 
     let (data_dir, gw) = build_gateway().await?;
     let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
-    scope["gpt-5.4"]["reasoning"] = serde_json::json!(true);
-    scope["gpt-5.4"]["reasoning_options"] =
-        serde_json::json!([{"type": "effort", "values": ["none", "low", "max"]}]);
+    scope["gpt-5.4"]["reasoning_efforts"] = serde_json::json!(["none", "low", "max"]);
     seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
     let provider = gw
         .admin()
@@ -633,14 +504,9 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         "limit".to_string(),
         serde_json::json!({"context": 256 * 1024}),
     );
-    object.insert("reasoning".to_string(), serde_json::json!(true));
-    object.insert("tool_call".to_string(), serde_json::json!(true));
     object.insert(
-        "reasoning_options".to_string(),
-        serde_json::json!([{
-            "type": "effort",
-            "values": ["none", "low", "medium", "high", "xhigh"]
-        }]),
+        "reasoning_efforts".to_string(),
+        serde_json::json!(["none", "low", "medium", "high", "xhigh"]),
     );
     object.insert(
         "cost".to_string(),
@@ -714,8 +580,6 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
             .and_then(|limit| limit.context),
         Some(256 * 1024)
     );
-    assert_eq!(frozen.metadata.reasoning, Some(true));
-    assert_eq!(frozen.metadata.tool_call, Some(true));
     assert!(matches!(
         frozen.snapshot_state,
         SnapshotState::Edited { .. }
@@ -910,7 +774,6 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
     assert_eq!(prepared_by_id.id, "glm-5.1");
     assert_eq!(prepared_by_id.metadata.name.as_deref(), Some("GLM-5.1"));
     assert_eq!(prepared_by_id.metadata.family.as_deref(), Some("glm"));
-    assert_eq!(prepared_by_id.metadata.tool_call, Some(true));
     assert_eq!(
         prepared_by_id
             .metadata
@@ -1011,11 +874,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
                 metadata: serde_json::json!({
                     "id": "private/model",
                     "name": "Private Model",
-                    "tool_call": true,
-                    "reasoning_options": [{
-                        "type": "effort",
-                        "values": ["none", "low", "medium", "high", "xhigh"]
-                    }],
+                    "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                     "vendor_extension": {"mode": "private"},
                     "snapshot_state": {"type": "imported", "source": {"type": "discovery"}}
                 }),
@@ -1187,7 +1046,6 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
         .await?;
     assert_eq!(glm.metadata.name.as_deref(), Some("GLM-5.1"));
     assert_eq!(glm.metadata.family.as_deref(), Some("glm"));
-    assert_eq!(glm.metadata.tool_call, Some(true));
     assert_eq!(
         glm.metadata.limit.as_ref().and_then(|limit| limit.context),
         Some(200_000)
@@ -1205,8 +1063,6 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
     assert_eq!(unknown.snapshot_state, SnapshotState::Unregistered);
     assert!(unknown.metadata.limit.is_none());
     assert!(unknown.metadata.modalities.is_none());
-    assert!(unknown.metadata.tool_call.is_none());
-    assert!(unknown.metadata.reasoning.is_none());
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;
@@ -1263,10 +1119,8 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             metadata: ProviderModelMetadata {
                 limit: Some(stravia_core::provider_models::ModelLimit {
                     context: Some(256 * 1024),
-                    ..Default::default()
                 }),
-                reasoning: Some(true),
-                tool_call: Some(true),
+                reasoning_efforts: Some(vec!["low".into(), "high".into()]),
                 ..ProviderModelMetadata::bare("glm-5.1")
             },
         })
@@ -1337,8 +1191,6 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         SnapshotState::Edited { source: None }
     );
     assert!(upgraded.metadata.limit.is_none());
-    assert!(upgraded.metadata.tool_call.is_none());
-    assert!(upgraded.metadata.reasoning.is_none());
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;

@@ -766,7 +766,7 @@ SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` �
 
 客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；客户端未提供任何推理指令时才继承 Route 的可选默认档位。先按既有策略选择 Target，再以原请求档位在该 Target 的非 Hidden Thinking Level Map 中匹配：精确档位优先，否则优先向上选择最近档位，无更高档位时才向下选择最近档位，并生成 protocol-native control。off 并非禁止向上匹配；不同 Target 的实际档位可以不同。每次 failover 都从原请求档位重新匹配，不沿用上一个 Target 的实际档位。若选中 Target 全部 Mapping 为 Hidden，客户端显式档位跳过该 Target 并尝试可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续。Route 的 Supported Thinking Levels 由所有已启用 Target 的非 Hidden Mapping 并集派生，供管理面、模型发现及客户端配置导出展示至少一个已启用 Target 支持的等级，不钳制执行，也不决定 Target 准入。无已启用 Target 时集合为空；等级按 off、minimal、low、medium、high、xhigh、max 排序且不重复。`GET /v1/models` 仅在并集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control；客户端配置导出使用该并集，字段与导出格式不变。
 
-按 Catalog `reasoning_options` 生成 Thinking Level Map 时，Provider 协议无法表达的行一律降级为 Hidden（不提供该等级，而不猜测 wire 形状）；用户显式提交的不可写 Control 仍按 `THINKING_CONTROL_UNREPRESENTABLE` 拒绝。
+按 Provider Model `reasoning_efforts` 中明确登记的值生成 Thinking Level Map；缺失或空列表生成全 Hidden，不根据开关、预算或旧功能标志猜测档位。自定义 Effort 保留在规格中，但未知值不映射到猜测的 Canonical Thinking Level。新生成的 Generated 行若无法由 Provider 协议表达，则降级为 Hidden；用户显式提交的不可写 Control 仍按 `THINKING_CONTROL_UNREPRESENTABLE` 拒绝。Target 的显式开关与预算控制及真实协议编码保留。
 
 ### 8.2 API Token 模型
 
@@ -831,9 +831,13 @@ Provider discovery 只负责提供当前可见的模型 ID。动态端点响应�
 
 Catalog 读取与 Generated Mapping 的准备在事务前完成，事务中的校验回调不重新进入 Storage。SQLite 使用 `BEGIN IMMEDIATE`；PostgreSQL 按 `models` → `model_backends` 顺序获取事务级 `SHARE ROW EXCLUSIVE` 表锁，串行化期间的 Route 写入，避免漏掉并发新绑定的 Target；Memory 在统一锁序下先准备再写回。存储在提交前准备完整启用 Route 快照。Route module 跨存储调用持有当前实例的缓存写锁，提交后不再执行可失败的读取或逐条发布：成功返回后，新请求使用完整的新配置。其他实例仍通过 epoch 异步刷新，不承诺同时切换，也不把数据库与内存描述为同一事务。
 
-管理列表的每个 Provider Model 返回 `specification`，替代原有不完整的 `capabilities` 摘要。Core 从已保存 metadata 投影 `limit`（`context`、`input`、`output`）、`modalities`（`input`、`output`），以及 `reasoning`、`tool_call`、`structured_output`、`attachment`、`temperature` 五项可空声明；缺失功能保持 `null`，不补 `false`，缺失限额与模态组保持 `null`。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。此管理契约变更不修改持久化 schema、推理接口或运行时能力判定。
+管理列表的每个 Provider Model 返回 `specification`。Core 从已保存 metadata 投影仅含 `context` 的 `limit`、`modalities`（`input`、`output`）与 `reasoning_efforts` 明确字符串列表；缺失规格保持未知，Effort 列表不含 `default` 或 `null` 默认选项。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。模型元数据不再登记五项支持功能、`interleaved`、输入／输出 Token 上限或开关／预算推理规格；退休键不作为未知扩展保留。
 
-WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开完整限额和三态功能。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格列在既有列筛选状态中保存五类 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中模态与功能已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
+WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开模态、Effort 和结构化价格。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格筛选在既有状态中保存上下文下限、输入模态、输出模态和 Effort 的 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中值已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
+
+模型元数据删除不关闭协议中的附件、推理、工具调用、结构化输出或采样控制。Web Search、Media 与模型轮次不再以模型 `tool_call` 声明判断工具资格；服务启用、有效可用状态、模态、平台权限及真实协议可表达性仍按各自执行路径校验，不支持的请求由协议或上游明确拒绝，不伪造模型支持声明。请求 `max_tokens` / `max_output_tokens` 与 `reasoning_content` 编解码继续存在。Route 和客户端配置不再派生或导出模型最大输出上限，也不以 context 代替输出上限。
+
+`0006_model_specification` 在 SQLite 与 PostgreSQL 上保数据增量升级：删除旧投影列和 JSON 键，只从旧 Effort 规格提取明确值；已存在的新 Effort 列表优先。迁移不改 Provider、Route 绑定或任何现有 Target 映射，包括旧 Generated 开关／预算映射。显式 re-import 才按新规格刷新 Generated，仍保留 Overridden。升级前按部署流程备份数据库，不修改冻结基线或重置历史。
 
 Canonical Model 只用作一次性模板：客户端 Route ID 落在 `models.model_id`，与存储主键 `models.id` 分离；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。手动创建可提交同一可选 `template_id`，Core 验证模板存在后保存为带已知来源的 edited 快照；客户端不能直接指定 `snapshot_state`。这保留来源而不推断 metadata 是否被改过，也不形成持续继承的 Canonical Model binding。
 

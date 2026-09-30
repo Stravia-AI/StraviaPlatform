@@ -231,12 +231,7 @@ fn discover(
                 .to_owned();
             let metadata = entry
                 .as_object()
-                .map(|object| {
-                    object
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
+                .map(stravia_vendor_common::thinking::source_metadata)
                 .unwrap_or_default();
             let capabilities = entry
                 .get("capabilities")
