@@ -48,6 +48,9 @@ async fn websocket_handler(
                 let AxumMessage::Text(text) = message else {
                     continue;
                 };
+                if text == "disconnect-without-close" {
+                    break;
+                }
                 if socket
                     .send(AxumMessage::Text(format!("ack:{text}").into()))
                     .await
@@ -171,6 +174,27 @@ fn assert_local_miss(error: stravia_vendor_runtime::HostFailure) {
         stravia_vendor_sdk::ErrorKind::ContinuationUnavailable
     ));
     assert_eq!(error.upstream_status, None);
+}
+
+#[tokio::test]
+async fn websocket_receive_failure_preserves_the_underlying_close_reason() {
+    let server = test_server().await;
+    let network = network(&server.url, Arc::new(VendorWebSocketPool::default()));
+    let socket = checkout(&network, &server.url).await;
+    socket
+        .send(WebSocketMessage::Text("disconnect-without-close".into()))
+        .await
+        .expect("ask local upstream to disconnect without a closing handshake");
+
+    let failure = socket
+        .next()
+        .await
+        .expect_err("an abnormal upstream close must fail the response stream");
+    assert!(
+        failure.message.contains("without closing handshake"),
+        "the failure must distinguish an abnormal close from other WebSocket errors: {}",
+        failure.message
+    );
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Vendor transport failures now retain the underlying error cause chain in redacted logs and failed-request diagnostics, so WebSocket failures distinguish abnormal closes, protocol errors, and I/O failures instead of reporting only "tungstenite error". Retry, continuation, timeout, and wire-capture behavior are unchanged; missing causes in historical records cannot be recovered.
 - Raised each Vendor attempt's pre-output event buffer budget from 1 MiB to 16 MiB so large Codex tool-schema echoes can be retained before the first output. The buffer remains bounded and still fails explicitly when its budget is exceeded.
 - Image requests and tool results no longer fail with "Vendor operation input was rejected" when forwarded to Anthropic or Google Gemini because they include an image `detail` hint. Targets without an equivalent control omit the hint while preserving the image and tool-result association; OpenAI-compatible and Open Responses targets continue to receive it unchanged.
 - Codex OAuth now presents client version `0.159.2` on model discovery and generation requests. The upstream lists `gpt-6.1-sol` only for recent client versions, so connections pinned to `0.156.1` may not have shown it; rediscover models on existing Codex connections to pick it up.
