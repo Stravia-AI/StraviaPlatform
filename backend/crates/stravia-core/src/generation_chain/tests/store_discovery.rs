@@ -1503,6 +1503,80 @@ async fn stable_session_does_not_link_semantically_changed_history() {
 }
 
 #[tokio::test]
+async fn controls_prefix_wins_when_same_session_candidate_does_not_match() {
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        None,
+    );
+    let owner = principal("owner");
+
+    // Same session id and same controls, but different history content: the
+    // session-layer index returns this candidate, then items_equal rejects it.
+    let mut session_request = responses_request(vec![user_message("session alpha")]);
+    session_request.instructions = Some("shared controls".into());
+    session_request.meta.vendor.ingress.insert(
+        GENERATION_SESSION_ID_META.into(),
+        serde_json::Value::String("session-1".into()),
+    );
+    let mut session_root = chain
+        .begin(owner.clone(), session_request)
+        .await
+        .expect("begin session root");
+    let mut session_response = AiResponse::new("upstream", "model");
+    session_response.push_output_text("session answer");
+    session_root.stage(&mut session_response, &generation_source(), None);
+    session_root.persist().await.expect("persist session root");
+
+    // Sessionless generation with the same controls contributes only a
+    // controls-layer candidate for the resumed prefix.
+    let mut controls_request = responses_request(vec![user_message("controls beta")]);
+    controls_request.instructions = Some("shared controls".into());
+    let mut controls_root = chain
+        .begin(owner.clone(), controls_request)
+        .await
+        .expect("begin controls root");
+    let mut controls_response = AiResponse::new("upstream", "model");
+    controls_response.push_output_text("controls answer");
+    controls_root.stage(&mut controls_response, &generation_source(), None);
+    controls_root
+        .persist()
+        .await
+        .expect("persist controls root");
+
+    // The replayed prefix matches the sessionless history, so discovery must
+    // fall through the rejected session candidate into the controls layer.
+    let mut resumed_request = responses_request(vec![
+        user_message("controls beta"),
+        AiItem::output_text("controls answer"),
+        user_message("next"),
+    ]);
+    resumed_request.instructions = Some("shared controls".into());
+    resumed_request.meta.vendor.ingress.insert(
+        GENERATION_SESSION_ID_META.into(),
+        serde_json::Value::String("session-1".into()),
+    );
+    let resumed = chain
+        .begin(owner, resumed_request)
+        .await
+        .expect("begin resumed request");
+
+    assert_eq!(
+        resumed.parent.parent_id.as_deref(),
+        Some(controls_root.id())
+    );
+    assert_eq!(resumed.request_delta.items.len(), 1);
+    assert!(items_equal(
+        &resumed.request().items,
+        &[
+            user_message("controls beta"),
+            AiItem::output_text("controls answer"),
+            user_message("next"),
+        ]
+    ));
+}
+
+#[tokio::test]
 async fn previous_response_resolves_principal_scoped_item_references() {
     let store = generation_store().await;
     let owner = principal("owner");

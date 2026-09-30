@@ -89,6 +89,7 @@ impl ProviderModelStore for PostgresStorage {
         reconciliation: ProviderModelReconciliation,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
+        let has_writes = !reconciliation.updates.is_empty() || !reconciliation.inserts.is_empty();
         for update in &reconciliation.updates {
             let revision = sqlx::query_scalar::<_, i64>(
                 "SELECT revision FROM provider_models WHERE provider_id = $1 AND model_id = $2 AND source_kind = 'discovered' FOR UPDATE",
@@ -155,6 +156,12 @@ impl ProviderModelStore for PostgresStorage {
         for input in reconciliation.inserts {
             insert_record(&mut tx, input).await?;
         }
+        // Presence/metadata changes alter model resolution and prices; notify
+        // other replicas in the same commit. An empty reconciliation writes
+        // nothing and must not publish a spurious epoch.
+        if has_writes {
+            bump_config_epoch(&mut tx).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -175,13 +182,12 @@ impl ProviderModelStore for PostgresStorage {
         let provider_id = input.provider_id.clone();
         let model_id = input.model_id.clone();
         insert_record(&mut tx, input).await?;
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, &provider_id, &model_id)
+            .await?
+            .context("created Provider Model not found")?;
         tx.commit().await?;
-        let mut conn = self.pool.acquire().await?;
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut conn, &provider_id, &model_id)
-                .await?
-                .context("created Provider Model not found")?,
-        )))
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn update_metadata(
@@ -211,13 +217,12 @@ impl ProviderModelStore for PostgresStorage {
             });
         }
         replace_cost_rules(&mut tx, provider_id, model_id, &metadata.cost_rules()).await?;
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, provider_id, model_id)
+            .await?
+            .context("updated Provider Model not found")?;
         tx.commit().await?;
-        let mut conn = self.pool.acquire().await?;
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut conn, provider_id, model_id)
-                .await?
-                .context("updated Provider Model not found")?,
-        )))
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn reimport(
@@ -296,6 +301,7 @@ impl ProviderModelStore for PostgresStorage {
         policy: ProviderModelSelectionPolicy,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"UPDATE provider_models
                SET selection_policy = $1, revision = revision + 1, updated_at = NOW()
@@ -305,38 +311,44 @@ impl ProviderModelStore for PostgresStorage {
         .bind(provider_id)
         .bind(model_id)
         .bind(expected_revision)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
-            let mut conn = self.pool.acquire().await?;
             return Ok(
-                if get_record(&mut conn, provider_id, model_id)
-                    .await?
-                    .is_some()
-                {
+                if get_record(&mut tx, provider_id, model_id).await?.is_some() {
                     ProviderModelMutation::Conflict
                 } else {
                     ProviderModelMutation::NotFound
                 },
             );
         }
-        let mut conn = self.pool.acquire().await?;
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut conn, provider_id, model_id)
-                .await?
-                .context("updated Provider Model not found")?,
-        )))
+        // Selection policy gates whether the resolved model may serve traffic;
+        // publish the change atomically with the write it accompanies.
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, provider_id, model_id)
+            .await?
+            .context("updated Provider Model not found")?;
+        tx.commit().await?;
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn delete_manual(&self, provider_id: &str, model_id: &str) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "DELETE FROM provider_models WHERE provider_id = $1 AND model_id = $2 AND source_kind = 'manual'",
         )
         .bind(provider_id)
         .bind(model_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        let deleted = result.rows_affected() == 1;
+        if deleted {
+            // Removing a manual record changes loose resolution results;
+            // other replicas must reload together with this commit.
+            bump_config_epoch(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(deleted)
     }
 }
 
@@ -929,6 +941,7 @@ mod tests {
         )
         .await;
         insert_target(&pool, "target-4", "route-1", None, 0, &[]).await;
+        let epoch_before = config_epoch(&pool).await.unwrap();
 
         let result = storage
             .reimport(
@@ -967,7 +980,7 @@ mod tests {
             model.cost_rules[0].kind,
             ProviderModelCostRuleKind::ContextOver200k
         );
-        assert_eq!(config_epoch(&pool).await, Some(1));
+        assert_eq!(config_epoch(&pool).await, Some(epoch_before + 1));
 
         // The complete active Route snapshot was prepared inside the transaction.
         assert_eq!(active_routes.len(), 1);
@@ -1026,6 +1039,7 @@ mod tests {
         )
         .await;
 
+        let epoch_before = config_epoch(&pool).await;
         let conflict = storage
             .reimport(
                 "provider",
@@ -1057,7 +1071,7 @@ mod tests {
         assert_eq!(model.revision, 1);
         assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
         assert_eq!(model.metadata.name.as_deref(), Some("model"));
-        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(config_epoch(&pool).await, epoch_before);
         assert_eq!(
             map_row(
                 &target_map_in_db(&pool, "target-1").await,
@@ -1087,6 +1101,7 @@ mod tests {
         )
         .await;
 
+        let epoch_before = config_epoch(&pool).await;
         // A permit rejection must surface verbatim, not as a storage/sqlx error.
         let error = storage
             .reimport(
@@ -1112,7 +1127,7 @@ mod tests {
         assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
         assert_eq!(model.metadata.name.as_deref(), Some("model"));
         assert!(model.cost_rules.is_empty());
-        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(config_epoch(&pool).await, epoch_before);
         assert_eq!(
             map_row(
                 &target_map_in_db(&pool, "target-1").await,
@@ -1148,6 +1163,7 @@ mod tests {
         )
         .await;
 
+        let epoch_before = config_epoch(&pool).await;
         // Generated 行未变，也必须按新规格检查现有 Overridden 行；
         // 此时快照与成本规则已写入事务，校验失败必须全部回滚。
         let mut input = reimport_input(1);
@@ -1183,7 +1199,7 @@ mod tests {
         assert_eq!(model.revision, 1);
         assert_eq!(model.snapshot_state, SnapshotState::Unregistered);
         assert!(model.cost_rules.is_empty());
-        assert_eq!(config_epoch(&pool).await, None);
+        assert_eq!(config_epoch(&pool).await, epoch_before);
         assert_eq!(target_map_in_db(&pool, "target-1").await, original_map);
 
         cleanup(admin, pool, &schema).await;

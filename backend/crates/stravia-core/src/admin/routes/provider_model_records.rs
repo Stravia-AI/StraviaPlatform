@@ -424,6 +424,7 @@ impl RouteModule<'_> {
                 *cache = crate::router::RouteCache {
                     models: active_routes,
                 };
+                self.gw.route_policy_state.clear_pricing();
                 ProviderModelDetail::from(*model)
             }
             ProviderModelReimport::NotFound => {
@@ -463,6 +464,7 @@ impl RouteModule<'_> {
             .delete_manual(provider_id, &model_id)
             .await?
         {
+            self.gw.route_policy_state.clear_pricing();
             Ok(())
         } else {
             Err(provider_model_not_found(provider_id, &model_id))
@@ -584,11 +586,15 @@ impl RouteModule<'_> {
             same_discovery_provider(&provider, &latest_provider),
             "Provider changed while synchronizing discovered models"
         );
+        let reconciled = !reconciliation.updates.is_empty() || !reconciliation.inserts.is_empty();
         self.gw
             .storage
             .provider_models()
             .apply_reconciliation(provider_id, reconciliation)
             .await?;
+        if reconciled {
+            self.gw.route_policy_state.clear_pricing();
+        }
         self.gw
             .vendor_plugins
             .store
@@ -875,6 +881,9 @@ fn apply_provider_model_mutation(
 ) -> anyhow::Result<ProviderModelDetail> {
     match mutation {
         ProviderModelMutation::Applied(model) => {
+            // The write committed: drop this Gateway's cached prices before
+            // returning so the next selection sees the new values.
+            gw.route_policy_state.clear_pricing();
             let mut detail = ProviderModelDetail::from(*model);
             super::thinking_map::hide_unwritable_generated_controls(
                 gw,

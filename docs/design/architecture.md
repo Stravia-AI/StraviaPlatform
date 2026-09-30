@@ -514,9 +514,9 @@ Request Hook 完成后、首次 Target 选择前，`CacheAffinity` 对每个 can
 
 Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Gateway 在进程内以按字节上限淘汰的 LRU Generation Materialization Cache 加速读取；它以共享不可变对象保存精确物化的 execution context，缓存命中只复制共享引用，不在锁内复制整段历史；构造可变请求时再复制所需字段。缓存大小通过流式序列化计数估算，不分配用于计量的完整 JSON 缓冲；条目仍受原有字节上限与 TTL 限制，缓存不是历史事实源。重启或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
 
-父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，若已有对应 ingress 的引用目录则不再读链，否则读取一次祖先历史构造目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录按 ingress 惰性缓存，并计入同一字节预算。
+父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。自动父发现胜出后，未过期且无引用的 delta 直接复用核验得到的不可变物化对象，不再二次查缓存；对象已过期时沿用原恢复与错误处理路径。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，若已有对应 ingress 的引用目录则不再读链，否则读取一次祖先历史构造目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录按 ingress 惰性缓存，并计入同一字节预算。
 
-SQLite 与 PostgreSQL 的候选查询将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，供优化器使用既有索引，不拆成独立集合。SQLite 借此避免多条件 OR 在长历史下退化为 namespace 范围扫描；Principal、kind、namespace、过期过滤及候选排序保持不变。候选仍须通过完整 canonical 历史前缀核验，session hint 不能替代语义一致性检查。父发现只计算实际用于查询的 controls/session 指纹，不额外构造未使用的全历史 context hash。
+SQLite 与 PostgreSQL 的候选查询将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，供优化器使用既有索引，不拆成独立集合。SQLite 借此避免多条件 OR 在长历史下退化为 namespace 范围扫描；Principal、kind、namespace、过期过滤及候选排序保持不变。候选仍须通过完整 canonical 历史前缀核验，session hint 不能替代语义一致性检查。自动父发现先查询并严格核验 session 层，只有该层没有可用父链时才查询 controls 层，保留各层内部排序与 session 优先级；`candidate_count` 只累计实际查询层返回的候选。父发现只计算实际用于查询的 controls/session 指纹，不额外构造未使用的全历史 context hash。
 
 共享内容恢复先按节点批次读取引用元数据，再按唯一 `(Principal, content_key)` 分批读取正文，避免同一大块内容随每个引用重复传输。每个唯一内容在当前节点批次内只校验摘要和解析一次，再恢复到各引用位置；仍校验存储格式、引用数量、路径及缺失内容，不跨 Principal 共享正文。SQLite 引用元数据 JOIN 对引用表的 Principal 列使用单目 `+` 排除 principal-leading 索引条件，避免每个节点扫描同主体的全部引用；仍保留与节点 Principal 的等值校验，并由右侧节点列的 TEXT affinity 保持比较语义。该查询选择不依赖自动生成的索引名，不要求修改 schema 或运行 `ANALYZE`；PostgreSQL 保持普通等值条件。
 
@@ -826,6 +826,10 @@ MCP 的外部 `tools/call` 与 Proxy 的 `Inference Run` 共用同一 Principal
 Provider discovery 只负责提供当前可见的模型 ID。动态端点响应包含 `visibility` 时只保留 `list` 项；Core 再以相同 Provider Catalog scope 中的精确 upstream model ID 补齐初始 metadata。Catalog 独有模型不会扩充动态 discovery 集合，端点独有模型则以最小 metadata 创建。没有可靠账号 discovery 的 Catalog Provider 直接使用其按需加载的 scoped inventory。
 
 `provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。`snapshot_state` 区分 `unregistered`、带来源的 `imported` 和保留可知来源的 `edited`；来源可为 Provider Catalog、Canonical Model 或 Discovery。ID-only discovery 不填充虚假的能力、模态或上下文默认值；只有未登记快照可在普通同步中首次获取真实规格。已导入和人工编辑规格保持不变，插件拥有的执行 metadata、presence 与生命周期仍按各自契约刷新。管理员显式 re-import 才整体替换规格。对账写入使用 expected revision 防止覆盖并发编辑；旧行保守迁移为来源未知的 edited，不重写 `metadata_json`。未知字段仍保存在完整 metadata 中，常用查询列与分档成本规则继续规范化到关系列。
+
+调度所需的 input/output/cache-read/cache-write 基础价格投影由当前 Gateway 共享的 `RoutePolicyState` 复用，按 Provider 与 Target 请求的 upstream Model ID 缓存，同时缓存缺失或无价结果。用量与凭据失效信息仍在每次选择时向存储读取，沿用原有 stale 标记。创建、编辑、删除、同步、选择策略修改与 re-import 在本实例成功返回前清除相关定价缓存；本地 Route 缓存刷新也清除价格，覆盖 Provider 级联删除。启用配置 epoch 轮询时，其他实例据此异步失效：观测到新 epoch 即清除价格，即使后续 Route 重载失败也不保留旧值。禁用轮询不承诺跨实例刷新。缓存代次阻止失效前启动的旧读取回填，读取失败不进入缓存。
+
+SQLite 与 PostgreSQL 的 Provider Model 创建、规格编辑、选择策略修改、手工删除及实际对账写入都在原事务内更新 `config_epoch`。创建与编辑在提交前读回完整记录；读回失败时一并回滚规格、成本规则与 epoch，提交后不再执行可失败的读回。
 
 显式 re-import 由 Route module 统一协调。新快照、规范化成本规则、全部关联 Target 的 Generated Mapping 与 `config_epoch` 在同一存储原子操作中提交，禁用的 Route / Target 也在范围内。事务读取最新绑定与映射，只替换仍为 Generated 的行，保留 Overridden、Target ID 与其他策略字段。旧 revision、不可写的手工映射或最终 Vendor 写许可失效均阻止提交；提交前的持久化错误回滚整笔变更。映射未发生变化也不能跳过新规格下的可写性校验。数据库提交确认丢失时不推断已经回滚，调用方应重新读取状态，不自动重试。
 

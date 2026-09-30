@@ -508,6 +508,11 @@ impl Gateway {
 
                     if current > known_epoch {
                         known_epoch = current;
+                        // Provider Model prices change inside the same epoch
+                        // bump: drop the shared pricing cache as soon as a new
+                        // epoch is seen, so a failed route reload cannot leave
+                        // stale prices behind once `known_epoch` advanced.
+                        gw_poll.route_policy_state.clear_pricing();
                         let reload = tokio::select! {
                             _ = cancellation.cancelled() => return,
                             result = async {

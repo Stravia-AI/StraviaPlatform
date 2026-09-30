@@ -895,10 +895,13 @@ impl ObservationStore {
         match self {
             Self::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
+                // 过滤后才按批预占：被跳过的 Wire/空 credential 不占号。
+                let mut next_sequence = next_sqlite_batch(&mut tx, prepared.len()).await?;
                 let mut status_changed = false;
                 let mut visible = String::new();
                 for (run_event, at, kind, payload, encoded) in prepared {
-                    let sequence = next_sqlite(&mut tx).await?;
+                    let sequence = next_sequence;
+                    next_sequence += 1;
                     if let RunEvent::ClientVisibleContentDelta { text } = run_event {
                         visible.push_str(text);
                     } else {
@@ -950,13 +953,18 @@ impl ObservationStore {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                // 按批取回实际序列值再配对：并发写入下 nextval 跨批不连续，不能自行累加。
+                let sequences: Vec<i64> = sqlx::query_scalar(
+                    "SELECT nextval('observation_event_sequence') FROM generate_series(1,$1)",
+                )
+                .bind(checked_event_count(prepared.len())?)
+                .fetch_all(&mut *tx)
+                .await?;
                 let mut status_changed = false;
                 let mut visible = String::new();
-                for (run_event, at, kind, payload, encoded) in prepared {
-                    let sequence =
-                        sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
-                            .fetch_one(&mut *tx)
-                            .await?;
+                for ((run_event, at, kind, payload, encoded), sequence) in
+                    prepared.into_iter().zip(sequences)
+                {
                     if let RunEvent::ClientVisibleContentDelta { text } = run_event {
                         visible.push_str(text);
                     } else {
@@ -1880,16 +1888,31 @@ async fn supersede_waiting_parent_postgres(
 }
 
 async fn next_sqlite(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> anyhow::Result<i64> {
-    sqlx::query(
-        "UPDATE observation_sequence SET next_sequence=next_sequence+1 WHERE singleton_id=1",
+    next_sqlite_batch(tx, 1).await
+}
+
+fn checked_event_count(len: usize) -> anyhow::Result<i64> {
+    let count = i64::try_from(len)
+        .map_err(|_| anyhow::anyhow!("observation event batch size overflows i64"))?;
+    anyhow::ensure!(count > 0, "observation event batch allocates no sequence");
+    Ok(count)
+}
+
+/// WHERE 先比较上界再进位：序列耗尽显式报错，i64::MAX 边界也不会隐式提升为
+/// REAL；RETURNING 的末端减回条数即首序列，不存在 end+1 溢出点。
+async fn next_sqlite_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    count: usize,
+) -> anyhow::Result<i64> {
+    let count = checked_event_count(count)?;
+    sqlx::query_scalar(
+        "UPDATE observation_sequence SET next_sequence=next_sequence+?1 WHERE singleton_id=1 AND next_sequence<=?2 RETURNING next_sequence-?1",
     )
-    .execute(&mut **tx)
-    .await?;
-    Ok(
-        sqlx::query_scalar("SELECT next_sequence-1 FROM observation_sequence WHERE singleton_id=1")
-            .fetch_one(&mut **tx)
-            .await?,
-    )
+    .bind(count)
+    .bind(i64::MAX - count)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("observation event sequence is exhausted"))
 }
 
 struct EventInsert<'a> {
@@ -3524,6 +3547,204 @@ mod tests {
             "late content must not move activity backwards"
         );
         pool.close().await;
+        Ok(())
+    }
+
+    /// 事件边界合同：过滤事件不占号，批次与夹入单事件严格递增，
+    /// 失败批次整体回滚且游标/last_event_sequence 停在最新提交事件。
+    async fn interleaved_batch_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        let wire = || RunEvent::Wire {
+            direction: "outbound".into(),
+            transport: "sse".into(),
+            protocol: "responses".into(),
+            message_type: "request".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            status_code: None,
+            url: None,
+            headers: Value::Null,
+            payload: Value::Null,
+        };
+        let empty_credentials = || RunEvent::CredentialMappingsCreated {
+            discoveries: Vec::new(),
+        };
+        admit_tool_run(store, "interleaved", None, "alice").await?;
+
+        let first = store
+            .persist_run_events(
+                "interleaved",
+                "interleaved",
+                &[
+                    (wire(), None, 2),
+                    (empty_credentials(), None, 2),
+                    (
+                        RunEvent::ClientVisibleContentDelta { text: "a".into() },
+                        None,
+                        2,
+                    ),
+                ],
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(first.len(), 1, "filtered events must not persist");
+
+        let skipped = store
+            .persist_run_events(
+                "interleaved",
+                "interleaved",
+                &[(wire(), None, 2), (empty_credentials(), None, 2)],
+                i64::MAX,
+            )
+            .await?;
+        assert!(skipped.is_empty());
+
+        let single = store
+            .persist_run_event(
+                "interleaved",
+                "interleaved",
+                &RunEvent::ClientOutputCommitted,
+                3,
+                i64::MAX,
+            )
+            .await?
+            .expect("single event");
+        assert_eq!(single.sequence, first[0].sequence + 1);
+
+        let second = store
+            .persist_run_events(
+                "interleaved",
+                "interleaved",
+                &[
+                    (wire(), None, 4),
+                    (
+                        RunEvent::ModelTurnStarted {
+                            model_turn_id: "interleaved-turn".into(),
+                            route_id: "route".into(),
+                            model_display_name: None,
+                            estimated_input_tokens: None,
+                        },
+                        None,
+                        4,
+                    ),
+                    (
+                        RunEvent::ClientVisibleContentDelta { text: "b".into() },
+                        None,
+                        4,
+                    ),
+                ],
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].sequence, single.sequence + 1);
+        assert!(second[0].sequence < second[1].sequence);
+
+        // 批内 Model Turn 主键冲突令整批回滚。
+        let boundary = second[1].sequence;
+        let failing = vec![
+            (
+                RunEvent::ClientVisibleContentDelta { text: "x".into() },
+                None,
+                5,
+            ),
+            (
+                RunEvent::ModelTurnStarted {
+                    model_turn_id: "interleaved-turn".into(),
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    estimated_input_tokens: None,
+                },
+                None,
+                5,
+            ),
+        ];
+        assert!(
+            store
+                .persist_run_events("interleaved", "interleaved", &failing, i64::MAX)
+                .await
+                .is_err()
+        );
+        assert!(store.replay(boundary).await?.is_empty());
+
+        let after = store
+            .persist_run_event(
+                "interleaved",
+                "interleaved",
+                &RunEvent::ClientOutputCommitted,
+                6,
+                i64::MAX,
+            )
+            .await?
+            .expect("post-rollback event");
+        if matches!(store, ObservationStore::Sqlite(_)) {
+            assert_eq!(after.sequence, boundary + 1);
+        } else {
+            assert!(after.sequence > boundary);
+        }
+        assert_eq!(store.max_sequence().await?, after.sequence);
+        let last_sequence: i64 = match store {
+            ObservationStore::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT last_event_sequence FROM inference_run_observations WHERE id='interleaved'",
+            )
+            .fetch_one(pool)
+            .await?,
+            ObservationStore::Postgres(pool) => sqlx::query_scalar(
+                "SELECT last_event_sequence FROM inference_run_observations WHERE id='interleaved'",
+            )
+            .fetch_one(pool)
+            .await?,
+        };
+        assert_eq!(last_sequence, after.sequence);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filtered_events_and_interleaved_batches_share_one_sequence_order() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        interleaved_batch_scenario(&store).await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_interleaved_batches_when_configured() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("DB_URL") else {
+            eprintln!("跳过 PostgreSQL 动态验证：未显式设置 DB_URL");
+            return Ok(());
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        let schema = format!("stravia_obs_batch_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await?;
+        let result = async {
+            let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.options([("search_path", schema.as_str())]))
+                .await?;
+            let result = async {
+                crate::migrations::migrate_postgres(&pool).await?;
+                interleaved_batch_scenario(&ObservationStore::Postgres(pool.clone())).await
+            }
+            .await;
+            pool.close().await;
+            result
+        }
+        .await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        result?;
+        cleanup?;
         Ok(())
     }
 

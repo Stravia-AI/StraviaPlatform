@@ -20,9 +20,9 @@ use crate::storage::DynStorage;
 use super::cache_affinity::CacheAffinity;
 use super::continuation::ContinuationLookup;
 use super::selector::{
-    ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
-    RouteSchedulingSnapshot, TargetSchedulingSnapshot, conversation_identity, selected_target_key,
-    target_key,
+    ConversationIdentity, PricingProbe, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
+    RouteSchedulingSnapshot, TargetPricing, TargetSchedulingSnapshot, conversation_identity,
+    selected_target_key, target_key,
 };
 
 /// Why selection could not produce a policy.
@@ -209,24 +209,41 @@ impl RouteSelector {
             let Some(model) = target.model().map(|model| model.as_str()) else {
                 continue;
             };
-            let Some(provider_model) = self
-                .storage
-                .provider_models()
-                .find(target.provider_id().as_str(), model)
-                .await?
-            else {
-                continue;
+            let provider_id = target.provider_id().as_str();
+            let pricing = match self.policy_state.pricing(provider_id, model) {
+                PricingProbe::Hit(pricing) => pricing,
+                PricingProbe::Miss(generation) => {
+                    let loaded = self
+                        .storage
+                        .provider_models()
+                        .find(provider_id, model)
+                        .await?
+                        .and_then(|record| record.metadata.cost)
+                        .map(|cost| TargetPricing {
+                            cost_input: cost.prices.input.and_then(|value| value.to_f64()),
+                            cost_output: cost.prices.output.and_then(|value| value.to_f64()),
+                            cost_cache_read: cost
+                                .prices
+                                .cache_read
+                                .and_then(|value| value.to_f64()),
+                            cost_cache_write: cost
+                                .prices
+                                .cache_write
+                                .and_then(|value| value.to_f64()),
+                        });
+                    self.policy_state
+                        .store_pricing(generation, provider_id, model, loaded);
+                    loaded
+                }
             };
-            let Some(cost) = provider_model.metadata.cost else {
+            let Some(pricing) = pricing else {
                 continue;
             };
             let target_snapshot = &mut snapshot.targets[index];
-            target_snapshot.cost_input = cost.prices.input.and_then(|value| value.to_f64());
-            target_snapshot.cost_output = cost.prices.output.and_then(|value| value.to_f64());
-            target_snapshot.cost_cache_read =
-                cost.prices.cache_read.and_then(|value| value.to_f64());
-            target_snapshot.cost_cache_write =
-                cost.prices.cache_write.and_then(|value| value.to_f64());
+            target_snapshot.cost_input = pricing.cost_input;
+            target_snapshot.cost_output = pricing.cost_output;
+            target_snapshot.cost_cache_read = pricing.cost_cache_read;
+            target_snapshot.cost_cache_write = pricing.cost_cache_write;
         }
         Ok(snapshot)
     }
@@ -1125,5 +1142,223 @@ mod tests {
             .await
             .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("output_heavy"));
+    }
+
+    fn priced_model(provider_id: &str, input: u64, output: u64) -> NewProviderModelRecord {
+        NewProviderModelRecord {
+            provider_id: provider_id.into(),
+            model_id: "model".into(),
+            source_kind: ProviderModelSourceKind::Manual,
+            snapshot_state: SnapshotState::Edited { source: None },
+            metadata_source_provider_id: None,
+            presence: ProviderModelPresence::Present,
+            selection_policy: ProviderModelSelectionPolicy::Auto,
+            metadata: ProviderModelMetadata {
+                cost: Some(ModelCost {
+                    prices: PriceComponents {
+                        input: Some(Decimal::from(input)),
+                        output: Some(Decimal::from(output)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    async fn snapshot_costs(
+        fixture: &Fixture,
+        route: &RouteConfig,
+    ) -> Vec<(String, Option<f64>, Option<f64>)> {
+        fixture
+            .selector
+            .scheduling_snapshot(&route.targets, None)
+            .await
+            .expect("snapshot")
+            .targets
+            .iter()
+            .map(|target| {
+                (
+                    target.target_key.clone(),
+                    target.cost_input,
+                    target.cost_output,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn pricing_cache_serves_until_invalidation_boundary() {
+        let storage = Arc::new(FixtureStorage::new());
+        let fixture = fixture(storage.clone(), no_continuation());
+        let route = route(vec![target("p", 0)]);
+        let models = storage.provider_models();
+
+        // Negative result is cached: no write has happened yet.
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), None, None)]);
+        let applied = models
+            .create(priced_model("p", 1, 2))
+            .await
+            .expect("create");
+        assert!(matches!(applied, ProviderModelMutation::Applied(_)));
+
+        // The write's invalidation has not landed, so the cached negative
+        // answer still serves.
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), None, None)]);
+
+        fixture.policy_state.clear_pricing();
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), Some(1.0), Some(2.0))]);
+
+        // A price update writes through storage but stays invisible until the
+        // invalidation boundary clears the shared cache.
+        let record = models.get("p", "model").await.unwrap().unwrap();
+        let mut updated = priced_model("p", 7, 9);
+        updated.metadata.provider = record.metadata.provider.clone();
+        models
+            .update_metadata(
+                "p",
+                "model",
+                updated.metadata,
+                record.snapshot_state.clone(),
+                record.revision,
+            )
+            .await
+            .expect("update_metadata");
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), Some(1.0), Some(2.0))]);
+        fixture.policy_state.clear_pricing();
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), Some(7.0), Some(9.0))]);
+
+        // Deleting the manual record takes effect at the same boundary.
+        assert!(models.delete_manual("p", "model").await.unwrap());
+        fixture.policy_state.clear_pricing();
+        let costs = snapshot_costs(&fixture, &route).await;
+        assert_eq!(costs, vec![("p:model".to_string(), None, None)]);
+    }
+
+    /// Real `AdminService` writes must drop this Gateway's pricing cache before
+    /// returning, so the next selection observes the new price state without
+    /// waiting for the config epoch poll.
+    #[tokio::test]
+    async fn admin_provider_model_writes_invalidate_pricing_immediately() {
+        use crate::config::GatewayConfig;
+        use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceInput};
+        use crate::provider_models::{CreateManualProviderModel, UpdateProviderModel};
+
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let gateway = crate::Gateway::from_storage(
+            GatewayConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..GatewayConfig::default()
+            },
+            Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new())),
+        )
+        .await
+        .expect("gateway");
+        let provider = gateway
+            .admin()
+            .create_provider(CreateProvider {
+                name: Some("Pricing Provider".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai-compatible".into()),
+                    base_url: "http://127.0.0.1:9".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            })
+            .await
+            .expect("provider");
+        let selector = RouteSelector::new(
+            gateway.storage.clone(),
+            CacheAffinity::default(),
+            no_continuation(),
+            gateway.route_policy_state.clone(),
+        );
+        let route = route(vec![target(&provider.id, 0)]);
+        let key = format!("{}:model", provider.id);
+        let costs = |snapshot: RouteSchedulingSnapshot| {
+            snapshot
+                .targets
+                .iter()
+                .find(|target| target.target_key == key)
+                .map(|target| (target.cost_input, target.cost_output))
+        };
+
+        // The unknown model is probed once and cached as a negative entry.
+        let snapshot = selector
+            .scheduling_snapshot(&route.targets, None)
+            .await
+            .expect("snapshot");
+        assert_eq!(costs(snapshot), Some((None, None)));
+
+        gateway
+            .admin()
+            .create_manual_provider_model(
+                &provider.id,
+                "model",
+                CreateManualProviderModel {
+                    template_id: None,
+                    metadata: serde_json::json!({
+                        "id": "model",
+                        "cost": { "input": 1.5, "output": 3.0 }
+                    }),
+                },
+            )
+            .await
+            .expect("create manual model");
+        let snapshot = selector
+            .scheduling_snapshot(&route.targets, None)
+            .await
+            .expect("snapshot after create");
+        assert_eq!(costs(snapshot), Some((Some(1.5), Some(3.0))));
+
+        let detail = gateway
+            .admin()
+            .get_provider_model(&provider.id, "model")
+            .await
+            .expect("detail");
+        gateway
+            .admin()
+            .update_provider_model(
+                &provider.id,
+                "model",
+                UpdateProviderModel {
+                    metadata: serde_json::json!({
+                        "id": "model",
+                        "cost": { "input": 4.0, "output": 8.0 }
+                    }),
+                    revision: detail.revision,
+                },
+            )
+            .await
+            .expect("update model");
+        let snapshot = selector
+            .scheduling_snapshot(&route.targets, None)
+            .await
+            .expect("snapshot after update");
+        assert_eq!(costs(snapshot), Some((Some(4.0), Some(8.0))));
+
+        gateway
+            .admin()
+            .delete_manual_provider_model(&provider.id, "model")
+            .await
+            .expect("delete model");
+        let snapshot = selector
+            .scheduling_snapshot(&route.targets, None)
+            .await
+            .expect("snapshot after delete");
+        assert_eq!(costs(snapshot), Some((None, None)));
+
+        gateway.shutdown().await;
     }
 }

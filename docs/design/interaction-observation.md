@@ -252,6 +252,8 @@ Trace 继续使用既有有界队列与写入批次；队列、捕获缓冲或�
 
 Observation writer 为持久化事件分配递增 `event_sequence`。事件及受影响摘要在同一数据库事务内提交后才广播；SSE event ID 等于 sequence。
 
+批次先过滤不持久化的事件并完成 payload 编码，再用一次数据库调用为实际事件取号；空批次不打开事务。SQLite 使用带整数上界检查的 `UPDATE ... RETURNING` 预留连续范围，单事件也复用同一取号路径，事务回滚不消耗序号。PostgreSQL 在同一查询中逐次调用 `nextval`，使用实际返回的每个值，不假设并发写者之间的序号连续；回滚仍可留下序号空隙。事件、状态投影、终态顺序及提交后广播规则不变，不调整 writer flush 周期。
+
 `live_content`、`live_snapshot` 和 `live_gap` 不带 SSE ID，不推进持久 cursor。订阅先分批重放已提交事件（每批最多 512 条），再发送完整易失快照，包括空快照。重连、reset 或断线时替换或清除旧易失状态，不按文本猜测去重。易失预览不承诺重启恢复。
 
 SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
