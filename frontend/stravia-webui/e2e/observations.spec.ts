@@ -79,8 +79,11 @@ function runFor(item: InteractionSummary): RunDetail {
     interaction_id: item.id,
     run_id: `run-${item.id}`,
     rejection_id: null,
-    kind: item.status === 'running' ? 'model_turn_started' : 'delivery_terminal',
-    payload: item.status === 'running' ? { model_turn_id: `turn-${item.id}` } : { delivered: true },
+    kind: item.status === 'running' ? 'model_turn_started' : 'run_finished',
+    payload:
+      item.status === 'running'
+        ? { model_turn_id: `turn-${item.id}` }
+        : { status: 'completed', delivery: { delivered: true } },
   }
   return {
     id: `run-${item.id}`,
@@ -102,8 +105,14 @@ function runFor(item: InteractionSummary): RunDetail {
       {
         ...event,
         sequence: item.last_event_sequence - 1,
-        kind: 'client_visible_content_delta',
-        payload: { text: item.visible_tail },
+        kind: 'client_visible_content',
+        payload: {
+          text: item.visible_tail,
+          parts: [{ type: 'text', text: item.visible_tail }],
+          item: 'text:0',
+          block_id: 'block:0',
+          complete: true,
+        },
       },
       event,
     ],
@@ -531,13 +540,15 @@ async function installObservationFixture(
         root.last_active_at = Math.max(...root.interactions.map((item) => item.last_active_at))
         const run = recordedRuns.get(known.id)!
         run.events.push(event)
-        if (event.kind === 'client_visible_content_delta') {
-          const payload = event.payload as { text: string }
+        if (event.kind === 'client_visible_content') {
+          const payload = event.payload as { text: string; item: string; block_id: string }
+          payload.item = payload.item === 'text:0' ? `text:${event.sequence}` : payload.item
+          payload.block_id = payload.block_id === 'block:0' ? `block:${event.sequence}` : payload.block_id
           known.visible_tail = (known.visible_tail + payload.text).slice(-4096)
         } else {
           known.visible_tail = visibleTail ?? `Updated at sequence ${event.sequence}`
         }
-        if (event.kind === 'delivery_terminal') {
+        if (event.kind === 'run_finished') {
           known.status = 'completed'
           run.status = 'completed'
           run.finished_at = event.occurred_at
@@ -736,7 +747,7 @@ test.describe('Interaction Observation canvas', () => {
       block_id: 'live-table',
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
-      kind: 'client_visible_content_delta',
+      kind: 'client_visible_content_delta' as const,
       model_turn_id: 'turn',
       attempt_id: 'attempt',
       occurred_at: startedAt + 299_000,
@@ -759,8 +770,31 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: block.interaction_id,
       run_id: block.run_id,
       rejection_id: null,
-      kind: block.kind,
-      payload: { text: completed.text, block_id: block.block_id },
+      kind: 'client_visible_content',
+      payload: {
+        text: completed.text,
+        parts: [{ type: 'text', text: completed.text }],
+        block_id: block.block_id,
+        item: 'text:live-table',
+        model_turn_id: block.model_turn_id,
+        attempt_id: block.attempt_id,
+        complete: true,
+        parts: [
+          {
+            type: 'text',
+            text: completed.text,
+            parts: [{ type: 'text', text: completed.text }],
+            block_id: block.block_id,
+            item: 'text:live-table',
+            model_turn_id: block.model_turn_id,
+            attempt_id: block.attempt_id,
+            complete: true,
+          },
+        ],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     }
     fixture.emit(durable)
     await sendObservation(page, 'observation', durable, durable.sequence)
@@ -812,8 +846,14 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: 'client_visible_content_delta',
-        payload: { text: `\n\nIncrement ${index}` },
+        kind: 'client_visible_content',
+        payload: {
+          text: `\n\nIncrement ${index}`,
+          parts: [{ type: 'text', text: `\n\nIncrement ${index}` }],
+          item: 'text:0',
+          block_id: 'block:0',
+          complete: true,
+        },
       })
     await expect(conversation.getByText('Increment 450', { exact: true })).toHaveCount(1)
     await expect(conversation.getByText('Increment 1', { exact: true })).toHaveCount(1)
@@ -835,8 +875,14 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: detail.interaction.id,
         run_id: detail.runs[0].id,
         rejection_id: null,
-        kind: 'client_visible_content_delta',
-        payload: { text: `Paragraph ${index + 1}\n\n` },
+        kind: 'client_visible_content',
+        payload: {
+          text: `Paragraph ${index + 1}\n\n`,
+          parts: [{ type: 'text', text: `Paragraph ${index + 1}\n\n` }],
+          item: `text:${index + 1}`,
+          block_id: `block:${index + 1}`,
+          complete: true,
+        },
       }))
     })
     await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -899,7 +945,16 @@ test.describe('Interaction Observation canvas', () => {
               run_id: `run-page-${runIndex + 1}`,
               rejection_id: null,
               ...(sequence % 2 === 0
-                ? { kind: 'client_visible_content_delta', payload: { text: `Paragraph ${sequence}\n\n` } }
+                ? {
+                    kind: 'client_visible_content',
+                    payload: {
+                      text: `Paragraph ${sequence}\n\n`,
+                      parts: [{ type: 'text', text: `Paragraph ${sequence}\n\n` }],
+                      item: `text:${sequence}`,
+                      block_id: `block:${sequence}`,
+                      complete: true,
+                    },
+                  }
                 : { kind: 'fixture_note', payload: { index: sequence } }),
             }
           }),
@@ -965,8 +1020,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Summary-only live answer' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Summary-only live answer',
+        parts: [{ type: 'text', text: ' Summary-only live answer' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Summary-only live answer')
     expect(fixture.summaryRequests.map((url) => url.pathname)).toEqual([
@@ -985,8 +1046,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-nova',
       run_id: 'run-interaction-nova',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' New child preview' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' New child preview',
+        parts: [{ type: 'text', text: ' New child preview' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(node(page, 'Nova', 'running').locator('article')).toContainText('New child preview')
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
@@ -1009,8 +1076,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Ordinary live continuation' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Ordinary live continuation',
+        parts: [{ type: 'text', text: ' Ordinary live continuation' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(conversation).toContainText('Ordinary live continuation')
     await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Ordinary live continuation')
@@ -1024,8 +1097,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-boreal',
       run_id: 'run-interaction-boreal',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Sibling summary update' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Sibling summary update',
+        parts: [{ type: 'text', text: ' Sibling summary update' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toContainText('Sibling summary update')
     await expect(conversation).toContainText('Ordinary live continuation')
@@ -1056,8 +1135,14 @@ test.describe('Interaction Observation canvas', () => {
             interaction_id: 'interaction-cinder',
             run_id: 'run-interaction-cinder',
             rejection_id: null,
-            kind: 'client_visible_content_delta',
-            payload: { text: ' Delayed Cinder update' },
+            kind: 'client_visible_content',
+            payload: {
+              text: ' Delayed Cinder update',
+              parts: [{ type: 'text', text: ' Delayed Cinder update' }],
+              item: 'text:0',
+              block_id: 'block:0',
+              complete: true,
+            },
           })
         }
         await expect
@@ -1107,8 +1192,8 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'delivery_terminal',
-      payload: { delivered: true },
+      kind: 'run_finished',
+      payload: { status: 'completed', delivery: { delivered: true } },
     })
     await expect(page.getByText('No interaction chains match', { exact: true })).toBeVisible()
     expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('running')
@@ -1158,8 +1243,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Historical chain advanced' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Historical chain advanced',
+        parts: [{ type: 'text', text: ' Historical chain advanced' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Historical chain advanced')
     expect(fixture.detailRequests).toEqual([])
@@ -1204,8 +1295,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Recovered after replay gap' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Recovered after replay gap',
+        parts: [{ type: 'text', text: ' Recovered after replay gap' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     fixture.reset()
     await expect(conversation).toContainText('Recovered after replay gap')
@@ -1232,8 +1329,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: ' Replayed summary answer' },
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Replayed summary answer',
+        parts: [{ type: 'text', text: ' Replayed summary answer' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Replayed summary answer')
     expect(attempts).toBe(2)
@@ -2033,7 +2136,13 @@ test.describe('Interaction Observation canvas', () => {
             run_id: 'run-interjection',
             rejection_id: null,
             kind: 'input_preview_recorded',
-            payload: { text: input },
+            payload: {
+              text: input,
+              parts: [{ type: 'text', text: input }],
+              item: 'text:0',
+              block_id: 'block:0',
+              complete: true,
+            },
           },
           {
             sequence: 21,
@@ -2041,8 +2150,14 @@ test.describe('Interaction Observation canvas', () => {
             interaction_id: detail.interaction.id,
             run_id: 'run-interjection',
             rejection_id: null,
-            kind: 'client_visible_content_delta',
-            payload: { text: '范围扩大为所有平台生成的 ID。' },
+            kind: 'client_visible_content',
+            payload: {
+              text: '范围扩大为所有平台生成的 ID。',
+              parts: [{ type: 'text', text: '范围扩大为所有平台生成的 ID。' }],
+              item: 'text:0',
+              block_id: 'block:0',
+              complete: true,
+            },
           },
         ],
       })
@@ -2128,7 +2243,8 @@ test.describe('Interaction Observation canvas', () => {
           debug_enabled: true,
           inferred_retry: false,
           parent_run_id: null,
-          generation_parent_id: null,
+          generation_parent_id: 'generation-parent-atlas',
+          generation_root_id: 'generation-root-cinder',
           has_new_user: true,
           parent_interaction_id: 'interaction-atlas',
           root_id: 'root-a',
@@ -2140,8 +2256,8 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: 'generation_associated',
-        payload: { root_id: 'generation-root-cinder', parent_id: 'generation-parent-atlas', has_new_user: true },
+        kind: 'checkpoint',
+        payload: { stage: 'model_turn' },
       },
       {
         sequence: 13,
@@ -2293,7 +2409,7 @@ test.describe('Interaction Observation canvas', () => {
         payload,
       })
     for (let sequence = 11; sequence <= 13; sequence++) {
-      emit(sequence, 'client_visible_content_delta', { text: `chunk-${sequence}` })
+      emit(sequence, 'client_visible_content', { text: `chunk-${sequence}` })
     }
     await page.goto('/logs?interaction=interaction-cinder')
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
@@ -2313,7 +2429,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.keyboard.press('Enter')
     await expect(records).toHaveCount(3)
 
-    emit(14, 'client_visible_content_delta', { text: 'chunk-14' })
+    emit(14, 'client_visible_content', { text: 'chunk-14' })
     await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
     await expect(group).toHaveAttribute('aria-expanded', 'true')
     await expect(records).toHaveCount(4)
@@ -2324,8 +2440,8 @@ test.describe('Interaction Observation canvas', () => {
     }
 
     emit(15, 'delivery_finished', { status: 'delivery_failed', reason: 'client_disconnected' })
-    emit(16, 'client_visible_content_delta', { text: 'after-failure-16' })
-    emit(17, 'client_visible_content_delta', { text: 'after-failure-17' })
+    emit(16, 'client_visible_content', { text: 'after-failure-16' })
+    emit(17, 'client_visible_content', { text: 'after-failure-17' })
     await expect(groups).toHaveCount(2)
     await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
     await expect(groups.last()).toHaveAccessibleName(/^Response text updated × 2/)
@@ -2345,7 +2461,7 @@ test.describe('Interaction Observation canvas', () => {
       ['model_turn_started', 0, { model_turn_id: 'ordered-turn', model_display_name: 'Cinder' }],
       ['target_attempt_started', 0, { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt' }],
       ['client_output_committed', 5000, {}],
-      ['client_visible_content_delta', 6000, { text: 'first streamed output' }],
+      ['client_visible_content', 6000, { text: 'first streamed output' }],
       [
         'usage_confirmed',
         6500,
@@ -2357,7 +2473,7 @@ test.describe('Interaction Observation canvas', () => {
         { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt', status: 'completed' },
       ],
       ['model_turn_finished', 7000, { model_turn_id: 'ordered-turn', status: 'completed' }],
-      ['client_visible_content_delta', 6600, { text: 'output recorded before upstream completion' }],
+      ['client_visible_content', 6600, { text: 'output recorded before upstream completion' }],
     ]
     const events = rows.map(([kind, offset, payload], index): ObservationEvent => ({
       sequence: 11 + index,
@@ -2643,8 +2759,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: delta },
+      kind: 'client_visible_content',
+      payload: {
+        text: delta,
+        parts: [{ type: 'text', text: delta }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(response).toHaveText(initial + delta)
     const samples = await page.evaluate(
@@ -2672,8 +2794,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: secondDelta },
+      kind: 'client_visible_content',
+      payload: {
+        text: secondDelta,
+        parts: [{ type: 'text', text: secondDelta }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     await expect(response).toHaveText(initial + delta + secondDelta)
     expect(await conversation.evaluate((element) => element.scrollTop)).toBe(0)
@@ -2695,8 +2823,8 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'delivery_terminal',
-      payload: { delivered: true },
+      kind: 'run_finished',
+      payload: { status: 'completed', delivery: { delivered: true } },
     })
     await expect(
       inspector
@@ -2732,7 +2860,7 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: 'client_visible_content_delta',
+        kind: 'client_visible_content',
         payload: { text },
       })
       if (index === 0) await expect(response.getByRole('heading', { name: '核心配置' })).toBeVisible()
@@ -2774,8 +2902,14 @@ test.describe('Interaction Observation canvas', () => {
           interaction_id: 'interaction-cinder',
           run_id: 'run-interaction-cinder',
           rejection_id: null,
-          kind: 'client_visible_content_delta',
-          payload: { text: tail },
+          kind: 'client_visible_content',
+          payload: {
+            text: tail,
+            parts: [{ type: 'text', text: tail }],
+            item: 'text:0',
+            block_id: 'block:0',
+            complete: true,
+          },
         },
         tail,
       )
@@ -2999,8 +3133,14 @@ test.describe('Interaction Observation canvas', () => {
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
-      kind: 'client_visible_content_delta',
-      payload: { text: 'new visible activity' },
+      kind: 'client_visible_content',
+      payload: {
+        text: 'new visible activity',
+        parts: [{ type: 'text', text: 'new visible activity' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
     })
     const follow = page.getByRole('button', { name: 'New activity · Follow' })
     await expect(follow).toBeVisible({ timeout: 5_000 })
@@ -3024,8 +3164,8 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: 'delivery_terminal',
-        payload: { delivered: true },
+        kind: 'run_finished',
+        payload: { status: 'completed', delivery: { delivered: true } },
       },
       'Completed through a filtered summary',
     )

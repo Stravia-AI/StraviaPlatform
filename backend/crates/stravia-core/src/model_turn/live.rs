@@ -1980,6 +1980,7 @@ async fn drive_vendor_attempt(
 
         match outcome {
             Ok(VendorTerminal::Infer(mut response, publication)) => {
+                attempt.observe_response(&response);
                 let normalization = tokio::select! {
                     biased;
                     _ = publication.cancelled() => {

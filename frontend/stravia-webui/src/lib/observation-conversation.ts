@@ -15,8 +15,9 @@ const committedText = new WeakMap<RunDetail, string>()
 function runText(run: RunDetail): string {
   const cached = committedText.get(run)
   if (cached !== undefined) return cached
+  // ADR-0062：client_visible_content 每个 Canonical Item 一行，text 已是条目完整正文。
   const text = run.events
-    .filter((event) => event.kind === 'client_visible_content_delta' && event.run_id === run.id)
+    .filter((event) => event.kind === 'client_visible_content' && event.run_id === run.id)
     .toSorted((a, b) => a.sequence - b.sequence)
     .map((event) => payloadString(payloadRecord(event.payload).text) ?? '')
     .join('')
@@ -65,7 +66,12 @@ export function observationConversationMessages(
         live: false,
         unsaved: false,
       })
-    const pending = visible.filter((block) => block.run_id === run.id)
+    const committed = new Set(
+      run.events
+        .filter((event) => event.kind === 'client_visible_content' || event.kind === 'model_thinking')
+        .map((event) => payloadString(payloadRecord(event.payload).block_id)),
+    )
+    const pending = visible.filter((block) => block.run_id === run.id && !committed.has(block.block_id))
     messages.push({
       id: `assistant:${run.id}`,
       role: 'assistant',
@@ -73,7 +79,7 @@ export function observationConversationMessages(
       at: run.started_at,
       model: run.model_display_name?.trim() || run.route_id,
       live: run.status === 'running',
-      unsaved: pendingBlocks.some((block) => block.run_id === run.id),
+      unsaved: pendingBlocks.some((block) => block.run_id === run.id && !committed.has(block.block_id)),
     })
   }
   // A new run can stream before its durable metadata is fetched. Its stable run key survives that fetch.

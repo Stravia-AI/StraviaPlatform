@@ -6,46 +6,122 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use crate::interaction_observation::{ConfirmedUsage, RunEvent, RunObserver};
-use stravia_runtime_contract::protocol::ir::AiStreamDelta;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ObservedThinkingPart {
-    Unindexed,
-    Thinking {
-        output_index: Option<usize>,
-        content_index: Option<usize>,
-    },
-    Summary {
-        output_index: Option<usize>,
-        content_index: Option<usize>,
-    },
-}
+use crate::interaction_observation::{
+    ConfirmedUsage, RunEvent, RunObserver, canonical_item_block_id,
+};
+use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
+use stravia_runtime_contract::protocol::ir::{
+    AiItem, AiResponse, AiStreamDelta, ContentBlock, MessageContent,
+};
 
 #[derive(Default)]
-struct ObservedThinkingLayout {
-    last_part: Option<ObservedThinkingPart>,
-    has_text: bool,
+struct ObservedThinkingItems {
+    accumulator: StreamResponseAccumulator,
+    emitted: std::collections::HashSet<usize>,
+    emitted_ids: std::collections::HashSet<String>,
 }
 
-impl ObservedThinkingLayout {
-    fn text(&mut self, part: ObservedThinkingPart, text: &str) -> String {
-        use ObservedThinkingPart::*;
-        let boundary = self.has_text
-            && match self.last_part {
-                None => true,
-                Some(Unindexed) if matches!(part, Thinking { .. }) => false,
-                Some(Thinking { .. }) if part == Unindexed => false,
-                Some(previous) => previous != part,
-            };
-        self.last_part = Some(part);
-        self.has_text = true;
-        let mut observed = String::with_capacity(text.len() + if boundary { 2 } else { 0 });
-        if boundary {
-            observed.push_str("\n\n");
+impl ObservedThinkingItems {
+    fn record(
+        &mut self,
+        observation: &AttemptObservation,
+        index: usize,
+        item: &AiItem,
+        complete: bool,
+    ) {
+        let MessageContent::Blocks(blocks) = &item.content else {
+            return;
+        };
+        if self.emitted.contains(&index)
+            || item
+                .id_ref()
+                .is_some_and(|id| self.emitted_ids.contains(id))
+            || !blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
+                )
+            })
+        {
+            return;
         }
-        observed.push_str(text);
-        observed
+        let mut diagnostic_item = item.clone();
+        if let MessageContent::Blocks(blocks) = &mut diagnostic_item.content {
+            blocks.retain(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
+                )
+            });
+            for block in blocks {
+                match block {
+                    ContentBlock::Thinking { signature, .. } => *signature = None,
+                    ContentBlock::Reasoning {
+                        encrypted_content, ..
+                    } => *encrypted_content = None,
+                    _ => {}
+                }
+            }
+        }
+        let MessageContent::Blocks(blocks) = &diagnostic_item.content else {
+            return;
+        };
+        self.emitted.insert(index);
+        if let Some(id) = item.id_ref() {
+            self.emitted_ids.insert(id.to_owned());
+        }
+        let text = blocks
+            .iter()
+            .flat_map(|block| match block {
+                ContentBlock::Thinking { thinking, .. } => vec![thinking.as_str()],
+                ContentBlock::Reasoning {
+                    summary, content, ..
+                } => summary
+                    .iter()
+                    .chain(content.iter())
+                    .map(String::as_str)
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let parts = blocks
+            .iter()
+            .map(|block| {
+                serde_json::to_value(block).expect("canonical thinking part serialization")
+            })
+            .collect();
+        let mut diagnostic_item =
+            serde_json::to_value(&diagnostic_item).expect("canonical thinking item serialization");
+        retain_diagnostic_metadata(&mut diagnostic_item);
+        if let Some(observer) = &observation.observer {
+            observer.record(RunEvent::ModelThinking {
+                model_turn_id: observation.model_turn_id.clone(),
+                attempt_id: observation.id.clone(),
+                text,
+                parts,
+                block_id: canonical_item_block_id(&observation.id, index),
+                item: diagnostic_item,
+                complete,
+            });
+        }
+    }
+}
+
+fn retain_diagnostic_metadata(item: &mut serde_json::Value) {
+    if let Some(meta) = item.get_mut("meta") {
+        if let Some(fields) = meta.as_object_mut() {
+            // Only typed canonical graph metadata belongs in diagnostic rows;
+            // extension bags can contain lossless protected wire snapshots.
+            fields.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "id" | "__open_responses_item_reference" | "status" | "provenance" | "audience"
+                )
+            });
+        } else {
+            *meta = serde_json::Value::Null;
+        }
     }
 }
 
@@ -62,8 +138,9 @@ pub(crate) struct AttemptObservation {
     first_token_span: Mutex<Option<tracing::Span>>,
     finished: AtomicBool,
     usage_confirmed: AtomicBool,
+    confirmed_usage: Mutex<Option<ConfirmedUsage>>,
     thinking_active: AtomicBool,
-    thinking_layout: Mutex<ObservedThinkingLayout>,
+    thinking_items: Mutex<ObservedThinkingItems>,
     first_token_timed_out: Option<Arc<AtomicBool>>,
 }
 
@@ -112,8 +189,9 @@ impl AttemptObservation {
             first_token_span: Mutex::new(Some(first_token_span)),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
+            confirmed_usage: Mutex::new(None),
             thinking_active: AtomicBool::new(false),
-            thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
+            thinking_items: Mutex::new(ObservedThinkingItems::default()),
             first_token_timed_out,
         }
     }
@@ -125,38 +203,24 @@ impl AttemptObservation {
         if self.finished.load(Ordering::Acquire) {
             return;
         }
+        let identity = self
+            .thinking_items
+            .lock()
+            .accumulator
+            .apply_with_identity(delta);
         match delta {
             AiStreamDelta::ThinkingDelta(text)
             | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
             | AiStreamDelta::ReasoningSummaryDelta { text, .. }
                 if !text.is_empty() =>
             {
-                let part = match delta {
-                    AiStreamDelta::ThinkingDelta(_) => ObservedThinkingPart::Unindexed,
-                    AiStreamDelta::ThinkingDeltaWithMetadata {
-                        output_index,
-                        content_index,
-                        ..
-                    } => ObservedThinkingPart::Thinking {
-                        output_index: *output_index,
-                        content_index: *content_index,
-                    },
-                    AiStreamDelta::ReasoningSummaryDelta {
-                        output_index,
-                        content_index,
-                        ..
-                    } => ObservedThinkingPart::Summary {
-                        output_index: *output_index,
-                        content_index: *content_index,
-                    },
-                    _ => unreachable!(),
-                };
-                let mut layout = self.thinking_layout.lock();
                 self.thinking_active.store(true, Ordering::Release);
                 observer.record(RunEvent::ModelThinkingDelta {
                     model_turn_id: self.model_turn_id.clone(),
                     attempt_id: self.id.clone(),
-                    text: layout.text(part, text),
+                    item_ordinal: identity.expect("canonical thinking identity").0,
+                    part_index: identity.expect("canonical thinking identity").1,
+                    text: text.clone(),
                 });
             }
             AiStreamDelta::TextDelta(text)
@@ -175,14 +239,29 @@ impl AttemptObservation {
             | AiStreamDelta::UnexpectedEof => self.finish_thinking(),
             _ => {}
         }
+        if let AiStreamDelta::ItemDone { item, .. } = delta
+            && let Some((ordinal, _)) = identity
+        {
+            self.thinking_items.lock().record(self, ordinal, item, true);
+        }
+    }
+
+    pub(crate) fn observe_response(&self, response: &AiResponse) {
+        if self.observer.is_none() || self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        let mut items = self.thinking_items.lock();
+        let (_, ordinals) = std::mem::take(&mut items.accumulator).into_ai_response_with_ordinals();
+        for (index, item) in response.items.iter().enumerate() {
+            let ordinal = ordinals.get(index).copied().unwrap_or(index);
+            items.record(self, ordinal, item, true);
+        }
     }
 
     fn finish_thinking(&self) {
-        let mut layout = self.thinking_layout.lock();
         if !self.thinking_active.swap(false, Ordering::AcqRel) {
             return;
         }
-        layout.last_part = None;
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::ModelThinkingFinished {
                 model_turn_id: self.model_turn_id.clone(),
@@ -213,11 +292,13 @@ impl AttemptObservation {
         if self.usage_confirmed.swap(true, Ordering::AcqRel) {
             return;
         }
+        let usage = confirmed_usage(usage);
+        *self.confirmed_usage.lock() = Some(usage.clone());
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::UsageConfirmed {
                 model_turn_id: self.model_turn_id.clone(),
                 attempt_id: self.id.clone(),
-                usage: confirmed_usage(usage),
+                usage,
             });
         }
     }
@@ -256,6 +337,14 @@ impl AttemptObservation {
             span.record("status", "error");
         }
         self.finish_thinking();
+        if self.observer.is_some() {
+            let mut items = self.thinking_items.lock();
+            let (response, ordinals) =
+                std::mem::take(&mut items.accumulator).into_ai_response_with_ordinals();
+            for (item, ordinal) in response.items.iter().zip(ordinals) {
+                items.record(self, ordinal, item, status == "completed");
+            }
+        }
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::TargetAttemptFinished {
                 model_turn_id: self.model_turn_id.clone(),
@@ -265,6 +354,7 @@ impl AttemptObservation {
                 error_code,
                 duration_ms: self.started_at.elapsed().as_millis() as i64,
                 first_token_ms,
+                usage: self.confirmed_usage.lock().clone(),
             });
         }
     }
@@ -304,5 +394,39 @@ fn confirmed_usage(usage: &stravia_runtime_contract::protocol::ir::Usage) -> Con
         cache_write_tokens: usage.cache_creation_tokens.map(i64::from),
         reasoning_tokens: usage.reasoning_tokens.map(i64::from),
         coverage: None,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::retain_diagnostic_metadata;
+    use stravia_runtime_contract::protocol::ir::AiItemMetadata;
+
+    #[test]
+    fn diagnostic_metadata_retains_reference_without_wire_state() -> anyhow::Result<()> {
+        let metadata = AiItemMetadata::from(serde_json::json!({
+            "id": "reasoning-id",
+            "__open_responses_item_reference": "reasoning-reference",
+            "status": "completed",
+            "__open_responses_item": {"encrypted_content": "PROTECTED_WIRE_STATE"},
+            "vendor_private": "PRIVATE_EXTENSION",
+            "reference": {"encrypted_content": "UNKNOWN_REFERENCE_EXTENSION"},
+        }));
+        let mut item = serde_json::json!({"meta": serde_json::to_value(metadata)?});
+        retain_diagnostic_metadata(&mut item);
+        assert_eq!(
+            item["meta"]["__open_responses_item_reference"],
+            "reasoning-reference"
+        );
+        assert_eq!(item["meta"]["status"], "completed");
+        let diagnostic = serde_json::to_string(&item)?;
+        for private in [
+            "PROTECTED_WIRE_STATE",
+            "PRIVATE_EXTENSION",
+            "UNKNOWN_REFERENCE_EXTENSION",
+        ] {
+            assert!(!diagnostic.contains(private));
+        }
+        Ok(())
     }
 }

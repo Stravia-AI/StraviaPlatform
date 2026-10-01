@@ -195,27 +195,6 @@ CREATE TABLE public.credential_custom_rules (
 
 
 --
--- Name: debug_trace_manifests; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.debug_trace_manifests (
-    trace_id text NOT NULL,
-    run_id text,
-    rejection_id text,
-    relative_directory text NOT NULL,
-    bytes_written bigint DEFAULT 0 NOT NULL,
-    event_count bigint DEFAULT 0 NOT NULL,
-    status text NOT NULL,
-    partial_reason text,
-    tombstoned boolean DEFAULT false NOT NULL,
-    created_at bigint NOT NULL,
-    completed_at bigint,
-    expires_at bigint NOT NULL,
-    CONSTRAINT debug_trace_manifests_check CHECK (((run_id IS NOT NULL) <> (rejection_id IS NOT NULL)))
-);
-
-
---
 -- Name: history_markers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -267,6 +246,7 @@ CREATE TABLE public.inference_run_observations (
     expires_at bigint NOT NULL,
     failure_json text,
     request_model text,
+    delivery_completed_at bigint,
     CONSTRAINT inference_run_background_active_contract CHECK ((background_active >= 0))
 );
 
@@ -447,9 +427,12 @@ CREATE TABLE public.observation_events (
     run_id text,
     rejection_id text,
     kind text NOT NULL,
-    payload jsonb NOT NULL,
-    expires_at bigint NOT NULL
+    payload bytea NOT NULL,
+    expires_at bigint NOT NULL,
+    tool_id text,
+    operation_id text
 );
+ALTER TABLE ONLY public.observation_events ALTER COLUMN payload SET STORAGE EXTERNAL;
 
 
 --
@@ -655,7 +638,6 @@ CREATE TABLE public.rejected_request_observations (
     code text NOT NULL,
     status_code bigint NOT NULL,
     debug_enabled boolean NOT NULL,
-    debug_status text NOT NULL,
     last_event_sequence bigint NOT NULL,
     expires_at bigint NOT NULL,
     failure_json text,
@@ -725,25 +707,45 @@ CREATE TABLE public.target_attempt_observations (
 
 
 --
--- Name: turn_chain_content_refs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.turn_chain_content_refs (
-    node_id text NOT NULL,
-    principal text NOT NULL,
-    path text NOT NULL,
-    content_key text NOT NULL
-);
-
-
---
 -- Name: turn_chain_contents; Type: TABLE; Schema: public; Owner: -
 --
 
 CREATE TABLE public.turn_chain_contents (
+    id bigint NOT NULL,
     principal text NOT NULL,
     content_key text NOT NULL,
-    content text NOT NULL
+    content bytea NOT NULL
+);
+ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN content SET STORAGE EXTERNAL;
+
+
+--
+-- Name: turn_chain_contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.turn_chain_contents_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: turn_chain_contents_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.turn_chain_contents_id_seq OWNED BY public.turn_chain_contents.id;
+
+
+--
+-- Name: turn_chain_node_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_chain_node_contents (
+    node_id text NOT NULL,
+    principal text NOT NULL,
+    content_id bigint NOT NULL
 );
 
 
@@ -757,18 +759,19 @@ CREATE TABLE public.turn_chain_nodes (
     parent_id text,
     principal text NOT NULL,
     payload_version bigint NOT NULL,
-    payload text NOT NULL,
+    payload bytea NOT NULL,
     created_at bigint NOT NULL,
     expires_at bigint NOT NULL,
     prefix_namespace text,
     prefix_fingerprint text,
     prefix_item_count bigint,
     prefix_completed_at bigint,
-    storage_format integer DEFAULT 0 NOT NULL,
+    storage_format integer DEFAULT 2 NOT NULL,
     CONSTRAINT turn_chain_nodes_kind_check CHECK ((kind = ANY (ARRAY['response'::text, 'agent'::text, 'web_search'::text]))),
     CONSTRAINT turn_chain_nodes_payload_version_check CHECK ((payload_version > 0)),
-    CONSTRAINT turn_chain_nodes_storage_format_check CHECK ((storage_format = ANY (ARRAY[0, 1])))
+    CONSTRAINT turn_chain_nodes_storage_format_v2 CHECK ((storage_format = ANY (ARRAY[0, 1, 2])))
 );
+ALTER TABLE ONLY public.turn_chain_nodes ALTER COLUMN payload SET STORAGE EXTERNAL;
 
 
 --
@@ -834,6 +837,13 @@ CREATE TABLE public.web_providers (
     CONSTRAINT web_providers_kind_check CHECK ((kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text]))),
     CONSTRAINT web_providers_local_engines_contract CHECK (((kind <> 'local'::text) OR COALESCE((jsonb_typeof(local_engines) = 'object'::text), false)))
 );
+
+
+--
+-- Name: turn_chain_contents id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN id SET DEFAULT nextval('public.turn_chain_contents_id_seq'::regclass);
 
 
 --
@@ -957,22 +967,6 @@ ALTER TABLE ONLY public.credential_custom_rules
 
 
 --
--- Name: debug_trace_manifests debug_trace_manifests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.debug_trace_manifests
-    ADD CONSTRAINT debug_trace_manifests_pkey PRIMARY KEY (trace_id);
-
-
---
--- Name: debug_trace_manifests debug_trace_manifests_relative_directory_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.debug_trace_manifests
-    ADD CONSTRAINT debug_trace_manifests_relative_directory_key UNIQUE (relative_directory);
-
-
---
 -- Name: history_markers history_markers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1053,11 +1047,11 @@ ALTER TABLE ONLY public.native_compactions
 
 
 --
--- Name: observation_events observation_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: observation_events observation_events_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.observation_events
-    ADD CONSTRAINT observation_events_pkey PRIMARY KEY (sequence);
+    ADD CONSTRAINT observation_events_pkey1 PRIMARY KEY (sequence);
 
 
 --
@@ -1149,19 +1143,35 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_chain_content_refs turn_chain_content_refs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_chain_content_refs
-    ADD CONSTRAINT turn_chain_content_refs_pkey PRIMARY KEY (node_id, path);
-
-
---
--- Name: turn_chain_contents turn_chain_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_chain_contents turn_chain_contents_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.turn_chain_contents
-    ADD CONSTRAINT turn_chain_contents_pkey PRIMARY KEY (principal, content_key);
+    ADD CONSTRAINT turn_chain_contents_pkey1 PRIMARY KEY (id);
+
+
+--
+-- Name: turn_chain_contents turn_chain_contents_principal_content_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_contents
+    ADD CONSTRAINT turn_chain_contents_principal_content_key_key UNIQUE (principal, content_key);
+
+
+--
+-- Name: turn_chain_contents turn_chain_contents_principal_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_contents
+    ADD CONSTRAINT turn_chain_contents_principal_id_key UNIQUE (principal, id);
+
+
+--
+-- Name: turn_chain_node_contents turn_chain_node_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_chain_node_contents
+    ADD CONSTRAINT turn_chain_node_contents_pkey PRIMARY KEY (node_id, content_id);
 
 
 --
@@ -1218,13 +1228,6 @@ ALTER TABLE ONLY public.web_providers
 
 ALTER TABLE ONLY public.web_providers
     ADD CONSTRAINT web_providers_pkey PRIMARY KEY (id);
-
-
---
--- Name: debug_manifests_expiry_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX debug_manifests_expiry_idx ON public.debug_trace_manifests USING btree (tombstoned, expires_at);
 
 
 --
@@ -1368,20 +1371,6 @@ CREATE INDEX idx_oauth_creds_status ON public.provider_oauth_credentials USING b
 
 
 --
--- Name: idx_observation_events_client_tool_call; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_observation_events_client_tool_call ON public.observation_events USING btree (run_id, ((payload ->> 'tool_id'::text)), sequence DESC) WHERE (kind = ANY (ARRAY['client_tool_handoff'::text, 'client_tool_result'::text]));
-
-
---
--- Name: idx_observation_events_context; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_observation_events_context ON public.observation_events USING btree (interaction_id, sequence) WHERE (kind = ANY (ARRAY['compaction_operation'::text, 'native_compaction_associated'::text, 'retained_tail_associated'::text]));
-
-
---
 -- Name: idx_provider_allowance_samples_item_time; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1431,17 +1420,17 @@ CREATE INDEX idx_reversible_redaction_mappings_principal_expiry ON public.revers
 
 
 --
--- Name: idx_turn_chain_content_refs_content; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_content_refs_content ON public.turn_chain_content_refs USING btree (principal, content_key);
-
-
---
 -- Name: idx_turn_chain_expiry; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_turn_chain_expiry ON public.turn_chain_nodes USING btree (expires_at);
+
+
+--
+-- Name: idx_turn_chain_node_contents_content_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_turn_chain_node_contents_content_id ON public.turn_chain_node_contents USING btree (principal, content_id);
 
 
 --
@@ -1564,13 +1553,6 @@ CREATE INDEX model_turns_run_status_idx ON public.model_turn_observations USING 
 
 
 --
--- Name: observation_events_expiry_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX observation_events_expiry_idx ON public.observation_events USING btree (expires_at, sequence);
-
-
---
 -- Name: observation_events_interaction_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1578,10 +1560,17 @@ CREATE INDEX observation_events_interaction_idx ON public.observation_events USI
 
 
 --
+-- Name: observation_events_operation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_operation_idx ON public.observation_events USING btree (operation_id, sequence) WHERE (operation_id IS NOT NULL);
+
+
+--
 -- Name: observation_events_rejection_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX observation_events_rejection_idx ON public.observation_events USING btree (rejection_id, sequence);
+CREATE INDEX observation_events_rejection_idx ON public.observation_events USING btree (rejection_id, sequence) WHERE (rejection_id IS NOT NULL);
 
 
 --
@@ -1589,6 +1578,13 @@ CREATE INDEX observation_events_rejection_idx ON public.observation_events USING
 --
 
 CREATE INDEX observation_events_run_idx ON public.observation_events USING btree (run_id, sequence);
+
+
+--
+-- Name: observation_events_tool_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_tool_idx ON public.observation_events USING btree (tool_id, sequence) WHERE (tool_id IS NOT NULL);
 
 
 --
@@ -1718,22 +1714,6 @@ ALTER TABLE ONLY public.artifact_uploads
 
 
 --
--- Name: debug_trace_manifests debug_trace_manifests_rejection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.debug_trace_manifests
-    ADD CONSTRAINT debug_trace_manifests_rejection_id_fkey FOREIGN KEY (rejection_id) REFERENCES public.rejected_request_observations(id) ON DELETE CASCADE;
-
-
---
--- Name: debug_trace_manifests debug_trace_manifests_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.debug_trace_manifests
-    ADD CONSTRAINT debug_trace_manifests_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
-
-
---
 -- Name: inference_run_observations inference_run_observations_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1838,27 +1818,27 @@ ALTER TABLE ONLY public.native_compactions
 
 
 --
--- Name: observation_events observation_events_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: observation_events observation_events_interaction_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.observation_events
-    ADD CONSTRAINT observation_events_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
+    ADD CONSTRAINT observation_events_interaction_id_fkey1 FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
 
 
 --
--- Name: observation_events observation_events_rejection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.observation_events
-    ADD CONSTRAINT observation_events_rejection_id_fkey FOREIGN KEY (rejection_id) REFERENCES public.rejected_request_observations(id) ON DELETE CASCADE;
-
-
---
--- Name: observation_events observation_events_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: observation_events observation_events_rejection_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.observation_events
-    ADD CONSTRAINT observation_events_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
+    ADD CONSTRAINT observation_events_rejection_id_fkey1 FOREIGN KEY (rejection_id) REFERENCES public.rejected_request_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_events observation_events_run_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_events
+    ADD CONSTRAINT observation_events_run_id_fkey1 FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
 
 
 --
@@ -1950,19 +1930,19 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_chain_content_refs turn_chain_content_refs_node_id_principal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_chain_node_contents turn_chain_node_contents_node_id_principal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_content_refs
-    ADD CONSTRAINT turn_chain_content_refs_node_id_principal_fkey FOREIGN KEY (node_id, principal) REFERENCES public.turn_chain_nodes(id, principal) ON DELETE CASCADE;
+ALTER TABLE ONLY public.turn_chain_node_contents
+    ADD CONSTRAINT turn_chain_node_contents_node_id_principal_fkey FOREIGN KEY (node_id, principal) REFERENCES public.turn_chain_nodes(id, principal) ON DELETE CASCADE;
 
 
 --
--- Name: turn_chain_content_refs turn_chain_content_refs_principal_content_key_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_chain_node_contents turn_chain_node_contents_principal_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_content_refs
-    ADD CONSTRAINT turn_chain_content_refs_principal_content_key_fkey FOREIGN KEY (principal, content_key) REFERENCES public.turn_chain_contents(principal, content_key);
+ALTER TABLE ONLY public.turn_chain_node_contents
+    ADD CONSTRAINT turn_chain_node_contents_principal_content_id_fkey FOREIGN KEY (principal, content_id) REFERENCES public.turn_chain_contents(principal, id) ON DELETE RESTRICT;
 
 
 --

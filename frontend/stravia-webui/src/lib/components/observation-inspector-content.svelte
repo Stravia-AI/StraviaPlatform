@@ -81,8 +81,8 @@ function jumpToRun(runId: string | null) {
 }
 </script>
 
-{#snippet eventRow(event: ObservationEvent, outputs?: ReadonlyMap<string, number | null>)}
-  {@const summary = observationEventSummary(event, outputs)}
+{#snippet eventRow(event: ObservationEvent)}
+  {@const summary = observationEventSummary(event)}
   <li class="stream-item">
     <Collapsible.Root>
       <Collapsible.Trigger class="stream-row" data-tone={summary.tone} data-sequence={event.sequence}>
@@ -121,12 +121,12 @@ function jumpToRun(runId: string | null) {
   </li>
 {/snippet}
 
-{#snippet streamItem(item: StreamItem, outputs?: ReadonlyMap<string, number | null>)}
+{#snippet streamItem(item: StreamItem)}
   {@const events = itemEvents(item)}
   {#if item.type === 'event'}
-    {@render eventRow(item.event, outputs)}
+    {@render eventRow(item.event)}
   {:else if events.length === 1}
-    {@render eventRow(events[0], outputs)}
+    {@render eventRow(events[0])}
   {:else}
     {@const group = item.type === 'process' ? processGroup(events) : null}
     <li class="stream-item stream-group" data-group={item.type}>
@@ -148,7 +148,7 @@ function jumpToRun(runId: string | null) {
         <Collapsible.Content>
           <ol class="branch sub">
             {#each events as event (event.sequence)}
-              {@render eventRow(event, outputs)}
+              {@render eventRow(event)}
             {/each}
           </ol>
         </Collapsible.Content>
@@ -254,7 +254,7 @@ function jumpToRun(runId: string | null) {
     {#if items.length}
       <ol class="branch">
         {#each items as item (itemKey(item))}
-          {@render streamItem(item, timeline.attemptOutputs.get(run.id))}
+          {@render streamItem(item)}
         {/each}
       </ol>
     {/if}

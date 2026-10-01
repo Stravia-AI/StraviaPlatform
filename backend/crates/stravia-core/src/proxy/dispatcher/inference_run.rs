@@ -211,6 +211,7 @@ pub(crate) struct WebSocketRunDelivery {
     delivery_completed_at: Option<i64>,
     committed: bool,
     finished: bool,
+    decoder: stravia_protocol_codec::codec::open_responses::parser::ResponsesStreamParser,
 }
 
 impl WebSocketRunDelivery {
@@ -245,6 +246,7 @@ impl WebSocketRunDelivery {
         let sent_at = chrono::Utc::now().timestamp_millis();
         if !self.committed {
             self.committed = true;
+            self.terminal.shared().visible_committed = true;
             self.observer.record(RunEvent::ClientOutputCommitted);
         }
         self.record_wire_text(text);
@@ -258,19 +260,9 @@ impl WebSocketRunDelivery {
             if self.terminal.has_pending_inline_publications() {
                 self.terminal.receive_native_event(&self.observer, &value);
             }
-            if let Some(visible) = value
-                .get("delta")
-                .and_then(serde_json::Value::as_str)
-                .filter(|_| {
-                    matches!(
-                        value.get("type").and_then(serde_json::Value::as_str),
-                        Some("response.output_text.delta" | "response.refusal.delta")
-                    )
-                })
-            {
-                self.observer.record(RunEvent::ClientVisibleContentDelta {
-                    text: visible.to_owned(),
-                });
+            if let Ok(deltas) = self.decoder.parse_websocket_event(&value) {
+                self.terminal
+                    .observe_visible_deltas(&self.observer, &deltas);
             }
         }
     }
@@ -310,6 +302,8 @@ impl WebSocketRunDelivery {
         let delivery_completed_at = (status == "delivered")
             .then_some(self.delivery_completed_at)
             .flatten();
+        self.terminal
+            .finish_visible_items(&self.observer, status == "delivered");
         self.observer.record(RunEvent::DeliveryFinished {
             status: status.to_owned(),
             reason: reason.clone(),
@@ -318,6 +312,12 @@ impl WebSocketRunDelivery {
         self.terminal
             .finish_delivery_associations(&self.observer, delivered);
         self.observer.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: Some(crate::interaction_observation::DeliveryOutcome {
+                status: status.to_owned(),
+                reason: reason.clone(),
+                completed_at: delivery_completed_at,
+            }),
             delivery_completed_at,
             status: if delivered {
                 if self.terminal.waiting_client() {
@@ -387,7 +387,14 @@ pub(super) struct RunTerminalContext {
 struct TerminalDelivery {
     delivery_completed_at: Option<i64>,
     waiting_client: bool,
-    visible_text: Vec<String>,
+    visible_text: Vec<(usize, usize, String)>,
+    visible_stream_started: bool,
+    visible_item_offset: usize,
+    visible_model_leg: Option<usize>,
+    visible_finished_items: Vec<(usize, stravia_runtime_contract::protocol::ir::AiItem)>,
+    visible_stream: stravia_protocol_codec::accumulator::StreamResponseAccumulator,
+    canonical_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
+    visible_committed: bool,
     client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
     client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
 }
@@ -626,11 +633,114 @@ impl RunTerminalContext {
         self.shared().waiting_client
     }
 
-    pub(super) fn extend_visible_text(&self, texts: impl IntoIterator<Item = String>) {
+    pub(super) fn observe_visible_leg(&self, leg: usize) {
+        if self.shared().visible_model_leg == Some(leg) {
+            return;
+        }
+        self.begin_visible_leg();
+        self.shared().visible_model_leg = Some(leg);
+    }
+
+    fn begin_visible_leg(&self) {
+        let mut shared = self.shared();
+        let (response, ordinals) =
+            std::mem::take(&mut shared.visible_stream).into_ai_response_with_ordinals();
+        let offset = shared.visible_item_offset;
+        let count = ordinals.iter().max().map_or(0, |ordinal| ordinal + 1);
+        shared.visible_finished_items.extend(
+            ordinals
+                .into_iter()
+                .zip(response.items)
+                .map(|(ordinal, item)| (offset + ordinal, item)),
+        );
+        shared.visible_item_offset += count;
+    }
+
+    pub(super) fn observe_visible_deltas(
+        &self,
+        observer: &RunObserver,
+        deltas: &[stravia_runtime_contract::protocol::ir::AiStreamDelta],
+    ) {
+        let mut shared = self.shared();
+        shared.visible_committed = true;
+        shared.visible_stream_started |= !deltas.is_empty();
+        for delta in deltas {
+            if let Some((item_ordinal, part_index)) =
+                shared.visible_stream.apply_with_identity(delta)
+                && let Some(text) =
+                    engine::visible_delta_text(delta).filter(|text| !text.is_empty())
+            {
+                observer.record(RunEvent::ClientVisibleContentDelta {
+                    item_ordinal: shared.visible_item_offset + item_ordinal,
+                    part_index,
+                    text: text.to_owned(),
+                });
+            }
+        }
+    }
+
+    fn finish_visible_items(&self, observer: &RunObserver, complete: bool) {
+        let items = {
+            let mut shared = self.shared();
+            if !complete && !shared.visible_committed {
+                return;
+            }
+            if !complete || shared.visible_stream_started {
+                shared.canonical_output.take();
+                let (response, ordinals) =
+                    std::mem::take(&mut shared.visible_stream).into_ai_response_with_ordinals();
+                let offset = shared.visible_item_offset;
+                let mut items = std::mem::take(&mut shared.visible_finished_items);
+                items.extend(
+                    ordinals
+                        .into_iter()
+                        .zip(response.items)
+                        .map(|(ordinal, item)| (offset + ordinal, item)),
+                );
+                items
+            } else {
+                shared
+                    .canonical_output
+                    .take()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .collect()
+            }
+        };
+        for (ordinal, item) in items {
+            let Some(text) = item.output_text_ref().or_else(|| item.refusal_ref()) else {
+                continue;
+            };
+            let block_id =
+                crate::interaction_observation::canonical_item_block_id(observer.run_id(), ordinal);
+            let parts = match &item.content {
+                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(parts) => parts
+                    .iter()
+                    .filter_map(|part| serde_json::to_value(part).ok())
+                    .collect(),
+                stravia_runtime_contract::protocol::ir::MessageContent::Text(text) => {
+                    vec![serde_json::json!({"type":"text", "text":text})]
+                }
+            };
+            observer.record(RunEvent::ClientVisibleContent {
+                text: text.to_owned(),
+                parts,
+                block_id: block_id.to_owned(),
+                item: serde_json::to_value(&item).expect("canonical item serializes"),
+                complete,
+            });
+        }
+    }
+
+    pub(super) fn extend_visible_text(
+        &self,
+        texts: impl IntoIterator<Item = (usize, usize, String)>,
+    ) {
         self.shared().visible_text.extend(texts);
     }
 
-    fn take_visible_text(&self) -> Vec<String> {
+    fn take_visible_text(&self) -> Vec<(usize, usize, String)> {
         std::mem::take(&mut self.shared().visible_text)
     }
 
@@ -641,6 +751,7 @@ impl RunTerminalContext {
     ) {
         // 诊断比较客户端实际回放的 ingress 形态，不比较交付前的 canonical 分块。
         let mut shared = self.shared();
+        shared.canonical_output = Some(response.items.clone());
         let prefix = if ingress
             == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
         {
@@ -782,6 +893,10 @@ impl RunTerminalContext {
         reason: Option<String>,
         delivery_completed_at: Option<i64>,
     ) {
+        self.finish_visible_items(
+            observer,
+            delivery_status == "delivered" && status_code < 400,
+        );
         observer.record(RunEvent::DeliveryFinished {
             status: delivery_status.to_owned(),
             reason: reason.clone(),
@@ -800,6 +915,12 @@ impl RunTerminalContext {
         let delivered = delivery_status == "delivered";
         self.finish_delivery_associations(observer, delivered && status_code < 400);
         observer.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: Some(crate::interaction_observation::DeliveryOutcome {
+                status: delivery_status.to_owned(),
+                reason: reason.clone(),
+                completed_at: delivery_completed_at,
+            }),
             delivery_completed_at,
             status: status.to_owned(),
             terminal_reason: reason,
@@ -831,10 +952,14 @@ impl Stream for ObservedDeliveryStream {
                 self.receive_body_chunk(&bytes);
                 if !self.committed && self.status_code < 400 {
                     self.committed = true;
+                    self.terminal.shared().visible_committed = true;
                     self.observer.record(RunEvent::ClientOutputCommitted);
-                    for text in self.terminal.take_visible_text() {
-                        self.observer
-                            .record(RunEvent::ClientVisibleContentDelta { text });
+                    for (item_ordinal, part_index, text) in self.terminal.take_visible_text() {
+                        self.observer.record(RunEvent::ClientVisibleContentDelta {
+                            item_ordinal,
+                            part_index: (false, part_index),
+                            text,
+                        });
                     }
                 }
                 self.observer.record_debug(|| RunEvent::Wire {
@@ -1009,6 +1134,7 @@ async fn execute_observed(input: RunInput, root: tracing::Span) -> Response {
                 delivery_completed_at: None,
                 committed: false,
                 finished: false,
+                decoder: stravia_protocol_codec::codec::open_responses::parser::ResponsesStreamParser::default(),
             });
             response
         }

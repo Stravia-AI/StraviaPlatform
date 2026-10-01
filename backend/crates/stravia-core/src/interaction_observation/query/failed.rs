@@ -6,19 +6,18 @@ r.duration_ms,r.api_key_id,r.api_key_name,r.request_model AS model,
 (SELECT id FROM models WHERE model_id=r.request_model) AS route_id,
 NULL AS model_display_name,NULL AS interaction_id,NULL AS root_id,NULL AS run_id,
 r.failure_json,r.code,CAST(r.status_code AS BIGINT) AS status_code,
-CASE WHEN NOT r.debug_enabled THEN 'none' WHEN m.trace_id IS NULL THEN 'partial' ELSE m.status END AS debug_status,
+CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
 r.started_at IS NULL AS observation_gap,r.expires_at
-FROM rejected_request_observations r LEFT JOIN debug_trace_manifests m ON m.rejection_id=r.id
+FROM rejected_request_observations r
 WHERE r.status_code<>499 AND r.code NOT IN ('request_aborted','cancelled','client_disconnected')
 UNION ALL
 SELECT r.id,'run' AS kind,r.started_at,r.finished_at-r.started_at AS duration_ms,
 i.api_key_id,i.api_key_name,r.request_model AS model,r.route_id,r.model_display_name,
 i.id AS interaction_id,i.root_id,r.id AS run_id,r.failure_json,r.terminal_reason AS code,
 CAST(NULL AS BIGINT) AS status_code,
-CASE WHEN NOT r.debug_enabled THEN 'none' WHEN m.trace_id IS NULL THEN 'partial' ELSE m.status END AS debug_status,
+CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
 i.observation_gap OR r.failure_json IS NULL AS observation_gap,r.expires_at
 FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id
-LEFT JOIN debug_trace_manifests m ON m.run_id=r.id
 WHERE r.status='failed' AND r.finished_at IS NOT NULL
 AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted'))";
 
@@ -43,7 +42,15 @@ struct FailedRow {
 }
 
 impl FailedRow {
-    fn summary(self) -> anyhow::Result<FailedRequestSummary> {
+    fn summary(mut self, store: &ObservationStore) -> anyhow::Result<FailedRequestSummary> {
+        if self.debug_status != "none" {
+            let trace = if self.kind == "rejection" {
+                store.debug_trace_index().for_rejection(&self.id)
+            } else {
+                store.debug_trace_index().for_run(&self.id)
+            };
+            self.debug_status = trace.map_or_else(|| "partial".into(), |trace| trace.status);
+        }
         let error = match self.failure_json {
             Some(json) => serde_json::from_str(&json)?,
             None => FailureDiagnostic {
@@ -167,7 +174,7 @@ impl ObservationStore {
             .transpose()?;
         let limit = i64::from(q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
         let (total, mut rows) = match self {
-            Self::Sqlite(pool) => failed_rows!(
+            Self::Sqlite(pool, _, _) => failed_rows!(
                 pool,
                 sqlx::Sqlite,
                 &q,
@@ -176,7 +183,7 @@ impl ObservationStore {
                 limit + 1,
                 None
             ),
-            Self::Postgres(pool) => failed_rows!(
+            Self::Postgres(pool, _) => failed_rows!(
                 pool,
                 sqlx::Postgres,
                 &q,
@@ -199,7 +206,7 @@ impl ObservationStore {
         rows.truncate(limit as usize);
         let mut items = rows
             .into_iter()
-            .map(FailedRow::summary)
+            .map(|row| row.summary(self))
             .collect::<anyhow::Result<Vec<_>>>()?;
         self.failed_services(&mut items).await?;
         Ok(FailedRequestPage {
@@ -219,7 +226,7 @@ impl ObservationStore {
             return Ok(());
         }
         let rows: Vec<(String, String, String)> = match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _, _) => {
                 let mut sql = QueryBuilder::<sqlx::Sqlite>::new(
                     "SELECT DISTINCT run_id,provider_id,provider_name FROM target_attempt_observations WHERE run_id IN (",
                 );
@@ -230,7 +237,7 @@ impl ObservationStore {
                 sql.push(") ORDER BY run_id,provider_id,provider_name");
                 sql.build_query_as().fetch_all(pool).await?
             }
-            Self::Postgres(pool) => {
+            Self::Postgres(pool, _) => {
                 let mut sql = QueryBuilder::<sqlx::Postgres>::new(
                     "SELECT DISTINCT run_id,provider_id,provider_name FROM target_attempt_observations WHERE run_id IN (",
                 );
@@ -269,7 +276,7 @@ impl ObservationStore {
         let window = query_window(None, None, None, None)?;
         let cursor: Option<&FailedCursor> = None;
         let (_, rows) = match self {
-            Self::Sqlite(pool) => failed_rows!(
+            Self::Sqlite(pool, _, _) => failed_rows!(
                 pool,
                 sqlx::Sqlite,
                 &q,
@@ -278,7 +285,7 @@ impl ObservationStore {
                 1i64,
                 Some((kind, id))
             ),
-            Self::Postgres(pool) => failed_rows!(
+            Self::Postgres(pool, _) => failed_rows!(
                 pool,
                 sqlx::Postgres,
                 &q,
@@ -291,7 +298,7 @@ impl ObservationStore {
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
         };
-        let mut request = row.summary()?;
+        let mut request = row.summary(self)?;
         self.failed_services(std::slice::from_mut(&mut request))
             .await?;
         let snapshot_sequence = self.max_sequence().await?;
@@ -302,9 +309,9 @@ impl ObservationStore {
             )
         } else {
             let events = match self {
-                Self::Sqlite(pool) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id=? AND sequence<=? ORDER BY sequence")
+                Self::Sqlite(pool, _, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id=? AND sequence<=? ORDER BY sequence")
                     .bind(id).bind(snapshot_sequence).fetch_all(pool).await?)?,
-                Self::Postgres(pool) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE run_id=$1 AND sequence<=$2 ORDER BY sequence")
+                Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id=$1 AND sequence<=$2 ORDER BY sequence")
                     .bind(id).bind(snapshot_sequence).fetch_all(pool).await?)?,
             };
             (events, self.manifest_for_run(id).await?)

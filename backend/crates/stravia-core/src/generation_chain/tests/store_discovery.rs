@@ -560,11 +560,14 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
 
     // Simulate durable indexes written by the previous projection, without
     // changing immutable payloads or parent edges.
-    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool) = backend.as_ref() else {
+    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool, gate) = backend.as_ref() else {
         unreachable!()
     };
-    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
-        .bind(b.id()).execute(pool).await.unwrap();
+    {
+        let _write_gate = gate.lock().await;
+        sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
+            .bind(b.id()).execute(pool).await.unwrap();
+    }
     backend
         .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
         .await
@@ -649,11 +652,19 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .execute(pool)
         .await
         .unwrap();
+    // The stored payload is the binary format-2 envelope; rebuilds must leave
+    // it byte-identical.
+    let payload_before: Vec<u8> =
+        sqlx::query_scalar("SELECT payload FROM turn_chain_nodes WHERE id = ?")
+            .bind(b.id())
+            .fetch_one(pool)
+            .await
+            .unwrap();
     backend
         .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
         .await
         .unwrap();
-    let unavailable: (Option<String>, Option<String>, String) = sqlx::query_as(
+    let unavailable: (Option<String>, Option<String>, Vec<u8>) = sqlx::query_as(
         "SELECT prefix_namespace, parent_id, payload FROM turn_chain_nodes WHERE id = ?",
     )
     .bind(b.id())
@@ -662,10 +673,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     .unwrap();
     assert_eq!(unavailable.0, None);
     assert_eq!(unavailable.1.as_deref(), Some(a.id()));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&unavailable.2).unwrap(),
-        nodes[1].payload
-    );
+    assert_eq!(unavailable.2, payload_before);
 }
 
 #[tokio::test]
@@ -880,7 +888,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
@@ -971,7 +979,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
@@ -1500,6 +1508,80 @@ async fn stable_session_does_not_link_semantically_changed_history() {
     assert!(!resumed.parent.replace_effective_history);
     assert_eq!(resumed.request_delta.items.len(), 3);
     assert_eq!(resumed.request().items.len(), 3);
+}
+
+#[tokio::test]
+async fn controls_prefix_wins_when_same_session_candidate_does_not_match() {
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        None,
+    );
+    let owner = principal("owner");
+
+    // Same session id and same controls, but different history content: the
+    // session-layer index returns this candidate, then items_equal rejects it.
+    let mut session_request = responses_request(vec![user_message("session alpha")]);
+    session_request.instructions = Some("shared controls".into());
+    session_request.meta.vendor.ingress.insert(
+        GENERATION_SESSION_ID_META.into(),
+        serde_json::Value::String("session-1".into()),
+    );
+    let mut session_root = chain
+        .begin(owner.clone(), session_request)
+        .await
+        .expect("begin session root");
+    let mut session_response = AiResponse::new("upstream", "model");
+    session_response.push_output_text("session answer");
+    session_root.stage(&mut session_response, &generation_source(), None);
+    session_root.persist().await.expect("persist session root");
+
+    // Sessionless generation with the same controls contributes only a
+    // controls-layer candidate for the resumed prefix.
+    let mut controls_request = responses_request(vec![user_message("controls beta")]);
+    controls_request.instructions = Some("shared controls".into());
+    let mut controls_root = chain
+        .begin(owner.clone(), controls_request)
+        .await
+        .expect("begin controls root");
+    let mut controls_response = AiResponse::new("upstream", "model");
+    controls_response.push_output_text("controls answer");
+    controls_root.stage(&mut controls_response, &generation_source(), None);
+    controls_root
+        .persist()
+        .await
+        .expect("persist controls root");
+
+    // The replayed prefix matches the sessionless history, so discovery must
+    // fall through the rejected session candidate into the controls layer.
+    let mut resumed_request = responses_request(vec![
+        user_message("controls beta"),
+        AiItem::output_text("controls answer"),
+        user_message("next"),
+    ]);
+    resumed_request.instructions = Some("shared controls".into());
+    resumed_request.meta.vendor.ingress.insert(
+        GENERATION_SESSION_ID_META.into(),
+        serde_json::Value::String("session-1".into()),
+    );
+    let resumed = chain
+        .begin(owner, resumed_request)
+        .await
+        .expect("begin resumed request");
+
+    assert_eq!(
+        resumed.parent.parent_id.as_deref(),
+        Some(controls_root.id())
+    );
+    assert_eq!(resumed.request_delta.items.len(), 1);
+    assert!(items_equal(
+        &resumed.request().items,
+        &[
+            user_message("controls beta"),
+            AiItem::output_text("controls answer"),
+            user_message("next"),
+        ]
+    ));
 }
 
 #[tokio::test]

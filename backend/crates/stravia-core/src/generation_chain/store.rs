@@ -160,6 +160,15 @@ pub(crate) fn request_preserves_upstream_response(request: &AiRequest) -> bool {
     }
 }
 
+/// discover_prefix 一次调用内不变的核验输入：借用于调用方已算好的投影与
+/// 指纹，避免逐候选重复计算或克隆。
+struct PrefixVerifyContext<'a> {
+    prefix_units: &'a [u32],
+    controls_fingerprint: &'a str,
+    client_request: &'a AiRequest,
+    leading_control_items: usize,
+}
+
 impl GenerationChainStore {
     pub fn from_turn_chain(turn_chain: Arc<dyn TurnChainStore>, ttl: Duration) -> Self {
         Self {
@@ -329,53 +338,79 @@ impl GenerationChainStore {
             ));
         }
 
-        let mut candidates = Vec::new();
+        let mut candidate_count = 0_u64;
+        let context = PrefixVerifyContext {
+            prefix_units: &prefix_units,
+            controls_fingerprint: &controls_fingerprint,
+            client_request: &client_request,
+            leading_control_items,
+        };
+        // Session 命中时 controls 索引读取是浪费：先核验 session 层，全部
+        // 候选不匹配才查 controls。
         if let Some(session_fingerprint) = session_fingerprint.as_ref() {
             let fingerprints = context_fingerprints
                 .iter()
                 .map(|(_, item_count)| (session_fingerprint.clone(), *item_count))
                 .collect();
-            candidates.extend(
-                self.turn_chain
-                    .find_reusable_prefixes(
-                        principal,
-                        TurnNodeKind::Response,
-                        &ReusablePrefixQuery {
-                            namespace: format!("{GENERATION_PREFIX_NAMESPACE}session"),
-                            fingerprints,
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-
-        candidates.extend(
-            self.turn_chain
+            let candidates = self
+                .turn_chain
                 .find_reusable_prefixes(
                     principal,
                     TurnNodeKind::Response,
                     &ReusablePrefixQuery {
-                        namespace: format!(
-                            "{}{}",
-                            GENERATION_PREFIX_NAMESPACE, controls_fingerprint
-                        ),
-                        fingerprints: context_fingerprints,
+                        namespace: format!("{GENERATION_PREFIX_NAMESPACE}session"),
+                        fingerprints,
                     },
                 )
                 .await
-                .map_err(|error| error.to_string())?,
-        );
-        tracing::Span::current().record("candidate_count", candidates.len() as u64);
+                .map_err(|error| error.to_string())?;
+            candidate_count += candidates.len() as u64;
+            tracing::Span::current().record("candidate_count", candidate_count);
+            if let Some(prefix) = self
+                .verify_prefix_candidates(principal, &context, candidates, request)
+                .await?
+            {
+                return Ok(Some(prefix));
+            }
+        }
+
+        let candidates = self
+            .turn_chain
+            .find_reusable_prefixes(
+                principal,
+                TurnNodeKind::Response,
+                &ReusablePrefixQuery {
+                    namespace: format!("{}{}", GENERATION_PREFIX_NAMESPACE, controls_fingerprint),
+                    fingerprints: context_fingerprints,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        candidate_count += candidates.len() as u64;
+        tracing::Span::current().record("candidate_count", candidate_count);
+        self.verify_prefix_candidates(principal, &context, candidates, request)
+            .await
+    }
+
+    /// 索引命中只证明指纹相等：units、controls 与前缀投影逐项复核一致才算
+    /// 胜出，候选间保持层内 SQL 顺序。
+    async fn verify_prefix_candidates(
+        &self,
+        principal: &Principal,
+        context: &PrefixVerifyContext<'_>,
+        candidates: Vec<stravia_runtime_contract::turn_chain::ReusablePrefixCandidate>,
+        request: &mut AiRequest,
+    ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
         for candidate in candidates {
             let matched_units = usize::try_from(candidate.item_count).unwrap_or(usize::MAX);
             // prefix_units 已带累计 units，直接定位前缀边界，不再对
             // client_items 做第二次逐 item 投影。饱和到 u32::MAX 的相等由
             // 下方 items_equal 兜底，语义不变。
-            let matched_items = prefix_units
+            let matched_items = context
+                .prefix_units
                 .iter()
                 .position(|units| *units as usize >= matched_units)
-                .filter(|index| prefix_units[*index] as usize == matched_units)
+                .filter(|index| context.prefix_units[*index] as usize == matched_units)
                 .map(|index| index + 1);
             let Some(matched_items) = matched_items else {
                 continue;
@@ -385,20 +420,18 @@ impl GenerationChainStore {
                 .await?;
             // 便宜的标量比较先短路：fingerprint 相等只是索引命中，units 与
             // controls 相同才值得对两侧前缀做完整 canonical 投影比较。
-            let history_matches = materialized
-                .client_history
-                .as_ref()
-                .is_some_and(|history| history.controls_fingerprint == controls_fingerprint)
-                && materialized.client_item_units == matched_units
+            let history_matches = materialized.client_history.as_ref().is_some_and(|history| {
+                history.controls_fingerprint == context.controls_fingerprint
+            }) && materialized.client_item_units == matched_units
                 && items_equal(
                     &materialized.client_items,
-                    &client_request.items[..matched_items],
+                    &context.client_request.items[..matched_items],
                 );
             if !history_matches {
                 continue;
             }
             let mut delta = request.clone();
-            let matched_request_items = leading_control_items + matched_items;
+            let matched_request_items = context.leading_control_items + matched_items;
             delta.items = request.items[matched_request_items..].to_vec();
             remap_client_tool_result_ids(
                 &mut delta.items,
@@ -409,9 +442,24 @@ impl GenerationChainStore {
                 VERIFIED_HISTORY_REPLAY_META.into(),
                 serde_json::Value::Bool(true),
             );
-            let active = self
-                .materialize_parent_id(principal, candidate.node_id.as_str(), &mut delta)
-                .await?;
+            // 快路径直接消费已核验的 Arc 只为省掉同节点的第二次 cache_get/
+            // load；引用需要全祖先目录（window 不是 catalog）、ingress 语义和
+            // item_reference_not_found，过期需保留 TTL 拒绝语义，两者都交给
+            // materialize_parent_id 的原始路径。
+            let active = if request_has_item_references(&delta)
+                || materialized.expires_at <= std::time::Instant::now()
+            {
+                self.materialize_parent_id(principal, candidate.node_id.as_str(), &mut delta)
+                    .await?
+            } else {
+                Self::adopt_materialized_parent(
+                    candidate.node_id.as_str(),
+                    materialized.as_ref(),
+                    None,
+                    None,
+                    &mut delta,
+                )?
+            };
             *request = delta;
             return Ok(Some(DiscoveredGenerationPrefix {
                 active,
@@ -546,6 +594,19 @@ impl GenerationChainStore {
                 None,
             )
         };
+        Self::adopt_materialized_parent(parent_id, &materialized, catalog, ingress, request)
+    }
+
+    /// 供已持有核验结果的调用方（显式 previous_response_id 与
+    /// discover_prefix 胜出候选）直接投影父代，避免重复取回同一节点。
+    /// `catalog`/`ingress` 仅供 ItemReference 解析，无引用时传 None。
+    fn adopt_materialized_parent(
+        parent_id: &str,
+        materialized: &MaterializedGeneration,
+        catalog: Option<Vec<AiItem>>,
+        ingress: Option<ProtocolId>,
+        request: &mut AiRequest,
+    ) -> Result<ActiveGenerationChain, String> {
         let mut new_messages = std::mem::take(&mut request.items);
         if let Some(catalog) = catalog {
             resolve_catalog_references(&mut new_messages, &catalog, ingress)?;

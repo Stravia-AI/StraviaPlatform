@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { observationAttemptOutputTokens, observationEventSummary } from '../src/lib/observation-event-summary'
+import { observationEventSummary } from '../src/lib/observation-event-summary'
 import * as m from '../src/lib/paraglide/messages.js'
 import { getLocale, overwriteGetLocale } from '../src/lib/paraglide/runtime.js'
 import type { ObservationEvent } from '../src/lib/types'
@@ -16,47 +16,57 @@ function event(sequence: number, kind: string, payload: unknown): ObservationEve
   }
 }
 
-const finished = event(10, 'target_attempt_finished', {
-  attempt_id: 'current',
-  status: 'completed',
-  duration_ms: 18_750,
-  first_token_ms: 7_650,
-})
-
-function speed(events: ObservationEvent[], completion = finished): string | undefined {
-  return observationEventSummary(completion, observationAttemptOutputTokens(events)).facts.find(
-    (fact) => fact.label === m.logs_token_speed(),
-  )?.value
+function speed(completion: ObservationEvent): string | undefined {
+  return observationEventSummary(completion).facts.find((fact) => fact.label === m.logs_token_speed())?.value
 }
 
 describe('observation attempt output speed', () => {
-  test('uses the latest cumulative usage for this attempt rather than another attempt or the sum', () => {
+  test('uses the usage carried by the finish event itself', () => {
     expect(
-      speed([
-        event(3, 'usage_confirmed', { attempt_id: 'current', usage: { output_tokens: 1110 } }),
-        event(1, 'usage_confirmed', { attempt_id: 'current', usage: { output_tokens: 100 } }),
-        event(4, 'usage_confirmed', { attempt_id: 'other', usage: { output_tokens: 9999 } }),
-      ]),
+      speed(
+        event(10, 'target_attempt_finished', {
+          attempt_id: 'current',
+          status: 'completed',
+          duration_ms: 18_750,
+          first_token_ms: 7_650,
+          usage: { output_tokens: 1110 },
+        }),
+      ),
     ).toBe('100 tok/s')
   })
 
-  test('does not invent throughput when matching usage is missing or its latest value is unknown', () => {
-    const foreign = event(1, 'usage_confirmed', { attempt_id: 'other', usage: { output_tokens: 1110 } })
-    expect(speed([foreign])).toBe('–')
+  test('does not invent throughput when usage is absent or its output is unknown', () => {
     expect(
-      speed([
-        foreign,
-        event(2, 'usage_confirmed', { attempt_id: 'current', usage: { output_tokens: 1110 } }),
-        event(3, 'usage_confirmed', { attempt_id: 'current', usage: { output_tokens: null } }),
-      ]),
+      speed(
+        event(10, 'target_attempt_finished', {
+          attempt_id: 'current',
+          status: 'completed',
+          duration_ms: 18_750,
+          first_token_ms: 7_650,
+        }),
+      ),
+    ).toBe('–')
+    expect(
+      speed(
+        event(10, 'target_attempt_finished', {
+          attempt_id: 'current',
+          status: 'completed',
+          duration_ms: 18_750,
+          first_token_ms: 7_650,
+          usage: { output_tokens: null },
+        }),
+      ),
     ).toBe('–')
   })
 })
 
-describe('observation usage event summary', () => {
+describe('observation usage on attempt finish', () => {
   test('keeps cache counters separate without exposing reasoning as another output counter', () => {
     const summary = observationEventSummary(
-      event(5, 'usage_confirmed', {
+      event(5, 'target_attempt_finished', {
+        attempt_id: 'current',
+        status: 'completed',
+        duration_ms: 1_000,
         usage: {
           input_tokens: 920,
           output_tokens: 86,
@@ -67,12 +77,90 @@ describe('observation usage event summary', () => {
       }),
     )
 
-    expect(summary.facts).toEqual([
-      { label: m.observation_event_tokens_input(), value: '920' },
-      { label: m.observation_event_tokens_output(), value: '86' },
-      { label: m.observation_event_tokens_cache_read(), value: '320' },
-      { label: m.observation_event_tokens_cache_write(), value: '12' },
-    ])
+    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_input(), value: '920' })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_output(), value: '86' })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_cache_read(), value: '320' })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_cache_write(), value: '12' })
+    expect(summary.facts.some((fact) => fact.value === '4,444')).toBe(false)
+  })
+})
+
+describe('observation merged lifecycle payloads', () => {
+  test('run_finished renders the merged delivery status and reason with distinct labels', () => {
+    const summary = observationEventSummary(
+      event(9, 'run_finished', {
+        status: 'completed',
+        terminal_reason: 'completed',
+        delivery: { status: 'delivered', reason: null },
+      }),
+    )
+    expect(summary.title).toBe(m.observation_event_run_finished())
+    expect(summary.facts).toContainEqual({ label: m.observation_delivery(), value: m.observation_event_delivered() })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_reason(), value: 'completed' })
+  })
+
+  test('a failed delivery is readable without erasing the run status', () => {
+    const summary = observationEventSummary(
+      event(9, 'run_finished', {
+        status: 'failed',
+        terminal_reason: 'upstream_timeout',
+        delivery: { status: 'delivery_failed', reason: 'websocket_delivery_dropped' },
+      }),
+    )
+    expect(summary.tone).toBe('error')
+    expect(summary.facts).toContainEqual({ label: m.observation_delivery(), value: m.observation_status_failed() })
+    expect(summary.facts).toContainEqual({
+      label: m.observation_event_delivery_reason(),
+      value: 'websocket_delivery_dropped',
+    })
+  })
+
+  test('a cancelled delivery keeps the run result readable', () => {
+    const summary = observationEventSummary(
+      event(9, 'run_finished', { status: 'cancelled', delivery: { status: 'cancelled', reason: 'user_cancelled' } }),
+    )
+    expect(summary.facts).toContainEqual({ label: m.observation_delivery(), value: m.observation_status_cancelled() })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_delivery_reason(), value: 'user_cancelled' })
+  })
+
+  test('run_state_changed explains a restart recovery instead of the raw reason', () => {
+    const summary = observationEventSummary(
+      event(9, 'run_state_changed', { status: 'interrupted', reason: 'process_restarted' }),
+    )
+    expect(summary.facts).toContainEqual({
+      label: m.observation_event_reason(),
+      value: m.observation_event_reason_process_restarted(),
+    })
+  })
+})
+
+describe('observation canonical item events', () => {
+  test('an incomplete item keeps its title but warns and explains', () => {
+    const summary = observationEventSummary(
+      event(7, 'client_visible_content', { item: 'text:0', text: 'partial', complete: false }),
+    )
+    expect(summary.title).toBe(m.observation_event_client_visible_content())
+    expect(summary.tone).toBe('warning')
+    expect(summary.note).toBe(m.observation_event_content_incomplete())
+    expect(summary.facts).toContainEqual({
+      label: m.observation_event_result(),
+      value: m.observation_event_incomplete(),
+    })
+  })
+
+  test('a complete thinking item stays neutral for process grouping', () => {
+    const summary = observationEventSummary(
+      event(7, 'model_thinking', {
+        model_turn_id: 'turn',
+        attempt_id: 'attempt',
+        item: 'thinking:0',
+        text: 'done',
+        complete: true,
+      }),
+    )
+    expect(summary.title).toBe(m.observation_event_model_thinking())
+    expect(summary.tone).toBe('neutral')
+    expect(summary.note).toBeUndefined()
   })
 })
 

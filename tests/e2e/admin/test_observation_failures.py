@@ -17,6 +17,7 @@ import pytest
 from tests.common.helpers import (
     WebSession,
     download_observation_bundle,
+    encode_storage_json,
     find_free_port,
     http_bytes,
     http_request,
@@ -170,33 +171,19 @@ def test_trace_storage_failure_is_partial_without_changing_inference_or_continua
                         detail = _detail(env, interaction["id"])
                         if not detail["runs"] or detail["runs"][0]["status"] != "running":
                             continue
-                        trace = detail["runs"][0]["trace"]
-                        if not trace or trace["status"] != "partial":
-                            continue
-                        try:
-                            with closing(sqlite3.connect(data_dir / "db" / "gateway.db")) as connection:
-                                persisted = connection.execute(
-                                    "SELECT status, partial_reason, completed_at FROM debug_trace_manifests WHERE run_id = ?",
-                                    (detail["runs"][0]["id"],),
-                                ).fetchone()
-                        except sqlite3.OperationalError:
-                            return None
-                        if (
-                            persisted
-                            and persisted[0] == "partial"
-                            and "storage_error" in persisted[1]
-                            and persisted[2] is None
-                        ):
-                            return interaction, detail
+                        run = detail["runs"][0]
+                        assert run["debug_enabled"] is True
+                        assert run["trace"] is None
+                        assert not trace_root.is_dir()
+                        return interaction, detail
                     return None
 
                 failed_interaction, active_detail = _wait_for(
-                    "persistent partial Trace manifest before inference completion",
+                    "partial debug API before inference completion",
                     active_partial,
                 )
                 assert request_outcome == []
-                trace = active_detail["runs"][0]["trace"]
-                assert "storage_error" in trace["reasons"]
+                assert active_detail["runs"][0]["trace"] is None
                 status, debug_state = http_request(
                     "GET",
                     f"{env['admin']}/api/v1/observations/debug",
@@ -371,7 +358,6 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
     try:
         with tempfile.TemporaryDirectory(prefix="stravia-tombstone-restart-e2e-") as temporary:
             data_dir = Path(temporary)
-            database = data_dir / "db" / "gateway.db"
             env, process, logs = _start_initialized(
                 stravia_binary, data_dir, f"http://127.0.0.1:{mock_port}"
             )
@@ -395,25 +381,33 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
                 interaction = _wait_for(
                     "tombstone Interaction", lambda: _route_interactions(env, route_id)
                 )[0]
-                detail = _wait_for(
-                    "finished Trace manifest",
-                    lambda: (lambda value: value if value["runs"][0].get("trace") else None)(
-                        _detail(env, interaction["id"])
-                    ),
-                )
+                def finished_trace() -> dict[str, Any] | None:
+                    value = _detail(env, interaction["id"])
+                    trace = value["runs"][0].get("trace")
+                    if not trace:
+                        return None
+                    path = data_dir / "diagnostics" / "observation-debug" / trace["trace_id"] / "manifest.json"
+                    try:
+                        manifest = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        return None
+                    return value if manifest["completed_at"] is not None else None
+
+                detail = _wait_for("finished Trace manifest", finished_trace)
                 trace_id = detail["runs"][0]["trace"]["trace_id"]
             finally:
                 stop_stravia_server(process, logs)
 
             trace_directory = data_dir / "diagnostics" / "observation-debug" / trace_id
             assert trace_directory.is_dir()
-            with closing(sqlite3.connect(database)) as connection:
-                updated = connection.execute(
-                    "UPDATE debug_trace_manifests SET tombstoned = 1 WHERE trace_id = ?",
-                    (trace_id,),
-                ).rowcount
-                connection.commit()
-            assert updated == 1
+            manifest_path = trace_directory / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            assert manifest["schema_version"] == 2
+            assert manifest["trace_id"] == trace_id
+            manifest["tombstoned"] = True
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            deleting_directory = trace_directory.with_name(f".deleting-{trace_id}")
+            trace_directory.rename(deleting_directory)
 
             restart_port = find_free_port()
             restarted, restarted_logs = start_stravia_server(
@@ -431,15 +425,12 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
             try:
                 wait_until_ready(f"{restart_base}/readyz")
                 deadline = time.time() + 10.0
-                while trace_directory.exists() and time.time() < deadline:
+                while deleting_directory.exists() and time.time() < deadline:
                     time.sleep(0.1)
                 assert not trace_directory.exists()
-                with closing(sqlite3.connect(database)) as connection:
-                    count = connection.execute(
-                        "SELECT COUNT(*) FROM debug_trace_manifests WHERE trace_id = ?",
-                        (trace_id,),
-                    ).fetchone()[0]
-                assert count == 0
+                assert not deleting_directory.exists()
+                status, readiness = http_request("GET", f"{restart_base}/readyz")
+                assert status == 200, readiness
             finally:
                 stop_stravia_server(restarted, restarted_logs)
     finally:
@@ -572,7 +563,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
                 assert interrupted["runs"][0]["status"] == "interrupted"
                 assert interrupted["runs"][0]["terminal_reason"] == "process_restarted"
                 assert any(
-                    event["kind"] == "process_restarted"
+                    event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted"
                     for event in interrupted["runs"][0]["events"]
                 )
 
@@ -588,7 +579,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
 
 
 def _seed_resolved_waiting_siblings(data_dir: Path, interaction_id: str) -> str:
-    """仅在已停止的隔离实例中注入旧版本投影；也供 Desktop 烟测复用。"""
+    """Seed resolved tool siblings in the current schema of a stopped isolated instance."""
     database = data_dir / "db" / "gateway.db"
     assert data_dir.is_absolute() and database.is_file()
     with closing(sqlite3.connect(database)) as connection:
@@ -609,13 +600,13 @@ def _seed_resolved_waiting_siblings(data_dir: Path, interaction_id: str) -> str:
                 ("run_admitted", {"parent_run_id": root["id"]}),
                 ("client_tool_handoff", {"tool_id": "restart-a", "name": "local_probe", "input": {}}),
                 ("client_tool_handoff", {"tool_id": "restart-b", "name": "local_probe", "input": {}}),
-                ("run_finished", {"status": "waiting_client", "delivery_completed_at": root["finished_at"]}),
+                ("run_finished", {"status": "waiting_client", "delivery": {"status": "delivered", "reason": None}}),
             ]),
             (result_id, "completed", [
                 ("run_admitted", {"parent_run_id": root["id"]}),
                 ("client_tool_result", {"tool_id": "restart-a", "content": "ok", "is_error": False}),
                 ("client_tool_result", {"tool_id": "restart-b", "content": "tool failed", "is_error": True}),
-                ("run_finished", {"status": "completed", "delivery_completed_at": root["finished_at"]}),
+                ("run_finished", {"status": "completed", "delivery": {"status": "delivered", "reason": None}}),
             ]),
         ):
             run = {**root, "id": run_id, "parent_run_id": root["id"],
@@ -630,10 +621,11 @@ def _seed_resolved_waiting_siblings(data_dir: Path, interaction_id: str) -> str:
             for kind, payload in records:
                 connection.execute(
                     "INSERT INTO observation_events "
-                    "(sequence, occurred_at, interaction_id, run_id, kind, payload, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(sequence, occurred_at, interaction_id, run_id, kind, payload, expires_at, tool_id, operation_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (sequence, root["last_active_at"], interaction_id, run_id,
-                     kind, json.dumps(payload), root["expires_at"]),
+                     kind, encode_storage_json(payload), root["expires_at"],
+                     payload.get("tool_id"), payload.get("operation_id")),
                 )
                 sequence += 1
         connection.execute(
@@ -734,7 +726,7 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                     resolved = _detail(current, completed["id"])
                     historical = next(run for run in resolved["runs"] if run["id"] == resolved_run)
                     assert historical["status"] == "waiting_client"
-                    assert not any(event["kind"] == "process_restarted" for event in historical["events"])
+                    assert not any(event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted" for event in historical["events"])
                     recovered_detail = _detail(current, pending["id"])
                     assert recovered_detail["interaction"]["last_active_at"] == before_active_at
                     recovered = recovered_detail["runs"][0]
@@ -745,7 +737,7 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                     assert [event for event in recovered["events"] if event["kind"] == "run_finished"] == [
                         event for event in before["events"] if event["kind"] == "run_finished"
                     ]
-                    events = [event for event in recovered["events"] if event["kind"] == "process_restarted"]
+                    events = [event for event in recovered["events"] if event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted"]
                     assert len(events) == 1
                     assert events[0]["payload"] == {"status": "interrupted", "reason": "process_restarted"}
                     if recovery_events is not None:
@@ -862,10 +854,8 @@ def test_expired_waiting_client_is_removed_with_events_and_trace(
                         "SELECT COUNT(*) FROM observation_events WHERE interaction_id = ?",
                         (waiting["id"],),
                     ).fetchone()[0] == 0
-                    assert connection.execute(
-                        "SELECT COUNT(*) FROM debug_trace_manifests WHERE trace_id = ?",
-                        (trace["trace_id"],),
-                    ).fetchone()[0] == 0
+                assert not (trace_directory / "manifest.json").exists()
+                assert not trace_directory.with_name(f".deleting-{trace['trace_id']}").exists()
             finally:
                 stop_stravia_server(process, logs)
     finally:

@@ -700,23 +700,19 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
         matches!(result, Err(ModelTurnError { ref code, .. }) if code == "first_token_timeout")
     );
     gateway.observation.flush().await.unwrap();
-    let events: Vec<String> = sqlx::query_scalar(
+    let events: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT payload FROM observation_events WHERE kind='target_attempt_finished'",
     )
     .fetch_all(gateway._sqlite_pool.as_ref().unwrap())
     .await
     .unwrap();
     assert_eq!(events.len(), 1);
-    let terminal: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&crate::storage_codec::decode(&events[0]).unwrap()).unwrap();
     assert_eq!(terminal["error_code"], "first_token_timeout");
     assert_eq!(terminal["status"], "failed");
     assert!(terminal["first_token_ms"].is_null());
-    let usages: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE kind='usage_confirmed'")
-            .fetch_one(gateway._sqlite_pool.as_ref().unwrap())
-            .await
-            .unwrap();
-    assert_eq!(usages, 0);
+    assert!(terminal.get("usage").is_none_or(serde_json::Value::is_null));
     upstream.abort();
     let _ = upstream.await;
 }
@@ -2043,6 +2039,8 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     protection.abort();
     assert!(matches!(protection.await, Err(error) if error.is_cancelled()));
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery: None,
+        client_output_committed: false,
         delivery_completed_at: None,
         status: "cancelled".into(),
         terminal_reason: Some("cancelled".into()),
@@ -2151,6 +2149,8 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         Err(stravia_runtime_contract::redaction::RedactionError::InvalidText)
     ));
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery: None,
+        client_output_committed: false,
         delivery_completed_at: None,
         status: "failed".into(),
         terminal_reason: Some("reversible_redaction_failed".into()),
@@ -2237,6 +2237,8 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
             .contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R")
     );
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery: None,
+        client_output_committed: false,
         delivery_completed_at: None,
         status: "completed".into(),
         terminal_reason: None,

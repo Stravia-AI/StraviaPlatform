@@ -330,7 +330,7 @@ mod tests {
     async fn sqlite_sample_store_contract_and_provider_cascade() -> anyhow::Result<()> {
         let data_dir = tempfile::tempdir()?;
         let pool = crate::db::init_pool(data_dir.path()).await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES (?, ?, ?, ?, ?)",
@@ -380,7 +380,7 @@ mod tests {
             .max_connections(2)
             .connect_with(options)
             .await?;
-        crate::migrations::migrate_postgres(&pool).await?;
+        crate::migrations::migrate_postgres(&pool, None).await?;
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ($1, $2, $3, $4, $5)",

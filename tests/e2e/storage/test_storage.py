@@ -320,9 +320,13 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
         schema_report = run_schema_action(
             "inspect_observation", work_dir=work_dir, pg_url=pg_url, schema=schema
         )
-        assert "observation_tables=7" in schema_report
+        # debug_trace_manifests moved to <data_dir>/diagnostics/observation-debug/
+        # <trace_id>/manifest.json (B); observation_events_expiry_idx was dropped (C).
+        assert "observation_tables=6" in schema_report
+        assert "removed_tables=0" in schema_report
         assert "legacy_tables=0" in schema_report
-        assert "observation_indexes=4" in schema_report
+        assert "observation_indexes=3" in schema_report
+        assert "removed_indexes=0" in schema_report
 
         reconnect_port = find_free_port()
         reconnect_base = f"http://127.0.0.1:{reconnect_port}"
@@ -599,6 +603,24 @@ def test_observation_tool_replay_and_trace_survive_restart(
         assert sorted(results) == ["result-0", "result-1", "result-2"]
         assert not any(event["kind"] in {"wire", "content", "target_selected"} for event in events)
         assert [run["debug_enabled"] for run in detail["runs"]] == [True, False, True, True]
+        # Debug retention is indexed only by durable files, including after restart.
+        manifests = {
+            path.parent.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in (tmp_path / "diagnostics" / "observation-debug").glob("*/manifest.json")
+        }
+        for run in detail["runs"]:
+            trace = run.get("trace")
+            if run["debug_enabled"]:
+                assert trace is not None
+                assert trace["trace_id"] in manifests
+                assert manifests[trace["trace_id"]]["status"] == "complete"
+            else:
+                assert trace is None
+        if backend == "sqlite":
+            with sqlite3.connect(tmp_path / "db" / "gateway.db") as conn:
+                assert conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name='debug_trace_manifests'"
+                ).fetchone() is None
         _, _, archive = download_observation_bundle(env, detail)
         records = observation_bundle_events(archive)
         assert {record.get("direction") for record in records if record.get("layer") == "wire"} == {

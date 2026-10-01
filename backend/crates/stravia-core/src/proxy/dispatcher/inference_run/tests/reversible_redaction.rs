@@ -351,7 +351,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
     }
     let mut thoughts = std::collections::BTreeMap::<String, String>::new();
     for event in &events {
-        if event.kind == "model_thinking_delta" {
+        if event.kind == "model_thinking" {
             thoughts
                 .entry(event.payload["attempt_id"].as_str().unwrap().to_owned())
                 .or_default()
@@ -454,29 +454,32 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
             }
         }
         // Simulate history written before the semantic tag existed, rather than
-        // allowing an ingress request to forge internal provenance.
+        // allowing an ingress request to forge internal provenance. Turn Chain
+        // payloads are rewritten through the store so the format-2 envelope and
+        // externalized contents stay consistent.
         let pool = gateway._sqlite_pool.as_ref().unwrap();
-        for (select, update) in [
-            (
-                "SELECT id, payload FROM turn_chain_nodes WHERE payload IS NOT NULL",
-                "UPDATE turn_chain_nodes SET payload=? WHERE id=?",
-            ),
-            (
-                "SELECT reference, segment_payload FROM history_markers WHERE segment_payload IS NOT NULL",
-                "UPDATE history_markers SET segment_payload=? WHERE reference=?",
-            ),
-        ] {
-            let rows: Vec<(String, String)> = sqlx::query_as(select).fetch_all(pool).await.unwrap();
-            for (id, payload) in rows {
-                let mut payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-                remove_payload_kinds(&mut payload);
-                sqlx::query(update)
-                    .bind(payload.to_string())
-                    .bind(id)
-                    .execute(pool)
-                    .await
-                    .unwrap();
-            }
+        crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        )
+        .rewrite_payloads(remove_payload_kinds)
+        .await
+        .unwrap();
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT reference, segment_payload FROM history_markers WHERE segment_payload IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        for (id, payload) in rows {
+            let mut payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            remove_payload_kinds(&mut payload);
+            sqlx::query("UPDATE history_markers SET segment_payload=? WHERE reference=?")
+                .bind(payload.to_string())
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
         }
         let requests_before = requests.lock().len();
         let rejected = client

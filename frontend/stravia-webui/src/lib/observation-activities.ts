@@ -59,25 +59,11 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
     const calls: Call[] = []
     const thoughts = new Map<string, ThinkingActivity>()
     const prefix = [detail.interaction.id, run.id]
-    let currentTurn = ''
     const events = [
       ...new Map(
         run.events.filter((event) => event.run_id === run.id).map((event) => [event.sequence, event]),
       ).values(),
     ].sort((a, b) => a.sequence - b.sequence)
-    const scopeOf = (payload: ObjectValue) => identity(string(payload.model_turn_id), string(payload.attempt_id))
-    const finishedThoughts = new Set<string>()
-    const finishedAttempts = new Set<string>()
-    const finishedTurns = new Set<string>()
-    for (const event of events) {
-      const payload = object(event.payload)
-      if (event.kind === 'model_thinking_delta' && string(payload.text)) {
-        finishedThoughts.delete(scopeOf(payload))
-      }
-      if (event.kind === 'model_thinking_finished') finishedThoughts.add(scopeOf(payload))
-      if (event.kind === 'target_attempt_finished') finishedAttempts.add(scopeOf(payload))
-      if (event.kind === 'model_turn_finished') finishedTurns.add(string(payload.model_turn_id))
-    }
     const running =
       run.status === 'running' &&
       !events.some(
@@ -104,31 +90,31 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
       existing.activity.name = name
       return existing
     }
-    const thought = (scope: string, text: string, at: number) => {
-      if (!text) return
-      let activity = thoughts.get(scope)
-      if (!activity) {
-        activity = { kind: 'thinking', id: identity(...prefix, 'thinking', scope), at, text: '', live: running }
-        thoughts.set(scope, activity)
-        activities.push(activity)
-      }
-      // 独立空白增量也属于原文。
-      activity.text += text
-      activity.live =
-        running && !finishedTurns.has(currentTurn) && !finishedAttempts.has(scope) && !finishedThoughts.has(scope)
-    }
-
     for (const event of events) {
       const payload = object(event.payload)
       const id = string(payload.tool_id)
       const turn = string(payload.model_turn_id)
-      if (event.kind === 'model_thinking_delta') {
-        const scope = scopeOf(payload)
-        currentTurn = turn
-        thought(scope, string(payload.text), event.occurred_at)
-      } else if (event.kind === 'model_thinking_finished') {
-        const activity = thoughts.get(scopeOf(payload))
-        if (activity) activity.live = false
+      // ADR-0062：model_thinking 按 Canonical Item 一行（含取消/失败时的部分正文），落库即终态；
+      // live 只来自尚未落盘的易失块。条目身份与易失通道共用 block_id，迁移旧行退回 item/作用域。
+      if (event.kind === 'model_thinking') {
+        const text = string(payload.text)
+        const key =
+          string(payload.block_id) ||
+          string(payload.item) ||
+          identity(string(payload.model_turn_id), string(payload.attempt_id))
+        let activity = thoughts.get(key)
+        if (!activity && text) {
+          activity = {
+            kind: 'thinking',
+            id: identity(...prefix, 'thinking', key),
+            at: event.occurred_at,
+            text: '',
+            live: false,
+          }
+          thoughts.set(key, activity)
+          activities.push(activity)
+        }
+        if (activity && text) activity.text = text
       }
       let entry = calls.findLast(
         (entry) => entry.callId === id && (!turn || !entry.modelTurnId || entry.modelTurnId === turn),
@@ -237,16 +223,12 @@ export function observationConversationActivities(
       updated.add(key)
     }
     const activities = output.get(key)!
-    const id = identity(
-      detail.interaction.id,
-      block.run_id,
-      'thinking',
-      identity(block.model_turn_id ?? '', block.attempt_id ?? ''),
-    )
+    // 易失块与持久事件共用 block_id（每个 Canonical Item 一条）：已落库的正文是权威值，不重复拼接。
+    const id = identity(detail.interaction.id, block.run_id, 'thinking', block.block_id)
     const index = activities.findIndex((activity) => activity.id === id)
     const prior = activities[index]
-    if (prior?.kind === 'thinking') activities[index] = { ...prior, text: prior.text + block.text, live: true }
-    else activities.push({ kind: 'thinking', id, at: block.occurred_at, text: block.text, live: true })
+    if (prior?.kind === 'thinking') continue
+    activities.push({ kind: 'thinking', id, at: block.occurred_at, text: block.text, live: true })
   }
   return output
 }

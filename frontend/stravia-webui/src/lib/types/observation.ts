@@ -168,7 +168,7 @@ export interface LiveContentBlock {
   block_id: string
   interaction_id: string
   run_id: string
-  kind: string
+  kind: 'client_visible_content_delta' | 'model_thinking_delta'
   model_turn_id: string | null
   attempt_id: string | null
   occurred_at: number

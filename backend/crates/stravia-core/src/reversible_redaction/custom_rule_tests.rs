@@ -116,7 +116,9 @@ async fn assert_store_contract(store: &SqlCustomRuleStore) {
 async fn sqlite_custom_rule_store_contract() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     assert_store_contract(&SqlCustomRuleStore::sqlite(pool.clone())).await;
     pool.close().await;
 }
@@ -146,7 +148,9 @@ async fn postgres_custom_rule_store_contract_when_configured() {
         .connect_with(options.options([("search_path", schema.as_str())]))
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::migrate_postgres(&pool).await.unwrap();
+    crate::migrations::migrate_postgres(&pool, None)
+        .await
+        .unwrap();
     assert_store_contract(&SqlCustomRuleStore::postgres(pool.clone())).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))

@@ -152,7 +152,19 @@ impl ProtectedSecrets {
                     self.text(value);
                 }
             }
-            RunEvent::ClientVisibleContentDelta { text }
+            RunEvent::ModelThinking {
+                text, parts, item, ..
+            }
+            | RunEvent::ClientVisibleContent {
+                text, parts, item, ..
+            } => {
+                self.text(text);
+                for part in parts {
+                    self.value(part);
+                }
+                self.value(item);
+            }
+            RunEvent::ClientVisibleContentDelta { text, .. }
             | RunEvent::ModelThinkingDelta { text, .. } => self.text(text),
             RunEvent::ClientToolHandoff {
                 input: Some(value), ..
@@ -707,6 +719,12 @@ pub(crate) fn redact_rejected_outcome(outcome: &mut RejectedOutcome) -> Redactio
 pub(crate) fn redact_run_outcome(outcome: &mut RunOutcome) -> RedactionReport {
     let mut report = RedactionReport::default();
     redact_string(&mut outcome.status, &mut report);
+    if let Some(delivery) = &mut outcome.delivery {
+        redact_string(&mut delivery.status, &mut report);
+        if let Some(reason) = &mut delivery.reason {
+            redact_string(reason, &mut report);
+        }
+    }
     if let Some(reason) = &mut outcome.terminal_reason {
         redact_string(reason, &mut report);
     }
@@ -732,7 +750,19 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
             reason: Some(reason),
             ..
         } => redact_string(reason, &mut report),
-        RunEvent::ClientVisibleContentDelta { text }
+        RunEvent::ModelThinking {
+            text, parts, item, ..
+        }
+        | RunEvent::ClientVisibleContent {
+            text, parts, item, ..
+        } => {
+            redact_string(text, &mut report);
+            for part in parts {
+                report.merge(redact_value(part));
+            }
+            report.merge(redact_value(item));
+        }
+        RunEvent::ClientVisibleContentDelta { text, .. }
         | RunEvent::ModelThinkingDelta { text, .. } => redact_string(text, &mut report),
         RunEvent::ClientToolHandoff {
             input: Some(value), ..
@@ -1746,13 +1776,15 @@ mod tests {
         let sentinel = "VISIBLE_SECRET_5f1e";
         let safe = "retain-visible-business-output";
         let mut event = RunEvent::ClientVisibleContentDelta {
+            item_ordinal: 0,
+            part_index: (false, 0),
             text: format!(
                 "{safe} Authorization: Bearer {sentinel} callback=https://user:{sentinel}@example.test/path?signature={sentinel} metadata={{\"api_key\":\"{sentinel}\"}} form=name=Ada&access_token={sentinel}"
             ),
         };
 
         let report = redact_run_event(&mut event);
-        let RunEvent::ClientVisibleContentDelta { text } = event else {
+        let RunEvent::ClientVisibleContentDelta { text, .. } = event else {
             unreachable!();
         };
 

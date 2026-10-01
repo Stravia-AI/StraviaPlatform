@@ -234,7 +234,16 @@ def build_harness(work_dir: Path) -> None:
                     }
                     "inspect_observation" => {
                         let tables: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('interaction_observations', 'inference_run_observations', 'model_turn_observations', 'target_attempt_observations', 'observation_events', 'rejected_request_observations', 'debug_trace_manifests')",
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('interaction_observations', 'inference_run_observations', 'model_turn_observations', 'target_attempt_observations', 'observation_events', 'rejected_request_observations')",
+                        )
+                        .bind(&schema)
+                        .fetch_one(&pool)
+                        .await?;
+                        // Debug trace manifests live in <data_dir>/diagnostics/
+                        // observation-debug/<trace_id>/manifest.json; the table and
+                        // the unused event-expiry index must not come back.
+                        let removed: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('debug_trace_manifests')",
                         )
                         .bind(&schema)
                         .fetch_one(&pool)
@@ -246,14 +255,22 @@ def build_harness(work_dir: Path) -> None:
                         .fetch_one(&pool)
                         .await?;
                         let indexes: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('interaction_observations_window_idx', 'model_turns_analytics_idx', 'target_attempts_analytics_idx', 'observation_events_expiry_idx')",
+                            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('interaction_observations_window_idx', 'model_turns_analytics_idx', 'target_attempts_analytics_idx')",
+                        )
+                        .bind(&schema)
+                        .fetch_one(&pool)
+                        .await?;
+                        let removed_indexes: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('observation_events_expiry_idx')",
                         )
                         .bind(&schema)
                         .fetch_one(&pool)
                         .await?;
                         println!("observation_tables={tables}");
+                        println!("removed_tables={removed}");
                         println!("legacy_tables={legacy}");
                         println!("observation_indexes={indexes}");
+                        println!("removed_indexes={removed_indexes}");
                     }
                     other => anyhow::bail!("unknown schema action: {other}"),
                 }

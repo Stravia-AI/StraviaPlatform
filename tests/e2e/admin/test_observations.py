@@ -21,6 +21,7 @@ import pytest
 
 from tests.common.helpers import (
     download_observation_bundle,
+    encode_storage_json,
     observation_bundle_events,
     find_free_port,
     http_bytes,
@@ -355,7 +356,15 @@ def test_failed_request_records_stream_error_after_http_success(
         "status": observed["runs"][0]["status"],
         "reason": observed["runs"][0]["terminal_reason"],
         "events": [(event["kind"], event["payload"]) for event in observed["runs"][0]["events"]
-                   if event["kind"] in ("run_finished", "delivery_finished", "target_attempt_finished")],
+                   if event["kind"] in ("run_finished", "target_attempt_finished")],
+    }
+    finished = [event for event in observed["runs"][0]["events"] if event["kind"] == "run_finished"]
+    assert finished
+    terminal = finished[-1]
+    assert terminal["payload"]["status"] == "failed"
+    assert terminal["payload"]["terminal_reason"] == "upstream_stream_error"
+    assert terminal["payload"]["delivery"] == {
+        "status": "delivery_failed", "reason": "stream_incomplete", "completed_at": None,
     }
     failure = _wait_for(
         "stream error after successful headers",
@@ -733,20 +742,13 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     initial = _wait_for("completed history fixture", finished)
     interaction_id = initial["interaction"]["id"]
     run_id = initial["runs"][0]["id"]
-    text = "decoded compressed history 文本 " * 100
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
-        zipped.writestr("content", text)
-    payload = json.dumps({"kind": "client_visible_content_delta", "block_id": "history-compressed",
-                          "text_storage": {"codec": "zip-deflate-v1", "bytes": len(text.encode()),
-                                           "data": base64.b64encode(archive.getvalue()).decode()}})
     database = Path(admin_env["data_dir"]) / "db" / "gateway.db"
     with closing(sqlite3.connect(database)) as connection:
         expires = int(time.time() * 1000) + 86400000
         connection.executemany(
             "INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
-            [(int(time.time() * 1000), interaction_id, run_id, "client_visible_content_delta",
-              payload if index == 0 else json.dumps({"kind": "client_visible_content_delta", "text": f"part-{index}"}), expires)
+            [(int(time.time() * 1000), interaction_id, run_id, "client_visible_content",
+              encode_storage_json({"kind": "client_visible_content", "text": f"part-{index}"}), expires)
              for index in range(430)],
         )
         connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
@@ -762,7 +764,8 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     # Arrivals after the first page must not leak into this traversal.
     with closing(sqlite3.connect(database)) as connection:
         connection.execute("INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
-                           (int(time.time() * 1000), interaction_id, run_id, "client_visible_content_delta", '{"text":"late"}', expires))
+                           (int(time.time() * 1000), interaction_id, run_id, "client_visible_content",
+                            encode_storage_json({"kind": "client_visible_content", "text": "late"}), expires))
         connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
         connection.commit()
     for direction in ("after_sequence", "before_sequence"):
@@ -780,8 +783,6 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
                 break
         expected = [sequence for sequence, _ in stored]
         assert [event["sequence"] for event in seen] == expected
-        assert next(event["payload"]["text"] for event in seen if event["payload"].get("block_id") == "history-compressed") == text
-        assert all("text_storage" not in event["payload"] for event in seen)
     full = _detail(admin_env, interaction_id)
     assert any(event["kind"] == "run_admitted" for run in full["runs"] for event in run["events"])
     with closing(sqlite3.connect(database)) as connection:
@@ -793,7 +794,6 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     exported_events = sorted(exported["events"], key=lambda event: event["sequence"])
     assert [event["sequence"] for event in exported_events] == [sequence for sequence, _ in stored]
     assert any(event["kind"] == "run_admitted" for event in exported_events)
-    assert next(event["payload"]["text"] for event in exported_events if event["payload"].get("block_id") == "history-compressed") == text
 
 
 def _sse_event(
@@ -899,8 +899,18 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     sequences = [event["sequence"] for event in run["events"]]
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))
-    assert {"run_admitted", "target_attempt_started", "usage_confirmed", "run_finished"} <= {
-        event["kind"] for event in run["events"]
+    kinds = {event["kind"] for event in run["events"]}
+    assert {"run_admitted", "target_attempt_started", "target_attempt_finished", "run_finished"} <= kinds
+    # Confirmed usage rides on the attempt terminal (and its late higher-sequence
+    # revisions); the standalone usage_confirmed event kind is no longer persisted.
+    assert "usage_confirmed" not in kinds
+    attempt = [event for event in run["events"] if event["kind"] == "target_attempt_finished"][-1]
+    assert attempt["payload"]["usage"] == {
+        "input_tokens": None,
+        "output_tokens": 2,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
     }
 
     replay = _sse_event(admin_env, before)
@@ -1722,8 +1732,58 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
     assert cleared["data"]["skipped_active"] >= 2
     assert any(item["id"] == active["id"] for item in _route_interactions(admin_env, delay_route))
     assert any(item["id"] == waiting["id"] for item in _route_interactions(admin_env, waiting_route))
+
+    trace_root = Path(admin_env["data_dir"]) / "diagnostics" / "observation-debug"
+
+    def active_trace_dirs() -> set[Path] | None:
+        dirs = set()
+        for interaction_id in (waiting["id"], active["id"]):
+            detail = _detail(admin_env, interaction_id)
+            trace = detail["runs"][0].get("trace") if detail["runs"] else None
+            if trace:
+                dirs.add(trace_root / trace["trace_id"])
+        return dirs if len(dirs) == 2 else None
+
+    old_dirs = _wait_for("active ingress trace directories", active_trace_dirs)
+    status, state = http_request(
+        "DELETE",
+        f"{admin_env['admin']}/api/v1/observations/debug",
+        headers=admin_env["auth"],
+    )
+    assert status == 200, state
+    assert state["data"]["enabled"] is True
+    # The clear acknowledgement already carries the whole old trace directory
+    # away, including the runs whose ingress is still active.
+    assert all(not path.exists() for path in old_dirs)
     worker.join(timeout=10.0)
     assert result and result[0][0] == 200
+    _wait_for(
+        "cleared active capture reaches terminal state",
+        lambda: (lambda value: value if value["runs"][0]["status"] == "completed" else None)(
+            _detail(admin_env, active["id"])
+        ),
+    )
+    # Finishing the run must not resurrect its cleared trace directory.
+    assert all(not path.exists() for path in old_dirs)
+
+    fresh_route, fresh_key = _create_route(admin_env, "observation-after-clear")
+
+    def fresh_capture() -> dict[str, Any] | None:
+        interactions = _route_interactions(admin_env, fresh_route)
+        if not interactions:
+            return None
+        detail = _detail(admin_env, interactions[0]["id"])
+        trace = detail["runs"][0].get("trace") if detail["runs"] else None
+        return detail if trace and trace["status"] == "complete" else None
+
+    status, response = _proxy(
+        admin_env, fresh_key, "observation-after-clear", [{"role": "user", "content": "after clear"}],
+    )
+    assert status == 200, response
+    fresh = _wait_for("fresh Debug capture", fresh_capture)
+    fresh_dir = trace_root / fresh["runs"][0]["trace"]["trace_id"]
+    assert fresh_dir.is_dir()
+    assert json.loads((fresh_dir / "manifest.json").read_text(encoding="utf-8"))["trace_id"] == fresh["runs"][0]["trace"]["trace_id"]
 
 
 @pytest.mark.e2e

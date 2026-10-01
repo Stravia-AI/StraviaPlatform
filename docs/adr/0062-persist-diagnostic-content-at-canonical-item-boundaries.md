@@ -4,7 +4,7 @@ status: accepted
 
 # 按 Canonical Item 收口持久化诊断内容
 
-Interaction Observation 的 canonical 诊断内容按 Canonical Item 边界持久化：同一 item 的流式碎片汇聚为一项并保留项内 part 边界，独立 item 即使类型相同也不合并。该决定取代 `docs/design/interaction-observation.md` §5.1 中诊断文本按时间或大小封块的设计约定；实现尚未迁移。
+Interaction Observation 的 canonical 诊断内容按 Canonical Item 边界持久化：同一 item 的流式碎片汇聚为一项并保留项内 part 边界，独立 item 即使类型相同也不合并。该决定取代 `docs/design/interaction-observation.md` §5.1 中诊断文本按时间或大小封块的设计约定；[ADR-0077](0077-slim-interaction-observation-and-file-debug-manifests.md) 定义相应观测精简迁移：持久化 kind 为 `model_thinking` 与 `client_visible_content`，每个 item 一行并以 `complete` 标记区分正常结束与可处理失败/取消。
 
 正常结束时保存完整 item；可处理的失败或取消发生时，保存已实际收到的内容并将该 item 标为未完成。系统不周期性持久化同一 item 的中间快照，因此进程突然崩溃可以丢失整个尚未落盘的 item；本决策不规定如何补齐取消时未实际收到的尾部。
 

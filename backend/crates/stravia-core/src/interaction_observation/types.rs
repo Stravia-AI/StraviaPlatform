@@ -4,6 +4,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 
 pub type BundleStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 pub type ObservationStream = Pin<Box<dyn Stream<Item = ObservationUpdate> + Send>>;
@@ -74,7 +75,7 @@ impl ConfirmedUsage {
 }
 
 pub(super) fn project_event_for_management(mut event: ObservationEvent) -> ObservationEvent {
-    if event.kind != "usage_confirmed" {
+    if event.kind != "target_attempt_finished" {
         return event;
     }
     let Some(usage) = event
@@ -220,7 +221,18 @@ pub struct FailedRequestDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DeliveryOutcome {
+    pub status: String,
+    pub reason: Option<String>,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RunOutcome {
+    #[serde(default)]
+    pub client_output_committed: bool,
+    #[serde(default)]
+    pub delivery: Option<DeliveryOutcome>,
     /// Full successful client delivery, captured by the transport, not the writer.
     #[serde(default)]
     pub delivery_completed_at: Option<i64>,
@@ -347,6 +359,8 @@ pub(crate) enum RunEvent {
         error_code: Option<String>,
         duration_ms: i64,
         first_token_ms: Option<i64>,
+        #[serde(default)]
+        usage: Option<ConfirmedUsage>,
     },
     UsageConfirmed {
         model_turn_id: String,
@@ -379,7 +393,25 @@ pub(crate) enum RunEvent {
         content: Value,
         is_error: bool,
     },
+    ModelThinking {
+        model_turn_id: String,
+        attempt_id: String,
+        text: String,
+        parts: Vec<Value>,
+        block_id: String,
+        item: Value,
+        complete: bool,
+    },
+    ClientVisibleContent {
+        text: String,
+        parts: Vec<Value>,
+        block_id: String,
+        item: Value,
+        complete: bool,
+    },
     ModelThinkingDelta {
+        item_ordinal: usize,
+        part_index: CanonicalPartIndex,
         model_turn_id: String,
         attempt_id: String,
         text: String,
@@ -389,6 +421,8 @@ pub(crate) enum RunEvent {
         attempt_id: String,
     },
     ClientVisibleContentDelta {
+        item_ordinal: usize,
+        part_index: CanonicalPartIndex,
         text: String,
     },
     ClientOutputCommitted,
@@ -667,4 +701,10 @@ pub struct DownloadTicket {
     pub download_url: String,
     pub expires_at: i64,
     pub through_sequence: i64,
+}
+
+/// Stable canonical item identity from the real canonical output ordinal.
+/// Late provider item IDs never change this identity.
+pub(crate) fn canonical_item_block_id(scope: &str, item_ordinal: usize) -> String {
+    format!("{scope}:item:{item_ordinal}")
 }

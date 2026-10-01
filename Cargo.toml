@@ -67,6 +67,7 @@ http-body-util = "0.1"
 htmd = "0.5"
 bytes = "1"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+zstd = { version = "=0.13.3", default-features = false }
 # 与 shellexpand 复用 dirs 6；相同的 home_dir 实现无需在服务端额外编译 dirs 7。
 dirs = "6"
 dom_smoothie = "0.18"

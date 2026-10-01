@@ -199,6 +199,8 @@ impl RouteModule<'_> {
     }
 
     pub(crate) async fn reload_cache(&self) -> anyhow::Result<()> {
+        // Provider 删除会级联移除价格；路由重载失败也不能保留旧定价。
+        self.gw.route_policy_state.clear_pricing();
         self.gw
             .model_cache
             .write()

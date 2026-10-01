@@ -3,6 +3,7 @@ mod bundle;
 mod codec;
 mod grouping;
 mod live;
+mod manifest_index;
 mod query;
 mod redaction;
 mod retention;
@@ -12,6 +13,7 @@ mod tail;
 mod trace;
 mod trace_storage;
 mod types;
+pub(crate) mod upgrade;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
@@ -29,6 +31,7 @@ use std::{
         atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
 };
+use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -158,12 +161,8 @@ impl InteractionObservation {
         retention_days: u32,
         persistent: bool,
         generation_chains: crate::generation_chain::GenerationChain,
+        sqlite_write_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     ) -> Self {
-        let store = ObservationStore::new(sqlite, postgres)
-            .expect("Gateway provides exactly one observation SQL backend");
-        if store.recover_after_restart().await.is_err() {
-            tracing::warn!("observation restart recovery unavailable");
-        }
         let ephemeral_root = (!persistent).then(|| {
             data_dir.join(format!(
                 ".ephemeral-{}",
@@ -171,26 +170,40 @@ impl InteractionObservation {
             ))
         });
         let trace_data_dir = ephemeral_root.clone().unwrap_or(data_dir);
+        let index_root = trace_data_dir.clone();
+        let debug_trace_index = Arc::new(
+            match tokio::task::spawn_blocking(move || {
+                manifest_index::DebugTraceIndex::load(&index_root)
+            })
+            .await
+            {
+                Ok(Ok(index)) => index,
+                _ => {
+                    tracing::warn!("observation file manifests unavailable");
+                    manifest_index::DebugTraceIndex::empty(&trace_data_dir)
+                }
+            },
+        );
+        let store = ObservationStore::new(
+            sqlite,
+            postgres,
+            Arc::clone(&debug_trace_index),
+            sqlite_write_gate,
+        )
+        .expect("Gateway provides exactly one observation SQL backend");
+        if store.recover_after_restart().await.is_err() {
+            tracing::warn!("observation restart recovery unavailable");
+        }
+        if let Err(error) = debug_trace_index
+            .recover(chrono::Utc::now().timestamp_millis())
+            .await
+        {
+            tracing::warn!(%error, "trace manifest restart recovery unavailable");
+        }
         let traces = TraceManager::new(trace_data_dir).unwrap_or_else(|_| {
             tracing::warn!("observation trace storage unavailable");
             TraceManager::degraded()
         });
-        match store.manifest_ids().await {
-            Ok((retained, tombstoned)) => match traces.reconcile(retained, tombstoned).await {
-                Ok(report) => {
-                    if store
-                        .delete_manifests(&report.removed_tombstones)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("trace tombstone reconciliation persistence unavailable");
-                    }
-                }
-                Err(_) => tracing::warn!("trace file reconciliation unavailable"),
-            },
-            // 数据库不可读不等于没有保留记录，不能据此删除诊断文件。
-            Err(_) => tracing::warn!("trace manifest reconciliation unavailable"),
-        }
         let trace_sequence = Arc::new(AtomicI64::new(match store.max_sequence().await {
             Ok(sequence) => sequence,
             Err(_) => {
@@ -207,6 +220,7 @@ impl InteractionObservation {
         let unpersisted_gaps = Arc::new(Mutex::new(UnpersistedGaps::default()));
         let (writer, task) = writer::spawn(writer::WriterDeps {
             store: store.clone(),
+            debug_trace_index: Arc::clone(&debug_trace_index),
             retention_days: Arc::clone(&retention_days),
             updates: updates.clone(),
             trace_sequence: Arc::clone(&trace_sequence),
@@ -326,26 +340,17 @@ impl InteractionObservation {
         self.debug_state()
     }
     /// 删除全部已落盘 Debug Trace 与 manifest，不动请求记录；活动 Trace 标记 partial 后停止。
+    /// 在 observation writer 中串行执行，退役的 capture 不再发布 manifest；清除后新建 capture 不受影响。
     pub(crate) async fn clear_debug(&self) -> anyhow::Result<DebugState> {
-        {
-            let active: Vec<TraceHandle> =
-                self.inner.active_traces.lock().values().cloned().collect();
-            for trace in active {
-                trace.mark_partial("debug_data_cleared", true);
-            }
-        }
-        let ids = self.inner.store.mark_all_debug_tombstones().await?;
-        self.inner.traces.delete_all().await?;
-        self.inner.store.delete_manifests(&ids).await?;
-        let (_, partial) = self
-            .inner
-            .store
-            .debug_manifest_counts()
-            .await
-            .unwrap_or((0, 0));
+        let (response, receive) = tokio::sync::oneshot::channel();
         self.inner
-            .partial_trace_count
-            .store(partial, Ordering::Release);
+            .writer
+            .send(WriterCommand::ClearDebug { response })
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer unavailable during debug clear"))?;
+        receive
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer stopped during debug clear"))??;
         Ok(self.debug_state())
     }
     pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
@@ -594,7 +599,7 @@ impl InteractionObservation {
                         let snap = handle.snapshot(through).await.ok();
                         (
                             manifest.status,
-                            manifest.bytes_written,
+                            snap.as_ref().map_or(0, |snapshot| snapshot.bytes),
                             manifest.reasons,
                             snap,
                         )
@@ -607,7 +612,7 @@ impl InteractionObservation {
                             .ok();
                         (
                             manifest.status.clone(),
-                            manifest.bytes_written,
+                            snap.as_ref().map_or(0, |snapshot| snapshot.bytes),
                             manifest.reasons.clone(),
                             snap,
                         )
@@ -652,18 +657,19 @@ impl InteractionObservation {
                 let summary = serde_json::json!({"schema_version":1,"rejection_id":request.resource_id.clone(),"through_event_sequence":through,"events":snapshot_events});
                 let mut runs = Vec::new();
                 if let Some(manifest) = &detail.trace {
+                    let trace = self
+                        .inner
+                        .traces
+                        .snapshot(&manifest.trace_id, through)
+                        .await
+                        .ok();
                     runs.push(BundleRunSnapshot {
                         run_id: detail.rejection.id.clone(),
                         debug_enabled: detail.rejection.debug_enabled,
                         trace_status: manifest.status.clone(),
-                        bytes_written: manifest.bytes_written,
+                        bytes_written: trace.as_ref().map_or(0, |snapshot| snapshot.bytes),
                         reasons: manifest.reasons.clone(),
-                        trace: self
-                            .inner
-                            .traces
-                            .snapshot(&manifest.trace_id, through)
-                            .await
-                            .ok(),
+                        trace,
                     });
                 } else {
                     runs.push(BundleRunSnapshot {
@@ -997,10 +1003,8 @@ impl IngressObserver {
             generation_commit_fences: Mutex::new(Vec::new()),
             pending_input: Mutex::new(None),
             pending_tool_results: Mutex::new(Vec::new()),
-            thinking_redaction: Mutex::new(HashMap::new()),
-            visible_redaction: Mutex::new(redaction::VisibleTextRedactor::with_protected(
-                protected.clone(),
-            )),
+            thinking_redaction: Mutex::new(std::collections::BTreeMap::new()),
+            visible_redaction: Mutex::new(std::collections::BTreeMap::new()),
             protected,
         });
         if self
@@ -1106,8 +1110,15 @@ struct RunObserverInner {
     // Canonical user text remains memory-only until Model Turn protection succeeds.
     pending_input: Mutex<Option<String>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
-    thinking_redaction: Mutex<HashMap<(String, String), redaction::VisibleTextRedactor>>,
-    visible_redaction: Mutex<redaction::VisibleTextRedactor>,
+    thinking_redaction: Mutex<
+        std::collections::BTreeMap<
+            (String, String, usize, CanonicalPartIndex),
+            redaction::VisibleTextRedactor,
+        >,
+    >,
+    visible_redaction: Mutex<
+        std::collections::BTreeMap<(usize, CanonicalPartIndex), redaction::VisibleTextRedactor>,
+    >,
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
@@ -1254,6 +1265,9 @@ impl RunObserver {
             self.record(event());
         }
     }
+    pub(crate) fn run_id(&self) -> &str {
+        &self.inner.run_id
+    }
     pub(crate) fn record(&self, event: RunEvent) {
         if !self.inner.debug_enabled && matches!(event, RunEvent::Wire { .. }) {
             return;
@@ -1261,6 +1275,8 @@ impl RunObserver {
         if let RunEvent::ModelThinkingDelta {
             model_turn_id,
             attempt_id,
+            item_ordinal,
+            part_index,
             text,
         } = event
         {
@@ -1268,7 +1284,12 @@ impl RunObserver {
                 .inner
                 .thinking_redaction
                 .lock()
-                .entry((model_turn_id.clone(), attempt_id.clone()))
+                .entry((
+                    model_turn_id.clone(),
+                    attempt_id.clone(),
+                    item_ordinal,
+                    part_index,
+                ))
                 .or_insert_with(|| {
                     redaction::VisibleTextRedactor::with_protected(self.inner.protected.clone())
                 })
@@ -1277,6 +1298,8 @@ impl RunObserver {
                 self.send_event(RunEvent::ModelThinkingDelta {
                     model_turn_id,
                     attempt_id,
+                    item_ordinal,
+                    part_index,
                     text,
                 });
             }
@@ -1301,12 +1324,40 @@ impl RunObserver {
                 attempt_id: attempt_id.clone(),
             });
         }
-        if let RunEvent::ClientVisibleContentDelta { text } = event {
-            let ready = self.inner.visible_redaction.lock().push(text);
+        if let RunEvent::ClientVisibleContentDelta {
+            text,
+            item_ordinal,
+            part_index,
+        } = event
+        {
+            let ready = self
+                .inner
+                .visible_redaction
+                .lock()
+                .entry((item_ordinal, part_index))
+                .or_insert_with(|| {
+                    redaction::VisibleTextRedactor::with_protected(self.inner.protected.clone())
+                })
+                .push(text);
             if let Some(text) = ready {
-                self.send_event(RunEvent::ClientVisibleContentDelta { text });
+                self.send_event(RunEvent::ClientVisibleContentDelta {
+                    text,
+                    item_ordinal,
+                    part_index,
+                });
             }
             return;
+        }
+        if let RunEvent::ModelThinking {
+            model_turn_id,
+            attempt_id,
+            ..
+        } = &event
+        {
+            self.flush_thinking(model_turn_id, attempt_id);
+        }
+        if matches!(event, RunEvent::ClientVisibleContent { .. }) {
+            self.flush_visible();
         }
         if matches!(
             event,
@@ -1317,28 +1368,43 @@ impl RunObserver {
         self.send_event(event);
     }
     fn flush_thinking(&self, model_turn_id: &str, attempt_id: &str) -> bool {
-        let state = self
-            .inner
-            .thinking_redaction
-            .lock()
-            .remove(&(model_turn_id.to_owned(), attempt_id.to_owned()));
-        let Some(mut state) = state else { return false };
-        if let Some(text) = state.finish() {
-            self.send_event(RunEvent::ModelThinkingDelta {
-                model_turn_id: model_turn_id.to_owned(),
-                attempt_id: attempt_id.to_owned(),
-                text,
-            });
+        let mut states = self.inner.thinking_redaction.lock();
+        let keys: Vec<_> = states
+            .keys()
+            .filter(|(turn, attempt, _, _)| turn == model_turn_id && attempt == attempt_id)
+            .cloned()
+            .collect();
+        let had_pending = !keys.is_empty();
+        let pending: Vec<_> = keys
+            .into_iter()
+            .map(|key| {
+                let state = states.remove(&key).unwrap();
+                (key, state)
+            })
+            .collect();
+        drop(states);
+        for ((_, _, item_ordinal, part_index), mut state) in pending {
+            if let Some(text) = state.finish() {
+                self.send_event(RunEvent::ModelThinkingDelta {
+                    model_turn_id: model_turn_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    item_ordinal,
+                    part_index,
+                    text,
+                });
+            }
         }
-        true
+        had_pending
     }
     fn finish_thinking(&self) {
         let pending = std::mem::take(&mut *self.inner.thinking_redaction.lock());
-        for ((model_turn_id, attempt_id), mut state) in pending {
+        for ((model_turn_id, attempt_id, item_ordinal, part_index), mut state) in pending {
             if let Some(text) = state.finish() {
                 self.send_event(RunEvent::ModelThinkingDelta {
                     model_turn_id: model_turn_id.clone(),
                     attempt_id: attempt_id.clone(),
+                    item_ordinal,
+                    part_index,
                     text,
                 });
             }
@@ -1349,9 +1415,15 @@ impl RunObserver {
         }
     }
     fn flush_visible(&self) {
-        let ready = self.inner.visible_redaction.lock().finish();
-        if let Some(text) = ready {
-            self.send_event(RunEvent::ClientVisibleContentDelta { text });
+        let pending = std::mem::take(&mut *self.inner.visible_redaction.lock());
+        for ((item_ordinal, part_index), mut state) in pending {
+            if let Some(text) = state.finish() {
+                self.send_event(RunEvent::ClientVisibleContentDelta {
+                    text,
+                    item_ordinal,
+                    part_index,
+                });
+            }
         }
     }
     fn send_tool_results(&self, mut events: Vec<RunEvent>) {
@@ -1395,13 +1467,16 @@ impl RunObserver {
             if let Some(trace) = &self.inner.trace {
                 // Wire Debug applies its Authorization-only policy inside the Trace queue.
                 // Ordinary Observation redaction must not rewrite raw wire content first.
+                // Wire records carry the durable event frontier observed at capture
+                // time, not a synthetic next sequence: a ticket whose
+                // through-sequence equals that frontier includes the bytes, while
+                // later captures stay excluded by the fixed snapshot watermark.
                 let sequence = self
                     .inner
                     .observation
                     .inner
                     .trace_sequence
-                    .load(Ordering::Acquire)
-                    .saturating_add(1);
+                    .load(Ordering::Acquire);
                 record_trace_at(trace, Some(&self.inner.run_id), None, event, sequence);
             }
             return;
@@ -1445,7 +1520,7 @@ impl RunObserver {
             if let Some(previous) = pending.as_mut()
                 && writer::same_scope(previous, &event)
                 && writer::text_mut(previous).is_some_and(|text| {
-                    text.len().saturating_add(len) <= codec::CONTENT_BLOCK_BYTES
+                    text.len().saturating_add(len) <= writer::LIVE_COALESCE_BYTES
                 })
             {
                 let text = writer::text_mut(&mut event).expect("text delta");
@@ -1518,6 +1593,12 @@ impl RunObserver {
         self.finish_thinking();
         self.inner.queued_text.lock().take();
         self.inner.protected.text(&mut outcome.status);
+        if let Some(delivery) = &mut outcome.delivery {
+            self.inner.protected.text(&mut delivery.status);
+            if let Some(reason) = &mut delivery.reason {
+                self.inner.protected.text(reason);
+            }
+        }
         if let Some(reason) = &mut outcome.terminal_reason {
             self.inner.protected.text(reason);
         }
@@ -1596,12 +1677,14 @@ impl RunPublicationGuard {
 
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
-        for ((model_turn_id, attempt_id), mut state) in
+        for ((model_turn_id, attempt_id, item_ordinal, part_index), mut state) in
             std::mem::take(self.thinking_redaction.get_mut())
         {
             let delta = state.finish().map(|text| RunEvent::ModelThinkingDelta {
                 model_turn_id: model_turn_id.clone(),
                 attempt_id: attempt_id.clone(),
+                item_ordinal,
+                part_index,
                 text,
             });
             for event in [
@@ -1628,23 +1711,33 @@ impl Drop for RunObserverInner {
                 }
             }
         }
-        if let Some(text) = self.visible_redaction.get_mut().finish()
-            && self
-                .observation
-                .inner
-                .writer
-                .try_send(WriterCommand::Event {
-                    run_id: self.run_id.clone(),
-                    event: RunEvent::ClientVisibleContentDelta { text },
-                })
-                .is_err()
+        for ((item_ordinal, part_index), mut state) in
+            std::mem::take(self.visible_redaction.get_mut())
         {
-            *self.gap.get_mut() = true;
+            if let Some(text) = state.finish()
+                && self
+                    .observation
+                    .inner
+                    .writer
+                    .try_send(WriterCommand::Event {
+                        run_id: self.run_id.clone(),
+                        event: RunEvent::ClientVisibleContentDelta {
+                            text,
+                            item_ordinal,
+                            part_index,
+                        },
+                    })
+                    .is_err()
+            {
+                *self.gap.get_mut() = true;
+            }
         }
         let mut pending_finish = self.pending_finish.get_mut().take();
         if !*self.terminal.get_mut() {
             pending_finish = Some((
                 RunOutcome {
+                    client_output_committed: false,
+                    delivery: None,
                     delivery_completed_at: None,
                     status: "interrupted".into(),
                     terminal_reason: Some("observer_dropped".into()),
@@ -1690,14 +1783,20 @@ fn project_bundle_status(events: &[ObservationEvent]) -> String {
             "client_tool_handoff" => {
                 runs.insert(run, "waiting_client");
             }
-            "run_finished" | "run_state_changed" | "process_restarted" => {
+            "run_finished" | "run_state_changed" => {
                 let status = event
                     .payload
                     .get("status")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("interrupted");
                 runs.insert(run, status);
-                if event.kind == "process_restarted" {
+                if event.kind == "run_state_changed"
+                    && event
+                        .payload
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("process_restarted")
+                {
                     active.retain(|(owner, _, _)| *owner != run);
                 }
             }
@@ -1772,16 +1871,20 @@ fn project_bundle_summary(
                     attempts.entry(id).or_default();
                 }
             }
-            "usage_confirmed" => {
+            "target_attempt_finished" => {
                 if let Some(id) = event
                     .payload
                     .get("attempt_id")
                     .and_then(serde_json::Value::as_str)
                 {
-                    let recorded = attempts.entry(id).or_default();
-                    if recorded.is_some() {
+                    if event
+                        .payload
+                        .get("usage")
+                        .is_none_or(serde_json::Value::is_null)
+                    {
                         continue;
                     }
+                    let recorded = attempts.entry(id).or_default();
                     match serde_json::from_value(
                         event.payload.get("usage").cloned().unwrap_or_default(),
                     ) {
@@ -1795,7 +1898,7 @@ fn project_bundle_summary(
                     }
                 }
             }
-            "client_visible_content_delta" => {
+            "client_visible_content" => {
                 if let Some(text) = event
                     .payload
                     .get("text")
@@ -1978,6 +2081,22 @@ fn record_trace_observed_at(
 mod snapshot_tests {
     use serde_json::Value;
 
+    fn visible_item(id: &str, text: &str) -> RunEvent {
+        RunEvent::ClientVisibleContent {
+            text: text.into(),
+            parts: vec![serde_json::json!({"type":"text","text":text})],
+            block_id: id.into(),
+            item: serde_json::json!({"id":id,"role":"assistant","content":text}),
+            complete: true,
+        }
+    }
+
+    fn stored_payload(bytes: &[u8]) -> anyhow::Result<Value> {
+        Ok(serde_json::from_slice(&crate::storage_codec::decode(
+            bytes,
+        )?)?)
+    }
+
     use super::*;
 
     #[test]
@@ -2044,6 +2163,7 @@ mod snapshot_tests {
             1,
             persistent,
             crate::generation_chain::test_chain().await,
+            Some(Arc::new(tokio::sync::Mutex::new(()))),
         )
         .await
     }
@@ -2082,7 +2202,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let run = test_run(&observation, "missing-finish", facts(Vec::new()));
         run.record(RunEvent::ModelTurnStarted {
@@ -2112,11 +2232,42 @@ mod snapshot_tests {
             attempt_id: "attempt".into(),
             usage: ConfirmedUsage {
                 input_tokens: Some(7),
+                cache_read_tokens: Some(0),
                 ..Default::default()
             },
         });
+        observation.flush().await?;
+        let early_usage: Option<i64> = sqlx::query_scalar(
+            "SELECT input_tokens FROM target_attempt_observations WHERE id='attempt'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(early_usage, Some(7));
+        let interaction_id: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='missing-finish'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let early_detail = observation
+            .get_interaction(&interaction_id, ForestQuery::default())
+            .await?
+            .expect("active interaction");
+        let early_run = early_detail
+            .runs
+            .iter()
+            .find(|run| run.id == "missing-finish")
+            .expect("active run");
+        assert_eq!(early_run.usage.input_tokens, Some(7));
+        let early_usage_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE kind='usage_confirmed'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(early_usage_rows, 0);
         let background = run.clone();
         run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: None,
@@ -2153,6 +2304,88 @@ mod snapshot_tests {
                 Some(7)
             )
         );
+        let standalone_usage: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE kind='usage_confirmed'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(standalone_usage, 0);
+        let terminal_attempt: Vec<u8> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE kind='target_attempt_finished' AND run_id='missing-finish' ORDER BY sequence DESC LIMIT 1")
+            .fetch_one(&pool).await?;
+        assert_eq!(
+            stored_payload(&terminal_attempt)?["usage"]["input_tokens"],
+            7
+        );
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn early_usage_updates_queries_without_advancing_event_sequence() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let run = test_run(&observation, "early-usage", facts(Vec::new()));
+        run.record(RunEvent::ModelTurnStarted {
+            model_turn_id: "early-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "early-turn".into(),
+            attempt_id: "early-attempt".into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://localhost".into(),
+        });
+        observation.flush().await?;
+        let before_usage = observation.inner.store.max_sequence().await?;
+        run.record(RunEvent::UsageConfirmed {
+            model_turn_id: "early-turn".into(),
+            attempt_id: "early-attempt".into(),
+            usage: ConfirmedUsage {
+                input_tokens: Some(7),
+                cache_read_tokens: Some(0),
+                ..Default::default()
+            },
+        });
+        observation.flush().await?;
+        assert_eq!(observation.inner.store.max_sequence().await?, before_usage);
+        let usage: (Option<i64>, bool) = sqlx::query_as(
+            "SELECT input_tokens,usage_recorded FROM target_attempt_observations WHERE id='early-attempt'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(usage, (Some(7), true));
+        let interaction_id: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='early-usage'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let detail = observation
+            .get_interaction(&interaction_id, ForestQuery::default())
+            .await?
+            .expect("active interaction");
+        let queried_run = detail
+            .runs
+            .iter()
+            .find(|run| run.id == "early-usage")
+            .expect("active run");
+        assert_eq!(queried_run.usage.input_tokens, Some(7));
+        let obsolete_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE kind='usage_confirmed'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(obsolete_rows, 0);
+        drop(run);
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -2166,7 +2399,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let parent = test_run(&observation, "protected-parent", facts(Vec::new()));
         parent.record(RunEvent::ModelTurnStarted {
@@ -2179,6 +2412,8 @@ mod snapshot_tests {
             parent.send_event(RunEvent::ModelThinkingDelta {
                 model_turn_id: "turn".into(),
                 attempt_id: (index % 2).to_string(),
+                item_ordinal: 0,
+                part_index: (false, 0),
                 text: "x".into(),
             });
         }
@@ -2187,6 +2422,8 @@ mod snapshot_tests {
             status: "completed".into(),
         });
         parent.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: Some("generation".into()),
@@ -2199,6 +2436,8 @@ mod snapshot_tests {
         continuation.generation_root_id = Some("generation".into());
         let child = test_run(&observation, "protected-child", continuation);
         child.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: None,
@@ -2239,7 +2478,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let mut continuation = facts(Vec::new());
         continuation.has_new_user = false;
@@ -2265,7 +2504,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let admit = |id: &str, facts| {
             observation
@@ -2294,9 +2533,16 @@ mod snapshot_tests {
             if index == 8192 {
                 parent.send_event(RunEvent::ClientOutputCommitted);
             }
-            parent.send_event(RunEvent::ClientVisibleContentDelta { text: "文".into() });
+            parent.send_event(RunEvent::ClientVisibleContentDelta {
+                text: "文".into(),
+                item_ordinal: 0,
+                part_index: (false, 0),
+            });
         }
+        parent.record(visible_item("burst-item", &"文".repeat(16384)));
         parent.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: Some("burst-generation".into()),
@@ -2309,6 +2555,8 @@ mod snapshot_tests {
         continuation.generation_root_id = Some("burst-generation".into());
         let child = admit("burst-child", continuation);
         child.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: Some("child-generation".into()),
@@ -2328,33 +2576,15 @@ mod snapshot_tests {
         assert_eq!(rows[0].2.as_deref(), Some("burst-parent"));
         assert_eq!(rows[1].3, "completed");
         assert_eq!(rows[1].4.as_deref(), Some("burst-generation"));
-        let text: Vec<String> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content_delta' ORDER BY sequence")
-            .fetch_all(&pool).await?;
-        let recovered = text
-            .into_iter()
-            .map(|payload| {
-                let payload = codec::decode_payload(serde_json::from_str(&payload)?)?;
-                Ok(payload["text"].as_str().unwrap_or_default().to_owned())
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .concat();
-        assert_eq!(recovered, "文".repeat(16384));
-        let before_commit: Vec<String> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content_delta' AND sequence<(SELECT sequence FROM observation_events WHERE run_id='burst-parent' AND kind='client_output_committed') ORDER BY sequence",
-        ).fetch_all(&pool).await?;
-        let before_commit = before_commit
-            .into_iter()
-            .map(|payload| {
-                let payload = codec::decode_payload(serde_json::from_str(&payload)?)?;
-                Ok(payload["text"].as_str().unwrap_or_default().to_owned())
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .concat();
-        assert_eq!(
-            before_commit,
-            "文".repeat(8192),
-            "commit must seal the prior text"
-        );
+        let payload: Vec<u8> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content'")
+            .fetch_one(&pool).await?;
+        let payload = stored_payload(&payload)?;
+        assert_eq!(payload["text"], "文".repeat(16384));
+        assert_eq!(payload["block_id"], "burst-item");
+        assert_eq!(payload["complete"], true);
+        let volatile_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE run_id='burst-parent' AND kind IN ('client_visible_content_delta','client_output_committed')")
+            .fetch_one(&pool).await?;
+        assert_eq!(volatile_rows, 0);
         observation.shutdown().await;
         Ok(())
     }
@@ -2366,7 +2596,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         for close_first in [false, true] {
             let connection = ClientConnectionObservation::new(observation.clone());
@@ -2396,6 +2626,8 @@ mod snapshot_tests {
                     connection.close();
                 }
                 observer.finish(RunOutcome {
+                    client_output_committed: false,
+                    delivery: None,
                     status: status.into(),
                     terminal_reason: None,
                     generation_node_id: Some(format!("node-{id}")),
@@ -2444,7 +2676,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {
@@ -2465,9 +2697,7 @@ mod snapshot_tests {
                 },
                 facts(Vec::new()),
             );
-        observer.record(RunEvent::ClientVisibleContentDelta {
-            text: "saved answer".into(),
-        });
+        observer.record(visible_item("saved-answer", "saved answer"));
         drop(observer);
         observation.shutdown().await;
         sqlx::query("PRAGMA query_only=ON").execute(&pool).await?;
@@ -2496,7 +2726,7 @@ mod snapshot_tests {
             page.runs
                 .iter()
                 .flat_map(|run| &run.events)
-                .any(|event| event.kind == "client_visible_content_delta"
+                .any(|event| event.kind == "client_visible_content"
                     && event.payload["text"] == "saved answer")
         );
         assert_eq!(observation.inner.store.max_sequence().await?, before);
@@ -2505,112 +2735,289 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn trace_only_capture_flushes_at_durable_cutoffs_without_replay_gaps()
-    -> anyhow::Result<()> {
-        use tokio_stream::StreamExt;
-        fn wire_markers(records: &[serde_json::Value]) -> Vec<&str> {
-            records
-                .iter()
-                .filter_map(|record| record["payload"]["marker"].as_str())
-                .collect()
-        }
-
+    async fn clear_debug_active_trace_does_not_resurrect() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::db::init_pool(directory.path()).await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        observation.set_debug_enabled(true);
+        let active = test_run(&observation, "cleared-active", facts(Vec::new()));
+        observation.flush().await?;
+        let old = active
+            .inner
+            .trace
+            .as_ref()
+            .expect("debug trace")
+            .manifest()
+            .trace_id;
+        let old_directory = directory.path().join("observation-debug").join(&old);
+        assert!(old_directory.join("manifest.json").is_file());
+        observation.clear_debug().await?;
+        observation.flush().await?;
+        observation.sweep_retention().await?;
+        assert!(!old_directory.exists());
+        assert!(
+            observation
+                .inner
+                .store
+                .debug_trace_index()
+                .get(&old)
+                .is_none()
+        );
+        drop(active);
+        observation.flush().await?;
+        observation.sweep_retention().await?;
+        assert!(!old_directory.exists());
+        assert!(
+            observation
+                .inner
+                .store
+                .debug_trace_index()
+                .get(&old)
+                .is_none()
+        );
+        let fresh = test_run(&observation, "fresh-after-clear", facts(Vec::new()));
+        observation.flush().await?;
+        let new = fresh
+            .inner
+            .trace
+            .as_ref()
+            .expect("new debug trace")
+            .manifest()
+            .trace_id;
+        drop(fresh);
+        observation.flush().await?;
+        assert!(
+            directory
+                .path()
+                .join("observation-debug")
+                .join(&new)
+                .join("manifest.json")
+                .is_file()
+        );
+        assert!(
+            observation
+                .inner
+                .store
+                .debug_trace_index()
+                .get(&new)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_debug_retires_unadmitted_trace_without_active_writer() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        observation.set_debug_enabled(true);
+        let ingress = observation.observe_ingress(IngressStart {
+            id: "unadmitted".into(),
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            protocol: "responses".into(),
+        });
+        let trace = ingress.trace.as_ref().expect("ingress capture").clone();
+        // Finish removes ActiveWriter while the ingress handle still owns its state,
+        // reproducing the ownership shape of failed Create/recording without filesystem timing.
+        let old = trace.finish().await.trace_id;
+        trace.mark_partial("storage_error", true);
+        assert!(observation.inner.active_traces.lock().is_empty());
+        observation.clear_debug().await?;
+        drop(ingress);
+        observation.flush().await?;
+        observation.sweep_retention().await?;
+        assert!(
+            trace
+                .manifest()
+                .reasons
+                .iter()
+                .any(|reason| reason == "debug_data_cleared")
+        );
+        assert!(
+            !directory
+                .path()
+                .join("observation-debug")
+                .join(&old)
+                .exists()
+        );
+        assert!(
+            observation
+                .inner
+                .store
+                .debug_trace_index()
+                .get(&old)
+                .is_none()
+        );
+        assert_eq!(
+            observation.inner.store.debug_manifest_counts().await?,
+            (0, 0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wire_capture_is_eligible_at_the_durable_sequence_it_was_observed_at()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        observation.set_debug_enabled(true);
+        let observer = test_run(&observation, "wire-frontier", facts(Vec::new()));
+        observation.flush().await?;
+        let trace = observer.inner.trace.clone().expect("debug trace");
+        // No ordinary event lands after the capture: a ticket at the durable
+        // frontier must still include wire bytes observed while the log stood
+        // at that sequence.
+        let frontier = observation.inner.store.max_sequence().await?;
+        assert!(frontier >= 1);
+        observer.record(RunEvent::Wire {
+            direction: "upstream_response".into(),
+            transport: "http".into(),
+            protocol: "responses".into(),
+            message_type: "body_chunk".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            status_code: Some(200),
+            url: None,
+            headers: Value::Null,
+            payload: serde_json::json!({"marker": "incomplete-prefix"}),
+        });
+        observation.flush().await?;
+        let at_frontier = load_trace_values(trace.snapshot(frontier).await?).await?;
+        assert_eq!(
+            at_frontier
+                .iter()
+                .filter_map(|record| record["payload"]["marker"].as_str())
+                .collect::<Vec<_>>(),
+            ["incomplete-prefix"]
+        );
+        // The same record stays outside snapshots bounded before the frontier.
+        let before_frontier = load_trace_values(trace.snapshot(frontier - 1).await?).await?;
+        assert!(before_frontier.is_empty());
+        drop(observer);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocked_trace_root_retains_terminal_manifest_state() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        observation.set_debug_enabled(true);
+        // Displace the managed root after startup so every manifest write fails.
+        let root = directory.path().join("observation-debug");
+        let displaced = directory.path().join("observation-debug-displaced");
+        std::fs::rename(&root, &displaced)?;
+        std::fs::write(&root, b"regular file blocks managed trace directories")?;
+
+        let active = test_run(&observation, "blocked-run", facts(Vec::new()));
+        let trace = active.inner.trace.clone().expect("debug trace");
+        observation.flush().await?;
+        // The trace channel barrier orders the failed Create before the assert.
+        trace.flush().await?;
+        // While the capture is active the live handle already counts as partial
+        // and no manifest answers run-level queries yet.
+        assert!(observation.debug_state().partial_trace_count >= 1);
+        let index = observation.inner.store.debug_trace_index();
+        assert!(index.for_run("blocked-run").is_none());
+
+        active.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+            delivery_completed_at: Some(writer::now()),
+        });
+        drop(active);
+        observation.flush().await?;
+        // The finalized manifest is retained in the in-memory index even though
+        // the durable write failed, so queries and counts still see it.
+        assert!(observation.debug_state().partial_trace_count >= 1);
+        assert_eq!(
+            index.for_run("blocked-run").map(|m| m.status).as_deref(),
+            Some("partial")
+        );
+        let (_, partial) = observation.inner.store.debug_manifest_counts().await?;
+        assert!(partial >= 1);
+        observation.sweep_retention().await?;
+        assert!(observation.debug_state().partial_trace_count >= 1);
+        // Clear and retention erase the retained state without durable files.
+        observation.clear_debug().await?;
+        assert_eq!(observation.debug_state().partial_trace_count, 0);
+        assert!(index.for_run("blocked-run").is_none());
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_capture_flushes_to_files_without_database_debug_events() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         for enabled in [true, false] {
             observation.set_debug_enabled(enabled);
-            let run_id = format!("trace-{enabled}");
-            let observer = observation
-                .observe_ingress(IngressStart {
-                    id: format!("ingress-{enabled}"),
-                    method: "POST".into(),
-                    path: "/responses".into(),
-                    protocol: "responses".into(),
-                })
-                .admit(
-                    RunStart {
-                        id: run_id.clone(),
-                        principal: "test".into(),
-                        api_key_id: None,
-                        api_key_name: None,
-                        route_id: "route".into(),
-                        model_display_name: None,
-                        ingress_protocol: "responses".into(),
-                    },
-                    facts(Vec::new()),
-                );
+            let observer = test_run(&observation, &format!("trace-{enabled}"), facts(Vec::new()));
             observation.flush().await?;
-            let admitted = observation.inner.store.max_sequence().await?;
-            let wire = |marker: &str| RunEvent::Wire {
-                direction: "platform_to_client".into(),
-                transport: "http".into(),
-                protocol: "responses".into(),
-                message_type: "body_chunk".into(),
-                model_turn_id: None,
-                attempt_id: None,
-                status_code: Some(200),
-                url: None,
-                headers: Value::Null,
-                payload: serde_json::json!({"marker":marker}),
-            };
-            observer.record(wire("before-cutoff"));
-            observation.flush().await?;
-            let cutoff = observation.inner.store.max_sequence().await?;
-            observer.record(wire("after-cutoff"));
             let trace = observer.inner.trace.clone();
-            if let Some(trace) = &trace {
-                let old = load_trace_values(trace.snapshot(cutoff).await?).await?;
-                assert_eq!(wire_markers(&old), ["before-cutoff"]);
-                assert!(
-                    wire_markers(&load_trace_values(trace.snapshot(admitted).await?).await?)
-                        .is_empty()
-                );
-            } else {
-                assert!(!enabled);
-                assert_eq!(cutoff, admitted);
+            for marker in ["before-flush", "after-flush"] {
+                observer.record(RunEvent::Wire {
+                    direction: "platform_to_client".into(),
+                    transport: "http".into(),
+                    protocol: "responses".into(),
+                    message_type: "body_chunk".into(),
+                    model_turn_id: None,
+                    attempt_id: None,
+                    status_code: Some(200),
+                    url: None,
+                    headers: Value::Null,
+                    payload: serde_json::json!({"marker":marker}),
+                });
+                observation.flush().await?;
             }
+            observer.finish(RunOutcome {
+                client_output_committed: false,
+                delivery: None,
+                status: "completed".into(),
+                terminal_reason: None,
+                generation_node_id: None,
+                generation_root_id: None,
+                delivery_completed_at: Some(writer::now()),
+            });
             drop(observer);
             observation.flush().await?;
-            let terminal = observation.inner.store.max_sequence().await?;
-            if let Some(trace) = &trace {
-                let final_records = load_trace_values(trace.snapshot(terminal).await?).await?;
-                assert_eq!(
-                    wire_markers(&final_records),
-                    ["before-cutoff", "after-cutoff"]
-                );
-                assert_eq!(trace.manifest().status, "complete");
-            }
-            let rows: Vec<(i64, String)> = sqlx::query_as(
-                "SELECT sequence,kind FROM observation_events WHERE sequence>? ORDER BY sequence",
-            )
-            .bind(admitted)
-            .fetch_all(&pool)
-            .await?;
-            assert!(
-                !rows.iter().any(|(_, kind)| matches!(
-                    kind.as_str(),
-                    "wire" | "content" | "target_selected"
-                ))
-            );
-            assert_eq!(
-                rows.iter()
-                    .map(|(sequence, _)| *sequence)
-                    .collect::<Vec<_>>(),
-                ((admitted + 1)..=terminal).collect::<Vec<_>>()
-            );
-            let mut replay = observation.subscribe(admitted);
-            for (sequence, kind) in rows {
-                let update = tokio::time::timeout(std::time::Duration::from_secs(2), replay.next())
-                    .await?
-                    .expect("persisted replay event");
-                let ObservationUpdate::Event(event) = update else {
-                    panic!("trace traffic must not cause a replay reset")
-                };
-                assert_eq!((event.sequence, event.kind), (sequence, kind));
+            if let Some(trace) = trace {
+                let records = load_trace_values(trace.snapshot(i64::MAX).await?).await?;
+                let markers: Vec<_> = records
+                    .iter()
+                    .filter_map(|record| record["payload"]["marker"].as_str())
+                    .collect();
+                assert_eq!(markers, ["before-flush", "after-flush"]);
+                let manifest_path = directory
+                    .path()
+                    .join("observation-debug")
+                    .join(&trace.manifest().trace_id)
+                    .join("manifest.json");
+                let manifest: Value =
+                    serde_json::from_slice(&tokio::fs::read(manifest_path).await?)?;
+                assert_eq!(manifest["status"], "complete");
+                assert_eq!(manifest["run_id"], format!("trace-{enabled}"));
+            } else {
+                assert!(!enabled);
             }
         }
+        let debug_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE kind IN ('wire','content','target_selected','trace_manifest_updated')").fetch_one(&pool).await?;
+        assert_eq!(debug_rows, 0);
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -2618,13 +3025,12 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn input_preview_is_root_owned_and_recorded_once_per_run() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
-            .execute(&pool)
-            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let at = writer::now();
         sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('historical','test','historical','initial','route','running',?,?,?)")
             .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
@@ -2637,7 +3043,11 @@ mod snapshot_tests {
         sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('initial','historical',NULL,'openai','route','running',0,?,?,?),('child','historical','initial','openai','route','running',0,?,?,?)")
             .bind(at).bind(at).bind(at + 86_400_000)
             .bind(at + 1).bind(at + 1).bind(at + 86_400_000).execute(&pool).await?;
-        let store = store::ObservationStore::Sqlite(pool.clone());
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::load(directory.path())?),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
         assert!(
             store
                 .persist_input_preview("historical", "missing", "not owned", at, at + 86_400_000)
@@ -2689,7 +3099,7 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(preview.as_deref(), Some("first input"));
-        let events: Vec<(String, String)> = sqlx::query_as(
+        let events: Vec<(String, Vec<u8>)> = sqlx::query_as(
             "SELECT run_id,payload FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
         )
         .fetch_all(&pool)
@@ -2704,7 +3114,7 @@ mod snapshot_tests {
         assert_eq!(
             events
                 .iter()
-                .map(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload))
+                .map(|(_, payload)| stored_payload(payload))
                 .collect::<Result<Vec<_>, _>>()?,
             [
                 serde_json::json!({"kind": "input_preview_recorded", "text": "first input"}),
@@ -2726,9 +3136,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect_with(options.clone())
             .await?;
-        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
-            .execute(&pool)
-            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let now = chrono::Utc::now().timestamp_millis();
         for (id, status, last_active, gap) in [
             ("first", "failed", now + 100, false),
@@ -2774,7 +3182,7 @@ mod snapshot_tests {
             ),
         ] {
             sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
-                .bind(sequence).bind(time).bind(interaction).bind(payload)
+                .bind(sequence).bind(time).bind(interaction).bind(crate::storage_codec::encode(payload.as_bytes())?)
                 .bind(now + 86_400_000).execute(&pool).await?;
         }
         pool.close().await;
@@ -2782,7 +3190,11 @@ mod snapshot_tests {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        let store = store::ObservationStore::Sqlite(pool.clone());
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::load(directory.path())?),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
         let first = store
             .credential_discoveries(CredentialDiscoveryQuery {
                 cursor: None,
@@ -2852,9 +3264,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
-            .execute(&pool)
-            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let mut observation = test_observation(&pool, directory.path(), false).await;
         let delivered_at = writer::now() - 100_000;
         for restarted in [false, true] {
@@ -2967,6 +3377,8 @@ mod snapshot_tests {
                     true,
                 );
                 first.finish(RunOutcome {
+                    client_output_committed: false,
+                    delivery: None,
                     status: if tools { "waiting_client" } else { "completed" }.into(),
                     terminal_reason: None,
                     generation_node_id: Some(node_id.clone()),
@@ -3017,9 +3429,17 @@ mod snapshot_tests {
                         .fetch_one(&pool)
                         .await?;
                 assert_eq!(status, "running");
-                let recorded_reason: String = sqlx::query_scalar("SELECT json_extract(payload,'$.grouping_reason') FROM observation_events WHERE run_id=? AND kind='run_admitted'")
-                    .bind(&id).fetch_one(&pool).await?;
-                assert_eq!(recorded_reason, reason, "{id}");
+                let admitted_payload: Vec<u8> = sqlx::query_scalar(
+                    "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_admitted'",
+                )
+                .bind(&id)
+                .fetch_one(&pool)
+                .await?;
+                assert_eq!(
+                    stored_payload(&admitted_payload)?["grouping_reason"],
+                    reason,
+                    "{id}"
+                );
                 drop(child);
                 observation.flush().await?;
             }
@@ -3061,9 +3481,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
-            .execute(&pool)
-            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let make_run = |id: &str| {
             observation
@@ -3095,6 +3513,8 @@ mod snapshot_tests {
             }],
         });
         completed.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             delivery_completed_at: None,
             status: "completed".into(),
             terminal_reason: None,
@@ -3129,6 +3549,8 @@ mod snapshot_tests {
         assert_eq!(page.items[0].new_credential_count, 1);
 
         active.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             delivery_completed_at: None,
             status: "completed".into(),
             terminal_reason: None,
@@ -3187,9 +3609,7 @@ mod snapshot_tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        sqlx::raw_sql(include_str!("../../migrations/sqlite/0001_baseline.sql"))
-            .execute(&pool)
-            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {
@@ -3254,23 +3674,25 @@ mod snapshot_tests {
                 "error": "restored-tool-secret", "access_token": "PLATFORM_RESULT_SECRET",
             })),
         });
-        observer.record(RunEvent::ModelThinkingDelta {
+        observer.record(RunEvent::ModelThinking {
             model_turn_id: "turn".into(),
             attempt_id: "attempt".into(),
             text: "private reasoning".into(),
+            parts: vec![serde_json::json!({"type":"thinking","text":"private reasoning"})],
+            block_id: "private-reasoning".into(),
+            item: serde_json::json!({"id":"private-reasoning","content":"private reasoning"}),
+            complete: true,
         });
-        observer.record(RunEvent::ClientVisibleContentDelta {
-            text: "public answer".into(),
-        });
+        observer.record(visible_item("public-answer", "public answer"));
         drop(observer);
         observation.flush().await?;
-        let rows: Vec<(String, String)> =
+        let rows: Vec<(String, Vec<u8>)> =
             sqlx::query_as("SELECT kind, payload FROM observation_events ORDER BY sequence")
                 .fetch_all(&pool)
                 .await?;
         let events: Vec<(String, Value)> = rows
             .into_iter()
-            .map(|(kind, payload)| (kind, serde_json::from_str(&payload).expect("event payload")))
+            .map(|(kind, payload)| (kind, stored_payload(&payload).expect("event payload")))
             .collect();
         let results: Vec<_> = events
             .iter()
@@ -3310,15 +3732,14 @@ mod snapshot_tests {
         );
         let thinking: String = events
             .iter()
-            .filter(|event| event.0 == "model_thinking_delta")
+            .filter(|event| event.0 == "model_thinking")
             .filter_map(|event| event.1["text"].as_str())
             .collect();
         assert_eq!(thinking, "private reasoning");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.0 == "model_thinking_finished")
-        );
+        assert!(events.iter().all(|event| !matches!(
+            event.0.as_str(),
+            "model_thinking_delta" | "model_thinking_finished" | "client_visible_content_delta"
+        )));
         let visible: String =
             sqlx::query_scalar("SELECT visible_tail FROM interaction_observations")
                 .fetch_one(&pool)

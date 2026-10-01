@@ -39,11 +39,13 @@ async fn sqlite_turn_chain_survives_store_reconstruction() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let id = TurnNodeId::response();
-    SqlTurnChainStore::sqlite(pool.clone())
+    // 同一池上的多个 store 必须共用同一写闸门。
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    SqlTurnChainStore::sqlite(pool.clone(), Arc::clone(&gate))
         .commit(TurnCommit {
             id: id.clone(),
             kind: TurnNodeKind::Response,
@@ -57,7 +59,7 @@ async fn sqlite_turn_chain_survives_store_reconstruction() {
         .await
         .expect("persist response Turn");
 
-    let reconstructed = SqlTurnChainStore::sqlite(pool);
+    let reconstructed = SqlTurnChainStore::sqlite(pool, gate);
     let chain = reconstructed
         .materialize(&principal("owner"), TurnNodeKind::Response, &id)
         .await
@@ -75,10 +77,10 @@ async fn sqlite_rejects_and_renews_expired_ancestor_chains() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(pool.clone(), Arc::new(tokio::sync::Mutex::new(())));
     let owner = principal("owner");
     let root = TurnNodeId::agent();
     let child = TurnNodeId::agent();
@@ -431,10 +433,14 @@ async fn sqlite_reusable_prefix_store_contract() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
-    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(pool))).await;
+    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(
+        pool,
+        Arc::new(tokio::sync::Mutex::new(())),
+    )))
+    .await;
 }
 
 #[tokio::test]
@@ -463,7 +469,7 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
         .connect_with(options)
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::migrate_postgres(&pool)
+    crate::migrations::migrate_postgres(&pool, None)
         .await
         .expect("PostgreSQL migrations");
     assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::postgres(pool.clone())))
@@ -534,10 +540,12 @@ async fn sqlite_reusable_prefix_metadata_survives_store_reconstruction() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
-    SqlTurnChainStore::sqlite(pool.clone())
+    // 同一池上的多个 store 共用同一写闸门。
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    SqlTurnChainStore::sqlite(pool.clone(), Arc::clone(&gate))
         .commit(TurnCommit {
             id: TurnNodeId::new("resp_indexed"),
             kind: TurnNodeKind::Response,
@@ -556,7 +564,7 @@ async fn sqlite_reusable_prefix_metadata_survives_store_reconstruction() {
         .await
         .expect("commit indexed response");
 
-    let candidates = SqlTurnChainStore::sqlite(pool)
+    let candidates = SqlTurnChainStore::sqlite(pool, gate)
         .find_reusable_prefixes(
             &principal("owner"),
             TurnNodeKind::Response,
@@ -587,11 +595,11 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let owner = principal("owner");
-    let setup = SqlTurnChainStore::sqlite(pool.clone());
+    let setup = SqlTurnChainStore::sqlite(pool.clone(), Arc::new(tokio::sync::Mutex::new(())));
     let mut head: Option<TurnNodeId> = None;
     for depth in 0..DEPTH {
         let id = TurnNodeId::agent();
@@ -646,7 +654,7 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let store = SqlTurnChainStore::sqlite(budgeted);
+    let store = SqlTurnChainStore::sqlite(budgeted, Arc::new(tokio::sync::Mutex::new(())));
 
     let chain = store
         .materialize(&owner, TurnNodeKind::Agent, &head)
@@ -689,7 +697,7 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let owner = principal("owner");
@@ -729,7 +737,7 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let candidates = SqlTurnChainStore::sqlite(budgeted)
+    let candidates = SqlTurnChainStore::sqlite(budgeted, Arc::new(tokio::sync::Mutex::new(())))
         .find_reusable_prefixes(
             &owner,
             TurnNodeKind::Response,

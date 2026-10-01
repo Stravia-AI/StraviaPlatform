@@ -242,7 +242,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let directory = tempfile::tempdir().expect("temp dir");
@@ -266,6 +266,7 @@ mod tests {
             7,
             true,
             gateway.generation_chains.clone(),
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(()))),
         )
         .await;
         let observer = observation

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { formatDuration, formatList, formatTime } from '../src/lib/format'
-import { deriveTimeline, itemEvents, itemKey, processGroup, usageText } from '../src/lib/observation-timeline'
+import { formatDuration, formatTime } from '../src/lib/format'
+import { deriveTimeline, itemEvents, itemKey, usageRows, usageText } from '../src/lib/observation-timeline'
+import { observationEventSummary } from '../src/lib/observation-event-summary'
 import * as m from '../src/lib/paraglide/messages.js'
 import type {
   ConfirmedUsage,
@@ -107,6 +108,41 @@ function failureDetail(events: ObservationEvent[]): FailedRequestDetail {
   }
 }
 
+describe('terminal lifecycle revisions', () => {
+  test('keeps diagnostic chronology without adding revision usage to the run projection or TPS', () => {
+    const initial = event(1, 'target_attempt_finished', {
+      attempt_id: 'attempt',
+      status: 'failed',
+      duration_ms: 2000,
+      first_token_ms: 1000,
+      usage: { ...usage, output_tokens: 10 },
+    })
+    const revised = event(3, 'target_attempt_finished', {
+      attempt_id: 'attempt',
+      status: 'failed',
+      duration_ms: 2000,
+      first_token_ms: 1000,
+      usage: { ...usage, output_tokens: 20 },
+    })
+    const delivery = event(2, 'run_finished', { status: 'failed', delivery: null })
+    const delivered = event(4, 'run_finished', {
+      status: 'failed',
+      delivery: { status: 'delivery_failed', reason: 'connection_closed', completed_at: 4 },
+    })
+    const current = run('r1', 0, [initial, delivery, revised, delivered])
+    const view = deriveTimeline(detail([current]), undefined)
+    expect(view.timelines.get('r1')!.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4])
+    expect(usageRows(view.orderedRuns[0]).find(([label]) => label === m.observation_event_tokens_output())?.[1]).toBe(
+      20,
+    )
+    expect(observationEventSummary(revised).facts).toContainEqual({ label: m.logs_token_speed(), value: '20 tok/s' })
+    expect(observationEventSummary(delivered).facts).toContainEqual({
+      label: m.observation_event_delivery_reason(),
+      value: 'connection_closed',
+    })
+  })
+})
+
 describe('deriveTimeline ordering', () => {
   test('orders runs by started_at and events by occurred_at then sequence', () => {
     const later = run('b', 2000)
@@ -138,7 +174,7 @@ describe('stream item grouping', () => {
   test('merges consecutive neutral process events and folds same-name handoffs', () => {
     const r = run('a', 0, [
       event(1, 'checkpoint', { stage: 'one' }),
-      event(2, 'usage_confirmed', { usage: {} }),
+      event(2, 'wire', { direction: 'upstream' }),
       event(3, 'client_tool_handoff', { name: 'search' }),
       event(4, 'client_tool_handoff', { name: 'search' }),
       event(5, 'client_tool_handoff', { name: 'other' }),
@@ -155,7 +191,16 @@ describe('stream item grouping', () => {
   })
 
   test('process-kind events with a non-neutral tone stay on the main stream', () => {
-    const r = run('a', 0, [event(1, 'trace_manifest_updated', { status: 'missing' }), event(2, 'checkpoint', {})])
+    const r = run('a', 0, [
+      event(1, 'client_visible_content', {
+        item: 'text:0',
+        block_id: 'partial',
+        text: 'partial',
+        parts: [{ type: 'text', text: 'partial' }],
+        complete: false,
+      }),
+      event(2, 'checkpoint', {}),
+    ])
     const items = deriveTimeline(detail([r]), undefined).streams.get('a')!
     expect(items.map((i) => i.type)).toEqual(['event', 'process'])
   })
@@ -244,30 +289,6 @@ describe('failure items', () => {
     expect(view.failureItems.map((i) => i.type)).toEqual(['tools', 'process'])
     expect(view.failureItems.map(itemKey)).toEqual([1, 2])
     expect(itemEvents(view.failureItems[1]).map((e) => e.sequence)).toEqual([2, 3])
-  })
-})
-
-describe('processGroup', () => {
-  test('a single kind collapses into title times count', () => {
-    const group = processGroup([event(1, 'checkpoint', { stage: 'a' }), event(2, 'checkpoint', { stage: 'b' })])
-    expect(group.label).toBe(m.observation_event_group({ title: m.observation_event_checkpoint(), count: 2 }))
-    expect(group.titles).toBeNull()
-  })
-
-  test('mixed kinds list distinct titles and truncate past three', () => {
-    const kinds = ['checkpoint', 'wire', 'usage_confirmed']
-    const mixed = kinds.map((kind, i) => event(i + 1, kind, {}))
-    const three = processGroup(mixed)
-    expect(three.label).toBe(m.observation_process_events({ count: 3 }))
-    expect(three.titles).toBe(
-      formatList([m.observation_event_checkpoint(), m.observation_event_wire(), m.observation_event_usage_confirmed()]),
-    )
-
-    const four = processGroup([...mixed, event(4, 'input_preview_recorded', {})])
-    expect(four.label).toBe(m.observation_process_events({ count: 4 }))
-    expect(four.titles).toBe(
-      `${formatList([m.observation_event_checkpoint(), m.observation_event_wire(), m.observation_event_usage_confirmed()])}…`,
-    )
   })
 })
 

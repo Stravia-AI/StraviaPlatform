@@ -336,6 +336,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     )
                                 });
                                 let progress = delivery.send_deltas(&deltas).await;
+                                if progress == DeliveryProgress::Sent && observe_delivery {
+                                    ledger.terminal.observe_visible_leg(projection.model_leg_ordinal());
+                                    ledger.terminal.observe_visible_deltas(&observer, &deltas);
+                                }
                                 let outcome = if progress == DeliveryProgress::Sent {
                                     ProjectionDelivery::Sent
                                 } else {

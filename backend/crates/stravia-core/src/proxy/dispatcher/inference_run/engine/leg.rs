@@ -879,17 +879,15 @@ pub(super) async fn deliver_projected(
     observe_delivery: bool,
     batch: ProjectedDeltaBatch,
 ) -> Result<(), ProjectedDeliveryFailure> {
-    let visible_text = if observe_delivery {
-        batch
-            .deltas()
-            .iter()
-            .filter_map(super::visible_delta_text)
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
     let progress = delivery.send_deltas(batch.deltas()).await;
+    if progress == DeliveryProgress::Sent && observe_delivery {
+        ledger
+            .terminal
+            .observe_visible_leg(projection.model_leg_ordinal());
+        ledger
+            .terminal
+            .observe_visible_deltas(observer, batch.deltas());
+    }
     let outcome = if progress == DeliveryProgress::Sent {
         ProjectionDelivery::Sent
     } else {
@@ -902,17 +900,6 @@ pub(super) async fn deliver_projected(
             ProjectedDeliveryFailure::Marker(error)
         })?;
     if progress == DeliveryProgress::Sent {
-        if observe_delivery {
-            for text in visible_text {
-                if !text.is_empty() {
-                    observer.record(
-                        crate::interaction_observation::RunEvent::ClientVisibleContentDelta {
-                            text,
-                        },
-                    );
-                }
-            }
-        }
         Ok(())
     } else {
         Err(ProjectedDeliveryFailure::Delivery(progress))
@@ -1028,7 +1015,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let directory = tempfile::tempdir().expect("temp dir");
@@ -1052,6 +1039,7 @@ mod tests {
             7,
             true,
             gateway.generation_chains.clone(),
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(()))),
         )
         .await;
         let observer = observation

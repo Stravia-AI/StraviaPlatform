@@ -1,10 +1,5 @@
 import { computeTps, formatDuration, formatNumber, formatTps } from '$lib/format'
-import {
-  failureOriginLabel,
-  observationContextStatusLabel,
-  observationDebugStatusLabel,
-  observationStatusLabel,
-} from '$lib/observation-labels'
+import { failureOriginLabel, observationContextStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { payloadCount, payloadRecord } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 import type { ObservationEvent } from '$lib/types/observation'
@@ -16,9 +11,9 @@ type EventSummary = {
   tone: 'neutral' | 'success' | 'warning' | 'error'
 }
 
+// 思考与可见正文按 Canonical Item 各落一行；确认用量由 target_attempt_finished 携带。
 const TITLES: Record<string, () => string> = {
   run_admitted: m.observation_event_run_admitted,
-  generation_associated: m.observation_event_generation_associated,
   retained_tail_associated: m.observation_event_retained_tail_associated,
   native_compaction_associated: m.observation_event_native_compaction_associated,
   model_turn_started: m.observation_event_model_turn_started,
@@ -29,23 +24,18 @@ const TITLES: Record<string, () => string> = {
   platform_tool_finished: m.observation_event_platform_tool_finished,
   client_tool_handoff: m.observation_event_client_tool_handoff,
   client_tool_result: m.observation_event_client_tool_result,
-  model_thinking_delta: m.observation_event_model_thinking_delta,
-  model_thinking_finished: m.observation_event_model_thinking_finished,
+  model_thinking: m.observation_event_model_thinking,
   compaction_operation: m.observation_event_compaction_operation,
-  delivery_finished: m.observation_event_delivery_finished,
   run_finished: m.observation_event_run_finished,
   run_state_changed: m.observation_event_run_state_changed,
   request_rejected: m.observation_event_request_rejected,
   request_failed: m.observation_request_failed,
   observation_gap: m.observation_event_observation_gap,
-  usage_confirmed: m.observation_event_usage_confirmed,
-  client_visible_content_delta: m.observation_event_client_visible_content_delta,
-  client_output_committed: m.observation_event_client_output_committed,
+  client_visible_content: m.observation_event_client_visible_content,
   input_preview_recorded: m.observation_event_input_preview_recorded,
   credential_mappings_created: m.observation_event_credential_mappings_created,
   checkpoint: m.observation_event_checkpoint,
   wire: m.observation_event_wire,
-  trace_manifest_updated: m.observation_event_trace_manifest_updated,
 }
 
 const record = payloadRecord
@@ -99,30 +89,7 @@ export function observationStatusTone(status: unknown): EventSummary['tone'] {
   }
 }
 
-/** 索引同一 Run 内各次尝试最后确认的输出用量；累计快照不能相加。 */
-export function observationAttemptOutputTokens(events: readonly ObservationEvent[]): Map<string, number | null> {
-  const latest = new Map<string, ObservationEvent>()
-  for (const event of events) {
-    if (event.kind !== 'usage_confirmed') continue
-    const attempt = text(record(event.payload).attempt_id)
-    if (!attempt) continue
-    const previous = latest.get(attempt)
-    if (!previous || previous.sequence < event.sequence) {
-      latest.set(attempt, event)
-    }
-  }
-  const outputs = new Map<string, number | null>()
-  for (const [attempt, event] of latest) {
-    const value = record(record(event.payload).usage).output_tokens
-    outputs.set(attempt, count(value) ? value : null)
-  }
-  return outputs
-}
-
-export function observationEventSummary(
-  event: ObservationEvent,
-  attemptOutputTokens?: ReadonlyMap<string, number | null>,
-): EventSummary {
+export function observationEventSummary(event: ObservationEvent): EventSummary {
   const known = Object.hasOwn(TITLES, event.kind)
   const summary: EventSummary = {
     title: known ? TITLES[event.kind]() : m.observation_event_unknown(),
@@ -179,45 +146,60 @@ export function observationEventSummary(
         httpStatus()
         add(m.observation_error_code(), payload.error_code)
         duration('first_token_ms', m.observation_event_first_token())
-      }
-      if (event.kind === 'run_finished') add(m.observation_event_reason(), payload.terminal_reason)
-      if (event.kind === 'run_state_changed') {
-        const reason =
-          payload.reason === 'user_interrupted'
-            ? m.observation_user_interrupted()
-            : payload.reason === 'superseded'
-              ? m.observation_status_superseded()
-              : payload.reason
-        add(m.observation_event_reason(), reason)
-      }
-      if (event.kind === 'target_attempt_finished' || event.kind === 'platform_tool_finished') {
         duration('duration_ms', m.observation_duration())
-      }
-      if (event.kind === 'target_attempt_finished') {
-        const attempt = text(payload.attempt_id)
+        // 确认用量随完成事件同载荷返回（含失败/中断的部分用量），管理面 input 已减缓存读。
+        const usage = record(payload.usage)
+        const usageFields: Array<[string, () => string]> = [
+          ['input_tokens', m.observation_event_tokens_input],
+          ['output_tokens', m.observation_event_tokens_output],
+          ['cache_read_tokens', m.observation_event_tokens_cache_read],
+          ['cache_write_tokens', m.observation_event_tokens_cache_write],
+        ]
+        for (const [key, label] of usageFields) {
+          if (count(usage[key])) add(label(), formatNumber(usage[key]))
+        }
         const firstToken = count(payload.first_token_ms) ? payload.first_token_ms : null
         const speed = computeTps({
-          output_tokens: attempt ? attemptOutputTokens?.get(attempt) : null,
+          output_tokens: count(usage.output_tokens) ? usage.output_tokens : null,
           is_stream: firstToken !== null,
           latency_upstream_ms: count(payload.duration_ms) ? payload.duration_ms : null,
           stream_first_chunk_ms: firstToken,
         })
         add(m.logs_token_speed(), formatTps(speed))
       }
-      break
-    case 'delivery_finished':
-      if (payload.status === 'delivered') {
-        add(m.observation_event_result(), m.observation_event_delivered())
-        summary.tone = 'success'
-      } else if (payload.status === 'delivery_failed') {
-        add(m.observation_event_result(), observationStatusLabel('failed'))
-        summary.tone = 'error'
-      } else if (payload.status === 'cancelled') {
-        result()
-      } else {
-        add(m.observation_event_result(), payload.status)
+      if (event.kind === 'platform_tool_finished') {
+        duration('duration_ms', m.observation_duration())
       }
-      add(m.observation_event_reason(), payload.reason)
+      if (event.kind === 'run_finished') {
+        add(m.observation_event_reason(), payload.terminal_reason)
+        // 交付结果并入 run_finished：delivered/delivery_failed/cancelled 与附带原因。
+        const delivery = record(payload.delivery)
+        const deliveryStatus = text(delivery.status)
+        if (deliveryStatus) {
+          const deliveryLabel =
+            deliveryStatus === 'delivered'
+              ? m.observation_event_delivered()
+              : deliveryStatus === 'delivery_failed'
+                ? observationStatusLabel('failed')
+                : deliveryStatus === 'cancelled'
+                  ? observationStatusLabel('cancelled')
+                  : deliveryStatus
+          add(m.observation_delivery(), deliveryLabel)
+          add(m.observation_event_delivery_reason(), delivery.reason)
+          if (deliveryStatus === 'delivery_failed' && summary.tone === 'neutral') summary.tone = 'warning'
+        }
+      }
+      if (event.kind === 'run_state_changed') {
+        const reason =
+          payload.reason === 'user_interrupted'
+            ? m.observation_user_interrupted()
+            : payload.reason === 'superseded'
+              ? m.observation_status_superseded()
+              : payload.reason === 'process_restarted'
+                ? m.observation_event_reason_process_restarted()
+                : payload.reason
+        add(m.observation_event_reason(), reason)
+      }
       break
     case 'retained_tail_associated':
       // 匹配结果只解释诊断关联，不能代表请求成功或执行历史发生变化。
@@ -268,19 +250,6 @@ export function observationEventSummary(
       summary.note = observationGapNote(text(payload.reason))
       add(m.observation_event_reason(), payload.reason)
       break
-    case 'usage_confirmed': {
-      const usage = record(payload.usage)
-      const fields: Array<[string, () => string]> = [
-        ['input_tokens', m.observation_event_tokens_input],
-        ['output_tokens', m.observation_event_tokens_output],
-        ['cache_read_tokens', m.observation_event_tokens_cache_read],
-        ['cache_write_tokens', m.observation_event_tokens_cache_write],
-      ]
-      for (const [key, label] of fields) {
-        if (count(usage[key])) add(label(), formatNumber(usage[key]))
-      }
-      break
-    }
     case 'credential_mappings_created':
       if (Array.isArray(payload.discoveries) && payload.discoveries.length > 0) {
         add(m.observation_event_credentials(), formatNumber(payload.discoveries.length))
@@ -293,18 +262,13 @@ export function observationEventSummary(
       add(m.observation_protocol(), payload.protocol)
       httpStatus()
       break
-    case 'trace_manifest_updated':
-      if (['complete', 'missing', 'none', 'partial', 'running', 'writing'].includes(text(payload.status) ?? '')) {
-        add(m.observation_event_result(), observationDebugStatusLabel(text(payload.status) ?? ''))
-      } else {
-        add(m.observation_event_result(), payload.status)
-      }
-      if (payload.status === 'missing' || payload.status === 'partial') summary.tone = 'warning'
-      if (Array.isArray(payload.reasons)) {
-        add(
-          m.observation_event_reason(),
-          payload.reasons.filter((reason): reason is string => !!text(reason)).join(', '),
-        )
+    case 'model_thinking':
+    case 'client_visible_content':
+      // 每个 Canonical Item 一行；complete=false 仅出现在已处理的取消/失败时保留部分正文。
+      if (payload.complete === false) {
+        add(m.observation_event_result(), m.observation_event_incomplete())
+        summary.tone = 'warning'
+        summary.note = m.observation_event_content_incomplete()
       }
       break
   }

@@ -92,6 +92,7 @@ impl ProviderModelStore for SqliteStorage {
     ) -> anyhow::Result<()> {
         let mut connection = self.pool.acquire().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let has_writes = !reconciliation.updates.is_empty() || !reconciliation.inserts.is_empty();
         for update in &reconciliation.updates {
             let revision = sqlx::query_scalar::<_, i64>(
                 "SELECT revision FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'",
@@ -158,6 +159,12 @@ impl ProviderModelStore for SqliteStorage {
         for input in reconciliation.inserts {
             insert_record(&mut tx, input).await?;
         }
+        // Presence/metadata changes alter model resolution and prices; notify
+        // other replicas in the same commit. An empty reconciliation writes
+        // nothing and must not publish a spurious epoch.
+        if has_writes {
+            bump_config_epoch(&mut tx).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -179,12 +186,12 @@ impl ProviderModelStore for SqliteStorage {
         let provider_id = input.provider_id.clone();
         let model_id = input.model_id.clone();
         insert_record(&mut tx, input).await?;
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, &provider_id, &model_id)
+            .await?
+            .context("created Provider Model not found")?;
         tx.commit().await?;
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut connection, &provider_id, &model_id)
-                .await?
-                .context("created Provider Model not found")?,
-        )))
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn update_metadata(
@@ -215,12 +222,12 @@ impl ProviderModelStore for SqliteStorage {
             });
         }
         replace_cost_rules(&mut tx, provider_id, model_id, &metadata.cost_rules()).await?;
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, provider_id, model_id)
+            .await?
+            .context("updated Provider Model not found")?;
         tx.commit().await?;
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut connection, provider_id, model_id)
-                .await?
-                .context("updated Provider Model not found")?,
-        )))
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn reimport(
@@ -285,6 +292,7 @@ impl ProviderModelStore for SqliteStorage {
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation> {
         let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             r#"UPDATE provider_models
                SET selection_policy = ?, revision = revision + 1, updated_at = datetime('now')
@@ -294,36 +302,45 @@ impl ProviderModelStore for SqliteStorage {
         .bind(provider_id)
         .bind(model_id)
         .bind(expected_revision)
-        .execute(&mut *connection)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
             return Ok(
-                if get_record(&mut connection, provider_id, model_id)
-                    .await?
-                    .is_some()
-                {
+                if get_record(&mut tx, provider_id, model_id).await?.is_some() {
                     ProviderModelMutation::Conflict
                 } else {
                     ProviderModelMutation::NotFound
                 },
             );
         }
-        Ok(ProviderModelMutation::Applied(Box::new(
-            get_record(&mut connection, provider_id, model_id)
-                .await?
-                .context("updated Provider Model not found")?,
-        )))
+        // Selection policy gates whether the resolved model may serve traffic;
+        // publish the change atomically with the write it accompanies.
+        bump_config_epoch(&mut tx).await?;
+        let record = get_record(&mut tx, provider_id, model_id)
+            .await?
+            .context("updated Provider Model not found")?;
+        tx.commit().await?;
+        Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
     async fn delete_manual(&self, provider_id: &str, model_id: &str) -> anyhow::Result<bool> {
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "DELETE FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'manual'",
         )
         .bind(provider_id)
         .bind(model_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        let deleted = result.rows_affected() == 1;
+        if deleted {
+            // Removing a manual record changes loose resolution results;
+            // other replicas must reload together with this commit.
+            bump_config_epoch(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(deleted)
     }
 }
 
@@ -783,7 +800,9 @@ mod tests {
     async fn stale_reconciliation_rolls_back_all_sqlite_updates() {
         let data_dir = tempfile::tempdir().unwrap();
         let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
                      VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -865,7 +884,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         sqlx::query(
@@ -922,7 +941,9 @@ mod tests {
     async fn reimport_fixture() -> (tempfile::TempDir, SqliteStorage) {
         let data_dir = tempfile::tempdir().unwrap();
         let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -1107,6 +1128,7 @@ mod tests {
             .await
             .unwrap();
 
+        let epoch_before = config_epoch(pool).await.unwrap().parse::<i64>().unwrap();
         let target_a_before = target_row(pool, "target-a").await;
         let target_c_map_before = target_map(pool, "target-c").await;
 
@@ -1137,7 +1159,10 @@ mod tests {
             model.cost_rules[0].kind,
             ProviderModelCostRuleKind::ContextOver200k
         );
-        assert_eq!(config_epoch(pool).await.as_deref(), Some("1"));
+        assert_eq!(
+            config_epoch(pool).await.unwrap().parse::<i64>().unwrap(),
+            epoch_before + 1
+        );
 
         // Generated rows follow the reimported map; the Overridden row survives.
         let map_a = target_map(pool, "target-a").await;
@@ -1229,7 +1254,7 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        sqlx::query("INSERT INTO settings (name, value) VALUES ('config_epoch', '7')")
+        sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '7')")
             .execute(pool)
             .await
             .unwrap();
@@ -1291,7 +1316,7 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        sqlx::query("INSERT INTO settings (name, value) VALUES ('config_epoch', '3')")
+        sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '3')")
             .execute(pool)
             .await
             .unwrap();
@@ -1306,6 +1331,7 @@ mod tests {
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
+        let epoch_before = config_epoch(pool).await;
 
         let result = storage
             .reimport(
@@ -1323,7 +1349,7 @@ mod tests {
             model_before
         );
         assert_eq!(target_map(pool, "target-a").await, map_before);
-        assert_eq!(config_epoch(pool).await.as_deref(), Some("3"));
+        assert_eq!(config_epoch(pool).await, epoch_before);
     }
 
     #[tokio::test]
@@ -1340,13 +1366,14 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        sqlx::query("INSERT INTO settings (name, value) VALUES ('config_epoch', '4')")
+        sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '4')")
             .execute(pool)
             .await
             .unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
+        let epoch_before = config_epoch(pool).await;
 
         let result = storage
             .reimport(
@@ -1364,7 +1391,7 @@ mod tests {
             model_before
         );
         assert_eq!(target_map(pool, "target-a").await, map_before);
-        assert_eq!(config_epoch(pool).await.as_deref(), Some("4"));
+        assert_eq!(config_epoch(pool).await, epoch_before);
     }
 
     #[tokio::test]
@@ -1384,6 +1411,7 @@ mod tests {
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
+        let epoch_before = config_epoch(pool).await;
 
         let stale = storage
             .reimport(
@@ -1413,7 +1441,7 @@ mod tests {
             model_before
         );
         assert_eq!(target_map(pool, "target-a").await, map_before);
-        assert!(config_epoch(pool).await.is_none());
+        assert_eq!(config_epoch(pool).await, epoch_before);
     }
 
     #[tokio::test]
@@ -1433,6 +1461,7 @@ mod tests {
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
+        let epoch_before = config_epoch(pool).await;
 
         let mut input = reimport_input(&refreshed_metadata(), 1);
         input
@@ -1448,17 +1477,19 @@ mod tests {
             model_before
         );
         assert_eq!(target_map(pool, "target-a").await, map_before);
-        assert!(config_epoch(pool).await.is_none());
+        assert_eq!(config_epoch(pool).await, epoch_before);
     }
 
     #[tokio::test]
     async fn reimport_treats_an_invalid_epoch_as_zero() {
         let (_data_dir, storage) = reimport_fixture().await;
         let pool = storage.pool();
-        sqlx::query("INSERT INTO settings (name, value) VALUES ('config_epoch', 'bogus')")
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', 'bogus')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
         let result = storage
             .reimport(

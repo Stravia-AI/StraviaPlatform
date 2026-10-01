@@ -381,7 +381,7 @@ mod tests {
                 .connect_with(options.options([("search_path", schema.as_str())]))
                 .await?;
             let result = async {
-                crate::migrations::migrate_postgres(&pool).await?;
+                crate::migrations::migrate_postgres(&pool, None).await?;
                 let now = chrono::Utc::now().timestamp_millis();
                 let recent = now - 1_000;
                 let old = now - 2 * 60 * 60 * 1_000;

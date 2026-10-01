@@ -374,7 +374,7 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
         let now = chrono::Utc::now().timestamp_millis();
         let recent = now - 1_000;
         let old = now - 2 * 60 * 60 * 1_000;

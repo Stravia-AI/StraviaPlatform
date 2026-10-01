@@ -563,6 +563,7 @@ pub(super) struct ClientProjectionSession {
     pending_unindexed_signature: Option<String>,
     carrier_facts: ThinkingCarrierFacts,
     next_unindexed_output_index: usize,
+    model_leg_ordinal: usize,
     current_unindexed_item_kind: Option<UnindexedItemKind>,
     client_output_started: bool,
     client_output_committed: bool,
@@ -606,6 +607,7 @@ impl ClientProjectionSession {
                 stream_unprotected_summaries: false,
             },
             next_unindexed_output_index: 0,
+            model_leg_ordinal: 0,
             current_unindexed_item_kind: None,
             client_output_started: false,
             client_output_committed: false,
@@ -664,6 +666,10 @@ impl ClientProjectionSession {
         Ok(std::borrow::Cow::Owned(delivered))
     }
 
+    pub(super) fn model_leg_ordinal(&self) -> usize {
+        self.model_leg_ordinal
+    }
+
     pub(super) fn begin_model_leg(
         &mut self,
         carrier_facts: ThinkingCarrierFacts,
@@ -676,6 +682,7 @@ impl ClientProjectionSession {
                 .and_then(|source| source.protocol.as_ref())
                 .and_then(|protocol| protocol.protocol())
                 .is_some_and(|protocol| protocol != self.state.ingress.protocol);
+        self.model_leg_ordinal += 1;
         self.thinking_source = source;
         self.state.begin_model_leg();
         debug_assert!(
@@ -2260,7 +2267,7 @@ async fn projection_session_fixture(
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store: Arc<dyn HistoryMarkerStore> =

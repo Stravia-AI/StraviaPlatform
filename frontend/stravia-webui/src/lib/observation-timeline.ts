@@ -1,5 +1,5 @@
 import { formatDuration, formatList, formatNumber, formatTime } from '$lib/format'
-import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
+import { observationEventSummary } from '$lib/observation-event-summary'
 import { payloadRecord, payloadString } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 import type { FailedRequestDetail, InteractionDetail, ObservationEvent, RunDetail } from '$lib/types/observation'
@@ -16,7 +16,6 @@ export interface ObservationTimeline {
   visibleRuns: RunDetail[]
   runIndex: Map<string, number>
   timelines: Map<string, ObservationEvent[]>
-  attemptOutputs: Map<string, Map<string, number | null>>
   streams: Map<string, StreamItem[]>
   failureItems: StreamItem[]
   offsetLabel(at: number): string
@@ -34,25 +33,22 @@ function toolName(event: ObservationEvent): string | null {
   return name?.trim() ? name : null
 }
 
-// 过程层事件：诊断关联、捕获与增量记录不承载主流程叙事；带成败或警告语义时仍留在主干。
-const PROCESS_KINDS = new Set([
-  'generation_associated',
-  'retained_tail_associated',
-  'native_compaction_associated',
-  'input_preview_recorded',
-  'credential_mappings_created',
-  'checkpoint',
-  'wire',
-  'trace_manifest_updated',
-  'usage_confirmed',
-  'client_visible_content_delta',
-  'model_thinking_delta',
-])
+// 过程层事件：诊断关联、捕获与按项收口的内容记录不承载主流程叙事；带成败或警告语义时仍留在主干。
+const PROCESS_KINDS: Record<string, true> = {
+  retained_tail_associated: true,
+  native_compaction_associated: true,
+  input_preview_recorded: true,
+  credential_mappings_created: true,
+  checkpoint: true,
+  wire: true,
+  client_visible_content: true,
+  model_thinking: true,
+}
 
-function streamItems(events: readonly ObservationEvent[], outputs?: ReadonlyMap<string, number | null>): StreamItem[] {
+function streamItems(events: readonly ObservationEvent[]): StreamItem[] {
   const items: StreamItem[] = []
   for (const event of events) {
-    const process = PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
+    const process = event.kind in PROCESS_KINDS && observationEventSummary(event).tone === 'neutral'
     const name = toolName(event)
     const previous = items.at(-1)
     if (process) {
@@ -126,10 +122,7 @@ export function deriveTimeline(
       : m.observation_details()
 
   const timelines = new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)]))
-  const attemptOutputs = new Map(orderedRuns.map((run) => [run.id, observationAttemptOutputTokens(run.events)]))
-  const streams = new Map(
-    orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))]),
-  )
+  const streams = new Map(orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [])]))
   const failureItems = failure ? streamItems(orderedEvents(failure.events)) : []
 
   const baseTime = interaction?.interaction.started_at ?? failure?.request.started_at ?? null
@@ -164,16 +157,5 @@ export function deriveTimeline(
     return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
   }
 
-  return {
-    title,
-    orderedRuns,
-    visibleRuns,
-    runIndex,
-    timelines,
-    attemptOutputs,
-    streams,
-    failureItems,
-    offsetLabel,
-    gapLabel,
-  }
+  return { title, orderedRuns, visibleRuns, runIndex, timelines, streams, failureItems, offsetLabel, gapLabel }
 }

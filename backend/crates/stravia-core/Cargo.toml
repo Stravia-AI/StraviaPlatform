@@ -68,6 +68,7 @@ dashmap = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sigv4 = { workspace = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zstd = { workspace = true }
 tempfile = { workspace = true }
 parking_lot = { workspace = true }
 image = { workspace = true }
