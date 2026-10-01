@@ -3,6 +3,34 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 #[test]
+fn client_history_normalizer_keeps_public_reasoning_unsigned_and_native_thinking_signed() {
+    use crate::codec::anthropic::messages::stream::normalize_client_history_item;
+    use stravia_runtime_contract::protocol::ir::AiItem;
+
+    let mut reasoning = AiItem::reasoning(
+        vec!["Public summary".to_string()],
+        vec!["Public detail".to_string()],
+        Some("responses-cipher-not-an-anthropic-signature".to_string()),
+    );
+    normalize_client_history_item(&mut reasoning);
+    let (text, signature) = reasoning.thinking_ref().expect("public Thinking history");
+    assert!(text.contains("Public summary"));
+    assert!(text.contains("Public detail"));
+    assert_eq!(
+        signature, None,
+        "Responses cipher is not an Anthropic signature"
+    );
+    assert!(!text.contains("responses-cipher-not-an-anthropic-signature"));
+
+    let mut native = AiItem::thinking("Native thinking", Some("native-signature".to_string()));
+    normalize_client_history_item(&mut native);
+    assert_eq!(
+        native.thinking_ref(),
+        Some(("Native thinking", Some("native-signature")))
+    );
+}
+
+#[test]
 fn formatters_emit_cached_prompt_token_details() {
     let mut response = AiResponse::new("chatcmpl-cache", "model");
     response.usage = Usage {

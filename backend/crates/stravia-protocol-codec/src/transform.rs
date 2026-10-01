@@ -1229,18 +1229,6 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
             ) {
                 lost.push(format!("items[{index}].refusal"));
             }
-            if pair.ingress.protocol != Protocol::OpenAICompatible
-                && matches!(
-                &item.content,
-                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
-                    if blocks.iter().any(|block| matches!(
-                        block,
-                        stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { .. }
-                    ))
-                )
-            {
-                lost.push(format!("items[{index}].reasoning_structure"));
-            }
             if let Some(content) = item
                 .meta
                 .as_ref()
@@ -1289,6 +1277,12 @@ fn stream_loss_paths(pair: ProtocolPair, deltas: &[AiStreamDelta]) -> Vec<String
     let mut lost = Vec::new();
     for (index, delta) in deltas.iter().enumerate() {
         match delta {
+            AiStreamDelta::ItemDone { item, .. }
+                if pair.ingress.protocol == Protocol::OpenResponses
+                    && !open_responses_output_item_representable(item) =>
+            {
+                lost.push(format!("deltas[{index}].item"));
+            }
             AiStreamDelta::ItemDone { item, .. }
                 if pair.ingress.protocol != Protocol::OpenResponses
                     && (item.is_compaction() || item.is_compaction_trigger()) =>

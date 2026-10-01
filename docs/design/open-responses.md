@@ -183,7 +183,9 @@ Wire-only state留在目标 stream session：`output_index`、`content_index`、
 
 Reasoning content 保持 dated reasoning item 结构，但 wire delta/done 使用 rolling `response.reasoning_text.delta` 与 `response.reasoning_text.done` 名称，以兼容当前 OpenAI Responses 客户端。Decoder 同时接受 dated `response.reasoning.delta` / `response.reasoning.done` 与 rolling 名称；reasoning summary lifecycle 不变。
 
-通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。Generation Chain 的 ingress 历史投影将该输出转换为对应的 `Reasoning`，保留文本、签名和 item 元数据，使完整历史回放可以精确匹配直接父节点。Effective Model Request 与权威输出仍保留原始 Thinking；原生 `Reasoning.summary` 和 `Reasoning.content` 不合并，不放宽跨协议历史比较，也不回写既有历史节点或观察父边。
+通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。`Thinking.signature` 不是 Responses 的 `encrypted_content`，不得在输出、流事件或历史投影中互换。Generation Chain 的 ingress 历史投影保留实际 OUTPUT 的公开文本与 item 身份；原生 `Reasoning.summary`、`Reasoning.content` 与真实密文保持原样，不套用上游 REQUEST 的字段约束。已知跨协议交付的原始思考块及可信来源由既有一对一 History Marker 保存，回放时恢复；Effective Model Request 与权威输出仍保留原始块，不回写既有历史节点或观察父边。
+
+发送上游 Responses REQUEST 时，兼容的原生 `Reasoning` 保留 `summary` 与 `encrypted_content`，但 `content` 必须为空。原 `content` 的每个可读段落按原顺序放入紧随的 assistant `output_text`，位于后续工具调用之前；所有由思考条目降级或混合拆分得到的正文载体均不继承源条目的 id、status、phase 或原生扩展字段；混合条目拆出的 function_call 同样不借用父条目身份，但保留 call_id、name 与 arguments。普通 message、原生 function_call 及独立 function_call_output 仍保留各自合法的身份和元数据。这些规则仅作用于上游请求投影，不改写权威历史、来源或客户端 OUTPUT 身份。通用 `Thinking` 的可读内容降为 `output_text`，不把其它协议的签名当作 Responses 密文。没有可信来源的受保护载荷仍遵循 ADR-0075 的乐观判定；载荷类型的表示边界不因此放宽。
 
 ---
 

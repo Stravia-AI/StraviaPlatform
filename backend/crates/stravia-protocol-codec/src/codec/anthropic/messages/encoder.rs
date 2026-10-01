@@ -537,29 +537,15 @@ fn encode_content_block_for_anthropic_with_ids(
             None if thinking.is_empty() => Vec::new(),
             None => vec![serde_json::json!({"type": "text", "text": thinking})],
         },
-        // Reasoning 复用 stream.rs `normalize_client_history_item` 的同款映射：
-        // summary 与 content 各段顺序拼接为 thinking 文本，encrypted_content 作
-        // signature；无密文时每段非空明文降级为一个 text 块。
+        // Responses ciphertext is not an Anthropic thinking signature.
         ContentBlock::Reasoning {
-            summary,
-            content,
-            encrypted_content,
-        } => match encrypted_content
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(encrypted_content) => vec![serde_json::json!({
-                "type": "thinking",
-                "thinking": summary.iter().chain(content).cloned().collect::<String>(),
-                "signature": encrypted_content,
-            })],
-            None => summary
-                .iter()
-                .chain(content)
-                .filter(|text| !text.is_empty())
-                .map(|text| serde_json::json!({"type": "text", "text": text}))
-                .collect(),
-        },
+            summary, content, ..
+        } => summary
+            .iter()
+            .chain(content)
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::json!({"type": "text", "text": text}))
+            .collect(),
         other => vec![encode_single_anthropic_content_block(
             other,
             generated_tool_id_seq,

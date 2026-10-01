@@ -194,25 +194,22 @@ fn unsigned_thinking_degrades_to_text_block() {
 }
 
 #[test]
-fn encrypted_reasoning_encodes_as_signed_thinking_block() {
+fn thinking_replay_responses_ciphertext_degrades_per_readable_segment() {
     let request = assistant_blocks_request(vec![ContentBlock::Reasoning {
-        summary: vec!["summary".into()],
-        content: vec!["detail".into()],
+        summary: vec!["summary-one".into(), "summary-two".into()],
+        content: vec!["detail-one".into(), "detail-two".into()],
         encrypted_content: Some("ciphertext".into()),
     }]);
 
     let (body, _) = AnthropicEncoder.encode_request(&request).expect("encode");
-
-    // 与 stream.rs 的 Reasoning→Thinking 一致：summary+content 顺序拼接，
-    // encrypted_content 作为 signature。
-    let content = body["messages"][1]["content"].as_array().unwrap();
     assert_eq!(
-        content.as_slice(),
-        [serde_json::json!({
-            "type": "thinking",
-            "thinking": "summarydetail",
-            "signature": "ciphertext",
-        })]
+        body["messages"][1]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "summary-one"},
+            {"type": "text", "text": "summary-two"},
+            {"type": "text", "text": "detail-one"},
+            {"type": "text", "text": "detail-two"}
+        ])
     );
 }
 

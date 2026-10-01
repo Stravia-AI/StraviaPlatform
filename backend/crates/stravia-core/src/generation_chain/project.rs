@@ -83,27 +83,21 @@ pub(crate) fn project_client_history(
             stravia_protocol_codec::codec::open_responses::formatter::stamp_output_graph_ids(
                 response,
             );
-        // Thinking 经 Responses 交付的是正文，不是摘要；历史身份必须与客户端回放一致。
-        // 只改写 ingress 投影，保留 effective Thinking 与原生 Reasoning 的语义。
+        // Client history follows Responses OUTPUT, not upstream REQUEST replay rules.
+        // Thinking is readable reasoning content, but its signature is not a cipher.
         for item in &mut output {
             if let MessageContent::Blocks(blocks) = &mut item.content
-                && let [
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    },
-                ] = blocks.as_mut_slice()
+                && let [ContentBlock::Thinking { thinking, .. }] = blocks.as_mut_slice()
             {
                 let content = if thinking.is_empty() {
                     Vec::new()
                 } else {
                     vec![std::mem::take(thinking)]
                 };
-                let encrypted_content = signature.take();
                 blocks[0] = ContentBlock::Reasoning {
                     summary: Vec::new(),
                     content,
-                    encrypted_content,
+                    encrypted_content: None,
                 };
             }
         }
@@ -193,6 +187,34 @@ fn project_anthropic_history(response: &AiResponse) -> Vec<AiItem> {
 
 fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<AiItem> {
     let mut output = generic_client_history_output(response);
+    for item in &mut output {
+        if let MessageContent::Blocks(blocks) = &mut item.content
+            && blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+        {
+            let original = std::mem::take(blocks);
+            for block in original {
+                match block {
+                    ContentBlock::Reasoning {
+                        summary, content, ..
+                    } => {
+                        blocks.extend(
+                            summary
+                                .into_iter()
+                                .chain(content)
+                                .filter(|text| !text.is_empty())
+                                .map(|thinking| ContentBlock::Thinking {
+                                    thinking,
+                                    signature: None,
+                                }),
+                        );
+                    }
+                    other => blocks.push(other),
+                }
+            }
+        }
+    }
     let prefix_len = prefix.len();
     let mut chain = prefix.to_vec();
     chain.extend(output);
@@ -202,7 +224,7 @@ fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<A
     output
 }
 
-fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
+pub(super) fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
     let mut ids = HashMap::<
         stravia_runtime_contract::protocol::ir::ToolCallId,
         stravia_runtime_contract::protocol::ir::ToolCallId,
@@ -211,12 +233,6 @@ fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
 
     for item in items {
         if let MessageContent::Blocks(blocks) = &mut item.content {
-            blocks.retain(|block| {
-                !matches!(
-                    block,
-                    ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
-                )
-            });
             for block in blocks {
                 match block {
                     ContentBlock::ToolUse {

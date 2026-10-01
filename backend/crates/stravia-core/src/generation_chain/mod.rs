@@ -412,6 +412,14 @@ impl GenerationChain {
         mut request: AiRequest,
     ) -> Result<GenerationChainWrite, BeginError> {
         let mut request_delta = request.clone();
+        if ProtocolTransform::inferred_ingress(&request_delta)
+            == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        {
+            // Build Gemini call/result aliases while the full client prefix is
+            // present. After discovery slices the delta, its raw result ID can
+            // no longer be associated with the normalized parent call ID.
+            normalize_gemini_client_tool_ids(&mut request_delta.items);
+        }
         let native = self.resolve_compaction(&principal, &request).await?;
         let has_explicit_parent = matches!(
             request.ext.as_ref(),

@@ -161,7 +161,7 @@ fn formatted_response_matches_dated_schema() {
     let mut response = AiResponse::new("resp_gateway", "logical-model");
     response.items = vec![
         AiItem::output_text("done"),
-        AiItem::thinking("summary", Some("opaque".into())),
+        AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("opaque".into())),
     ];
     response.stop_reason = Some("stop".into());
 

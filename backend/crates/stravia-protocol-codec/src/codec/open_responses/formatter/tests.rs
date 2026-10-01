@@ -195,6 +195,49 @@ fn clears_text_metadata_when_canonical_text_changes() {
 }
 
 #[test]
+fn anthropic_signed_thinking_response_keeps_public_reasoning_without_ciphertext() {
+    use crate::transform::ProtocolTransform;
+    use stravia_runtime_contract::protocol::ids::{
+        ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24,
+    };
+
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+        .expect("registered protocol pair");
+    let response = pair
+        .decode_response(serde_json::json!({
+            "id": "msg_signed", "type": "message", "role": "assistant",
+            "model": "claude-model",
+            "content": [
+                {"type": "thinking", "thinking": "Inspect the fixture.", "signature": "ClaudeSig"},
+                {"type": "text", "text": "The answer."}
+            ],
+            "stop_reason": "end_turn", "stop_sequence": null,
+            "usage": {"input_tokens": 8, "output_tokens": 5}
+        }))
+        .expect("decode Anthropic signed thinking response");
+    let formatted = pair
+        .encode_response(&response)
+        .expect("encode Responses output");
+    let output = formatted["output"].as_array().expect("output items");
+    assert_eq!(
+        output
+            .iter()
+            .map(|item| item["type"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("reasoning"), Some("message")]
+    );
+    assert_eq!(
+        output[0]["content"],
+        serde_json::json!([
+            {"type": "reasoning_text", "text": "Inspect the fixture."}
+        ])
+    );
+    assert!(output[0].get("encrypted_content").is_none());
+    assert_eq!(output[1]["content"][0]["text"], "The answer.");
+}
+
+#[test]
 fn preserves_canonical_item_order_without_collapsing_messages() {
     let mut response = AiResponse::new("resp_gateway", "logical-model");
     response.items = vec![
@@ -221,7 +264,8 @@ fn preserves_canonical_item_order_without_collapsing_messages() {
         .collect::<Vec<_>>();
 
     assert_eq!(types, ["message", "function_call", "reasoning"]);
-    assert_eq!(formatted["output"][2]["encrypted_content"], "opaque");
+    assert_eq!(formatted["output"][2]["content"][0]["text"], "reasoning");
+    assert!(formatted["output"][2].get("encrypted_content").is_none());
 }
 #[test]
 fn encodes_function_output_arrays_with_dated_content_shapes() {

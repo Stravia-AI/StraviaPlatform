@@ -105,7 +105,7 @@ pub(crate) fn execute_inference(
     }
     let preserve_upstream_errors = protocol == OPEN_RESPONSES_PROTOCOL
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
-    let encoded = crate::encode_inference_request(protocol, &request)?;
+    let mut encoded = crate::encode_inference_request(protocol, &request)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
     for (name, value) in &provider.client_headers {
         set_header(&mut headers, name, value.clone());
@@ -114,6 +114,7 @@ pub(crate) fn execute_inference(
     set_header(&mut headers, "content-type", "application/json".into());
     apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
+    prepare_gemini_imported_tool_history(protocol, model, &url, &mut encoded.body);
     let body = serde_json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(
             ErrorKind::Invalid,
@@ -146,6 +147,123 @@ pub(crate) fn execute_inference(
         return decoded.map(Box::new).map(OperationOutput::Infer);
     }
     crate::decode_inference(host, protocol, response)
+}
+
+/// Google's documented imported-history validator control, not a native signature.
+/// This is request-only and deliberately excludes Vertex and unverified proxies.
+fn prepare_gemini_imported_tool_history(protocol: &str, model: &str, url: &str, body: &mut Value) {
+    if protocol != GEMINI_PROTOCOL {
+        return;
+    }
+    let Some(version_suffix) = model
+        .strip_prefix("models/")
+        .unwrap_or(model)
+        .strip_prefix("gemini-3")
+    else {
+        return;
+    };
+    // Accept the major-only name and numeric minor versions, not aliases or
+    // a prefix match on a different major (e.g. gemini-30 or gemini-4).
+    let major_three = if let Some(name) = version_suffix.strip_prefix('-') {
+        !name.is_empty()
+    } else if let Some((minor, name)) = version_suffix
+        .strip_prefix('.')
+        .and_then(|suffix| suffix.split_once('-'))
+    {
+        !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit()) && !name.is_empty()
+    } else {
+        false
+    };
+    if !major_three {
+        return;
+    }
+    // Ordinary text requests need no endpoint parsing or allocations here.
+    if !body
+        .get("contents")
+        .and_then(Value::as_array)
+        .is_some_and(|contents| {
+            contents.iter().any(|content| {
+                content.get("role").and_then(Value::as_str) == Some("model")
+                    && content
+                        .get("parts")
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts.iter().any(|part| part.get("functionCall").is_some())
+                        })
+            })
+        })
+    {
+        return;
+    }
+    let Ok(endpoint) = url::Url::parse(url) else {
+        return;
+    };
+    if endpoint.scheme() != "https"
+        || endpoint.host_str() != Some("generativelanguage.googleapis.com")
+        || endpoint.port_or_known_default() != Some(443)
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !endpoint
+            .path()
+            .strip_prefix("/v1beta/models/")
+            .is_some_and(|path| {
+                !path.contains('/')
+                    && (path.ends_with(":generateContent")
+                        || path.ends_with(":streamGenerateContent"))
+            })
+    {
+        return;
+    }
+    let Some(contents) = body.get_mut("contents").and_then(Value::as_array_mut) else {
+        return;
+    };
+    // Tool results use the user role too, but do not start a new user turn.
+    let start = contents
+        .iter()
+        .rposition(|content| {
+            content.get("role").and_then(Value::as_str) == Some("user")
+                && content
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part.as_object().is_some_and(|fields| {
+                                fields.keys().any(|key| {
+                                    matches!(
+                                        key.as_str(),
+                                        "text" | "inlineData" | "fileData" | "videoMetadata"
+                                    )
+                                })
+                            })
+                        })
+                    })
+        })
+        .map_or(0, |index| index + 1);
+    for content in &mut contents[start..] {
+        if content.get("role").and_then(Value::as_str) != Some("model") {
+            continue;
+        }
+        let Some(parts) = content.get_mut("parts").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let Some(first_call) = parts
+            .iter_mut()
+            .find(|part| part.get("functionCall").is_some())
+        else {
+            continue;
+        };
+        let missing = match first_call.get("thoughtSignature") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(signature)) => signature.is_empty(),
+            _ => false,
+        };
+        if missing && let Some(fields) = first_call.as_object_mut() {
+            fields.insert(
+                "thoughtSignature".into(),
+                Value::String("skip_thought_signature_validator".into()),
+            );
+        }
+    }
 }
 
 fn classify_open_responses_error(value: &Value, saw_response_event: bool) -> Option<PluginError> {
@@ -1196,6 +1314,191 @@ mod tests {
         );
         assert!(catalog_models[1].capabilities.is_empty());
         assert_eq!(catalog_models[1].metadata["capabilities"], json!([]));
+    }
+
+    fn strict_gemini_consumer(body: &Value) -> Result<(), &'static str> {
+        let contents = body["contents"].as_array().unwrap();
+        let boundary = contents
+            .iter()
+            .rposition(|content| {
+                content["role"] == "user"
+                    && content["parts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|part| part.get("functionResponse").is_none())
+            })
+            .unwrap_or(0);
+        for content in &contents[boundary..] {
+            if content["role"] != "model" {
+                continue;
+            }
+            if let Some(call) = content["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part.get("functionCall").is_some())
+                && call["thoughtSignature"].as_str().is_none_or(str::is_empty)
+            {
+                return Err("missing current-turn function-call signature");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn imported_gemini_tool_steps_continue_with_exact_parallel_associations() {
+        let mut body = json!({"contents": [
+            {"role":"user","parts":[{"text":"old request"}]},
+            {"role":"model","parts":[{"functionCall":{"id":"old","name":"old","args":{}}}]},
+            {"role":"user","parts":[{"text":"current request"}]},
+            {"role":"model","parts":[{"text":"planning"},{"functionCall":{"id":"a","name":"weather","args":{"city":"Paris"}}},{"functionCall":{"id":"b","name":"weather","args":{"city":"London"}}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"a","name":"weather","response":{"temp":15}}},{"functionResponse":{"id":"b","name":"weather","response":{"temp":12}}}]},
+            {"role":"model","parts":[{"functionCall":{"id":"c","name":"book","args":{}},"thoughtSignature":null}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"c","name":"book","response":{"ok":true}}}]}
+        ]});
+        assert!(strict_gemini_consumer(&body).is_err());
+        let mut expected = body.clone();
+        expected["contents"][3]["parts"][1]["thoughtSignature"] =
+            json!("skip_thought_signature_validator");
+        expected["contents"][5]["parts"][0]["thoughtSignature"] =
+            json!("skip_thought_signature_validator");
+        prepare_gemini_imported_tool_history(
+            GEMINI_PROTOCOL,
+            "gemini-3-flash-preview",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=test",
+            &mut body,
+        );
+        assert_eq!(strict_gemini_consumer(&body), Ok(()));
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn gemini_import_control_handles_empty_signature_and_latest_standard_user_content() {
+        let mut body = json!({"contents":[
+            {"role":"model","parts":[{"functionCall":{"name":"past","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"name":"past","response":{}}},{"text":"new turn"}]},
+            {"role":"model","parts":[{"functionCall":{"name":"current","args":{}},"thoughtSignature":""}]}
+        ]});
+        let mut expected = body.clone();
+        expected["contents"][2]["parts"][0]["thoughtSignature"] =
+            json!("skip_thought_signature_validator");
+        prepare_gemini_imported_tool_history(
+            GEMINI_PROTOCOL,
+            "models/gemini-3-pro-preview",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent",
+            &mut body,
+        );
+        assert_eq!(strict_gemini_consumer(&body), Ok(()));
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn gemini_import_control_preserves_native_and_unsigned_non_required_history() {
+        let original = json!({"contents":[
+            {"role":"user","parts":[{"text":"request"}]},
+            {"role":"model","parts":[{"functionCall":{"name":"tool","args":{}},"thoughtSignature":"opaque+/=="},{"functionCall":{"name":"parallel","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"name":"tool","response":{}}}]},
+            {"role":"model","parts":[{"text":"done"}]}
+        ]});
+        let mut body = original.clone();
+        prepare_gemini_imported_tool_history(
+            GEMINI_PROTOCOL,
+            "gemini-3-pro",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:streamGenerateContent",
+            &mut body,
+        );
+        assert_eq!(strict_gemini_consumer(&body), Ok(()));
+        assert_eq!(body, original);
+        for (protocol, model, url) in [
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "https://aiplatform.googleapis.com/v1/projects/p/locations/l/publishers/google/models/gemini-3-pro:generateContent",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "http://127.0.0.1:8080/v1beta/models/gemini-3-pro:generateContent",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-2.5-pro",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "https://generativelanguage.googleapis.com/v1/models/gemini-3-pro:generateContent",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "https://generativelanguage.googleapis.com:8443/v1beta/models/gemini-3-pro:generateContent",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:countTokens",
+            ),
+            (
+                GEMINI_PROTOCOL,
+                "gemini-3-pro",
+                "http://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent",
+            ),
+            (
+                OPENAI_CHAT_PROTOCOL,
+                "gemini-3-pro",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent",
+            ),
+        ] {
+            let mut unsigned = original.clone();
+            unsigned["contents"][1]["parts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("thoughtSignature");
+            let unchanged = unsigned.clone();
+            prepare_gemini_imported_tool_history(protocol, model, url, &mut unsigned);
+            assert_eq!(unsigned, unchanged);
+            assert!(strict_gemini_consumer(&unsigned).is_err());
+        }
+    }
+
+    #[test]
+    fn gemini_import_control_supports_major_three_minor_versions_only() {
+        let original = json!({"contents":[
+            {"role":"user","parts":[{"text":"weather"}]},
+            {"role":"model","parts":[{"functionCall":{"id":"a","name":"weather","args":{"city":"Paris"}}},{"functionCall":{"id":"b","name":"weather","args":{"city":"London"}}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"a","name":"weather","response":{"temp":15}}},{"functionResponse":{"id":"b","name":"weather","response":{"temp":12}}}]}
+        ]});
+        for model in ["gemini-3.8-flash", "gemini-3.1-pro-preview"] {
+            let mut body = original.clone();
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            );
+            prepare_gemini_imported_tool_history(GEMINI_PROTOCOL, model, &url, &mut body);
+            assert_eq!(strict_gemini_consumer(&body), Ok(()), "{model}");
+            let mut expected = original.clone();
+            expected["contents"][1]["parts"][0]["thoughtSignature"] =
+                json!("skip_thought_signature_validator");
+            assert_eq!(body, expected);
+        }
+        for model in [
+            "gemini-30-flash",
+            "gemini-2.5-pro",
+            "gemini-4.1-pro",
+            "gemini-flash-latest",
+            "gemini-3.x-pro",
+            "gemini-3.-pro",
+        ] {
+            let mut body = original.clone();
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            );
+            prepare_gemini_imported_tool_history(GEMINI_PROTOCOL, model, &url, &mut body);
+            assert_eq!(body, original, "{model}");
+            assert!(strict_gemini_consumer(&body).is_err());
+        }
     }
 
     fn assert_protected_reasoning(error: Option<PluginError>) {

@@ -3,6 +3,120 @@ use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 
 #[test]
+fn anthropic_live_text_thinking_text_tool_preserves_responses_chronology() {
+    use crate::codec::anthropic::messages::stream::AnthropicStreamParser;
+
+    let native = [
+        serde_json::json!({"type":"message_start","message":{"id":"msg_chronology","model":"claude-model","usage":{"input_tokens":7,"output_tokens":0}}}),
+        serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Planning before thought."}}),
+        serde_json::json!({"type":"content_block_stop","index":0}),
+        serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+        serde_json::json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Compare the available paths."}}),
+        serde_json::json!({"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"native-anthropic-signature"}}),
+        serde_json::json!({"type":"content_block_stop","index":1}),
+        serde_json::json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}),
+        serde_json::json!({"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"The selected path follows thought."}}),
+        serde_json::json!({"type":"content_block_stop","index":2}),
+        serde_json::json!({"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"toolu_read","name":"read","input":{}}}),
+        serde_json::json!({"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"Cargo.toml\"}"}}),
+        serde_json::json!({"type":"content_block_stop","index":3}),
+        serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":11}}),
+        serde_json::json!({"type":"message_stop"}),
+    ];
+    let blocks = native
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect::<Vec<_>>();
+    for chunks in [vec![blocks.concat()], blocks] {
+        let mut parser = AnthropicStreamParser::new();
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut bodies = Vec::new();
+        for chunk in chunks {
+            let deltas = parser.parse_chunk(&chunk).expect("native Anthropic SSE");
+            bodies.extend(
+                formatter
+                    .format_deltas(&deltas)
+                    .iter()
+                    .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap()),
+            );
+        }
+        let added = bodies
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.added")
+            .map(|event| {
+                (
+                    event["output_index"].as_u64().unwrap(),
+                    event["item"]["type"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            added,
+            vec![
+                (0, "message"),
+                (1, "reasoning"),
+                (2, "message"),
+                (3, "function_call")
+            ]
+        );
+        let readable = bodies
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event["type"].as_str(),
+                    Some("response.output_text.delta" | "response.reasoning_text.delta")
+                )
+            })
+            .map(|event| {
+                (
+                    event["output_index"].as_u64().unwrap(),
+                    event["delta"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            readable,
+            vec![
+                (0, "Planning before thought."),
+                (1, "Compare the available paths."),
+                (2, "The selected path follows thought.")
+            ]
+        );
+        let completed = bodies
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("terminal response");
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .map(|item| item["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["message", "reasoning", "message", "function_call"]
+        );
+        assert_eq!(output[0]["content"][0]["text"], "Planning before thought.");
+        assert_eq!(
+            output[1]["content"][0]["text"],
+            "Compare the available paths."
+        );
+        assert!(output[1].get("encrypted_content").is_none());
+        assert_eq!(
+            output[2]["content"][0]["text"],
+            "The selected path follows thought."
+        );
+        assert_eq!(output[3]["call_id"], "toolu_read");
+        assert_eq!(output[3]["name"], "read");
+        assert_eq!(output[3]["arguments"], "{\"path\":\"Cargo.toml\"}");
+    }
+}
+
+#[test]
 fn stream_formatter_classifies_failures_without_leaking_diagnostics() {
     use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
 
@@ -864,6 +978,46 @@ fn closes_each_reasoning_summary_part_before_starting_the_next() {
 }
 
 #[test]
+fn generic_thinking_signature_never_becomes_responses_ciphertext() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-signed-thinking".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDelta("Inspect the fixture.".into()),
+        AiStreamDelta::ThinkingSignature("ClaudeSig".into()),
+        AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        },
+    ]);
+    let bodies = event_bodies(&events);
+    let item_done = bodies
+        .iter()
+        .find(|body| body["type"] == "response.output_item.done")
+        .expect("reasoning item done");
+    assert_eq!(item_done["item"]["type"], "reasoning");
+    assert_eq!(
+        item_done["item"]["content"][0]["text"],
+        "Inspect the fixture."
+    );
+    assert!(item_done["item"].get("encrypted_content").is_none());
+    let terminal = bodies
+        .iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    assert_eq!(
+        terminal["response"]["output"][0]["content"][0]["text"],
+        "Inspect the fixture."
+    );
+    assert!(
+        terminal["response"]["output"][0]
+            .get("encrypted_content")
+            .is_none()
+    );
+}
+
+#[test]
 fn completed_item_forwards_encrypted_only_reasoning() {
     let mut formatter = ResponsesStreamFormatter::new();
     let events = formatter.format_deltas(&[
@@ -883,9 +1037,14 @@ fn completed_item_forwards_encrypted_only_reasoning() {
             stop_reason: "stop".into(),
         },
     ]);
-    let terminal = events
+    let bodies = event_bodies(&events);
+    let item_done = bodies
         .iter()
-        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .find(|event| event["type"] == "response.output_item.done")
+        .expect("reasoning item done");
+    assert_eq!(item_done["item"]["encrypted_content"], "opaque");
+    let terminal = bodies
+        .iter()
         .find(|event| event["type"] == "response.completed")
         .expect("response completed");
 

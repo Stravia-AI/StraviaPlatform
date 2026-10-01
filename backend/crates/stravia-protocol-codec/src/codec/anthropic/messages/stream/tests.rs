@@ -3,6 +3,90 @@ use crate::codec::open_responses::parser::ResponsesStreamParser;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
+fn assert_anthropic_thought_signature_stays_on_gemini_thought(split_chunks: bool) {
+    use crate::codec::google::gemini::stream::GoogleStreamFormatter;
+
+    let blocks = [
+        make_sse_block(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_signed_tool","type":"message","role":"assistant","content":[],"model":"claude-3-7-sonnet","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+        ),
+        make_sse_block(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        ),
+        make_sse_block(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Check the weather first."}}"#,
+        ),
+        make_sse_block(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"anthropic-thought-S"}}"#,
+        ),
+        make_sse_block(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+        ),
+        make_sse_block(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_weather","name":"get_weather","input":{}}}"#,
+        ),
+        make_sse_block(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+        ),
+        make_sse_block(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}}"#,
+        ),
+        make_sse_block(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":1}"#,
+        ),
+        make_sse_block(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":20}}"#,
+        ),
+        make_sse_block("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    let chunks = if split_chunks {
+        blocks.to_vec()
+    } else {
+        vec![blocks.concat()]
+    };
+    let mut parser = AnthropicStreamParser::new();
+    let mut formatter = GoogleStreamFormatter::new();
+    let mut parts = Vec::new();
+    for chunk in chunks {
+        let deltas = parser.parse_chunk(&chunk).expect("native Anthropic SSE");
+        for event in formatter.format_deltas(&deltas) {
+            let body: Value = serde_json::from_str(&event.data).expect("Gemini wire JSON");
+            if let Some(wire_parts) = body["candidates"][0]["content"]["parts"].as_array() {
+                parts.extend(wire_parts.iter().cloned());
+            }
+        }
+    }
+    assert_eq!(
+        parts,
+        vec![
+            serde_json::json!({"text": "Check the weather first.", "thought": true}),
+            serde_json::json!({"text": "", "thought": true, "thoughtSignature": "anthropic-thought-S"}),
+            serde_json::json!({"functionCall": {"id": "toolu_weather", "name": "get_weather", "args": {"city": "Paris"}}}),
+        ],
+        "a completed signed thought must not donate its signature to the following call"
+    );
+}
+
+#[test]
+fn anthropic_signed_thought_then_tool_preserves_gemini_part_ownership() {
+    assert_anthropic_thought_signature_stays_on_gemini_thought(false);
+}
+
+#[test]
+fn anthropic_signed_thought_then_tool_preserves_gemini_part_ownership_across_chunks() {
+    assert_anthropic_thought_signature_stays_on_gemini_thought(true);
+}
+
 fn make_sse_block(event: &str, data: &str) -> String {
     format!("event: {event}\ndata: {data}\n\n")
 }
@@ -83,6 +167,61 @@ fn test_format_response_includes_thinking_signature() {
     assert_eq!(
         thinking.get("signature").and_then(|v| v.as_str()),
         Some("sig_resp")
+    );
+}
+
+#[test]
+fn responses_cipher_response_emits_unsigned_anthropic_public_thinking() {
+    use crate::transform::ProtocolTransform;
+    use stravia_runtime_contract::protocol::ids::{
+        ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24,
+    };
+
+    let pair = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+        .expect("registered protocol pair");
+    let wire = crate::codec::open_responses::formatter::response_resource_snapshot(
+        "resp_cipher",
+        "reasoning-model",
+        "completed",
+        vec![serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_cipher",
+            "summary": [{"type": "summary_text", "text": "Public summary"}],
+            "content": [{"type": "reasoning_text", "text": "Public detail"}],
+            "encrypted_content": "responses-cipher-not-an-anthropic-signature"
+        })],
+        Value::Null,
+        Value::Null,
+        Value::Null,
+    );
+    let response = pair
+        .decode_response(wire)
+        .expect("Responses response decode");
+    let encoded = pair
+        .encode_response(&response)
+        .expect("Anthropic response encode");
+    let blocks = encoded["content"].as_array().expect("Anthropic content");
+    let thinking: Vec<_> = blocks
+        .iter()
+        .filter(|block| block["type"] == "thinking")
+        .collect();
+    let public_text: String = thinking
+        .iter()
+        .filter_map(|block| block["thinking"].as_str())
+        .collect();
+    assert!(public_text.contains("Public summary"), "{encoded}");
+    assert!(public_text.contains("Public detail"), "{encoded}");
+    assert!(
+        thinking
+            .iter()
+            .all(|block| block.get("signature").is_none()),
+        "{encoded}"
+    );
+    assert!(
+        !encoded
+            .to_string()
+            .contains("responses-cipher-not-an-anthropic-signature")
     );
 }
 
@@ -291,16 +430,14 @@ fn test_stream_formatter_emits_signature_delta() {
         .iter()
         .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
         .any(|json| {
-            json.get("delta")
-                .and_then(|delta| delta.get("signature"))
-                .and_then(|signature| signature.as_str())
-                == Some("abc123")
+            json["delta"]["type"] == "signature_delta"
+                && json["delta"]["signature"].as_str() == Some("abc123")
         });
     assert!(has_signature, "expected signature_delta event");
 }
 
 #[test]
-fn open_responses_encrypted_reasoning_reaches_anthropic_signature_delta() {
+fn open_responses_completed_reasoning_keeps_public_text_without_anthropic_signature_delta() {
     let created = crate::codec::open_responses::formatter::response_resource_snapshot(
         "resp_1",
         "gpt-5.6-luna",
@@ -326,7 +463,7 @@ fn open_responses_encrypted_reasoning_reaches_anthropic_signature_delta() {
             ),
             make_sse_block(
                 "response.output_item.done",
-                r#"{"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":"opaque-reasoning"}}"#,
+                r#"{"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Public summary"}],"content":[{"type":"reasoning_text","text":"Public detail"}],"encrypted_content":"opaque-reasoning"}}"#,
             ),
         ]
         .concat();
@@ -335,14 +472,26 @@ fn open_responses_encrypted_reasoning_reaches_anthropic_signature_delta() {
         .expect("Open Responses stream");
     let events = AnthropicStreamFormatter::new().format_deltas(&deltas);
 
+    let payloads: Vec<Value> = events
+        .iter()
+        .map(|event| serde_json::from_str(&event.data).expect("Anthropic SSE JSON"))
+        .collect();
+    assert!(
+        payloads
+            .iter()
+            .all(|json| json["delta"]["type"] != "signature_delta"),
+        "Responses cipher must not become an Anthropic signature: {payloads:?}"
+    );
+    let public_text: String = payloads
+        .iter()
+        .filter_map(|json| json["delta"]["thinking"].as_str())
+        .collect();
+    assert!(public_text.contains("Public summary"), "{payloads:?}");
+    assert!(public_text.contains("Public detail"), "{payloads:?}");
     assert!(
         events
             .iter()
-            .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
-            .any(|json| {
-                json["delta"]["type"] == "signature_delta"
-                    && json["delta"]["signature"] == "opaque-reasoning"
-            })
+            .all(|event| !event.data.contains("opaque-reasoning"))
     );
 }
 

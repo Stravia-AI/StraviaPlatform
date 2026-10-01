@@ -35,6 +35,7 @@ pub struct StreamResponseAccumulator {
     items: Vec<AccumulatedItem>,
     tool_calls: Vec<Option<ToolCall>>,
     completed_items: BTreeMap<usize, AiItem>,
+    item_closed: bool,
     indexed_text: BTreeMap<(usize, usize), String>,
     indexed_refusal: BTreeMap<(usize, usize), String>,
     indexed_reasoning_summary: BTreeMap<(usize, usize), String>,
@@ -95,13 +96,18 @@ impl StreamResponseAccumulator {
                 self.response_metadata = Some(metadata.clone());
             }
             AiStreamDelta::ProtectedThinkingStart { .. } => {}
-            AiStreamDelta::ThinkingDelta(text) => match self.items.last_mut() {
-                Some(AccumulatedItem::Thinking { text: current, .. }) => current.push_str(text),
-                _ => self.items.push(AccumulatedItem::Thinking {
-                    text: text.clone(),
-                    signature: String::new(),
-                }),
-            },
+            AiStreamDelta::ThinkingDelta(text) => {
+                match self.items.last_mut() {
+                    Some(AccumulatedItem::Thinking { text: current, .. }) if !self.item_closed => {
+                        current.push_str(text);
+                    }
+                    _ => self.items.push(AccumulatedItem::Thinking {
+                        text: text.clone(),
+                        signature: String::new(),
+                    }),
+                }
+                self.item_closed = false;
+            }
             AiStreamDelta::ThinkingDeltaWithMetadata {
                 text,
                 output_index: Some(output_index),
@@ -112,16 +118,19 @@ impl StreamResponseAccumulator {
                 .entry((*output_index, *content_index))
                 .or_default()
                 .push_str(text),
-            AiStreamDelta::ThinkingDeltaWithMetadata { text, .. } => match self.items.last_mut() {
-                Some(AccumulatedItem::Reasoning {
-                    content: current, ..
-                }) => current.push_str(text),
-                _ => self.items.push(AccumulatedItem::Reasoning {
-                    summary: String::new(),
-                    content: text.clone(),
-                    signature: String::new(),
-                }),
-            },
+            AiStreamDelta::ThinkingDeltaWithMetadata { text, .. } => {
+                match self.items.last_mut() {
+                    Some(AccumulatedItem::Reasoning {
+                        content: current, ..
+                    }) if !self.item_closed => current.push_str(text),
+                    _ => self.items.push(AccumulatedItem::Reasoning {
+                        summary: String::new(),
+                        content: text.clone(),
+                        signature: String::new(),
+                    }),
+                }
+                self.item_closed = false;
+            }
             AiStreamDelta::ThinkingSignature(signature) => {
                 match self.items.iter_mut().rev().find_map(|item| match item {
                     AccumulatedItem::Thinking { signature, .. }
@@ -157,16 +166,19 @@ impl StreamResponseAccumulator {
                 .entry((*output_index, *content_index))
                 .or_default()
                 .push_str(text),
-            AiStreamDelta::ReasoningSummaryDelta { text, .. } => match self.items.last_mut() {
-                Some(AccumulatedItem::Reasoning {
-                    summary: current, ..
-                }) => current.push_str(text),
-                _ => self.items.push(AccumulatedItem::Reasoning {
-                    summary: text.clone(),
-                    content: String::new(),
-                    signature: String::new(),
-                }),
-            },
+            AiStreamDelta::ReasoningSummaryDelta { text, .. } => {
+                match self.items.last_mut() {
+                    Some(AccumulatedItem::Reasoning {
+                        summary: current, ..
+                    }) if !self.item_closed => current.push_str(text),
+                    _ => self.items.push(AccumulatedItem::Reasoning {
+                        summary: text.clone(),
+                        content: String::new(),
+                        signature: String::new(),
+                    }),
+                }
+                self.item_closed = false;
+            }
             AiStreamDelta::RefusalDelta(text) => self.push_refusal(text),
             AiStreamDelta::RefusalDeltaWithIndex {
                 text,
@@ -224,18 +236,9 @@ impl StreamResponseAccumulator {
                 }
             }
             AiStreamDelta::ItemDone { index, item } => {
-                if item
-                    .meta
-                    .as_ref()
-                    .is_some_and(|meta| meta.get("__google_media_part").is_some())
-                {
-                    // Gemini parts have no output-item indices; keep their wire
-                    // order alongside text rather than treating index zero as replacement.
-                    self.items.push(AccumulatedItem::Unknown(item.clone()));
-                } else {
-                    self.completed_items
-                        .insert(*index, completed_item_semantic_shell(item));
-                }
+                self.item_closed = true;
+                self.completed_items
+                    .insert(*index, completed_item_semantic_shell(item));
             }
             AiStreamDelta::Usage(usage) => self.usage = usage.clone(),
             AiStreamDelta::ResponseTerminal {
@@ -266,16 +269,18 @@ impl StreamResponseAccumulator {
     }
     fn push_text(&mut self, text: &str) {
         match self.items.last_mut() {
-            Some(AccumulatedItem::Text(current)) => current.push_str(text),
+            Some(AccumulatedItem::Text(current)) if !self.item_closed => current.push_str(text),
             _ => self.items.push(AccumulatedItem::Text(text.to_owned())),
         }
+        self.item_closed = false;
     }
 
     fn push_refusal(&mut self, text: &str) {
         match self.items.last_mut() {
-            Some(AccumulatedItem::Refusal(current)) => current.push_str(text),
+            Some(AccumulatedItem::Refusal(current)) if !self.item_closed => current.push_str(text),
             _ => self.items.push(AccumulatedItem::Refusal(text.to_owned())),
         }
+        self.item_closed = false;
     }
 
     pub fn into_ai_response(self) -> AiResponse {
@@ -286,6 +291,7 @@ impl StreamResponseAccumulator {
             items,
             tool_calls,
             completed_items,
+            item_closed: _,
             indexed_text,
             stop_reason,
             terminal,

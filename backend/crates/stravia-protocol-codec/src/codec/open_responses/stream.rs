@@ -68,7 +68,6 @@ pub struct ResponsesStreamFormatter {
     next_message_content_index: usize,
     accumulated_reasoning: String,
     accumulated_reasoning_content: String,
-    reasoning_encrypted_content: Option<String>,
     reasoning_summary_started: bool,
     usage: Usage,
     started: bool,
@@ -112,7 +111,6 @@ impl ResponsesStreamFormatter {
             next_message_content_index: 0,
             accumulated_reasoning: String::new(),
             accumulated_reasoning_content: String::new(),
-            reasoning_encrypted_content: None,
             reasoning_summary_started: false,
             usage: Usage::default(),
             started: false,
@@ -336,7 +334,31 @@ impl ResponsesStreamFormatter {
         ));
     }
 
+    fn close_message(&mut self, status: Option<AiItemStatus>) -> Option<usize> {
+        let output_index = self.message_output_index.take()?;
+        let mut content = BTreeMap::new();
+        if let Some(content_index) = self.text_content_index.take() {
+            content.insert(content_index, std::mem::take(&mut self.accumulated_text));
+        }
+        let mut refusals = BTreeMap::new();
+        if let Some(content_index) = self.refusal_content_index.take() {
+            refusals.insert(content_index, std::mem::take(&mut self.accumulated_refusal));
+        }
+        self.indexed_messages.insert(
+            output_index,
+            PendingIndexedMessage {
+                item_id: std::mem::take(&mut self.msg_id),
+                content,
+                refusals,
+                status,
+            },
+        );
+        self.next_message_content_index = 0;
+        Some(output_index)
+    }
+
     fn ensure_reasoning_started(&mut self, events: &mut Vec<SseEvent>) {
+        self.close_message(None);
         self.ensure_started(events);
         if self.reasoning_item_id.is_some() {
             return;
@@ -381,9 +403,6 @@ impl ResponsesStreamFormatter {
                 "type": "reasoning_text",
                 "text": self.accumulated_reasoning_content
             }]);
-        }
-        if let Some(encrypted_content) = &self.reasoning_encrypted_content {
-            item["encrypted_content"] = serde_json::Value::String(encrypted_content.clone());
         }
         item
     }
@@ -455,7 +474,6 @@ impl ResponsesStreamFormatter {
         self.reasoning_output_index = None;
         self.accumulated_reasoning.clear();
         self.accumulated_reasoning_content.clear();
-        self.reasoning_encrypted_content = None;
         self.reasoning_summary_started = false;
     }
 
@@ -629,6 +647,7 @@ impl ResponsesStreamFormatter {
         output_index: usize,
         preferred_item_id: Option<&str>,
     ) {
+        self.close_message(None);
         self.ensure_started(events);
         self.next_output_index = self.next_output_index.max(output_index + 1);
         if self.indexed_reasoning.contains_key(&output_index) {
@@ -1462,18 +1481,9 @@ impl ResponsesStreamFormatter {
                 } => {
                     self.emit_reasoning_summary_delta(&mut events, text, obfuscation.as_deref());
                 }
-                AiStreamDelta::ThinkingSignature(signature) => {
-                    if self.reasoning_item_id.is_none()
-                        && let Some(item) = self.sealed_reasoning_items.values_mut().next_back()
-                    {
-                        // The signature completes the thinking block it trails;
-                        // that block's item already sealed, so keep it on the
-                        // sealed item for the terminal snapshot.
-                        item["encrypted_content"] = serde_json::Value::String(signature.clone());
-                    } else {
-                        self.reasoning_encrypted_content = Some(signature.clone());
-                    }
-                }
+                // Native Responses ciphertext arrives on typed Reasoning ItemDone;
+                // a generic Thinking signature belongs to another wire format.
+                AiStreamDelta::ThinkingSignature(_) => {}
                 AiStreamDelta::TextDelta(text) => {
                     self.emit_text_delta(&mut events, text, None);
                 }
@@ -1529,6 +1539,7 @@ impl ResponsesStreamFormatter {
                     text,
                 ),
                 AiStreamDelta::ToolCallStart { index, id, name } => {
+                    self.close_message(None);
                     self.ensure_started(&mut events);
                     self.seal_reasoning_item(&mut events);
                     if let Some(pos) = self.tool_index_map.get(index).copied()
@@ -1668,6 +1679,7 @@ impl ResponsesStreamFormatter {
                     if let Some("stravia:agent_result") =
                         item.get("type").and_then(|value| value.as_str())
                     {
+                        self.close_message(None);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         let output_index = self.next_output_index;
@@ -1710,6 +1722,7 @@ impl ResponsesStreamFormatter {
                         self.completed_item_fields.insert(*index, fields.clone());
                     }
                     if let Some(native) = super::native_compaction_item(item) {
+                        self.close_message(None);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
@@ -1750,6 +1763,7 @@ impl ResponsesStreamFormatter {
                         );
                     }
                     if let Some((call_id, content)) = item.function_call_output_ref() {
+                        self.close_message(None);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
@@ -1787,28 +1801,49 @@ impl ResponsesStreamFormatter {
                     let is_message = item.role
                         == stravia_runtime_contract::protocol::ir::Role::Assistant
                         && item.tool_calls.is_none()
-                        && item.reasoning_ref().is_none()
-                        && item.thinking_ref().is_none()
-                        && item.unknown_ref().is_none();
-                    if is_message && self.message_output_index != Some(*index) {
-                        self.ensure_indexed_message(&mut events, *index, None);
-                        self.indexed_messages
-                            .get_mut(index)
-                            .expect("indexed message was inserted")
-                            .status = item.status();
+                        && match &item.content {
+                            stravia_runtime_contract::protocol::ir::MessageContent::Text(_) => true,
+                            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => blocks.iter().all(|block| matches!(block,
+                                stravia_runtime_contract::protocol::ir::ContentBlock::Text { .. }
+                                | stravia_runtime_contract::protocol::ir::ContentBlock::Refusal { .. })),
+                        };
+                    if is_message {
+                        if !self.indexed_messages.contains_key(index)
+                            && let Some(output_index) = self.close_message(item.status())
+                        {
+                            if output_index != *index {
+                                if let Some(content) = self.completed_message_content.remove(index)
+                                {
+                                    self.completed_message_content.insert(output_index, content);
+                                }
+                                if let Some(fields) = self.completed_item_fields.remove(index) {
+                                    self.completed_item_fields.insert(output_index, fields);
+                                }
+                            }
+                        } else {
+                            self.ensure_indexed_message(&mut events, *index, None);
+                            self.indexed_messages
+                                .get_mut(index)
+                                .expect("indexed message was inserted")
+                                .status = item.status();
+                        }
                     }
-                    if let Some((_, _, encrypted_content)) = item.reasoning_ref()
-                        && !self.sealed_reasoning_items.contains_key(index)
-                    {
-                        self.ensure_indexed_reasoning(&mut events, *index, None);
-                        let mut reasoning = self
-                            .indexed_reasoning
-                            .remove(index)
-                            .expect("indexed reasoning was inserted");
-                        reasoning.encrypted_content = encrypted_content.map(str::to_owned);
-                        // ItemDone 才证明晚到签名完整；此时立即收口，避免工具先
-                        // 完成的 SSE 顺序被客户端持久化为 call → reasoning。
-                        self.seal_indexed_reasoning_item(&mut events, *index, reasoning);
+                    if let Some((_, _, encrypted_content)) = item.reasoning_ref() {
+                        if let Some(sealed) = self.sealed_reasoning_items.get_mut(index) {
+                            if let Some(ciphertext) = encrypted_content {
+                                sealed["encrypted_content"] =
+                                    serde_json::Value::String(ciphertext.to_owned());
+                            }
+                        } else {
+                            self.ensure_indexed_reasoning(&mut events, *index, None);
+                            let mut reasoning = self
+                                .indexed_reasoning
+                                .remove(index)
+                                .expect("indexed reasoning was inserted");
+                            reasoning.encrypted_content = encrypted_content.map(str::to_owned);
+                            // Typed ItemDone proves native ciphertext complete.
+                            self.seal_indexed_reasoning_item(&mut events, *index, reasoning);
+                        }
                     }
                 }
                 AiStreamDelta::Usage(u) => {

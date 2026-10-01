@@ -190,9 +190,53 @@ enum GeminiStreamPart {
     Other(Value),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeStreamKind {
+    Thinking,
+    Text,
+    Tool,
+    Other,
+}
+
+#[derive(Default)]
+struct NativeStreamCursor {
+    kind: Option<NativeStreamKind>,
+    index: usize,
+    next_index: usize,
+    text: String,
+}
+
+impl NativeStreamCursor {
+    fn close_text(&mut self, deltas: &mut Vec<AiStreamDelta>, signature: Option<String>) {
+        let item = match self.kind {
+            Some(NativeStreamKind::Thinking) => {
+                AiItem::thinking(std::mem::take(&mut self.text), signature)
+            }
+            Some(NativeStreamKind::Text) => AiItem::output_text(std::mem::take(&mut self.text)),
+            _ => return,
+        };
+        deltas.push(AiStreamDelta::ItemDone {
+            index: self.index,
+            item,
+        });
+        self.kind = None;
+    }
+
+    fn begin(&mut self, kind: NativeStreamKind, deltas: &mut Vec<AiStreamDelta>) -> usize {
+        if self.kind != Some(kind) {
+            self.close_text(deltas, None);
+            self.index = self.next_index;
+            self.next_index += 1;
+            self.kind = Some(kind);
+        }
+        self.index
+    }
+}
+
 pub struct GoogleStreamParser {
     buffer: String,
     first: bool,
+    cursor: NativeStreamCursor,
 }
 
 impl Default for GoogleStreamParser {
@@ -206,6 +250,7 @@ impl GoogleStreamParser {
         Self {
             buffer: String::new(),
             first: true,
+            cursor: NativeStreamCursor::default(),
         }
     }
 }
@@ -224,14 +269,14 @@ impl GoogleStreamParser {
                 if let Some(data) = line.strip_prefix("data:") {
                     saw_sse_data = true;
                     let chunk = serde_json::from_str::<Value>(data.trim())?;
-                    parse_gemini_chunk(&chunk, &mut deltas, &mut self.first)?;
+                    parse_gemini_chunk(&chunk, &mut deltas, &mut self.first, &mut self.cursor)?;
                 }
             }
 
             let bare = block.trim();
             if !saw_sse_data && (bare.starts_with('{') || bare.starts_with('[')) {
                 let chunk = serde_json::from_str::<Value>(bare)?;
-                parse_gemini_chunk(&chunk, &mut deltas, &mut self.first)?;
+                parse_gemini_chunk(&chunk, &mut deltas, &mut self.first, &mut self.cursor)?;
             }
         }
 
@@ -251,6 +296,7 @@ fn parse_gemini_chunk(
     raw_chunk: &Value,
     deltas: &mut Vec<AiStreamDelta>,
     first: &mut bool,
+    cursor: &mut NativeStreamCursor,
 ) -> Result<()> {
     let chunk: GeminiStreamChunk = serde_json::from_value(raw_chunk.clone())?;
     if *first {
@@ -275,13 +321,20 @@ fn parse_gemini_chunk(
                     extra,
                 } if extra.is_empty() => {
                     if thought.unwrap_or(false) || thought_signature.is_some() {
+                        cursor.begin(NativeStreamKind::Thinking, deltas);
                         if !text.is_empty() {
+                            cursor.text.push_str(text);
                             deltas.push(AiStreamDelta::ThinkingDelta(text.clone()));
+                        } else if thought_signature.is_some() {
+                            deltas.push(AiStreamDelta::ThinkingDelta(String::new()));
                         }
                         if let Some(signature) = thought_signature {
                             deltas.push(AiStreamDelta::ThinkingSignature(signature.clone()));
+                            cursor.close_text(deltas, Some(signature.clone()));
                         }
                     } else if !text.is_empty() {
+                        cursor.begin(NativeStreamKind::Text, deltas);
+                        cursor.text.push_str(text);
                         deltas.push(AiStreamDelta::TextDelta(text.clone()));
                     }
                 }
@@ -290,25 +343,38 @@ fn parse_gemini_chunk(
                     thought_signature,
                     extra,
                 } if extra.is_empty() => {
+                    cursor.close_text(deltas, None);
                     if let Some(signature) = thought_signature {
-                        deltas.push(AiStreamDelta::ThinkingSignature(signature.clone()));
+                        cursor.kind = None;
+                        cursor.begin(NativeStreamKind::Thinking, deltas);
+                        deltas.push(AiStreamDelta::ThinkingDelta(String::new()));
+                        cursor.close_text(deltas, Some(signature.clone()));
                     }
+                    cursor.kind = None;
+                    let index = cursor.begin(NativeStreamKind::Tool, deltas);
                     let id = function_call
                         .id
                         .clone()
                         .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                     deltas.push(AiStreamDelta::ToolCallStart {
-                        index: 0,
-                        id,
+                        index,
+                        id: id.clone(),
                         name: function_call.name.clone(),
                     });
-                    let args = function_call.args.to_string();
-                    if args != "{}" {
-                        deltas.push(AiStreamDelta::ToolCallDelta {
-                            index: 0,
-                            arguments: args,
-                        });
-                    }
+                    let arguments = function_call.args.to_string();
+                    deltas.push(AiStreamDelta::ToolCallDelta {
+                        index,
+                        arguments: arguments.clone(),
+                    });
+                    deltas.push(AiStreamDelta::ItemDone {
+                        index,
+                        item: AiItem::function_call(ToolCall {
+                            id: id.into(),
+                            name: function_call.name.clone(),
+                            arguments,
+                        }),
+                    });
+                    cursor.kind = None;
                 }
                 GeminiStreamPart::Text {
                     text,
@@ -316,6 +382,9 @@ fn parse_gemini_chunk(
                     thought_signature,
                     extra,
                 } => {
+                    cursor.close_text(deltas, None);
+                    cursor.kind = None;
+                    cursor.begin(NativeStreamKind::Other, deltas);
                     let mut raw = extra.clone();
                     raw.insert("text".into(), Value::String(text.clone()));
                     if let Some(thought) = thought {
@@ -324,8 +393,13 @@ fn parse_gemini_chunk(
                     if let Some(signature) = thought_signature {
                         raw.insert("thoughtSignature".into(), Value::String(signature.clone()));
                     }
+                    let raw = Value::Object(raw);
                     deltas.push(AiStreamDelta::Unknown {
-                        raw: Value::Object(raw).to_string(),
+                        raw: raw.to_string(),
+                    });
+                    deltas.push(AiStreamDelta::ItemDone {
+                        index: cursor.index,
+                        item: AiItem::unknown(raw),
                     });
                 }
                 GeminiStreamPart::FunctionCall {
@@ -333,18 +407,29 @@ fn parse_gemini_chunk(
                     thought_signature,
                     extra,
                 } => {
+                    cursor.close_text(deltas, None);
+                    cursor.kind = None;
+                    cursor.begin(NativeStreamKind::Other, deltas);
                     let mut raw = extra.clone();
                     raw.insert("functionCall".into(), serde_json::to_value(function_call)?);
                     if let Some(signature) = thought_signature {
                         raw.insert("thoughtSignature".into(), Value::String(signature.clone()));
                     }
+                    let raw = Value::Object(raw);
                     deltas.push(AiStreamDelta::Unknown {
-                        raw: Value::Object(raw).to_string(),
+                        raw: raw.to_string(),
+                    });
+                    deltas.push(AiStreamDelta::ItemDone {
+                        index: cursor.index,
+                        item: AiItem::unknown(raw),
                     });
                 }
                 GeminiStreamPart::Other(raw) => {
+                    cursor.close_text(deltas, None);
+                    cursor.kind = None;
+                    let index = cursor.begin(NativeStreamKind::Other, deltas);
                     if let Some(item) = google_media_item(raw)? {
-                        deltas.push(AiStreamDelta::ItemDone { index: 0, item });
+                        deltas.push(AiStreamDelta::ItemDone { index, item });
                         continue;
                     }
                     if raw.as_object().is_some_and(|fields| {
@@ -354,6 +439,10 @@ fn parse_gemini_chunk(
                     }
                     deltas.push(AiStreamDelta::Unknown {
                         raw: raw.to_string(),
+                    });
+                    deltas.push(AiStreamDelta::ItemDone {
+                        index,
+                        item: AiItem::unknown(raw.clone()),
                     });
                 }
             }
@@ -371,6 +460,7 @@ fn parse_gemini_chunk(
     }
 
     if let Some(reason) = candidate.and_then(|candidate| candidate.finish_reason.as_deref()) {
+        cursor.close_text(deltas, None);
         let normalized = match reason {
             "STOP" => "stop",
             "MAX_TOKENS" => "length",
@@ -385,13 +475,21 @@ fn parse_gemini_chunk(
 
 // ── Stream formatter (deltas → Gemini SSE) ──
 
+struct StreamToolCall {
+    name: String,
+    id: String,
+    arguments: String,
+    signature: Option<String>,
+}
+
 pub struct GoogleStreamFormatter {
     usage: Usage,
     model: String,
-    tool_names: HashMap<usize, String>,
-    tool_ids: HashMap<usize, String>,
-    tool_arg_buffers: HashMap<usize, String>,
+    tools: HashMap<usize, StreamToolCall>,
     response_metadata: serde_json::Map<String, Value>,
+    pending_signature: Option<String>,
+    thinking_signature_emitted: bool,
+    reasoning_has_text: bool,
 }
 
 impl Default for GoogleStreamFormatter {
@@ -405,10 +503,11 @@ impl GoogleStreamFormatter {
         Self {
             usage: Usage::default(),
             model: String::new(),
-            tool_names: HashMap::new(),
-            tool_ids: HashMap::new(),
-            tool_arg_buffers: HashMap::new(),
+            tools: HashMap::new(),
             response_metadata: serde_json::Map::new(),
+            pending_signature: None,
+            thinking_signature_emitted: false,
+            reasoning_has_text: false,
         }
     }
 }
@@ -435,6 +534,23 @@ impl GoogleStreamFormatter {
         let mut events = Vec::new();
 
         for delta in deltas {
+            if (matches!(
+                delta,
+                AiStreamDelta::ThinkingDelta(_)
+                    | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+                    | AiStreamDelta::TextDelta(_)
+                    | AiStreamDelta::TextDeltaWithMetadata { .. }
+                    | AiStreamDelta::RefusalDelta(_)
+                    | AiStreamDelta::RefusalDeltaWithIndex { .. }
+                    | AiStreamDelta::Unknown { .. }
+                    | AiStreamDelta::Done { .. }
+                    | AiStreamDelta::ThinkingSignature(_)
+            ) || matches!(delta, AiStreamDelta::ItemDone { item, .. }
+                    if item.thinking_ref().is_none() && item.reasoning_ref().is_none()))
+                && let Some(signature) = self.pending_signature.take()
+            {
+                self.emit_thinking_signature(&mut events, &signature);
+            }
             match delta {
                 AiStreamDelta::MessageStart { model, .. } => {
                     self.model = model.clone();
@@ -442,6 +558,11 @@ impl GoogleStreamFormatter {
                 AiStreamDelta::ThinkingDelta(text)
                 | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
                 | AiStreamDelta::ReasoningSummaryDelta { text, .. } => {
+                    self.thinking_signature_emitted = false;
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.reasoning_has_text = true;
                     let chunk = serde_json::json!({
                         "candidates": [{
                             "content": {
@@ -455,15 +576,40 @@ impl GoogleStreamFormatter {
                 }
                 AiStreamDelta::ThinkingSignature(signature) => {
                     self.emit_thinking_signature(&mut events, signature);
+                    self.thinking_signature_emitted = true;
                 }
                 AiStreamDelta::ItemDone { item, .. } => {
+                    if let Some((text, signature)) = item.thinking_ref() {
+                        if let Some(pending) = self.pending_signature.take() {
+                            self.emit_thinking_signature(&mut events, &pending);
+                        } else if !self.thinking_signature_emitted
+                            && let Some(signature) = signature
+                        {
+                            if text.is_empty() {
+                                self.pending_signature = Some(signature.to_owned());
+                            } else {
+                                self.emit_thinking_signature(&mut events, signature);
+                            }
+                        }
+                    }
+                    self.thinking_signature_emitted = false;
+                    if let Some((summary, content, _)) = item.reasoning_ref()
+                        && !self.reasoning_has_text
+                    {
+                        for text in summary
+                            .iter()
+                            .chain(content)
+                            .filter(|text| !text.is_empty())
+                        {
+                            events.push(SseEvent::new(None, serde_json::json!({
+                                "candidates": [{"content": {"role": "model", "parts": [{"text": text, "thought": true}]}}],
+                                "modelVersion": self.model,
+                            }).to_string()));
+                        }
+                    }
+                    self.reasoning_has_text = false;
                     if let Some(part) = google_media_part(item) {
                         events.push(SseEvent::new(None, serde_json::json!({"candidates":[{"content":{"role":"model","parts":[part]}}],"modelVersion":self.model}).to_string()));
-                    }
-                    if let Some((_, _, Some(signature))) = item.reasoning_ref()
-                        && !signature.is_empty()
-                    {
-                        self.emit_thinking_signature(&mut events, signature);
                     }
                 }
                 AiStreamDelta::TextDelta(text)
@@ -479,32 +625,36 @@ impl GoogleStreamFormatter {
                     events.push(SseEvent::new(None, chunk.to_string()));
                 }
                 AiStreamDelta::ToolCallStart { index, id, name } => {
-                    self.tool_names.insert(*index, name.clone());
-                    self.tool_ids.insert(*index, id.clone());
-                    self.tool_arg_buffers.insert(*index, String::new());
+                    self.tools.insert(
+                        *index,
+                        StreamToolCall {
+                            name: name.clone(),
+                            id: id.clone(),
+                            arguments: String::new(),
+                            signature: self.pending_signature.take(),
+                        },
+                    );
                 }
                 AiStreamDelta::ToolCallDelta { index, arguments } => {
-                    let Some(name) = self.tool_names.get(index).cloned() else {
+                    let Some(tool) = self.tools.get_mut(index) else {
                         continue;
                     };
-                    let Some(id) = self.tool_ids.get(index).cloned() else {
+                    tool.arguments.push_str(arguments);
+                    let Ok(args @ Value::Object(_)) =
+                        serde_json::from_str::<Value>(&tool.arguments)
+                    else {
                         continue;
                     };
-                    let buf = self.tool_arg_buffers.entry(*index).or_default();
-                    buf.push_str(arguments);
-                    let Ok(args @ Value::Object(_)) = serde_json::from_str::<Value>(buf) else {
-                        continue;
-                    };
-                    let normalized_args = normalize_tool_args(&name, args);
+                    let normalized_args = normalize_tool_args(&tool.name, args);
+                    let mut part = serde_json::json!({"functionCall": {
+                        "id": tool.id, "name": tool.name, "args": normalized_args
+                    }});
+                    if let Some(signature) = tool.signature.take() {
+                        part["thoughtSignature"] = Value::String(signature);
+                    }
                     let chunk = serde_json::json!({
                         "candidates": [{
-                            "content": {"role": "model", "parts": [{
-                                "functionCall": {
-                                    "id": id,
-                                    "name": name,
-                                    "args": normalized_args
-                                }
-                            }]},
+                            "content": {"role": "model", "parts": [part]},
                         }],
                     });
                     events.push(SseEvent::new(None, chunk.to_string()));
@@ -595,16 +745,23 @@ impl GoogleStreamFormatter {
     }
 
     pub(crate) fn format_done(&mut self) -> Vec<SseEvent> {
-        vec![]
+        let mut events = Vec::new();
+        if let Some(signature) = self.pending_signature.take() {
+            self.emit_thinking_signature(&mut events, &signature);
+        }
+        events
     }
 
     // functionCall 的 args 契约是 JSON 对象：标量、数组、null 与非 JSON 字节
     // 同样不可表达；合法 JSON 不足以满足对象契约。
     pub(crate) fn unrepresentable_tool_arguments(&self) -> Vec<String> {
-        self.tool_arg_buffers
+        self.tools
             .iter()
-            .filter(|(_, buffer)| {
-                !matches!(serde_json::from_str::<Value>(buffer), Ok(Value::Object(_)))
+            .filter(|(_, tool)| {
+                !matches!(
+                    serde_json::from_str::<Value>(&tool.arguments),
+                    Ok(Value::Object(_))
+                )
             })
             .map(|(index, _)| format!("tool_calls[{index}].arguments"))
             .collect()
@@ -614,13 +771,14 @@ impl GoogleStreamFormatter {
 fn google_parts_from_response(resp: &AiResponse) -> Vec<Value> {
     let mut parts = Vec::new();
     for item in &resp.items {
-        if let Some((summary, content, signature)) = item.reasoning_ref() {
-            let text = summary.iter().chain(content).cloned().collect::<String>();
-            let mut part = serde_json::json!({"text": text, "thought": true});
-            if let Some(signature) = signature {
-                part["thoughtSignature"] = Value::String(signature.to_owned());
-            }
-            parts.push(part);
+        if let Some((summary, content, _)) = item.reasoning_ref() {
+            parts.extend(
+                summary
+                    .iter()
+                    .chain(content)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| serde_json::json!({"text": text, "thought": true})),
+            );
         } else if let Some((thinking, signature)) = item.thinking_ref() {
             let mut part = serde_json::json!({"text": thinking, "thought": true});
             if let Some(signature) = signature {
@@ -645,6 +803,7 @@ fn google_parts_from_response(resp: &AiResponse) -> Vec<Value> {
             parts.push(raw.clone());
         }
     }
+    super::encoder::pair_call_signatures(&mut parts);
     parts
 }
 

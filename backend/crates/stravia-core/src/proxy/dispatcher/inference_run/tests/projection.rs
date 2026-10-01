@@ -251,8 +251,9 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
             "one original generation and one continuation"
         );
         let input = captured[1]["input"].as_array().expect("Responses input");
-        // Marker 恢复不携带可回放的上游条目 ID；无密文的公开推理按 Responses
-        // 契约降级为正文。完整输入比较同时禁止展示用段落分隔符泄漏为额外文本。
+        // Marker 恢复不携带可回放的上游条目 ID。REQUEST 中受保护推理只保留
+        // summary 与密文，原 content 段落紧随其后降级为无推理 ID/meta 的正文；
+        // 完整输入比较同时禁止展示用段落分隔符泄漏为额外文本。
         assert_eq!(
             input,
             &vec![
@@ -263,8 +264,12 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
                 json!({
                     "type": "reasoning",
                     "summary": items[0]["summary"],
-                    "content": items[0]["content"],
+                    "content": [],
                     "encrypted_content": items[0]["encrypted_content"]
+                }),
+                json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": parts[2]}]
                 }),
                 json!({
                     "type": "message", "role": "assistant",
@@ -998,7 +1003,74 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
                 vec!["reasoning", "content", "reasoning", "content"],
                 "{ingress}: {body}"
             );
-            assert_eq!(runs[0].1, "R1", "{ingress}: {body}");
+            let first_thinking = &runs[0].1;
+            if ingress == OPEN_RESPONSES_2026_04_24 {
+                let references = crate::history_marker::history_marker_references(&[
+                    stravia_runtime_contract::protocol::ir::AiItem::thinking(first_thinking, None),
+                ]);
+                assert_eq!(
+                    references.len(),
+                    1,
+                    "one authoritative marker for R1: {body}"
+                );
+                let reference = &references[0];
+                let preview = first_thinking
+                    .strip_suffix(&crate::history_marker::render_history_marker_reference(
+                        reference,
+                    ))
+                    .expect("preview is followed by its authoritative marker");
+                let public = preview
+                    .strip_prefix(&crate::history_marker::render_preview_projection_start(
+                        reference, 0,
+                    ))
+                    .and_then(|preview| {
+                        preview.strip_suffix(&crate::history_marker::render_preview_projection_end(
+                            reference, 0,
+                        ))
+                    })
+                    .expect("one paired native public preview for the same reference");
+                assert_eq!(
+                    public.trim_matches('\n'),
+                    "R1",
+                    "public preview contains exactly the original readable thought: {body}"
+                );
+                let terminal = body
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                    .find(|event| event["type"] == "response.completed")
+                    .expect("Responses terminal output");
+                let output = terminal["response"]["output"]
+                    .as_array()
+                    .expect("terminal items");
+                let first = output
+                    .iter()
+                    .find(|item| item["type"] == "reasoning")
+                    .expect("native terminal reasoning");
+                assert!(
+                    first
+                        .get("encrypted_content")
+                        .is_none_or(serde_json::Value::is_null),
+                    "{body}"
+                );
+                assert!(
+                    first
+                        .get("signature")
+                        .is_none_or(serde_json::Value::is_null),
+                    "{body}"
+                );
+                let public = first["content"]
+                    .as_array()
+                    .expect("OUTPUT native reasoning content")
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<String>();
+                assert_eq!(
+                    public.trim_matches('\n'),
+                    first_thinking.trim_matches('\n'),
+                    "stream and terminal public reasoning agree: {body}"
+                );
+            }
             assert_eq!(runs[1].1, "C1", "{ingress}: {body}");
             assert!(
                 runs[2]

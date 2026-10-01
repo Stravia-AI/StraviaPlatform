@@ -592,18 +592,18 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
         .expect("begin root");
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
-        AiItem::reasoning(Vec::new(), Vec::new(), Some("opaque".into())),
+        AiItem::thinking(String::new(), Some("opaque".into())),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
         }),
     ];
-    root.stage(
-        &mut response,
-        &generation_source(),
-        Some("upstream-response".into()),
-    );
+    let mut source = generation_source();
+    if let GenerationSource::Target(source) = &mut source {
+        source.protocol = Some(ANTHROPIC_MESSAGES_2023_06_01.into());
+    }
+    root.stage(&mut response, &source, Some("upstream-response".into()));
     root.persist().await.expect("persist root");
     let root_id = root.id().to_owned();
 
@@ -652,6 +652,124 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
 }
 
 #[tokio::test]
+async fn gemini_wire_thought_and_marker_replay_preserves_parent_prefix() {
+    use stravia_protocol_codec::codec::google::gemini::decoder::GoogleDecoder;
+    use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+
+    let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    let pair = ProtocolTransform::global()
+        .bind(protocol, protocol)
+        .expect("Gemini pair");
+    for marker_carrier in [false, true] {
+        let chain = generation_chain().await;
+        let owner = principal("gemini-wire-owner");
+        let question = serde_json::json!({"role": "user", "parts": [{"text": "question"}]});
+        let initial = GoogleDecoder
+            .decode_with_model(
+                serde_json::json!({"contents": [question.clone()]}),
+                "model",
+                false,
+            )
+            .expect("decode initial Gemini request");
+        let mut root = chain
+            .begin(owner.clone(), initial)
+            .await
+            .expect("begin Gemini root");
+        let marker = crate::history_marker::reserve_thinking_marker();
+        let thought = if marker_carrier {
+            crate::history_marker::render_history_marker(&marker)
+        } else {
+            "native thought".to_owned()
+        };
+        let mut response = AiResponse::new("upstream", "model");
+        response.items = vec![
+            AiItem::thinking(
+                thought.clone(),
+                (!marker_carrier).then(|| "native-signature".into()),
+            ),
+            AiItem::function_call(ToolCall {
+                id: "provider-call".into(),
+                name: "lookup".into(),
+                arguments: "{\"value\":1}".into(),
+            }),
+        ];
+        let wire = pair
+            .encode_response(&response)
+            .expect("encode actual Gemini delivery");
+        let mut source = generation_source();
+        if let GenerationSource::Target(source) = &mut source {
+            source.protocol = Some(protocol.into());
+        }
+        assert!(root.stage(&mut response, &source, None));
+        root.persist().await.expect("persist Gemini delivery");
+        let replay = GoogleDecoder
+            .decode_with_model(
+                serde_json::json!({
+                    "contents": [question, wire["candidates"][0]["content"].clone(), {
+                        "role": "user", "parts": [{"functionResponse": {
+                            "id": "provider-call", "name": "lookup", "response": {"result": "found"}
+                        }}]
+                    }]
+                }),
+                "model",
+                false,
+            )
+            .expect("decode real Gemini client replay");
+        let resumed = chain
+            .begin(owner, replay)
+            .await
+            .expect("discover Gemini parent");
+        assert_eq!(
+            resumed.parent_id(),
+            Some(root.id()),
+            "thought/marker must participate in the same client prefix"
+        );
+        assert!(resumed.has_matching_pending_tool_result());
+        assert_eq!(resumed.request_delta.items.len(), 1);
+        let call = resumed
+            .request()
+            .items
+            .iter()
+            .find_map(AiItem::function_call_ref)
+            .expect("effective parent tool call");
+        let result = resumed
+            .request()
+            .items
+            .iter()
+            .rev()
+            .find_map(AiItem::function_call_output_ref)
+            .expect("effective continuation tool result");
+        assert_eq!(call.name, "lookup");
+        assert_eq!(call.id.as_str(), "provider-call");
+        assert_eq!(
+            result.0,
+            call.id.as_str(),
+            "canonical client aliases must restore the provider call/result association"
+        );
+        let restored_item = resumed
+            .request()
+            .items
+            .iter()
+            .find(|item| item.thinking_ref().is_some())
+            .expect("effective parent keeps thought carrier");
+        assert_eq!(
+            restored_item.thinking_ref().unwrap(),
+            (
+                thought.as_str(),
+                (!marker_carrier).then_some("native-signature")
+            )
+        );
+        if !marker_carrier {
+            assert_eq!(
+                crate::history_marker::ThinkingSource::from_item(restored_item),
+                source.thinking_source(),
+                "native replay must retain source rather than becoming Unknown"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
@@ -669,7 +787,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
         .expect("begin root");
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
-        AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("opaque".into())),
+        AiItem::thinking("summary", Some("opaque".into())),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
@@ -746,11 +864,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
 
     let mut second_response = AiResponse::new("upstream-2", "model");
     second_response.items = vec![
-        AiItem::reasoning(
-            vec!["second summary".into()],
-            Vec::new(),
-            Some("opaque-2".into()),
-        ),
+        AiItem::thinking("second summary", Some("opaque-2".into())),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_2".into(),
             name: "lookup".into(),
@@ -841,15 +955,16 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
     let owner = principal("owner");
     let question = user_message("question");
     let mut initial = responses_request(vec![question.clone()]);
-    initial.meta.source_protocol =
-        Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
+    // The client receives Responses OUTPUT throughout this leg; Anthropic is
+    // the provider source, not the client ingress protocol.
+    initial.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
     let mut root = chain
         .begin(owner.clone(), initial)
         .await
-        .expect("begin Anthropic root");
+        .expect("begin Responses client root with Anthropic source");
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
-        AiItem::reasoning(vec!["reasoning".into()], vec![], Some("opaque".into())),
+        AiItem::thinking("reasoning", Some("opaque".into())),
         AiItem::output_text("answer"),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
@@ -857,25 +972,33 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
             arguments: "{\"value\":1}".into(),
         }),
     ];
-    root.stage(
-        &mut response,
-        &generation_source(),
-        Some("upstream-response".into()),
-    );
+    let mut source = generation_source();
+    if let GenerationSource::Target(source) = &mut source {
+        source.protocol = Some(ANTHROPIC_MESSAGES_2023_06_01.into());
+    }
+    root.stage(&mut response, &source, Some("upstream-response".into()));
     root.persist().await.expect("persist Anthropic root");
     let root_id = root.id().to_owned();
 
-    let mut resumed_request = responses_request(vec![
-        question,
-        AiItem::reasoning(vec!["reasoning".into()], vec![], Some("opaque".into())),
-        AiItem::output_text("answer"),
-        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
-            id: "call_1".into(),
-            name: "lookup".into(),
-            arguments: "{\"value\":1}".into(),
-        }),
-        user_message("follow-up"),
-    ]);
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .expect("Responses pair");
+    let wire = pair
+        .encode_response(&response)
+        .expect("format actual Responses OUTPUT");
+    assert!(wire["output"].as_array().unwrap().iter().any(|item| {
+        item["type"] == "reasoning"
+            && item["content"][0]["text"] == "reasoning"
+            && item.get("encrypted_content").is_none()
+    }));
+    let mut input = vec![serde_json::json!({"role": "user", "content": "question"})];
+    input.extend(wire["output"].as_array().unwrap().iter().cloned());
+    input.push(serde_json::json!({"role": "user", "content": "follow-up"}));
+    let mut resumed_request = pair
+        .decode_request(serde_json::json!({
+            "model": "model", "input": input,
+        }))
+        .expect("decode real Responses client replay");
     resumed_request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
     resumed_request.meta.vendor.ingress.insert(
         GENERATION_SESSION_ID_META.into(),
@@ -888,6 +1011,20 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
 
     assert_eq!(resumed.parent.parent_id.as_deref(), Some(root_id.as_str()));
     assert_eq!(resumed.request_delta.items.len(), 1);
+    let original_thought = resumed
+        .request()
+        .items
+        .iter()
+        .find(|item| item.thinking_ref().is_some())
+        .expect("verified client prefix restores original provider Thinking");
+    assert_eq!(
+        original_thought.thinking_ref(),
+        Some(("reasoning", Some("opaque")))
+    );
+    assert_eq!(
+        crate::history_marker::ThinkingSource::from_item(original_thought),
+        source.thinking_source()
+    );
 }
 
 #[test]
@@ -1037,10 +1174,15 @@ fn chat_projects_flattened_assistant_history() {
 }
 
 #[test]
-fn anthropic_projects_reasoning_as_thinking() {
+fn anthropic_projects_reasoning_as_unsigned_thinking_and_keeps_native_signature() {
     let mut response = AiResponse::new("ant", "model");
     response.items = vec![
-        AiItem::reasoning(Vec::new(), Vec::new(), Some("opaque".into())),
+        AiItem::reasoning(
+            vec!["summary".into()],
+            vec!["readable content".into()],
+            Some("responses-cipher".into()),
+        ),
+        AiItem::thinking("native thought", Some("native-signature".into())),
         AiItem::function_call(ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
@@ -1053,11 +1195,28 @@ fn anthropic_projects_reasoning_as_thinking() {
     let MessageContent::Blocks(blocks) = &output[0].content else {
         panic!("expected blocks");
     };
+    let thoughts = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => Some((thinking.as_str(), signature.as_deref())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        thoughts,
+        vec![
+            ("summary\nreadable content", None),
+            ("native thought", Some("native-signature"))
+        ]
+    );
     assert!(
-            blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::Thinking { signature: Some(sig), .. } if sig == "opaque"))
-        );
+        !serde_json::to_string(&output)
+            .unwrap()
+            .contains("responses-cipher")
+    );
 }
 
 #[test]

@@ -74,20 +74,22 @@ fn chat_reasoning_content_degrades_to_output_text_before_its_tool_call() {
 }
 
 #[test]
-fn empty_reasoning_content_is_always_encoded_as_an_array() {
-    for item in [
-        AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("opaque".into())),
-        AiItem::thinking("summary", Some("signature".into())),
-    ] {
-        let request = AiRequest::new("gpt", vec![item]);
-
-        let (body, _) = ResponsesEncoder
-            .encode_request(&request)
-            .expect("encode empty reasoning content");
-
-        assert_eq!(body["input"][0]["type"], "reasoning");
-        assert_eq!(body["input"][0]["content"], serde_json::json!([]));
-    }
+fn thinking_replay_signature_is_not_responses_ciphertext() {
+    let request = AiRequest::new(
+        "gpt",
+        vec![AiItem::thinking(
+            "visible thinking",
+            Some("anthropic-signature".into()),
+        )],
+    );
+    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    assert_eq!(
+        body["input"],
+        serde_json::json!([{
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "visible thinking"}]
+        }])
+    );
 }
 
 #[test]
@@ -514,22 +516,6 @@ fn unsigned_thinking_degrades_to_output_text_message() {
 }
 
 #[test]
-fn signed_thinking_encodes_native_reasoning_with_encrypted_content() {
-    let request = AiRequest::new(
-        "gpt",
-        vec![AiItem::thinking("why", Some("signature".into()))],
-    );
-
-    let (body, _) = ResponsesEncoder
-        .encode_request(&request)
-        .expect("encode signed thinking");
-
-    assert_eq!(body["input"][0]["type"], "reasoning");
-    assert_eq!(body["input"][0]["summary"][0]["text"], "why");
-    assert_eq!(body["input"][0]["encrypted_content"], "signature");
-}
-
-#[test]
 fn reasoning_without_id_or_encrypted_content_degrades_to_output_text() {
     let request = AiRequest::new(
         "gpt",
@@ -600,12 +586,15 @@ fn mixed_assistant_item_splits_native_reasoning_in_order() {
     );
     assert_eq!(input[1]["type"], "reasoning");
     assert_eq!(input[1]["summary"][0]["text"], "summary");
-    assert_eq!(input[1]["content"][0]["text"], "detail");
+    assert_eq!(input[1]["content"], serde_json::json!([]));
     assert_eq!(input[1]["encrypted_content"], "opaque");
     assert_eq!(input[2]["type"], "message");
     assert_eq!(
         input[2]["content"],
-        serde_json::json!([{"type": "output_text", "text": "after"}])
+        serde_json::json!([
+            {"type": "output_text", "text": "detail"},
+            {"type": "output_text", "text": "after"}
+        ])
     );
     assert_eq!(input[3]["type"], "function_call");
     assert_eq!(input[3]["call_id"], "call_1");
@@ -721,4 +710,224 @@ fn assistant_item_with_only_redacted_thinking_emits_nothing() {
     assert_eq!(input.len(), 1);
     assert_eq!(input[0]["role"], "user");
     assert!(!body.to_string().contains("redacted-payload"));
+}
+
+#[test]
+fn degraded_reasoning_message_does_not_reuse_reasoning_item_id() {
+    use stravia_runtime_contract::protocol::ir::{AiItemAudience, AiItemProvenance, AiItemStatus};
+
+    // 跨来源回放：密文缺失或为空的 Reasoning、无/有签名的 Thinking 都没有
+    // 原生载体，明文降级为 message。拆出的新载体不能借用推理条目的 `rs_`
+    // 图 id（上游要求 message id 以 `msg` 开头）、status、phase 或来源侧
+    // 原生扩展字段。
+    for item in [
+        AiItem::reasoning(vec!["summary".into()], Vec::new(), None),
+        AiItem::reasoning(vec!["summary".into()], Vec::new(), Some(String::new())),
+        AiItem::thinking("summary", None),
+        AiItem::thinking("summary", Some("anthropic-signature".into())),
+    ] {
+        let mut item = item.with_graph_metadata(
+            Some("rs_gateway_0".into()),
+            Some(AiItemStatus::Completed),
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        );
+        let meta = item.meta.as_mut().expect("graph metadata creates meta");
+        meta.insert_extension("phase", serde_json::json!("commentary"))
+            .expect("phase is not reserved");
+        meta.insert_extension(
+            "__open_responses_item_fields",
+            serde_json::json!({
+                "internal_chat_message_metadata_passthrough": {"trace": "opaque"}
+            }),
+        )
+        .expect("item fields is not reserved");
+
+        let (body, _) = ResponsesEncoder
+            .encode_request(&AiRequest::new("gpt", vec![item]))
+            .expect("encode degraded reasoning");
+
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        let message = &input[0];
+        assert_eq!(message["type"], "message");
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(
+            message["content"],
+            serde_json::json!([{"type": "output_text", "text": "summary"}])
+        );
+        for field in [
+            "id",
+            "status",
+            "phase",
+            "internal_chat_message_metadata_passthrough",
+        ] {
+            assert!(
+                message.get(field).is_none(),
+                "degraded message must not borrow source item `{field}`: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_reasoning_tool_use_split_does_not_reuse_item_identity() {
+    use stravia_runtime_contract::protocol::ir::{
+        AiItemAudience, AiItemProvenance, AiItemStatus, ToolCall,
+    };
+
+    // 双表示边界：ToolUse 块与 canonical tool_calls 指向同一 call（len=1）。
+    // 拆出的降级 message 与派生 function_call 都是新载体，都不能借用父推理
+    // 条目的 `rs_` 身份或原生扩展字段。
+    let mut item = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "chain".into(),
+                signature: Some("anthropic-signature".into()),
+            },
+            ContentBlock::Reasoning {
+                summary: vec!["sum".into()],
+                content: vec!["detail".into()],
+                encrypted_content: None,
+            },
+            ContentBlock::Text {
+                text: "answer".into(),
+                cache_control: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "lookup".into(),
+                input: serde_json::json!({"q": "x"}),
+                cache_control: None,
+            },
+        ]),
+        tool_calls: Some(vec![ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: "{\"q\":\"x\"}".into(),
+        }]),
+        tool_call_id: None,
+        meta: None,
+    };
+    item.set_graph_metadata(
+        Some("rs_gateway_0".into()),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    let meta = item.meta.as_mut().expect("graph metadata creates meta");
+    meta.insert_extension("phase", serde_json::json!("commentary"))
+        .expect("phase is not reserved");
+    meta.insert_extension(
+        "__open_responses_item_fields",
+        serde_json::json!({
+            "internal_chat_message_metadata_passthrough": {"trace": "opaque"}
+        }),
+    )
+    .expect("item fields is not reserved");
+
+    let request = AiRequest::new(
+        "gpt",
+        vec![
+            item,
+            AiItem::function_call_output("call_1", serde_json::json!({"rows": 2}))
+                .with_graph_metadata(
+                    Some("fco_gateway_1".into()),
+                    Some(AiItemStatus::Completed),
+                    AiItemProvenance::Client,
+                    AiItemAudience::Provider,
+                ),
+        ],
+    );
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode mixed reasoning tool history");
+
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 3);
+
+    // 明文推理段与正文按原顺序合并为同一个降级 message。
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(input[0]["role"], "assistant");
+    assert_eq!(
+        input[0]["content"],
+        serde_json::json!([
+            {"type": "output_text", "text": "chain"},
+            {"type": "output_text", "text": "sum"},
+            {"type": "output_text", "text": "detail"},
+            {"type": "output_text", "text": "answer"},
+        ])
+    );
+    for field in [
+        "id",
+        "status",
+        "phase",
+        "internal_chat_message_metadata_passthrough",
+    ] {
+        assert!(
+            input[0].get(field).is_none(),
+            "degraded message must not borrow source item `{field}`: {}",
+            input[0]
+        );
+    }
+
+    // ToolUse 块派生的 function_call 完整保留 call_id/name/arguments，
+    // 同样不得继承父条目身份。
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[1]["name"], "lookup");
+    assert_eq!(
+        serde_json::from_str::<Value>(input[1]["arguments"].as_str().expect("arguments string"))
+            .expect("arguments are JSON"),
+        serde_json::json!({"q": "x"})
+    );
+    for field in ["id", "status", "internal_chat_message_metadata_passthrough"] {
+        assert!(
+            input[1].get(field).is_none(),
+            "derived function_call must not borrow source item `{field}`: {}",
+            input[1]
+        );
+    }
+
+    // 结果条目是独立条目，保留自身合法图身份与完整输出。
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[2]["id"], "fco_gateway_1");
+    assert_eq!(input[2]["status"], "completed");
+    assert_eq!(
+        serde_json::from_str::<Value>(input[2]["output"].as_str().expect("output string"))
+            .expect("tool output is JSON text"),
+        serde_json::json!({"rows": 2})
+    );
+}
+
+#[test]
+fn plain_assistant_message_keeps_provider_item_identity() {
+    use stravia_runtime_contract::protocol::ir::{AiItemAudience, AiItemProvenance, AiItemStatus};
+
+    // 对照组：未拆分的普通 assistant message 原样保留合法 `msg_` 图 id、
+    // status 与 phase，守卫不能误删真实身份。
+    let mut item = AiItem::output_text("answer").with_graph_metadata(
+        Some("msg_1".into()),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    item.meta
+        .as_mut()
+        .expect("graph metadata creates meta")
+        .insert_extension("phase", serde_json::json!("final_answer"))
+        .expect("phase is not reserved");
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(&AiRequest::new("gpt", vec![item]))
+        .expect("encode plain assistant message");
+
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(body["input"][0]["role"], "assistant");
+    assert_eq!(body["input"][0]["id"], "msg_1");
+    assert_eq!(body["input"][0]["status"], "completed");
+    assert_eq!(body["input"][0]["phase"], "final_answer");
 }

@@ -4,7 +4,8 @@
 //! in client delivery copies. OpenAI-compatible clients keep Thinking on the
 //! reasoning carrier until the first non-empty Text, then use
 //! quoted `content` previews bound to authoritative Thinking History Markers.
-//! Other protocols retain their native carriers.
+//! Other protocols retain native carriers for same-protocol Model Legs;
+//! cross-protocol Thinking uses public previews and authoritative Markers.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -669,6 +670,12 @@ impl ClientProjectionSession {
         exposed_tool_names: impl IntoIterator<Item = String>,
         source: Option<crate::history_marker::ThinkingSource>,
     ) {
+        self.state.needs_thinking_marker = self.state.openai_compatible
+            || source
+                .as_ref()
+                .and_then(|source| source.protocol.as_ref())
+                .and_then(|protocol| protocol.protocol())
+                .is_some_and(|protocol| protocol != self.state.ingress.protocol);
         self.thinking_source = source;
         self.state.begin_model_leg();
         debug_assert!(
@@ -738,7 +745,7 @@ impl ClientProjectionSession {
         let finish_deltas = self.state.close_thinking_preview(output_index);
         let mut preview_deltas = Vec::new();
         let mut marker_deltas = Vec::with_capacity(markers.len());
-        if self.state.openai_compatible
+        if self.state.needs_thinking_marker
             && let MessageContent::Blocks(blocks) = &item.content
         {
             let mut markers_for_blocks = markers.iter();
@@ -749,7 +756,7 @@ impl ClientProjectionSession {
                 let marker = markers_for_blocks
                     .next()
                     .ok_or(HistoryMarkerError::InvalidPayload)?;
-                if post_text {
+                if self.state.openai_compatible && post_text {
                     if let Some(text) = public_thinking_text(block) {
                         preview_deltas.push(AiStreamDelta::TextDelta(render_quoted_preview(
                             &marker.reference,
@@ -791,7 +798,7 @@ impl ClientProjectionSession {
         item: &AiItem,
         reserved: Option<&HistoryMarker>,
     ) -> Result<Vec<HistoryMarker>, HistoryMarkerError> {
-        if !self.state.openai_compatible {
+        if !self.state.needs_thinking_marker {
             return reserved
                 .is_none()
                 .then(Vec::new)
@@ -1048,7 +1055,7 @@ impl ClientProjectionSession {
             .pending_unindexed_signature
             .as_ref()
             .filter(|value| !value.is_empty());
-        if signature.is_none() && !self.state.openai_compatible {
+        if signature.is_none() && !self.state.needs_thinking_marker {
             return None;
         }
         let (index, deltas) = self.pending_unindexed_thinking.as_ref()?;
@@ -1097,6 +1104,7 @@ impl ClientProjectionSession {
 
     fn streams_unprotected_reasoning_summary(&self, index: usize, delta: &AiStreamDelta) -> bool {
         self.carrier_facts.stream_unprotected_summaries
+            && (!self.state.needs_thinking_marker || self.state.openai_compatible)
             && !self.known_protected_thinking_indices.contains(&index)
             && matches!(delta, AiStreamDelta::ReasoningSummaryDelta { .. })
     }
@@ -1221,9 +1229,19 @@ impl ClientProjectionSession {
     }
 
     fn ends_unindexed_thinking(delta: &AiStreamDelta) -> bool {
+        // Transport/response bookkeeping can arrive between public Thinking
+        // and its late signature. Only a semantic item/turn boundary closes it.
+        // Unknown events are prefix carriers here; typed ItemDone carries any
+        // opaque content item's actual boundary.
         !matches!(
             delta,
-            AiStreamDelta::ThinkingDelta(_)
+            AiStreamDelta::MessageStart { .. }
+                | AiStreamDelta::ResponseMetadata { .. }
+                | AiStreamDelta::ProtectedThinkingStart { .. }
+                | AiStreamDelta::Usage(_)
+                | AiStreamDelta::ResponseTerminal { .. }
+                | AiStreamDelta::Unknown { .. }
+                | AiStreamDelta::ThinkingDelta(_)
                 | AiStreamDelta::ThinkingDeltaWithMetadata {
                     output_index: None,
                     ..
@@ -1471,7 +1489,9 @@ impl ClientProjectionSession {
                 }
                 if self.state.post_text_started() {
                     visible.extend(self.project_live_delta(index, delta));
-                } else if self.known_protected_thinking_indices.contains(&index) {
+                } else if (self.state.needs_thinking_marker && !self.state.openai_compatible)
+                    || self.known_protected_thinking_indices.contains(&index)
+                {
                     self.streamed_protected_thinking_indices.insert(index);
                     self.begin_protected_thinking(index);
                     let projected = self.project_protected_delta(index, delta);
@@ -1480,7 +1500,7 @@ impl ClientProjectionSession {
                 continue;
             }
             let kind = Self::unindexed_item_kind(&delta);
-            if kind != Some(UnindexedItemKind::Thinking)
+            if Self::ends_unindexed_thinking(&delta)
                 && self.pending_unindexed_signature.is_none()
                 && self.pending_unindexed_thinking.is_some()
             {
@@ -1581,7 +1601,7 @@ impl ClientProjectionSession {
                         let recorded = prepared.front().cloned();
                         let block_post_text =
                             recorded.as_ref().map_or(post_text, |entry| entry.post_text);
-                        let needs_marker = self.state.openai_compatible;
+                        let needs_marker = self.state.needs_thinking_marker;
                         if !needs_marker {
                             push_projection_block(&mut projected, block, &mut meta);
                             continue;
@@ -1600,7 +1620,7 @@ impl ClientProjectionSession {
                                 .await?;
                             (marker, true)
                         };
-                        if block_post_text {
+                        if self.state.openai_compatible && block_post_text {
                             if let Some(mut preview) = self.state.post_text_preview(&block, &marker)
                             {
                                 preview.meta = meta.take();
@@ -1746,6 +1766,8 @@ fn push_projection_block(
 /// Run-wide Client Projection state. `begin_model_leg` deliberately does not
 /// reset `post_text_started`.
 struct ProjectionState {
+    ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
+    needs_thinking_marker: bool,
     openai_compatible: bool,
     post_text_started: bool,
     live_previews: HashMap<usize, LiveThinkingPreview>,
@@ -1755,6 +1777,8 @@ struct ProjectionState {
 impl Default for ProjectionState {
     fn default() -> Self {
         Self {
+            ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            needs_thinking_marker: true,
             openai_compatible: true,
             post_text_started: false,
             live_previews: HashMap::new(),
@@ -1766,6 +1790,8 @@ impl Default for ProjectionState {
 impl ProjectionState {
     fn for_ingress(ingress: stravia_runtime_contract::protocol::ids::ProtocolId) -> Self {
         Self {
+            ingress,
+            needs_thinking_marker: ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             openai_compatible: ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             ..Self::default()
         }
@@ -1822,9 +1848,9 @@ impl ProjectionState {
             delta @ (AiStreamDelta::ThinkingDelta(_)
             | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
             | AiStreamDelta::ReasoningSummaryDelta { .. })
-                if self.openai_compatible =>
+                if self.needs_thinking_marker =>
             {
-                if !self.post_text_started {
+                if !self.openai_compatible || !self.post_text_started {
                     self.begin_protected_thinking(output_index);
                     return self.project_protected_delta(output_index, delta);
                 }
@@ -1860,12 +1886,13 @@ impl ProjectionState {
                 };
                 self.project_thinking_delta(output_index, carrier, text)
             }
+            AiStreamDelta::ThinkingSignature(_) if self.needs_thinking_marker => Vec::new(),
             other => vec![other],
         }
     }
 
     pub(super) fn begin_protected_thinking(&mut self, output_index: usize) {
-        if self.openai_compatible && !self.post_text_started {
+        if self.needs_thinking_marker && (!self.openai_compatible || !self.post_text_started) {
             self.pre_text_protected_previews
                 .entry(output_index)
                 .or_insert_with(|| LiveProtectedPreview {
@@ -1882,10 +1909,10 @@ impl ProjectionState {
         output_index: usize,
         delta: AiStreamDelta,
     ) -> Vec<AiStreamDelta> {
-        if !self.openai_compatible {
+        if !self.needs_thinking_marker {
             return vec![delta];
         }
-        if self.post_text_started {
+        if self.openai_compatible && self.post_text_started {
             return self.project_delta(output_index, delta);
         }
         let preview = self
@@ -2254,6 +2281,515 @@ async fn projection_session_fixture(
 mod tests {
     use super::*;
     use crate::history_marker::HistoryMarkerKind;
+    use crate::history_marker::{ReasoningRejections, ThinkingProvenance, ThinkingSource};
+    use stravia_runtime_contract::protocol::ids::{
+        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        OPEN_RESPONSES_2026_04_24, ProtocolId,
+    };
+
+    fn replay_source(protocol: ProtocolId, model: &str) -> ThinkingSource {
+        ThinkingSource {
+            namespace: format!("issuer-{protocol}-{model}"),
+            protocol: Some(protocol.into()),
+            actual_model: model.into(),
+            target_id: "actual-provider".into(),
+            authority: Some(format!("authority-{protocol}-{model}")),
+        }
+    }
+
+    fn protected_leg(session: &mut ClientProjectionSession, source: ThinkingSource) {
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            Vec::new(),
+            Some(source),
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_protocol_protected_delivery_restores_issuer_for_all_replay_targets() {
+        for (issuer, ingress, model) in [
+            (
+                ANTHROPIC_MESSAGES_2023_06_01,
+                OPEN_RESPONSES_2026_04_24,
+                "claude",
+            ),
+            (
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+                ANTHROPIC_MESSAGES_2023_06_01,
+                "gemini",
+            ),
+        ] {
+            let (_, store, principal) = projection_session_fixture("cross-protocol-owner").await;
+            let source = replay_source(issuer, model);
+            let mut session =
+                ClientProjectionSession::new(Arc::clone(&store), principal.clone(), ingress);
+            protected_leg(&mut session, source.clone());
+            let original = AiItem::thinking("provider thought", Some("provider-opaque".into()));
+            let mut response = AiResponse::new("response", model);
+            response.items = vec![original.clone()];
+            let batch = session
+                .project_staged(&mut response, &[])
+                .await
+                .expect("project foreign Thinking");
+            assert!(
+                !serde_json::to_string(&response.items)
+                    .unwrap()
+                    .contains("provider-opaque"),
+                "client delivery must not expose a foreign native signature"
+            );
+            assert_eq!(
+                crate::history_marker::history_marker_references(&response.items).len(),
+                1
+            );
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("publish marker");
+            let mut restored =
+                stravia_runtime_contract::protocol::ir::AiRequest::new(model, response.items);
+            crate::history_marker::resolve_request_markers(
+                store.as_ref(),
+                &principal,
+                &mut restored,
+            )
+            .await
+            .expect("client resubmits delivery unchanged");
+            let restored_thinking = restored
+                .items
+                .iter()
+                .filter(|item| is_thinking_item(item))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                restored_thinking.len(),
+                1,
+                "one block must restore exactly once"
+            );
+            assert_eq!(
+                serde_json::to_value(&restored_thinking[0].content).unwrap(),
+                serde_json::to_value(&original.content).unwrap()
+            );
+            assert_eq!(
+                ThinkingSource::from_item(restored_thinking[0]),
+                Some(source.clone())
+            );
+            for target in [
+                OPEN_RESPONSES_2026_04_24,
+                ANTHROPIC_MESSAGES_2023_06_01,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            ] {
+                let target_source = replay_source(target, model);
+                let mut replay = restored.clone();
+                stravia_protocol_codec::transform::prepare_thinking_replay(&mut replay, |item| {
+                    target_source.provenance(item, &ReasoningRejections::default())
+                        != ThinkingProvenance::Foreign
+                });
+                let thoughts = replay
+                    .items
+                    .iter()
+                    .filter_map(AiItem::thinking_ref)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    thoughts,
+                    vec![(
+                        "provider thought",
+                        (target == issuer).then_some("provider-opaque")
+                    )]
+                );
+            }
+            if issuer == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+                let other_model = replay_source(issuer, "different-gemini");
+                let mut replay = restored;
+                stravia_protocol_codec::transform::prepare_thinking_replay(&mut replay, |item| {
+                    other_model.provenance(item, &ReasoningRejections::default())
+                        != ThinkingProvenance::Foreign
+                });
+                assert_eq!(
+                    replay
+                        .items
+                        .iter()
+                        .filter_map(AiItem::thinking_ref)
+                        .collect::<Vec<_>>(),
+                    vec![("provider thought", None)]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_native_sse_late_signatures_project_and_restore_through_responses() {
+        use serde_json::json;
+        use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
+        use stravia_protocol_codec::transform::ProtocolTransform;
+
+        let (_, store, principal) = projection_session_fixture("native-gemini-sse-owner").await;
+        let source = replay_source(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, "gemini-native-model");
+        let mut session = ClientProjectionSession::new(
+            Arc::clone(&store),
+            principal.clone(),
+            OPEN_RESPONSES_2026_04_24,
+        );
+        let pair = ProtocolTransform::global()
+            .bind(
+                OPEN_RESPONSES_2026_04_24,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            )
+            .expect("Gemini source Responses client pair");
+        session.begin_model_leg(
+            pair.thinking_carrier_facts(),
+            Vec::new(),
+            Some(source.clone()),
+        );
+        let (mut decoder, mut encoder) = pair.stream().expect("native stream stages").into_parts();
+        let frames = [
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "thought A", "thought": true}]}}], "modelVersion": "gemini-native-model"}),
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": " / thought B", "thought": true}]}}]}),
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "", "thought": true, "thoughtSignature": "native-thought-signature"}]}}]}),
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "ordinary answer"}]}}]}),
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"id": "native-call", "name": "lookup", "args": {"value": 1}}, "thoughtSignature": "native-call-signature"}]}, "finishReason": "STOP"}]}),
+        ];
+        let mut accumulator = StreamResponseAccumulator::default();
+        let mut events = Vec::new();
+        for (frame_index, frame) in frames.into_iter().enumerate() {
+            let bytes = format!("data: {frame}\n\n");
+            let deltas = decoder
+                .decode_chunk(bytes.as_bytes())
+                .expect("decode real native Gemini SSE");
+            accumulator.apply_all(&deltas);
+            let batches = session
+                .project_live_deltas(deltas, false)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("native frame {frame_index} projection typed failure: {error:?}")
+                });
+            for batch in batches {
+                events.extend(
+                    encoder
+                        .encode_deltas(batch.deltas())
+                        .expect("encode projected Responses live delivery"),
+                );
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .expect("publish delivered Thinking markers");
+            }
+        }
+        let final_deltas = decoder.finish().expect("finish native Gemini parser");
+        accumulator.apply_all(&final_deltas);
+        for batch in session
+            .project_live_deltas(final_deltas, true)
+            .await
+            .expect("complete native projection")
+        {
+            events.extend(
+                encoder
+                    .encode_deltas(batch.deltas())
+                    .expect("encode Responses completion"),
+            );
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("publish final markers");
+        }
+        let completed = events
+            .iter()
+            .filter(|event| event.event.as_deref() == Some("response.completed"))
+            .map(|event| {
+                serde_json::from_str::<serde_json::Value>(&event.data).unwrap()["response"].clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completed.len(),
+            1,
+            "native source must produce exactly one successful client terminal"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event.as_deref(), Some("error" | "response.failed")))
+        );
+        let output = completed[0]["output"]
+            .as_array()
+            .expect("Responses terminal output");
+        assert!(output.iter().any(|item| item["type"] == "function_call"
+            && item["call_id"] == "native-call"
+            && item["name"] == "lookup"));
+        let client_pair = ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .expect("Responses replay pair");
+        let mut replay = client_pair
+            .decode_request(json!({"model": "gemini-native-model", "input": output}))
+            .expect("decode genuine client terminal history");
+        let live_references = crate::history_marker::history_marker_references(&replay.items);
+        assert_eq!(
+            live_references.len(),
+            2,
+            "thought and native call-signature carrier each have one marker"
+        );
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
+            .await
+            .expect("restore original native Thinking from genuine client history");
+        let thinking = replay
+            .items
+            .iter()
+            .filter_map(AiItem::thinking_ref)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            thinking,
+            vec![
+                ("thought A / thought B", Some("native-thought-signature")),
+                ("", Some("native-call-signature"))
+            ]
+        );
+        for item in replay
+            .items
+            .iter()
+            .filter(|item| item.thinking_ref().is_some())
+        {
+            assert_eq!(ThinkingSource::from_item(item), Some(source.clone()));
+        }
+        assert!(replay.items.iter().any(|item| {
+            item.function_call_ref()
+                .is_some_and(|call| call.id.as_str() == "native-call" && call.name == "lookup")
+        }));
+        let mut canonical = accumulator.into_ai_response();
+        let staged = session
+            .project_staged(&mut canonical, &[])
+            .await
+            .expect("settle parser canonical completion");
+        assert!(
+            staged.references.is_empty(),
+            "staged history reuses live published markers"
+        );
+        assert_eq!(
+            crate::history_marker::history_marker_references(&canonical.items),
+            live_references
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_protocol_indexed_summary_restores_only_original_reasoning() {
+        for ingress in [
+            ANTHROPIC_MESSAGES_2023_06_01,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        ] {
+            let (_, store, principal) =
+                projection_session_fixture("indexed-late-cipher-owner").await;
+            let source = replay_source(OPEN_RESPONSES_2026_04_24, "responses-model");
+            let mut session =
+                ClientProjectionSession::new(Arc::clone(&store), principal.clone(), ingress);
+            session.begin_model_leg(
+                ThinkingCarrierFacts {
+                    indexed: true,
+                    may_be_protected: true,
+                    stream_unprotected_summaries: true,
+                },
+                Vec::new(),
+                Some(source.clone()),
+            );
+            let original = AiItem::reasoning(
+                vec!["public summary".into()],
+                Vec::new(),
+                Some("late-cipher".into()),
+            );
+            let mut live = Vec::new();
+            for batch in session
+                .project_live_deltas(
+                    vec![AiStreamDelta::ReasoningSummaryDelta {
+                        text: "public summary".into(),
+                        obfuscation: None,
+                        output_index: Some(0),
+                        content_index: Some(0),
+                    }],
+                    false,
+                )
+                .await
+                .expect("stream summary before cipher")
+            {
+                live.extend_from_slice(batch.deltas());
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .expect("deliver preview");
+            }
+            assert!(
+                text_of(&live).contains("public summary"),
+                "public summary must stream immediately"
+            );
+            for batch in session
+                .project_live_deltas(
+                    vec![AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: original.clone(),
+                    }],
+                    true,
+                )
+                .await
+                .expect("close with late cipher")
+            {
+                live.extend_from_slice(batch.deltas());
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .expect("publish marker");
+            }
+            let rendered = text_of(&live);
+            assert!(!rendered.contains("late-cipher"));
+            assert_eq!(rendered.matches(HISTORY_MARKER_PREFIX).count(), 1);
+            let mut replay = stravia_runtime_contract::protocol::ir::AiRequest::new(
+                "responses-model",
+                vec![AiItem::thinking(rendered, None)],
+            );
+            crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
+                .await
+                .expect("restore live delivery");
+            let thoughts = replay
+                .items
+                .iter()
+                .filter(|item| is_thinking_item(item))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                thoughts.len(),
+                1,
+                "preview must not duplicate restored reasoning"
+            );
+            assert_eq!(
+                serde_json::to_value(&thoughts[0].content).unwrap(),
+                serde_json::to_value(&original.content).unwrap()
+            );
+            assert_eq!(ThinkingSource::from_item(thoughts[0]), Some(source));
+            let mut response = AiResponse::new("response", "responses-model");
+            response.items = vec![original];
+            let batch = session
+                .project_staged(&mut response, &[])
+                .await
+                .expect("settle indexed reasoning");
+            assert!(batch.references.is_empty());
+            assert_eq!(
+                crate::history_marker::history_marker_references(&response.items),
+                crate::history_marker::history_marker_references(&[AiItem::thinking(
+                    text_of(&live),
+                    None
+                )])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn same_protocol_protected_delivery_keeps_native_carrier_without_marker() {
+        for protocol in [
+            ANTHROPIC_MESSAGES_2023_06_01,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        ] {
+            let (_, store, principal) = projection_session_fixture("native-protected-owner").await;
+            let mut session = ClientProjectionSession::new(store, principal, protocol);
+            protected_leg(&mut session, replay_source(protocol, "native-model"));
+            let mut response = AiResponse::new("response", "native-model");
+            response.items = vec![
+                AiItem::output_text("answer"),
+                AiItem::thinking("native thought", Some("native-signature".into())),
+            ];
+            let original = response.items.clone();
+            let batch = session
+                .project_staged(&mut response, &[])
+                .await
+                .expect("native projection");
+            assert_eq!(
+                serde_json::to_value(&response.items).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+            assert!(crate::history_marker::history_marker_references(&response.items).is_empty());
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("native delivery");
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_cross_protocol_live_and_staged_share_one_marker_after_text() {
+        let (_, store, principal) = projection_session_fixture("responses-live-owner").await;
+        let source = replay_source(ANTHROPIC_MESSAGES_2023_06_01, "claude");
+        let mut session = ClientProjectionSession::new(
+            Arc::clone(&store),
+            principal.clone(),
+            OPEN_RESPONSES_2026_04_24,
+        );
+        protected_leg(&mut session, source.clone());
+        let original = AiItem::thinking("later thought", Some("claude-signature".into()));
+        let mut live = Vec::new();
+        for batch in session
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::TextDelta("answer".into()),
+                    AiStreamDelta::ThinkingDelta("later thought".into()),
+                    AiStreamDelta::ThinkingSignature("claude-signature".into()),
+                    AiStreamDelta::ItemDone {
+                        index: 1,
+                        item: original.clone(),
+                    },
+                ],
+                true,
+            )
+            .await
+            .expect("live foreign protected Thinking")
+        {
+            live.extend_from_slice(batch.deltas());
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("publish live marker");
+        }
+        assert!(
+            !live
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::ThinkingSignature(_))),
+            "Responses client must not receive a Claude signature as native opaque data"
+        );
+        let rendered = text_of(&live);
+        assert!(
+            rendered.starts_with("answer"),
+            "ordinary Text must retain first position"
+        );
+        assert!(rendered.contains("later thought"));
+        assert_eq!(rendered.matches(HISTORY_MARKER_PREFIX).count(), 1);
+        let mut response = AiResponse::new("response", "claude");
+        response.items = vec![AiItem::output_text("answer"), original.clone()];
+        let batch = session
+            .project_staged(&mut response, &[])
+            .await
+            .expect("settle same leg");
+        let live_references =
+            crate::history_marker::history_marker_references(&[AiItem::output_text(rendered)]);
+        assert_eq!(
+            crate::history_marker::history_marker_references(&response.items),
+            live_references
+        );
+        assert!(
+            batch.references.is_empty(),
+            "settlement must reuse the published live marker"
+        );
+        let mut request =
+            stravia_runtime_contract::protocol::ir::AiRequest::new("claude", response.items);
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut request)
+            .await
+            .expect("restore settled client history");
+        let thought = request
+            .items
+            .iter()
+            .filter(|item| is_thinking_item(item))
+            .collect::<Vec<_>>();
+        assert_eq!(thought.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&thought[0].content).unwrap(),
+            serde_json::to_value(&original.content).unwrap()
+        );
+        assert_eq!(ThinkingSource::from_item(thought[0]), Some(source));
+    }
 
     #[tokio::test]
 

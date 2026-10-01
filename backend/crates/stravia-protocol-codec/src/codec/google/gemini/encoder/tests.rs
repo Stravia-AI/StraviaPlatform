@@ -1,4 +1,63 @@
 use super::*;
+
+#[test]
+fn chat_history_and_responses_tool_result_keep_gemini_call_pairing() {
+    let response = crate::codec::openai::compatible::stream::OpenAIResponseParser
+        .parse_response(serde_json::json!({
+            "id": "chat_response", "model": "chat-model", "choices": [{
+                "index": 0, "finish_reason": "tool_calls", "message": {
+                    "role": "assistant", "content": "Inspecting.",
+                    "reasoning_content": "Read the files first.",
+                    "tool_calls": [{"id": "call_lookup", "type": "function", "function": {
+                        "name": "lookup", "arguments": "{\"key\":\"value\"}"
+                    }}]
+                }
+            }]
+        }))
+        .expect("decode Chat tool response");
+    let history = crate::codec::openai::compatible::stream::client_history_output_item(&response);
+    let mut dual = history.clone();
+    let MessageContent::Blocks(blocks) = &mut dual.content else {
+        panic!("readable Chat history blocks")
+    };
+    blocks.push(ContentBlock::ToolUse {
+        id: "call_lookup".into(),
+        name: "lookup".into(),
+        input: serde_json::json!({"key": "value"}),
+        cache_control: None,
+    });
+    let mut blocks_only = dual.clone();
+    blocks_only.tool_calls = None;
+    let continuation = crate::codec::open_responses::decoder::ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "model", "input": [{
+                "type": "function_call_output", "call_id": "call_lookup", "output": "found"
+            }]
+        }))
+        .expect("decode unadorned Responses function result");
+    for history in [history, dual, blocks_only] {
+        let mut request = continuation.clone();
+        request.items.insert(0, history);
+        let (body, _) = GoogleEncoder
+            .encode_request(&request)
+            .expect("encode continuation");
+        assert_eq!(
+            body["contents"][0]["parts"],
+            serde_json::json!([
+                {"text": "Read the files first.", "thought": true},
+                {"text": "Inspecting."},
+                {"functionCall": {"id": "call_lookup", "name": "lookup", "args": {"key": "value"}}}
+            ])
+        );
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"],
+            serde_json::json!({
+                "id": "call_lookup", "name": "lookup", "response": {"result": "found"}
+            })
+        );
+    }
+}
+
 #[test]
 fn rejects_unrepresentable_named_tool_choice() {
     let mut request = AiRequest::new(
@@ -151,7 +210,7 @@ fn unsigned_thinking_stays_a_thought_part_not_plain_text() {
 }
 
 #[test]
-fn reasoning_encodes_as_thought_part_with_encrypted_signature() {
+fn thinking_replay_responses_ciphertext_is_not_gemini_signature() {
     let request = assistant_blocks_request(vec![ContentBlock::Reasoning {
         summary: vec!["summary".into()],
         content: vec!["detail".into()],
@@ -161,29 +220,12 @@ fn reasoning_encodes_as_thought_part_with_encrypted_signature() {
     let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
 
     assert_eq!(
-        body["contents"][1]["parts"][0],
-        serde_json::json!({
-            "text": "summarydetail",
-            "thought": true,
-            "thoughtSignature": "ciphertext",
-        })
+        body["contents"][1]["parts"],
+        serde_json::json!([
+            {"text": "summary", "thought": true},
+            {"text": "detail", "thought": true}
+        ])
     );
-}
-
-#[test]
-fn unencrypted_reasoning_stays_a_thought_part() {
-    let request = assistant_blocks_request(vec![ContentBlock::Reasoning {
-        summary: vec!["summary".into()],
-        content: vec!["detail".into()],
-        encrypted_content: None,
-    }]);
-
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
-
-    let part = &body["contents"][1]["parts"][0];
-    assert_eq!(part["text"], "summarydetail");
-    assert_eq!(part["thought"], true);
-    assert!(part.get("thoughtSignature").is_none());
 }
 
 #[test]

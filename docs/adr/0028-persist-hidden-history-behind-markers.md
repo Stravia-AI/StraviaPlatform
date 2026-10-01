@@ -14,7 +14,7 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 
 ## Client projection
 
-- 所有 ingress 协议都把 Platform Tool call/result 隐藏为 Marker。协议无法无损回传 opaque thinking 时，可见 reasoning 继续输出，一个独立 Thinking Marker保存该 block 的 opaque 部分；原生可无损表示时继续使用原生字段。
+- 所有 ingress 协议都把 Platform Tool call/result 隐藏为 Marker。已知出口协议与客户端协议不同时，可见 reasoning 继续输出，既有一对一 Thinking Marker 保存原始 block 与可信来源，避免客户端把外来签名误认作自己的密文或签名。Marker 不依赖前缀未被编辑或父历史匹配。原生同协议可无损表示时继续使用原生字段；Chat 的 post-text 引用/正文载体策略不因此推广到其它协议。
 - Marker 是仅供机器读取的独立 HTML comment，包含不可猜测的短引用，不产生用户可见文案。
 - 除删除 Platform Tool 并插入对应 Marker 外，客户端响应的正文、公开 client tools、usage、stop/finish reason、response identity 和协议终态保持原行为。
 - 客户端提交的私有 Marker 无法解析、无权访问或已过期时清除该 Marker block，不把私有格式发送给模型。同一请求内相同 Marker 只展开第一次，后续重复块清除；同一 Marker 在不同请求和并发分支中可重复使用。
@@ -35,7 +35,7 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 
 实时 streaming 是底线，不允许为了 Marker 缓冲整个 Model Turn。普通可见 delta 立即发送；每个尚未分类的 tool index只缓冲到名称可分类，Platform call继续按该 index缓冲到 `ToolCallComplete`。完整 call到达后一次事务持久化 Marker/execution，输出对应 Marker，隐藏该 Platform call的全部 wire delta并开始执行；公开 text、reasoning 和 client-tool delta继续实时发送。
 
-受保护 Thinking output item具有明确 `ItemDone` 边界时，在经过 stream Hook 的完整 item上持久化 Marker并立即输出 comment；terminal projection复用已经交付的同一 Marker，不得重复创建。Target stream没有提供完整 item边界时，保留 terminal projection回退，不能猜测 signature delta代表整个受保护单元结束，也不能为调整 comment位置缓冲后续可见输出。
+受保护 Thinking output item具有明确 `ItemDone` 边界时，在经过 stream Hook 的完整 item上持久化 Marker并立即输出 comment；terminal projection复用已经交付的同一 Marker，不得重复创建。响应元数据、usage 和传输前缀不是内容边界，不提前封存仍可能收到原生签名的 Thinking；仅签名的工具载体与先前可读 Thinking 保持独立。Target stream没有提供完整 item边界时，保留 terminal projection回退，不能猜测 signature delta代表整个受保护单元结束，也不能为调整 comment位置缓冲后续可见输出。
 
 如果 Marker 持久化失败且客户端输出尚未 commit，返回普通 typed error；已经 commit 时只能发送 ingress 协议的 terminal stream error。该策略不保证会丢弃 tool-call assistant `content` 的第三方客户端回传 Marker；缺失 Marker按客户端删除隐藏片段处理，不再通过上下文猜测。
 

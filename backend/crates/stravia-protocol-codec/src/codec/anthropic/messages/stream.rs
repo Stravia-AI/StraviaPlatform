@@ -95,6 +95,21 @@ impl AnthropicResponseParser {
 
 pub struct AnthropicResponseFormatter;
 
+fn public_reasoning_text(summary: &[String], content: &[String]) -> String {
+    let mut thinking = String::new();
+    for text in summary
+        .iter()
+        .chain(content)
+        .filter(|text| !text.is_empty())
+    {
+        if !thinking.is_empty() {
+            thinking.push('\n');
+        }
+        thinking.push_str(text);
+    }
+    thinking
+}
+
 pub fn normalize_client_history_item(item: &mut AiItem) {
     let MessageContent::Blocks(blocks) = &mut item.content else {
         return;
@@ -102,15 +117,12 @@ pub fn normalize_client_history_item(item: &mut AiItem) {
     for block in blocks {
         match block {
             ContentBlock::Reasoning {
-                summary,
-                content,
-                encrypted_content,
+                summary, content, ..
             } => {
-                let thinking = summary.iter().chain(content.iter()).cloned().collect();
-                let signature = encrypted_content.take();
+                let thinking = public_reasoning_text(summary, content);
                 *block = ContentBlock::Thinking {
                     thinking,
-                    signature,
+                    signature: None,
                 };
             }
             ContentBlock::Refusal { refusal } => {
@@ -152,6 +164,11 @@ impl AnthropicResponseFormatter {
                         .insert("signature".into(), serde_json::json!(signature));
                 }
                 content.push(block);
+            } else if let Some((summary, body, _)) = item.reasoning_ref() {
+                let thinking = public_reasoning_text(summary, body);
+                if !thinking.is_empty() {
+                    content.push(serde_json::json!({"type": "thinking", "thinking": thinking}));
+                }
             } else if let Some(text) = item.output_text_ref() {
                 if !text.is_empty() {
                     content.push(serde_json::json!({"type": "text", "text": text}));
@@ -508,11 +525,6 @@ impl AnthropicStreamFormatter {
                     self.emit_thinking_signature(&mut events, signature);
                 }
                 AiStreamDelta::ItemDone { item, .. } => {
-                    if let Some((_, _, Some(signature))) = item.reasoning_ref()
-                        && !signature.is_empty()
-                    {
-                        self.emit_thinking_signature(&mut events, signature);
-                    }
                     if let MessageContent::Blocks(blocks) = &item.content {
                         for block in blocks {
                             if let ContentBlock::RedactedThinking { data } = block {

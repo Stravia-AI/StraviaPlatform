@@ -52,22 +52,56 @@ impl GoogleEncoder {
         let call_names = req
             .items
             .iter()
-            .flat_map(|message| message.tool_calls.iter().flatten())
-            .map(|call| (call.id.as_str(), call.name.as_str()))
+            .flat_map(|message| {
+                let block_calls = match &message.content {
+                    MessageContent::Blocks(blocks) => blocks.as_slice(),
+                    MessageContent::Text(_) => &[],
+                }
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    _ => None,
+                });
+                block_calls.chain(
+                    message
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .map(|call| (call.id.as_str(), call.name.as_str())),
+                )
+            })
             .collect::<HashMap<_, _>>();
 
         let mut contents: Vec<Value> = Vec::new();
+        let mut previous_was_assistant = false;
         for msg in &req.items {
             if matches!(msg.role, Role::System | Role::Developer) {
+                previous_was_assistant = false;
                 continue;
             }
-            let content = encode_content(msg, &call_names)?;
+            let mut content = encode_content(msg, &call_names)?;
+            if previous_was_assistant
+                && let Some(previous) = contents.last_mut()
+                && previous["role"] == "model"
+                && content["role"] == "model"
+                && let Some(parts) = previous["parts"].as_array_mut()
+                && let Some(next_parts) = content["parts"].as_array_mut()
+                && let (Some(last), Some(first)) = (parts.last_mut(), next_parts.first_mut())
+                && attach_call_signature(last, first)
+            {
+                parts.pop();
+                if parts.is_empty() {
+                    contents.pop();
+                }
+            }
             // 乐观回放可能让条目只剩 Gemini 承载不了的受保护载荷（如 redacted）：
             // 编码后没有 part 的 model 条目整条跳过，不发出空 content。
             if msg.role == Role::Assistant && content["parts"].as_array().is_some_and(Vec::is_empty)
             {
+                previous_was_assistant = false;
                 continue;
             }
+            previous_was_assistant = msg.role == Role::Assistant;
             contents.push(content);
         }
 
@@ -236,7 +270,7 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
         Role::System | Role::Developer => unreachable!("instruction roles handled separately"),
     };
 
-    let parts = match &msg.content {
+    let mut parts = match &msg.content {
         MessageContent::Text(t) => {
             if let Some(call_id) = msg.tool_call_id.as_deref() {
                 let name = call_names.get(call_id).ok_or_else(|| {
@@ -244,6 +278,7 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                 })?;
                 vec![serde_json::json!({
                     "functionResponse": {
+                        "id": call_id,
                         "name": name,
                         "response": {"result": t}
                     }
@@ -281,23 +316,102 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                 "name": name,
                 "response": {"result": msg.content.to_text()}
             });
-            let parts = blocks
+            let mut parts = Vec::new();
+            for block in blocks
                 .iter()
                 .filter(|block| !matches!(block, ContentBlock::Text { .. }))
-                .filter_map(|block| encode_content_block_for_gemini(block, call_names))
-                .collect::<Vec<_>>();
+            {
+                append_content_parts_for_gemini(&mut parts, block, call_names);
+            }
             if !parts.is_empty() {
                 function_response["parts"] = Value::Array(parts);
             }
             vec![serde_json::json!({"functionResponse": function_response})]
         }
-        MessageContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|block| encode_content_block_for_gemini(block, call_names))
-            .collect(),
+        MessageContent::Blocks(blocks) => {
+            let mut parts = Vec::new();
+            for block in blocks {
+                append_content_parts_for_gemini(&mut parts, block, call_names);
+            }
+            parts
+        }
     };
 
+    if let MessageContent::Blocks(blocks) = &msg.content
+        && msg.tool_call_id.is_none()
+        && let Some(calls) = &msg.tool_calls
+    {
+        for call in calls {
+            if blocks.iter().any(|block| {
+                matches!(block,
+                ContentBlock::ToolUse { id, .. } if id == &call.id)
+            }) {
+                continue;
+            }
+            let args: Value = serde_json::from_str(&call.arguments).map_err(|error| {
+                anyhow::anyhow!(
+                    "gemini functionCall args cannot represent arguments for tool call {}: {error}",
+                    call.id
+                )
+            })?;
+            parts.push(serde_json::json!({"functionCall": {
+                "id": call.id, "name": call.name, "args": args
+            }}));
+        }
+    }
+    pair_call_signatures(&mut parts);
     Ok(serde_json::json!({"role": role, "parts": parts}))
+}
+
+pub(super) fn attach_call_signature(carrier: &mut Value, call: &mut Value) -> bool {
+    if carrier["text"].as_str() != Some("")
+        || carrier["thought"] != true
+        || carrier["thoughtSignature"].as_str().is_none()
+        || call.get("functionCall").is_none()
+        || call.get("thoughtSignature").is_some()
+    {
+        return false;
+    }
+    let signature = carrier
+        .as_object_mut()
+        .expect("thought part is an object")
+        .remove("thoughtSignature")
+        .expect("checked signature");
+    call["thoughtSignature"] = signature;
+    true
+}
+
+pub(super) fn pair_call_signatures(parts: &mut Vec<Value>) {
+    let mut index = 0;
+    while index + 1 < parts.len() {
+        let (before, after) = parts.split_at_mut(index + 1);
+        if attach_call_signature(&mut before[index], &mut after[0]) {
+            parts.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn append_content_parts_for_gemini(
+    parts: &mut Vec<Value>,
+    block: &ContentBlock,
+    call_names: &HashMap<&str, &str>,
+) {
+    if let ContentBlock::Reasoning {
+        summary, content, ..
+    } = block
+    {
+        parts.extend(
+            summary
+                .iter()
+                .chain(content)
+                .filter(|text| !text.is_empty())
+                .map(|text| serde_json::json!({"text": text, "thought": true})),
+        );
+    } else if let Some(part) = encode_content_block_for_gemini(block, call_names) {
+        parts.push(part);
+    }
 }
 
 /// 返回 `None` 表示该块在 Gemini 上没有可承载的载体（如 redacted 数据），整块忽略。
@@ -358,20 +472,8 @@ pub(super) fn encode_content_block_for_gemini(
             }
             part
         }
-        ContentBlock::Reasoning {
-            summary,
-            content,
-            encrypted_content,
-        } => {
-            let mut part = serde_json::json!({
-                "text": summary.iter().chain(content).cloned().collect::<String>(),
-                "thought": true,
-            });
-            if let Some(signature) = encrypted_content {
-                part["thoughtSignature"] = Value::String(signature.clone());
-            }
-            part
-        }
+        // Request reasoning expands into paragraph parts before this single-part helper.
+        ContentBlock::Reasoning { .. } => return None,
         // redacted 数据没有 Gemini 原生载体，静默忽略，绝不能落到可读文本里。
         ContentBlock::RedactedThinking { .. } => return None,
         ContentBlock::Unknown { raw } => raw.clone(),

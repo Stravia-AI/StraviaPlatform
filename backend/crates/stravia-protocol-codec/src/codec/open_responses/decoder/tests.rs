@@ -439,7 +439,18 @@ fn preserves_reasoning_as_an_ordered_graph_item() {
         encoded["input"][0]["summary"][0]["text"],
         "private reasoning"
     );
-    assert_eq!(encoded["input"][0]["content"][0]["text"], "full reasoning");
+    assert_eq!(encoded["input"][0]["encrypted_content"], "opaque");
+    assert_eq!(encoded["input"][0]["content"], serde_json::json!([]));
+    assert_eq!(encoded["input"][1]["role"], "assistant");
+    assert_eq!(
+        encoded["input"][1]["content"],
+        serde_json::json!([
+            {"type":"output_text","text":"full reasoning"}
+        ])
+    );
+    assert_eq!(encoded["input"][2]["role"], "developer");
+    assert_eq!(encoded["input"][2]["content"][0]["text"], "new instruction");
+    assert_eq!(encoded["input"][3]["content"][0]["text"], "answer");
 }
 #[test]
 fn input_image_null_detail_is_treated_as_omitted() {

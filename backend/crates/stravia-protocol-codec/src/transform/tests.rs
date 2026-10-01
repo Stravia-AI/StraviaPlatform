@@ -86,6 +86,282 @@ fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
 }
 
 #[test]
+fn thinking_replay_gemini_tool_signature_stays_on_function_call_part() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        )
+        .unwrap();
+    let native = pair.decode_request(json!({"contents":[
+        {"role":"model","parts":[{
+            "functionCall":{"id":"call_lookup","name":"lookup","args":{"key":"value"}},
+            "thoughtSignature":"tool-signature"
+        }]},
+        {"role":"user","parts":[{
+            "functionResponse":{"id":"call_lookup","name":"lookup","response":{"result":"found"}}
+        }]}
+    ]})).unwrap();
+    let mut adjacent = native.clone();
+    adjacent.items[0].content = MessageContent::Blocks(vec![ContentBlock::ToolUse {
+        id: "call_lookup".into(),
+        name: "lookup".into(),
+        input: json!({"key":"value"}),
+        cache_control: None,
+    }]);
+    adjacent
+        .items
+        .insert(0, AiItem::thinking("", Some("tool-signature".into())));
+    for original in [native, adjacent] {
+        for preserve in [true, false] {
+            let mut replay = original.clone();
+            super::prepare_thinking_replay(&mut replay, |_| preserve);
+            let body = pair.encode_request(&replay).unwrap().body;
+            assert_eq!(body["contents"][0]["role"], "model");
+            assert_eq!(
+                body["contents"][0]["parts"],
+                if preserve {
+                    json!([{
+                        "functionCall":{"id":"call_lookup","name":"lookup","args":{"key":"value"}},
+                        "thoughtSignature":"tool-signature"
+                    }])
+                } else {
+                    json!([{
+                        "functionCall":{"id":"call_lookup","name":"lookup","args":{"key":"value"}}
+                    }])
+                }
+            );
+            assert_eq!(
+                body["contents"][1]["parts"][0]["functionResponse"]["name"],
+                "lookup"
+            );
+            assert_eq!(
+                body["contents"][1]["parts"][0]["functionResponse"]["id"],
+                "call_lookup"
+            );
+        }
+    }
+}
+
+#[test]
+fn thinking_replay_chat_response_tools_survive_gemini_history_encoding() {
+    let chat = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let response = chat
+        .decode_response(json!({
+            "id":"chat_response", "model":"chat-model", "choices":[{
+                "index":0, "finish_reason":"tool_calls", "message":{
+                    "role":"assistant", "content":"I will inspect the repository.",
+                    "reasoning_content":"Inspect the files first.",
+                    "tool_calls":[{"id":"call_lookup","type":"function","function":{
+                        "name":"lookup","arguments":"{\"key\":\"value\"}"
+                    }}]
+                }
+            }]
+        }))
+        .unwrap();
+    let history = crate::codec::openai::compatible::stream::client_history_output_item(&response);
+    let mut dual = history.clone();
+    let MessageContent::Blocks(blocks) = &mut dual.content else {
+        panic!("readable history blocks")
+    };
+    blocks.push(ContentBlock::ToolUse {
+        id: "call_lookup".into(),
+        name: "lookup".into(),
+        input: json!({"key":"value"}),
+        cache_control: None,
+    });
+    let gemini = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        )
+        .unwrap();
+    for mut items in [response.items, vec![history], vec![dual]] {
+        items.push(AiItem::function_call_output("call_lookup", json!("found")));
+        let body = gemini
+            .encode_request(&AiRequest::new("model", items))
+            .unwrap()
+            .body;
+        let parts: Vec<_> = body["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|content| content["role"] == "model")
+            .flat_map(|content| content["parts"].as_array().unwrap().iter())
+            .collect();
+        let readable: Vec<_> = parts
+            .iter()
+            .filter(|part| part.get("text").is_some())
+            .map(|part| (*part).clone())
+            .collect();
+        assert_eq!(
+            readable,
+            vec![
+                json!({"text":"Inspect the files first.","thought":true}),
+                json!({"text":"I will inspect the repository."})
+            ]
+        );
+        let calls: Vec<_> = parts
+            .iter()
+            .filter_map(|part| part.get("functionCall"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            calls,
+            vec![json!({"id":"call_lookup","name":"lookup","args":{"key":"value"}})]
+        );
+        let contents = body["contents"].as_array().unwrap();
+        let result = &contents.last().unwrap()["parts"][0]["functionResponse"];
+        assert_eq!(result["name"], "lookup");
+        assert_eq!(result["response"], json!({"result":"found"}));
+    }
+}
+
+#[test]
+fn thinking_replay_matrix_keeps_mixed_text_and_tool_associations() {
+    let original = AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "before".into(),
+                        cache_control: None,
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "inspect".into(),
+                        signature: Some("signed".into()),
+                    },
+                    ContentBlock::Text {
+                        text: "after".into(),
+                        cache_control: None,
+                    },
+                ]),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_lookup".into(),
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem::function_call_output("call_lookup", json!("result")),
+        ],
+    );
+    for target in [
+        OPEN_RESPONSES_2026_04_24,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+    ] {
+        let pair = ProtocolTransform::global()
+            .bind(ANTHROPIC_MESSAGES_2023_06_01, target)
+            .unwrap();
+        for preserve in [false, true] {
+            let mut replay = original.clone();
+            assert_eq!(
+                super::prepare_thinking_replay(&mut replay, |_| preserve),
+                !preserve
+            );
+            let body = pair.encode_request(&replay).unwrap().body;
+            match target {
+                OPEN_RESPONSES_2026_04_24 => {
+                    assert_eq!(
+                        body["input"][0]["content"],
+                        json!([
+                            {"type":"output_text","text":"before"},
+                            {"type":"output_text","text":"inspect"},
+                            {"type":"output_text","text":"after"}
+                        ])
+                    );
+                    assert_eq!(body["input"][1]["type"], "function_call");
+                    assert_eq!(body["input"][1]["call_id"], "call_lookup");
+                    assert_eq!(body["input"][2]["type"], "function_call_output");
+                    assert_eq!(body["input"][2]["call_id"], "call_lookup");
+                    assert_eq!(body["input"][2]["output"], "result");
+                    assert!(!body.to_string().contains("signed"));
+                }
+                ANTHROPIC_MESSAGES_2023_06_01 => {
+                    let content = &body["messages"][0]["content"];
+                    if preserve {
+                        assert_eq!(
+                            content[0],
+                            json!({"type":"thinking","thinking":"inspect","signature":"signed"})
+                        );
+                        assert_eq!(content[1], json!({"type":"text","text":"before"}));
+                    } else {
+                        assert_eq!(content[0], json!({"type":"text","text":"before"}));
+                        assert_eq!(content[1], json!({"type":"text","text":"inspect"}));
+                    }
+                    assert_eq!(content[2], json!({"type":"text","text":"after"}));
+                    assert_eq!(content[3]["type"], "tool_use");
+                    assert_eq!(content[3]["id"], "call_lookup");
+                    assert_eq!(
+                        body["messages"][1]["content"][0]["tool_use_id"],
+                        "call_lookup"
+                    );
+                    assert_eq!(body["messages"][1]["content"][0]["content"], "result");
+                }
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA => {
+                    let parts = body["contents"][0]["parts"]
+                        .as_array()
+                        .expect("model parts");
+                    let readable: Vec<_> = parts
+                        .iter()
+                        .filter(|part| part.get("text").is_some())
+                        .cloned()
+                        .collect();
+                    assert_eq!(
+                        readable,
+                        vec![
+                            json!({"text":"before"}),
+                            if preserve {
+                                json!({"text":"inspect","thought":true,"thoughtSignature":"signed"})
+                            } else {
+                                json!({"text":"inspect","thought":true})
+                            },
+                            json!({"text":"after"})
+                        ]
+                    );
+                    let calls: Vec<_> = parts
+                        .iter()
+                        .filter_map(|part| part.get("functionCall"))
+                        .collect();
+                    assert_eq!(
+                        calls,
+                        vec![&json!({"id":"call_lookup","name":"lookup","args":{}})]
+                    );
+                    let result = &body["contents"][1]["parts"][0]["functionResponse"];
+                    assert_eq!(result["name"], "lookup");
+                    assert_eq!(result["response"], json!({"result":"result"}));
+                    assert!(!body.to_string().contains("signed") || preserve);
+                }
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 => {
+                    assert_eq!(body["messages"][0]["reasoning_content"], "inspect");
+                    assert_eq!(
+                        body["messages"][0]["content"],
+                        json!([
+                            {"type":"text","text":"before"}, {"type":"text","text":"after"}
+                        ])
+                    );
+                    assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_lookup");
+                    assert_eq!(body["messages"][1]["tool_call_id"], "call_lookup");
+                    assert_eq!(body["messages"][1]["content"], "result");
+                    assert!(!body.to_string().contains("signed"));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
 fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     let pair = ProtocolTransform::global()
         .bind(
@@ -202,12 +478,12 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
 }
 
 #[test]
-fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
+fn thinking_replay_native_reasoning_keeps_ciphertext_but_moves_content_before_tools() {
     let native = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .unwrap();
     let mut request = native.decode_request(json!({"model":"model","input":[
-        {"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"detail"}],"encrypted_content":"secret"},
+        {"type":"reasoning","id":"rs_native","native_hint":"reasoning-only","summary":[{"type":"summary_text","text":"summary-one"},{"type":"summary_text","text":"summary-two"}],"content":[{"type":"reasoning_text","text":"detail-one"},{"type":"reasoning_text","text":"detail-two"}],"encrypted_content":"secret"},
         {"role":"user","content":"continue"}
     ]})).unwrap();
     request.items[0].tool_calls = Some(vec![ToolCall {
@@ -219,9 +495,28 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
     assert!(!super::prepare_thinking_replay(&mut request, |_| true));
     let body = native.encode_request(&request).unwrap().body;
     assert_eq!(body["input"][0]["encrypted_content"], "secret");
-    assert_eq!(body["input"][0]["content"][0]["text"], "detail");
-    assert_eq!(body["input"][1]["type"], "function_call");
-    assert_eq!(body["input"][1]["call_id"], "call_1");
+    assert_eq!(body["input"][0]["native_hint"], "reasoning-only");
+    assert_eq!(body["input"][0]["content"], json!([]));
+    assert_eq!(
+        body["input"][0]["summary"],
+        json!([
+            { "type": "summary_text", "text": "summary-one" },
+            { "type": "summary_text", "text": "summary-two" }
+        ])
+    );
+    assert_eq!(body["input"][1]["type"], "message");
+    assert_eq!(body["input"][1]["role"], "assistant");
+    assert!(body["input"][1].get("id").is_none());
+    assert!(body["input"][1].get("native_hint").is_none());
+    assert_eq!(
+        body["input"][1]["content"],
+        json!([
+            { "type": "output_text", "text": "detail-one" },
+            { "type": "output_text", "text": "detail-two" }
+        ])
+    );
+    assert_eq!(body["input"][2]["type"], "function_call");
+    assert_eq!(body["input"][2]["call_id"], "call_1");
 
     let pair = ProtocolTransform::global()
         .bind(

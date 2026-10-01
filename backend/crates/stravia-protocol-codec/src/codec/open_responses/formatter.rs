@@ -73,7 +73,7 @@ impl ResponsesResponseFormatter {
                     reasoning["encrypted_content"] = Value::String(signature.to_owned());
                 }
                 output.push(reasoning);
-            } else if let Some((text, signature)) = item.thinking_ref() {
+            } else if let Some((text, _)) = item.thinking_ref() {
                 let mut reasoning = serde_json::json!({
                     "type": "reasoning",
                     "id": item.id_ref().map(str::to_owned).unwrap_or_else(|| {
@@ -86,9 +86,6 @@ impl ResponsesResponseFormatter {
                         "type": "reasoning_text",
                         "text": text
                     }]);
-                }
-                if let Some(signature) = signature {
-                    reasoning["encrypted_content"] = Value::String(signature.to_owned());
                 }
                 output.push(reasoning);
             } else if let Some(call) = item.function_call_ref() {

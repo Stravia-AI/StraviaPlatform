@@ -320,15 +320,20 @@ fn anthropic_mixed_assistant_history_encodes_as_ordered_responses_items() {
             .iter()
             .map(|item| item["type"].as_str().expect("item type"))
             .collect::<Vec<_>>(),
-        [
-            "reasoning",
-            "message",
-            "function_call",
-            "function_call_output"
-        ]
+        ["message", "function_call", "function_call_output"]
     );
-    assert_eq!(input[0]["encrypted_content"], "opaque");
-    assert_eq!(input[0]["summary"], json!([]));
+    assert_eq!(
+        input[0]["content"],
+        json!([
+            {"type":"output_text","text":"I will inspect the repository."}
+        ])
+    );
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[1]["name"], "todowrite");
+    assert_eq!(input[1]["arguments"], r#"{"todos":[]}"#);
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[2]["output"], "[]");
+    assert!(!encoded.to_string().contains("opaque"));
 }
 #[test]
 fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {

@@ -68,36 +68,20 @@ impl ResponsesEncoder {
                     input.push(encode_native_reasoning_item(
                         item,
                         summary,
-                        content,
                         encrypted_content,
                     ));
+                    let mut degraded = degraded_reasoning_parts(content.iter());
+                    push_derived_assistant_message(&mut input, &mut degraded);
                 } else {
                     let mut degraded =
                         degraded_reasoning_parts(summary.iter().chain(content.iter()));
-                    push_assistant_message(&mut input, &mut degraded, item);
+                    push_derived_assistant_message(&mut input, &mut degraded);
                 }
                 continue;
             }
-            if let Some((text, signature)) = item.thinking_ref() {
-                let signature = signature.filter(|value| !value.is_empty());
-                if signature.is_some() {
-                    let mut reasoning = serde_json::json!({
-                        "type": "reasoning",
-                        "summary": [{
-                            "type": "summary_text",
-                            "text": text,
-                        }],
-                        "content": [],
-                    });
-                    insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
-                    if let Some(signature) = signature {
-                        reasoning["encrypted_content"] = Value::String(signature.to_owned());
-                    }
-                    input.push(reasoning);
-                } else {
-                    let mut degraded = degraded_reasoning_parts(std::iter::once(text));
-                    push_assistant_message(&mut input, &mut degraded, item);
-                }
+            if let Some((text, _)) = item.thinking_ref() {
+                let mut degraded = degraded_reasoning_parts(std::iter::once(text));
+                push_derived_assistant_message(&mut input, &mut degraded);
                 continue;
             }
             if let Some(raw) = item.unknown_ref() {
@@ -472,12 +456,11 @@ fn insert_reasoning_metadata(
     }
 }
 
-/// 编码一条原生 reasoning 输入条目。`encrypted_content` 非空时按现有规则移除
-/// `id`：密文绑定来源上游保存的条目身份，回放出的本地 id 不安全。
+/// 编码原生 reasoning 输入：摘要和密文保留，正文另作 assistant output_text。
+/// 密文绑定来源条目身份，因此回放时移除本地图 id。
 fn encode_native_reasoning_item(
     item: &stravia_runtime_contract::protocol::ir::AiItem,
     summary: &[String],
-    content: &[String],
     encrypted_content: Option<&str>,
 ) -> Value {
     let mut reasoning = serde_json::json!({
@@ -486,10 +469,7 @@ fn encode_native_reasoning_item(
             "type": "summary_text",
             "text": text
         })).collect::<Vec<_>>(),
-        "content": content.iter().map(|text| serde_json::json!({
-            "type": "reasoning_text",
-            "text": text
-        })).collect::<Vec<_>>(),
+        "content": [],
     });
     insert_reasoning_metadata(&mut reasoning, item, encrypted_content.is_some());
     if let Some(encrypted_content) = encrypted_content {
@@ -534,38 +514,9 @@ fn encode_mixed_assistant_items(
             ContentBlock::Text { .. } | ContentBlock::Refusal { .. } => {
                 message_content.push(encode_responses_content_block(block, "output_text")?);
             }
-            ContentBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                let signature = signature.as_deref().filter(|value| !value.is_empty());
-                if signature.is_some() {
-                    // 思考块必须成为独立的 reasoning item，前后普通内容 flush
-                    // 为各自 message，保持原顺序。
-                    push_assistant_message(&mut items, &mut message_content, item);
-                    let summary = if thinking.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![serde_json::json!({
-                            "type": "summary_text",
-                            "text": thinking,
-                        })]
-                    };
-                    let mut reasoning = serde_json::json!({
-                        "type": "reasoning",
-                        "summary": summary,
-                        "content": [],
-                    });
-                    insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
-                    if let Some(signature) = signature {
-                        reasoning["encrypted_content"] = Value::String(signature.to_owned());
-                    }
-                    items.push(reasoning);
-                } else {
-                    // 无签名思考没有原生载体：明文降级为 output_text，合入当前 message。
-                    message_content
-                        .extend(degraded_reasoning_parts(std::iter::once(thinking.as_str())));
-                }
+            ContentBlock::Thinking { thinking, .. } => {
+                message_content
+                    .extend(degraded_reasoning_parts(std::iter::once(thinking.as_str())));
             }
             ContentBlock::Reasoning {
                 summary,
@@ -576,13 +527,13 @@ fn encode_mixed_assistant_items(
                     .as_deref()
                     .filter(|value| !value.is_empty());
                 if encrypted_content.is_some() {
-                    push_assistant_message(&mut items, &mut message_content, item);
+                    push_derived_assistant_message(&mut items, &mut message_content);
                     items.push(encode_native_reasoning_item(
                         item,
                         summary,
-                        content,
                         encrypted_content,
                     ));
+                    message_content.extend(degraded_reasoning_parts(content.iter()));
                 } else {
                     message_content.extend(degraded_reasoning_parts(
                         summary.iter().chain(content.iter()),
@@ -594,21 +545,14 @@ fn encode_mixed_assistant_items(
             ContentBlock::ToolUse {
                 id, name, input, ..
             } => {
-                push_assistant_message(&mut items, &mut message_content, item);
-                let mut call = serde_json::json!({
+                push_derived_assistant_message(&mut items, &mut message_content);
+                // 混合条目拆出的调用不拥有父条目的原生身份，call_id 仍关联其结果。
+                items.push(serde_json::json!({
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
                     "arguments": input.to_string(),
-                });
-                if item
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| calls.len() == 1)
-                {
-                    insert_item_metadata(&mut call, item, true);
-                }
-                items.push(call);
+                }));
             }
             other => {
                 anyhow::bail!(
@@ -618,7 +562,7 @@ fn encode_mixed_assistant_items(
             }
         }
     }
-    push_assistant_message(&mut items, &mut message_content, item);
+    push_derived_assistant_message(&mut items, &mut message_content);
 
     if let Some(tool_calls) = &item.tool_calls {
         for tool_call in tool_calls {
@@ -640,24 +584,16 @@ fn encode_mixed_assistant_items(
     Ok(Some(items))
 }
 
-fn push_assistant_message(
-    items: &mut Vec<Value>,
-    content: &mut Vec<Value>,
-    item: &stravia_runtime_contract::protocol::ir::AiItem,
-) {
+// 派生载体不接收父条目，避免在密文剥离或混合拆分后继承错误的原生身份。
+fn push_derived_assistant_message(items: &mut Vec<Value>, content: &mut Vec<Value>) {
     if content.is_empty() {
         return;
     }
-    let mut message = serde_json::json!({
+    items.push(serde_json::json!({
         "type": "message",
         "role": "assistant",
         "content": std::mem::take(content),
-    });
-    insert_item_metadata(&mut message, item, true);
-    if let Some(phase) = item.meta.as_ref().and_then(|meta| meta.get("phase")) {
-        message["phase"] = phase.clone();
-    }
-    items.push(message);
+    }));
 }
 
 fn encode_message_content(content: &MessageContent, role: Role) -> Result<Option<Vec<Value>>> {
