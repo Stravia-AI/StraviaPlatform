@@ -26,6 +26,7 @@ async fn run_provider_allowance_sampler<F, Fut>(
 }
 
 async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageRuntime> {
+    crate::startup_progress::report("storage_connect", "Connecting to storage", 0, None);
     let root = crate::data_paths::resolve_data_dir(&config.data_dir)?;
     let paths = crate::data_paths::DataPaths::new(&root);
     paths.prepare()?;
@@ -57,6 +58,7 @@ async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageR
             }
         };
 
+    crate::startup_progress::report("storage_connect", "Checking storage health", 0, None);
     let health = storage.bootstrap().health().await?;
     if !health.can_connect {
         anyhow::bail!("selected storage backend is not reachable");
@@ -101,6 +103,7 @@ impl Gateway {
         sqlite_pool: Option<SqlitePool>,
         postgres_pool: Option<Pool<Postgres>>,
     ) -> anyhow::Result<Self> {
+        crate::startup_progress::report("gateway_initialize", "Initializing gateway", 0, None);
         config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
         let paths = crate::data_paths::DataPaths::new(&config.data_dir);
         paths.prepare()?;
@@ -114,6 +117,12 @@ impl Gateway {
         } else {
             sqlite_pool.clone()
         };
+        crate::startup_progress::report(
+            "gateway_initialize",
+            "Initializing gateway services",
+            0,
+            None,
+        );
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
@@ -127,6 +136,12 @@ impl Gateway {
             .http1_only()
             .build()?;
 
+        crate::startup_progress::report(
+            "gateway_initialize",
+            "Loading gateway configuration",
+            0,
+            None,
+        );
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
@@ -380,11 +395,24 @@ impl Gateway {
             principal_admission: Arc::new(admission::PrincipalAdmission::new()),
             lifecycle_owner: true,
         };
+        crate::startup_progress::report(
+            "gateway_initialize",
+            "Preparing provider integrations",
+            0,
+            None,
+        );
         gw.vendor_plugins.reconcile_bundled(&gw).await?;
+        crate::startup_progress::report("gateway_initialize", "Loading provider catalog", 0, None);
         if let Err(error) = gw.catalog_sync.bootstrap().await {
             tracing::warn!(error = ?error, "provider catalog bootstrap sync failed");
         }
         gw.install_model_turn();
+        crate::startup_progress::report(
+            "gateway_initialize",
+            "Configuring gateway extensions",
+            0,
+            None,
+        );
         configure_gateway_extensions(&mut gw, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             .await?;
         if gw.config.catalog_background_refresh {

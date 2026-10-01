@@ -11,6 +11,9 @@ import type { Snippet } from 'svelte'
 import '../app.css'
 import AppShell from '$lib/components/app-shell.svelte'
 import DesktopStartup from '$lib/components/desktop-startup.svelte'
+import ServerStartup from '$lib/components/server-startup.svelte'
+import { connectServerStartup, initialServerStartupState } from '$lib/server-startup'
+import type { ServerStartupState } from '$lib/server-startup'
 import DesktopStartupNotices from '$lib/components/desktop-startup-notices.svelte'
 import ProductUpdateOverlay from '$lib/components/product-update-overlay.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -43,9 +46,19 @@ afterNavigate(() => {
 
 let authReady = $state(false)
 let desktopStartup = $state.raw<DesktopStartupState>(initialDesktopStartupState)
+let serverStartup = $state.raw<ServerStartupState>(initialServerStartupState)
+let serverConnectionError = $state(false)
+const serverSurfaceState = $derived<ServerStartupState>(
+  serverStartup.status === 'ready' && !authReady
+    ? {
+        status: 'starting',
+        progress: { phase: 'session', label: 'Checking authentication', completed: 0, total: null },
+      }
+    : serverStartup,
+)
 const desktopSurfaceState = $derived<DesktopStartupState>(
   desktopStartup.status === 'ready' && !authReady
-    ? { ...desktopStartup, status: 'starting', stage: 'session' }
+    ? { ...desktopStartup, status: 'starting', stage: 'session', progress: null }
     : desktopStartup,
 )
 const queryClient = new QueryClient({
@@ -64,6 +77,7 @@ onMount(() => {
   let disposed = false
   let applicationInitializationStarted = false
   let disconnectDesktopStartup: (() => void) | undefined
+  let disconnectServerStartup: (() => void) | undefined
   let disconnectDesktopUpdates: (() => void) | undefined
 
   const failDesktopStartup = (stage: 'session' | 'desktop', details: string) => {
@@ -162,11 +176,23 @@ onMount(() => {
   }
 
   if (isTauri) void initializeDesktop()
-  else void initializeApplication(false)
+  else {
+    disconnectServerStartup = connectServerStartup(
+      (state) => {
+        if (disposed) return
+        serverStartup = state
+        if (state.status === 'ready') void initializeApplication(false)
+      },
+      () => {
+        if (!disposed) serverConnectionError = true
+      },
+    )
+  }
 
   return () => {
     disposed = true
     disconnectDesktopStartup?.()
+    disconnectServerStartup?.()
     disconnectDesktopUpdates?.()
   }
 })
@@ -175,6 +201,8 @@ onMount(() => {
 <ModeWatcher defaultMode="system" modeStorageKey="stravia-theme" />
 {#if isTauri && (!authReady || desktopStartup.status !== 'ready')}
   <DesktopStartup state={desktopSurfaceState} />
+{:else if !isTauri && (!authReady || serverStartup.status !== 'ready' || serverConnectionError)}
+  <ServerStartup state={serverSurfaceState} connectionError={serverConnectionError} />
 {:else}
   <QueryClientProvider client={queryClient}>
     <Tooltip.Provider>

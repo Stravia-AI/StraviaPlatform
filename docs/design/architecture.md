@@ -868,6 +868,10 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 
 迁移仍由单一数据库连接持有互斥锁并按阶段执行 SQL，不并发 schema 变更或 SQLite 写事务。历史每批最多 100 个节点，按节点 ID 游标推进并集中读取旧引用；JSON 还原、摘要、envelope 编码和批次唯一内容压缩交给有界 blocking worker。观测每批最多 200 条，旧表在转换期间建立 `(run_id, sequence)` 索引，生命周期合并只查询对应事件种类；批量解码与 manifest 导出使用同样的有界并发，worker 数随可用处理器确定，最多 8 个。事件合并按 sequence 串行执行，同批中被合并修改的旧行必须重读，不能把过期快照写回。每批数据库改动原子提交，失败只回滚当前批次，重启继续未完成数据；所有转换成功后才清理旧结构。日志记录迁移阶段、累计完成条数与总耗时，不记录历史正文、身份或诊断路径。
 
+启动与 migration 的内部进度统一由 `stravia-core::startup_progress` 提供：`report(phase, label, completed, total)` 发布当前阶段快照，同时写结构化日志；`observe_startup(observer, future)` 在调用任务的 Tokio task-local scope 内连接宿主观察者。没有观察者时仅记录日志，多个启动任务不共用全局 sink。`phase` 是稳定操作代码，`label` 是不含敏感数据的静态英文回退文案，计数只属于当前阶段；未知总量使用 `None`，未来迁移可直接复用同一接口。SQLx schema runner 保持原样，仅报告执行阶段，不猜测单条 SQL 或总体启动百分比。
+
+Tokio task-local 不传播到 `spawn` / `spawn_blocking`。迁移 worker 只准备工作，调用任务在 await/join 成功且批次提交或文件导出成功后上报计数；失败批次不增加进度，续跑重新统计剩余工作。宿主负责整体 ready/failed：Desktop 将快照放入既有原生启动事件，Server 用 watch 最新状态提供只读快照和 SSE，在 HTTP 准备完成后原子切换业务路由。浏览器入口与失败处理见[管理启动设计](admin-auth-bootstrap.md#启动与迁移进度)。
+
 每次新增或修改 migration，都必须通过工具同步重新生成两份参考文件，并与 migration 一并交付，不得手工修改 schema 正文：
 
 ```bash

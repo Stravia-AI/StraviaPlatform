@@ -172,12 +172,18 @@ pub(crate) async fn export_debug_manifests_sqlite(
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM debug_trace_manifests")
         .fetch_one(&mut *connection)
         .await?;
+    let total = u64::try_from(count)?;
+    crate::startup_progress::report(
+        "debug_manifests",
+        "Exporting diagnostic manifests",
+        0,
+        Some(total),
+    );
     if count == 0 {
         return Ok(());
     }
     let root =
         root.context("legacy debug manifests require a diagnostics directory before migration")?;
-    tracing::info!(count, "Exporting legacy observation manifests");
     let mut exported = 0usize;
     let mut after = String::new();
     loop {
@@ -208,7 +214,12 @@ pub(crate) async fn export_debug_manifests_sqlite(
         let batch_size = manifests.len();
         export_manifests(root, manifests).await?;
         exported += batch_size;
-        tracing::info!(exported, "Exported legacy observation manifest batch");
+        crate::startup_progress::report(
+            "debug_manifests",
+            "Exporting diagnostic manifests",
+            exported as u64,
+            Some(total),
+        );
     }
     Ok(())
 }
@@ -227,12 +238,27 @@ pub(crate) async fn convert_event_storage_sqlite(
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS observation_events_legacy_upgrade_run_sequence ON observation_events_legacy(run_id,sequence)")
         .execute(&mut *connection).await?;
-    tracing::info!("Converting legacy observation events");
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events_legacy")
+        .fetch_one(&mut *connection)
+        .await?;
+    let total = u64::try_from(total)?;
+    crate::startup_progress::report(
+        "observation_data",
+        "Converting observation events",
+        0,
+        Some(total),
+    );
     let mut converted = 0usize;
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at FROM observation_events_legacy ORDER BY sequence LIMIT 200").fetch_all(&mut *tx).await?;
         if rows.is_empty() {
+            crate::startup_progress::report(
+                "observation_data",
+                "Cleaning up migrated observations",
+                0,
+                None,
+            );
             sqlx::query("DROP TABLE observation_events_legacy")
                 .execute(&mut *tx)
                 .await?;
@@ -488,7 +514,12 @@ pub(crate) async fn convert_event_storage_sqlite(
         }
         tx.commit().await?;
         converted += batch_size;
-        tracing::info!(converted, "Converted legacy observation event batch");
+        crate::startup_progress::report(
+            "observation_data",
+            "Converting observation events",
+            converted as u64,
+            Some(total),
+        );
     }
     Ok(())
 }
@@ -507,12 +538,18 @@ pub(crate) async fn export_debug_manifests_postgres(
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM debug_trace_manifests")
         .fetch_one(&mut *connection)
         .await?;
+    let total = u64::try_from(count)?;
+    crate::startup_progress::report(
+        "debug_manifests",
+        "Exporting diagnostic manifests",
+        0,
+        Some(total),
+    );
     if count == 0 {
         return Ok(());
     }
     let root =
         root.context("legacy debug manifests require a diagnostics directory before migration")?;
-    tracing::info!(count, "Exporting legacy observation manifests");
     let mut exported = 0usize;
     let mut after = String::new();
     loop {
@@ -543,7 +580,12 @@ pub(crate) async fn export_debug_manifests_postgres(
         let batch_size = manifests.len();
         export_manifests(root, manifests).await?;
         exported += batch_size;
-        tracing::info!(exported, "Exported legacy observation manifest batch");
+        crate::startup_progress::report(
+            "debug_manifests",
+            "Exporting diagnostic manifests",
+            exported as u64,
+            Some(total),
+        );
     }
     Ok(())
 }
@@ -560,12 +602,27 @@ pub(crate) async fn convert_event_storage_postgres(
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS observation_events_legacy_upgrade_run_sequence ON observation_events_legacy(run_id,sequence)")
         .execute(&mut *connection).await?;
-    tracing::info!("Converting legacy observation events");
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events_legacy")
+        .fetch_one(&mut *connection)
+        .await?;
+    let total = u64::try_from(total)?;
+    crate::startup_progress::report(
+        "observation_data",
+        "Converting observation events",
+        0,
+        Some(total),
+    );
     let mut converted = 0usize;
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text AS payload,expires_at FROM observation_events_legacy ORDER BY sequence LIMIT 200").fetch_all(&mut *tx).await?;
         if rows.is_empty() {
+            crate::startup_progress::report(
+                "observation_data",
+                "Cleaning up migrated observations",
+                0,
+                None,
+            );
             sqlx::query("DROP TABLE observation_events_legacy")
                 .execute(&mut *tx)
                 .await?;
@@ -817,7 +874,12 @@ pub(crate) async fn convert_event_storage_postgres(
         }
         tx.commit().await?;
         converted += batch_size;
-        tracing::info!(converted, "Converted legacy observation event batch");
+        crate::startup_progress::report(
+            "observation_data",
+            "Converting observation events",
+            converted as u64,
+            Some(total),
+        );
     }
     Ok(())
 }
@@ -855,7 +917,25 @@ mod tests {
                 .bind(json!({"kind":"client_visible_content_delta","text":sequence.to_string()}).to_string())
                 .execute(&mut connection).await?;
         }
-        assert!(convert_event_storage_sqlite(&mut connection).await.is_err());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        assert!(
+            crate::startup_progress::observe_startup(
+                move |event| observed.lock().unwrap().push(event),
+                convert_event_storage_sqlite(&mut connection),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| (event.completed, event.total))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(402)), (200, Some(402)), (400, Some(402))]
+        );
         let committed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events")
             .fetch_one(&mut connection)
             .await?;
@@ -869,7 +949,23 @@ mod tests {
             .bind(json!({"kind":"client_visible_content_delta","text":"repaired"}).to_string())
             .execute(&mut connection)
             .await?;
-        convert_event_storage_sqlite(&mut connection).await?;
+        events.lock().unwrap().clear();
+        let observed = events.clone();
+        crate::startup_progress::observe_startup(
+            move |event| observed.lock().unwrap().push(event),
+            convert_event_storage_sqlite(&mut connection),
+        )
+        .await?;
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.total.is_some())
+                .map(|event| (event.completed, event.total))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(2)), (2, Some(2))]
+        );
         convert_event_storage_sqlite(&mut connection).await?;
         let payloads: Vec<Vec<u8>> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE kind='target_attempt_finished' ORDER BY sequence")
             .fetch_all(&mut connection).await?;

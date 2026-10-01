@@ -109,9 +109,12 @@ macro_rules! converter {
                 sqlx::query("CREATE INDEX IF NOT EXISTS turn_chain_legacy_refs_upgrade_node_principal ON turn_chain_legacy_refs(node_id,principal)")
                     .execute(&mut *connection).await?;
             }
+            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_chain_nodes WHERE storage_format < 2")
+                .fetch_one(&mut *connection).await?;
+            let total = u64::try_from(total)?;
             let mut cursor: Option<String> = None;
-            let mut completed = 0usize;
-            tracing::info!(phase = "history", "Legacy conversion started");
+            let mut completed = 0u64;
+            crate::startup_progress::report("history_data", "Converting history", completed, Some(total));
             loop {
                 let mut query = sqlx::QueryBuilder::<$db>::new("SELECT id, principal, CAST(storage_format AS BIGINT), legacy_payload FROM turn_chain_nodes WHERE storage_format < 2");
                 if let Some(cursor) = &cursor { query.push(" AND id > ").push_bind(cursor); }
@@ -155,15 +158,15 @@ macro_rules! converter {
                         .bind(&encoded.payload).bind(node).execute(&mut *transaction).await?;
                 }
                 transaction.commit().await?;
-                completed += prepared.len();
+                completed += prepared.len() as u64;
                 cursor = next_cursor;
-                tracing::info!(phase = "history", batch_completed = prepared.len(), completed, "Legacy conversion batch committed");
+                crate::startup_progress::report("history_data", "Converting history", completed, Some(total));
             }
             // Cleanup is restartable and happens only after all worklists committed.
+            crate::startup_progress::report("history_data", "Cleaning up migrated history", 0, None);
             sqlx::query("DROP TABLE IF EXISTS turn_chain_legacy_refs").execute(&mut *connection).await?;
             sqlx::query("DROP TABLE IF EXISTS turn_chain_legacy_contents").execute(&mut *connection).await?;
             sqlx::query("ALTER TABLE turn_chain_nodes DROP COLUMN legacy_payload").execute(&mut *connection).await?;
-            tracing::info!(phase = "history", completed, "Legacy conversion completed");
             Ok(())
         }
     }
@@ -265,7 +268,25 @@ mod tests {
             .await?;
         sqlx::raw_sql("CREATE TRIGGER fail_batch BEFORE UPDATE ON turn_chain_nodes WHEN NEW.id = '101' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
             .execute(&mut connection).await?;
-        assert!(convert_history_sqlite(&mut connection).await.is_err());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        assert!(
+            crate::startup_progress::observe_startup(
+                move |event| observed.lock().unwrap().push(event),
+                convert_history_sqlite(&mut connection),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| (event.completed, event.total))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(102)), (100, Some(102))]
+        );
         let formats: Vec<(String, i64)> = sqlx::query_as("SELECT id, CAST(storage_format AS BIGINT) FROM turn_chain_nodes WHERE id >= '099' ORDER BY id")
             .fetch_all(&mut connection).await?;
         assert_eq!(
@@ -276,7 +297,23 @@ mod tests {
         sqlx::query("DROP TRIGGER fail_batch")
             .execute(&mut connection)
             .await?;
-        convert_history_sqlite(&mut connection).await?;
+        events.lock().unwrap().clear();
+        let observed = events.clone();
+        crate::startup_progress::observe_startup(
+            move |event| observed.lock().unwrap().push(event),
+            convert_history_sqlite(&mut connection),
+        )
+        .await?;
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.total.is_some())
+                .map(|event| (event.completed, event.total))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(2)), (2, Some(2))]
+        );
         assert_eq!(restored(&mut connection, "100").await?, plain);
         assert_eq!(
             restored(&mut connection, "101").await?,

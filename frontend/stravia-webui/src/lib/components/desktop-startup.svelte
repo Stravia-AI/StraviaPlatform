@@ -9,6 +9,7 @@ import { onMount } from 'svelte'
 
 import BrandMark from '$lib/components/brand-mark.svelte'
 import BrandWordmark from '$lib/components/brand-wordmark.svelte'
+import StartupProgress from '$lib/components/startup-progress.svelte'
 import WindowControls from '$lib/components/window-controls.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -152,7 +153,7 @@ onMount(() => {
   <main class="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-y-auto p-4 sm:p-8">
     <section class="m-auto flex w-full min-w-0 max-w-2xl flex-col gap-6" aria-labelledby="desktop-startup-title">
       {#if startup.status === 'starting'}
-        <div class="flex items-start gap-4" role="status" aria-live="polite">
+        <div class="flex items-start gap-4">
           <div class="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-card">
             <Spinner class="size-5" />
           </div>
@@ -163,12 +164,13 @@ onMount(() => {
             <h1 id="desktop-startup-title" class="font-structural mt-1 text-2xl font-semibold text-balance">
               {m.desktop_startup_starting_title()}
             </h1>
-            <p class="mt-2 text-base font-medium">{stage}</p>
             <p class="mt-1 text-sm text-muted-foreground text-pretty">
               {m.desktop_startup_starting_description()}
             </p>
           </div>
         </div>
+        <StartupProgress
+          progress={startup.progress ?? { phase: startup.stage, label: stage, completed: 0, total: null }} />
       {:else}
         <div class="flex items-start gap-4" role="alert">
           <div

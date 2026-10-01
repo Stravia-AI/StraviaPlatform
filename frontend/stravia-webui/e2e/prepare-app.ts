@@ -210,6 +210,11 @@ export async function prepareApp(page: Page): Promise<void> {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
 
+    if (path === '/startup') {
+      await route.fulfill({ json: { status: 'ready', progress: null } })
+      return
+    }
+
     if (path === '/auth/state') {
       await route.fulfill({
         json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'playwright-admin' },

@@ -10,6 +10,7 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use stravia_core::startup_progress::StartupProgress;
 use tauri::Emitter;
 use tauri_plugin_opener::OpenerExt;
 
@@ -43,6 +44,16 @@ impl StartupStage {
             Self::Desktop => "desktop",
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::DataDirectory => "Preparing the data directory",
+            Self::Gateway => "Starting the gateway",
+            Self::Session => "Preparing the administrator session",
+            Self::Http => "Starting the local service",
+            Self::Desktop => "Preparing the desktop",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -62,6 +73,7 @@ pub(crate) struct StartupWarning {
 pub(crate) struct DesktopStartupSnapshot {
     pub status: StartupStatus,
     pub stage: String,
+    pub progress: Option<StartupProgress>,
     pub error: Option<StartupError>,
     pub warnings: Vec<StartupWarning>,
     pub log_path: Option<String>,
@@ -94,6 +106,7 @@ impl StartupController {
                 snapshot: DesktopStartupSnapshot {
                     status: StartupStatus::Starting,
                     stage: StartupStage::DataDirectory.code().to_string(),
+                    progress: None,
                     error: None,
                     warnings: Vec::new(),
                     log_path: diagnostics
@@ -133,11 +146,33 @@ impl StartupController {
                 return false;
             }
             lifecycle.snapshot.stage = stage.code().to_string();
+            lifecycle.snapshot.progress = Some(StartupProgress {
+                phase: stage.code(),
+                label: stage.label(),
+                completed: 0,
+                total: None,
+            });
         }
         self.diagnostics
             .record("INFO", stage.code(), "startup stage entered");
+        stravia_core::startup_progress::report(stage.code(), stage.label(), 0, None);
         publish(app, &self.snapshot());
         true
+    }
+
+    pub(crate) fn progress(&self, app: &tauri::AppHandle, progress: StartupProgress) {
+        let snapshot = {
+            let mut lifecycle = self.lifecycle.lock();
+            if lifecycle.shutting_down
+                || lifecycle.snapshot.status != StartupStatus::Starting
+                || lifecycle.snapshot.stage != StartupStage::Gateway.code()
+            {
+                return;
+            }
+            lifecycle.snapshot.progress = Some(progress);
+            lifecycle.snapshot.clone()
+        };
+        publish(app, &snapshot);
     }
 
     pub(crate) fn warning(
@@ -201,6 +236,7 @@ impl StartupController {
             }
             lifecycle.snapshot.status = StartupStatus::Ready;
             lifecycle.snapshot.stage = StartupStage::Desktop.code().to_string();
+            lifecycle.snapshot.progress = None;
             lifecycle.snapshot.error = None;
             self.diagnostics
                 .record("INFO", StartupStage::Desktop.code(), "startup ready");

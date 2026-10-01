@@ -460,16 +460,21 @@ async fn initialize_desktop(
 
         stage = StartupStage::Gateway;
         startup.stage(&app, stage);
+        let progress_startup = Arc::clone(&startup);
+        let progress_app = app.clone();
         gateway = Some(
-            Gateway::new(GatewayConfig {
-                data_dir: data_dir.clone(),
-                product_update_download_supported: true,
-                catalog_base_url: Some(
-                    stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned(),
-                ),
-                catalog_background_refresh: true,
-                ..Default::default()
-            })
+            stravia_core::startup_progress::observe_startup(
+                move |progress| progress_startup.progress(&progress_app, progress),
+                Gateway::new(GatewayConfig {
+                    data_dir: data_dir.clone(),
+                    product_update_download_supported: true,
+                    catalog_base_url: Some(
+                        stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned(),
+                    ),
+                    catalog_background_refresh: true,
+                    ..Default::default()
+                }),
+            )
             .await?,
         );
         if startup.is_shutting_down() {

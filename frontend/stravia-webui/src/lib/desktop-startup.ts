@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import type { StartupProgress } from '$lib/startup-progress'
 
 export type DesktopStartupStatus = 'starting' | 'ready' | 'failed'
 export type DesktopStartupStage = 'data_directory' | 'gateway' | 'session' | 'http' | 'desktop'
@@ -17,6 +18,7 @@ export interface DesktopStartupWarning extends DesktopStartupIssue {
 export interface DesktopStartupState {
   status: DesktopStartupStatus
   stage: DesktopStartupStage
+  progress: StartupProgress | null
   error: DesktopStartupIssue | null
   warnings: DesktopStartupWarning[]
   logPath: string | null
@@ -26,6 +28,7 @@ export interface DesktopStartupState {
 export const initialDesktopStartupState: DesktopStartupState = {
   status: 'starting',
   stage: 'desktop',
+  progress: null,
   error: null,
   warnings: [],
   logPath: null,
@@ -36,6 +39,7 @@ export function desktopFrontendFailure(stage: DesktopStartupStage, details: stri
   return {
     status: 'failed',
     stage,
+    progress: null,
     error: { code: stage, details },
     warnings: [],
     logPath: null,

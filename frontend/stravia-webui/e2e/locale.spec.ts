@@ -16,6 +16,10 @@ async function prepareLocalePage(page: Page, languages: string[], savedLocale?: 
 
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/startup')) {
+      await route.fulfill({ json: { status: 'ready', progress: null } })
+      return
+    }
     if (path.endsWith('/auth/state')) {
       await route.fulfill({
         json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'locale-admin' },

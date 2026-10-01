@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::startup_progress::report;
 use anyhow::ensure;
 use sqlx::{
     PgPool, Sqlite, SqlitePool,
@@ -78,6 +79,12 @@ pub async fn run_sqlite_migrator(
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     tracing::info!(backend = "sqlite", "Starting database migration");
+    report(
+        "migration_validate",
+        "Checking database migration history",
+        0,
+        None,
+    );
     let mut pinned = SqliteMigrationConnection {
         connection: pool.acquire().await?,
         // Arm before the first await which can disable FK enforcement.
@@ -95,59 +102,62 @@ pub async fn run_sqlite_migrator(
     sqlx::query("PRAGMA foreign_keys=OFF")
         .execute(&mut *pinned.connection)
         .await?;
+    report(
+        "migration_validate",
+        "Waiting for database migration lock",
+        0,
+        None,
+    );
     Migrate::lock(&mut *pinned.connection).await?;
     let runner = unlocked_runner(migrator);
     if runner.version_exists(7) {
-        tracing::info!(
-            backend = "sqlite",
-            phase = "history_schema",
-            "Applying migration phase"
-        );
+        report("history_schema", "Preparing history schema", 0, None);
         runner
             .run_direct(Some(6), &mut *pinned.connection, false)
             .await?;
         runner
             .run_direct(Some(7), &mut *pinned.connection, false)
             .await?;
-        tracing::info!(
-            backend = "sqlite",
-            phase = "history_data",
-            "Applying migration phase"
-        );
+        report("history_data", "Checking history conversion", 0, None);
         crate::turn_chain::upgrade::convert_history_sqlite(&mut pinned.connection).await?;
     }
     if runner.version_exists(8) {
-        tracing::info!(
-            backend = "sqlite",
-            phase = "debug_manifests",
-            "Applying migration phase"
-        );
+        report("debug_manifests", "Checking diagnostic manifests", 0, None);
         crate::interaction_observation::upgrade::export_debug_manifests_sqlite(
             &mut pinned.connection,
             diagnostics,
         )
         .await?;
-        tracing::info!(
-            backend = "sqlite",
-            phase = "observation_schema",
-            "Applying migration phase"
+        report(
+            "observation_schema",
+            "Preparing observation schema",
+            0,
+            None,
         );
         runner
             .run_direct(Some(8), &mut *pinned.connection, false)
             .await?;
-        tracing::info!(
-            backend = "sqlite",
-            phase = "observation_data",
-            "Applying migration phase"
+        report(
+            "observation_data",
+            "Checking observation conversion",
+            0,
+            None,
         );
         crate::interaction_observation::upgrade::convert_event_storage_sqlite(
             &mut pinned.connection,
         )
         .await?;
     }
+    report(
+        "schema_migrations",
+        "Applying database schema migrations",
+        0,
+        None,
+    );
     runner
         .run_direct(None, &mut *pinned.connection, false)
         .await?;
+    report("migration_verify", "Verifying database integrity", 0, None);
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&mut *pinned.connection)
         .await?;
@@ -185,54 +195,68 @@ pub async fn run_postgres_migrator(
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     tracing::info!(backend = "postgres", "Starting database migration");
+    report(
+        "migration_validate",
+        "Waiting for database migration lock",
+        0,
+        None,
+    );
     let mut connection = pool.acquire().await?;
     // SQLx 0.9 can leave its session-level advisory lock held after a failed
     // migration. Never return this migration session to the pool.
     connection.close_on_drop();
     Migrate::lock(&mut *connection).await?;
+    report(
+        "migration_validate",
+        "Checking database migration history",
+        0,
+        None,
+    );
     reject_incompatible_postgres(&mut connection, migrator).await?;
     let runner = unlocked_runner(migrator);
     if runner.version_exists(7) {
-        tracing::info!(
-            backend = "postgres",
-            phase = "history_schema",
-            "Applying migration phase"
-        );
+        report("history_schema", "Preparing history schema", 0, None);
         runner.run_direct(Some(6), &mut *connection, false).await?;
         runner.run_direct(Some(7), &mut *connection, false).await?;
-        tracing::info!(
-            backend = "postgres",
-            phase = "history_data",
-            "Applying migration phase"
-        );
+        report("history_data", "Checking history conversion", 0, None);
         crate::turn_chain::upgrade::convert_history_postgres(&mut connection).await?;
     }
     if runner.version_exists(8) {
-        tracing::info!(
-            backend = "postgres",
-            phase = "debug_manifests",
-            "Applying migration phase"
-        );
+        report("debug_manifests", "Checking diagnostic manifests", 0, None);
         crate::interaction_observation::upgrade::export_debug_manifests_postgres(
             &mut connection,
             diagnostics,
         )
         .await?;
-        tracing::info!(
-            backend = "postgres",
-            phase = "observation_schema",
-            "Applying migration phase"
+        report(
+            "observation_schema",
+            "Preparing observation schema",
+            0,
+            None,
         );
         runner.run_direct(Some(8), &mut *connection, false).await?;
-        tracing::info!(
-            backend = "postgres",
-            phase = "observation_data",
-            "Applying migration phase"
+        report(
+            "observation_data",
+            "Checking observation conversion",
+            0,
+            None,
         );
         crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
             .await?;
     }
+    report(
+        "schema_migrations",
+        "Applying database schema migrations",
+        0,
+        None,
+    );
     runner.run_direct(None, &mut *connection, false).await?;
+    report(
+        "migration_verify",
+        "Releasing database migration lock",
+        0,
+        None,
+    );
     Migrate::unlock(&mut *connection).await?;
     tracing::info!(
         backend = "postgres",

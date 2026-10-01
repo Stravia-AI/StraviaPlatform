@@ -25,6 +25,9 @@ pub use admin_entry::AdminEntryPolicy;
 mod http_auth;
 mod oauth_callback;
 mod setup;
+mod startup;
+
+pub use startup::StartupHttpApp;
 
 pub use setup::{
     DatabaseConfig, PreparedServerApp, ServerStartupConfig, gateway_config, prepare_server_app,

@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use stravia_core::config::GatewayConfig;
 use stravia_core::data_paths::{DataPaths, resolve_data_dir};
 use stravia_server::{
-    AdminEntryPolicy, DEFAULT_PORT, ServerStartupConfig, prepare_server_app, recover_admin,
+    AdminEntryPolicy, DEFAULT_PORT, ServerStartupConfig, StartupHttpApp, recover_admin,
     standalone_local_origins, start_http_server,
 };
 
@@ -164,21 +164,32 @@ async fn run_server(
         args.proxy_cors_origins.clone()
     };
 
-    let prepared = prepare_server_app(ServerStartupConfig {
+    let startup = StartupHttpApp::new(ServerStartupConfig {
         config_path,
         gateway,
         admin_entry,
         proxy_cors_origins,
         serve_embedded_webui: true,
-    })
-    .await?;
-    if let Some(token) = prepared.setup_token.as_deref() {
+    });
+    let server =
+        start_http_server(listener_address(&args.host, args.port), startup.router()).await?;
+    let address = server.local_addr();
+    tracing::info!(%address, "Stravia startup listener opened");
+    let prepared = startup.prepare().await;
+    let setup_token = match prepared {
+        Ok(token) => token,
+        Err(error) => {
+            if let Err(shutdown_error) = server.shutdown().await {
+                tracing::warn!(%shutdown_error, "failed to stop the startup listener");
+            }
+            return Err(error);
+        }
+    };
+    if let Some(token) = setup_token.as_deref() {
         println!("Stravia setup token: {token}");
         std::io::stdout().flush()?;
     }
 
-    let server = start_http_server(listener_address(&args.host, args.port), prepared.app).await?;
-    let address = server.local_addr();
     tracing::info!(%address, "Stravia Server listening");
     shutdown_signal().await;
     server.shutdown().await
