@@ -49,8 +49,6 @@ export interface ModelCapabilities {
   model_id: string
   context_window: number
   embedding_length?: number | null
-  tool_call: boolean
-  reasoning: boolean
   input_modalities: string[]
   output_modalities: string[]
 }
@@ -76,13 +74,6 @@ export type SnapshotState =
 
 export type ProviderModelSelectionPolicy = 'auto' | 'force_enabled' | 'force_disabled'
 
-export type ProviderModelReasoningOption =
-  | { type: 'toggle' }
-  | { type: 'effort'; values: Array<string | null> }
-  | { type: 'budget_tokens'; min?: number | null; max?: number | null }
-
-export type ProviderModelInterleaved = boolean | { field: string }
-
 export interface ProviderModelModalities {
   input: string[]
   output: string[]
@@ -90,18 +81,12 @@ export interface ProviderModelModalities {
 
 export interface ProviderModelLimit {
   context?: number | null
-  input?: number | null
-  output?: number | null
 }
 
 export interface ModelSpecification {
   limit?: ProviderModelLimit | null
   modalities?: ProviderModelModalities | null
-  reasoning?: boolean | null
-  tool_call?: boolean | null
-  structured_output?: boolean | null
-  attachment?: boolean | null
-  temperature?: boolean | null
+  reasoning_efforts?: string[]
 }
 
 export interface ProviderModelPrices {
@@ -129,8 +114,6 @@ export interface ProviderModelMetadata extends ModelSpecification {
   description?: string | null
   family?: string | null
   open_weights?: boolean | null
-  reasoning_options?: ProviderModelReasoningOption[] | null
-  interleaved?: ProviderModelInterleaved | null
   knowledge?: string | null
   release_date?: string | null
   last_updated?: string | null

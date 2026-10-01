@@ -42,15 +42,7 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
               source_kind: 'discovered',
               snapshot_state: { type: 'unregistered' },
               selection_policy: 'auto',
-              specification: {
-                limit: null,
-                modalities: null,
-                reasoning: null,
-                tool_call: null,
-                structured_output: null,
-                attachment: null,
-                temperature: null,
-              },
+              specification: { limit: null, modalities: null },
               revision: 1,
             },
           ],
@@ -59,7 +51,7 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
     }),
   )
   await page.route('**/api/v1/providers/prefill-provider/model-capabilities?*', (route) =>
-    route.fulfill({ json: { data: { reasoning: true } } }),
+    route.fulfill({ json: { data: { context_window: null, input_modalities: [], output_modalities: [] } } }),
   )
   await page.route('**/api/v1/providers/prefill-provider/model?*', async (route) => {
     if (holdDetails) await detailsReady
@@ -624,13 +616,9 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     snapshot_state: { type: 'imported', source: { type: 'discovery' } },
     selection_policy: 'auto',
     specification: {
-      limit: { context: 1050000, input: 1048576, output: 32000 },
+      limit: { context: 1050000 },
       modalities: { input: ['image', 'pdf'], output: ['text'] },
-      reasoning: true,
-      tool_call: false,
-      structured_output: null,
-      attachment: true,
-      temperature: false,
+      reasoning_efforts: ['low', 'high'],
     },
     revision: 1,
   }
@@ -665,11 +653,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
               name: available.name,
               limit: available.specification.limit,
               modalities: available.specification.modalities,
-              reasoning: true,
-              tool_call: false,
-              structured_output: null,
-              attachment: true,
-              temperature: false,
+              reasoning_efforts: available.specification.reasoning_efforts,
               cost: { input: 0.25, output: 1 },
             },
             extensions: {},
@@ -687,8 +671,6 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
             provider: 'Provider A',
             model_id: available.id,
             context_window: 128000,
-            tool_call: true,
-            reasoning: true,
             input_modalities: ['text', 'image'],
             output_modalities: ['text'],
           },
@@ -781,39 +763,29 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
   const dialogSpecification = page.getByRole('dialog').getByRole('group', { name: 'Model specification' })
   await expect(dialogSpecification).toContainText('1.05M')
-  await expect(dialogSpecification).toContainText('32K')
   await expect(dialogSpecification).toContainText('Input')
   await expect(dialogSpecification).toContainText('Output')
-  await expect(dialogSpecification.getByRole('button', { name: 'Image input' })).toBeVisible()
-  await expect(dialogSpecification.getByRole('button', { name: 'PDF input' })).toBeVisible()
-  await expect(dialogSpecification.getByRole('button', { name: 'Text output' })).toBeVisible()
-  await expect(dialogSpecification.getByRole('button', { name: 'Reasoning' })).toBeVisible()
+  await expect(dialogSpecification).toContainText('Image')
+  await expect(dialogSpecification).toContainText('PDF')
+  await expect(dialogSpecification).toContainText('Text')
   await page.getByRole('button', { name: 'View model details' }).click()
   const detailDialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'GPT Available' }) })
   const detailSpecification = detailDialog.getByRole('region', { name: 'Model specification' })
   await expect(detailSpecification).toContainText('1,050,000 tokens')
-  await expect(detailSpecification).toContainText('1,048,576 tokens')
-  await expect(detailSpecification).toContainText('32,000 tokens')
   await expect(detailSpecification).toContainText(/Input modalities.*Image.*PDF/)
   await expect(detailSpecification).toContainText(/Output modalities.*Text/)
-  await expect(detailSpecification).toContainText(/Reasoning.*Supported/)
-  await expect(detailSpecification).toContainText(/Tool calls.*Not supported/)
-  await expect(detailSpecification).toContainText(/Structured output.*Not registered/)
-  await expect(detailSpecification).toContainText(/Attachments.*Supported/)
-  await expect(detailSpecification).toContainText(/Temperature.*Not supported/)
+  await expect(detailSpecification).toContainText('high')
   await expect(detailDialog).toContainText('Pricing')
   await expect(detailDialog).toContainText('$0.25')
   await detailDialog.getByRole('button', { name: 'Close' }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()
   const savedDestination = page.getByRole('button', { name: 'Edit destination 1' })
+  await expect(savedDestination).toContainText('GPT Available')
   await expect(savedDestination).toContainText('Provider A')
-  await expect(savedDestination).toContainText('gpt-available')
-  await expect(page.getByRole('group', { name: 'Model specification' })).toContainText('1.05M')
+  await expect(savedDestination).not.toContainText('gpt-available')
+  await expect(savedDestination).not.toContainText('Context')
 
   await savedDestination.click({ position: { x: 4, y: 4 } })
-  await expect(page.getByRole('dialog')).toBeVisible()
-  await page.getByRole('button', { name: 'Confirm' }).click()
-  await savedDestination.getByRole('button', { name: /^Token limits:/ }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('button', { name: 'Confirm' }).click()
 
@@ -823,16 +795,20 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByLabel('Destination 2 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await expect(page.getByRole('button', { name: 'Edit destination 2' })).toContainText('gpt-available')
+  await expect(page.getByRole('button', { name: 'Edit destination 2' })).toContainText('GPT Available')
 
   await expect(page.getByRole('group', { name: 'Insert as the highest priority' })).toBeVisible()
   await page
     .getByRole('button', { name: 'Edit destination 1' })
-    .getByRole('button', { name: /^Token limits:/ })
     .dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
   await expect(page.getByLabel('Layer 1')).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByLabel('Destination 1 priority')).toHaveCount(0)
+  await expect(savedDestination).toContainText('Context 1.05M')
+  await expect(savedDestination).toContainText('Image')
+  await expect(savedDestination).toContainText('PDF')
+  await expect(savedDestination).toContainText('Text')
+  await expect(savedDestination).not.toContainText('Max output')
 
   await savedDestination.click({ position: { x: 4, y: 4 } })
   await expect(page.getByRole('dialog')).toBeVisible()

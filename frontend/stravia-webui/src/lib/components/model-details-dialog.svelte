@@ -33,13 +33,25 @@ let loading = $state(false)
 let error = $state('')
 
 const metadata = $derived<ProviderModelMetadata>(detail?.metadata ?? {})
-const prices = $derived.by(() => {
+const priceGroups = $derived.by(() => {
   const cost = metadata.cost
   if (!cost) return []
-  return priceFields.flatMap(({ key, label }) => {
-    const value = cost[key]
-    return value == null ? [] : [{ key, label: label(), value }]
-  })
+  const schedules = [
+    { label: m.model_specification_base_prices(), prices: cost },
+    ...(cost.context_over_200k
+      ? [{ label: m.model_specification_extended_context_prices(), prices: cost.context_over_200k }]
+      : []),
+    ...cost.tiers.map((tier) => ({ label: `${tier.tier.type} · ${formatNumber(tier.tier.size)}`, prices: tier })),
+  ]
+  return schedules
+    .map((schedule) => ({
+      label: schedule.label,
+      prices: priceFields.flatMap(({ key, label }) => {
+        const value = schedule.prices[key]
+        return value == null ? [] : [{ key, label: label(), value }]
+      }),
+    }))
+    .filter((schedule) => schedule.prices.length > 0)
 })
 async function loadDetails(): Promise<void> {
   loading = true
@@ -70,7 +82,7 @@ async function loadDetails(): Promise<void> {
     <Dialog.Header class="shrink-0 border-b px-6 py-5 pr-16">
       <Dialog.Title>{detail?.metadata.name || m.provider_model_editor_model_information()}</Dialog.Title>
       <Dialog.Description class="text-pretty">
-        {detail?.metadata.description || m.provider_model_editor_model_information()}
+        {detail?.metadata.description || modelId}
       </Dialog.Description>
     </Dialog.Header>
 
@@ -84,9 +96,29 @@ async function loadDetails(): Promise<void> {
     {:else if detail}
       <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
         <div class="flex flex-col gap-5">
+          <dl class="grid gap-4 border-b pb-4 sm:grid-cols-2">
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.common_model()}</dt>
+              <dd class="mt-1 break-words text-sm">{metadata.name || detail.id}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.model_specification_model_id()}</dt>
+              <dd class="mt-1 break-all font-technical text-sm">{detail.id}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.model_specification_family()}</dt>
+              <dd class="mt-1 text-sm">{metadata.family || m.model_specification_not_registered()}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">{m.provider_model_catalog_model_availability()}</dt>
+              <dd class="mt-1 text-sm">
+                {detail.available ? m.model_specification_available() : m.common_unavailable()}
+              </dd>
+            </div>
+          </dl>
           <ModelSpecification specification={metadata} density="detail" />
 
-          {#if prices.length > 0}
+          {#if priceGroups.length > 0}
             <section class="flex flex-col gap-3 border-t pt-4">
               <div>
                 <h3 class="text-sm font-semibold">{m.provider_model_editor_pricing()}</h3>
@@ -94,14 +126,17 @@ async function loadDetails(): Promise<void> {
                   {m.provider_model_editor_pricing_unit_help()}
                 </p>
               </div>
-              <dl class="grid gap-3 sm:grid-cols-2">
-                {#each prices as price (price.key)}
-                  <div class="flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
-                    <dt class="text-sm text-muted-foreground">{price.label}</dt>
-                    <dd class="font-technical text-sm">${formatNumber(price.value)}</dd>
-                  </div>
-                {/each}
-              </dl>
+              {#each priceGroups as group (group.label)}
+                <h4 class="text-xs font-medium">{group.label}</h4>
+                <dl class="grid gap-3 sm:grid-cols-2">
+                  {#each group.prices as price (price.key)}
+                    <div class="flex items-center justify-between gap-3 border-b py-2">
+                      <dt class="text-sm text-muted-foreground">{price.label}</dt>
+                      <dd class="font-technical text-sm">${price.value}</dd>
+                    </div>
+                  {/each}
+                </dl>
+              {/each}
             </section>
           {/if}
         </div>

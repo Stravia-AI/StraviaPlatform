@@ -12,13 +12,13 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { effectiveModelDisplayName, sortLogicalModels } from '$lib/logical-model'
-import type { Route, RouteSelectionStrategy } from '$lib/types'
+import { formatSpecificationTokens } from '$lib/model-specification'
+import type { Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
-import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import {
   DataTable,
@@ -65,15 +65,6 @@ const apiKeys = $derived(apiKeysQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
 const modelColumnHelper = createDataTableColumnHelper<Route>()
 
-function strategyLabel(strategy: RouteSelectionStrategy): string {
-  switch (strategy) {
-    case 'traffic_equalization':
-      return m.model_editor_traffic_equalization()
-    case 'latency_preference':
-      return m.model_editor_latency_preference()
-  }
-}
-
 const modelColumns = modelColumnHelper.columns([
   modelColumnHelper.accessor((model) => effectiveModelDisplayName(model), {
     id: 'display-name',
@@ -88,11 +79,11 @@ const modelColumns = modelColumnHelper.columns([
     meta: { label: () => m.models_client_model_id() },
     size: 190,
   }),
-  modelColumnHelper.accessor('balance', {
-    header: () => m.models_request_handling(),
-    cell: (context) => renderSnippet(modelBalanceCell, context),
-    meta: { label: () => m.models_request_handling() },
-    size: 170,
+  modelColumnHelper.accessor('context_window', {
+    header: () => m.model_specification_context(),
+    cell: (context) => renderSnippet(modelContextCell, context),
+    meta: { label: () => m.model_specification_context(), align: 'end' },
+    size: 130,
   }),
   modelColumnHelper.accessor((model) => associatedServicesLabel(model), {
     id: 'services',
@@ -151,10 +142,6 @@ function associatedServicesLabel(model: Route): string {
         .map((target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id),
     ),
   ].join(', ')
-}
-
-function enabledTargetCount(model: Route): number {
-  return model.targets.reduce((count, target) => count + (target.enabled ? 1 : 0), 0)
 }
 
 function openModel(model: Route, event: MouseEvent): void {
@@ -250,10 +237,11 @@ async function deleteModel(): Promise<void> {
   <TechnicalValue value={context.row.original.model_id} copyable />
 {/snippet}
 
-{#snippet modelBalanceCell(context: DataTableCellContext<Route>)}
-  <Badge variant="outline">
-    {strategyLabel(context.row.original.balance)}
-  </Badge>
+{#snippet modelContextCell(context: DataTableCellContext<Route>)}
+  {@const value = context.row.original.context_window}
+  <span class="font-technical tabular-nums">
+    {value == null ? m.model_specification_not_registered() : formatSpecificationTokens(value)}
+  </span>
 {/snippet}
 
 {#snippet modelServicesCell(context: DataTableCellContext<Route>)}
@@ -327,6 +315,7 @@ async function deleteModel(): Promise<void> {
           labels={tableLabels}
           getRowId={getModelRowId}
           ariaLabel={m.models_configured_models()}
+          size="small"
           stripedRows
           sortMode="multiple"
           resizableColumns
@@ -334,17 +323,19 @@ async function deleteModel(): Promise<void> {
       </div>
       <div class="route-mobile-list">
         {#each models as model (model.id)}
-          {@const targetCount = enabledTargetCount(model)}
           <div class="route-mobile-row">
-            <a class="min-w-0" href={resolve(`/models/${encodeURIComponent(model.model_id)}`)}>
-              <p class="truncate font-medium">{effectiveModelDisplayName(model)}</p>
-              <p class="truncate text-xs text-muted-foreground">
-                {m.models_client_model_id()}: <span class="font-technical">{model.model_id}</span>
-              </p>
+            <div class="min-w-0">
+              <a class="block truncate font-medium" href={resolve(`/models/${encodeURIComponent(model.model_id)}`)}>
+                {effectiveModelDisplayName(model)}
+              </a>
+              <TechnicalValue value={model.model_id} copyable />
               <p class="mt-1 text-xs text-muted-foreground">
-                {strategyLabel(model.balance)} · {targetCount === 1
-                  ? m.common_1_destination()
-                  : m.models_value_destinations({ target_count: targetCount })}
+                {m.model_specification_context()}:
+                <span class="font-technical tabular-nums">
+                  {model.context_window == null
+                    ? m.model_specification_not_registered()
+                    : formatSpecificationTokens(model.context_window)}
+                </span>
               </p>
               <p class="mt-1 truncate text-xs text-muted-foreground">
                 {m.models_associated_services()}: {associatedServicesLabel(model) || m.models_no_associated_services()}
@@ -354,7 +345,7 @@ async function deleteModel(): Promise<void> {
                 compact
                 label={model.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
                 tone={model.is_enabled ? 'healthy' : 'neutral'} />
-            </a>
+            </div>
             <div class="flex items-start gap-1">{@render modelActions(model)}</div>
           </div>
         {/each}

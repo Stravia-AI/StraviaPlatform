@@ -365,7 +365,6 @@ fn classify_targets(model: &Route) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut tool_targets = Vec::new();
     for target in &model.targets {
         let supports_image = super::platform::supports_image(&target.input_modalities);
-        let supports_tools = target.tool_call == Some(true);
         let target_key = format!(
             "{}:{}",
             target.provider_id,
@@ -374,11 +373,9 @@ fn classify_targets(model: &Route) -> (Vec<String>, Vec<String>, Vec<String>) {
         if supports_image {
             native_targets.push(target_key.clone());
         }
-        if supports_tools {
-            tool_targets.push(target_key.clone());
-            if !supports_image {
-                bridge_targets.push(target_key);
-            }
+        tool_targets.push(target_key.clone());
+        if !supports_image {
+            bridge_targets.push(target_key);
         }
     }
     (native_targets, bridge_targets, tool_targets)
@@ -411,6 +408,30 @@ fn bridge_error_status(code: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_routing_uses_modalities_without_tool_declarations() {
+        let route = Route {
+            id: "media-route".into(),
+            is_enabled: true,
+            targets: vec![
+                crate::host::MediaTarget {
+                    provider_id: "native".into(),
+                    model: Some("vision".into()),
+                    input_modalities: vec!["text".into(), "image".into()],
+                },
+                crate::host::MediaTarget {
+                    provider_id: "bridge".into(),
+                    model: Some("text".into()),
+                    input_modalities: vec!["text".into()],
+                },
+            ],
+        };
+        let (native, bridge, tools) = classify_targets(&route);
+        assert_eq!(native, vec!["native:vision"]);
+        assert_eq!(bridge, vec!["bridge:text"]);
+        assert_eq!(tools, vec!["native:vision", "bridge:text"]);
+    }
 
     #[test]
     fn media_planner_rejections_are_typed() {

@@ -187,11 +187,7 @@ async fn protected_responses_router_with_base_url(
                 metadata: serde_json::json!({
                     "id": "auth-model",
                     "name": "Auth model",
-                    "tool_call": true,
-                    "reasoning_options": [{
-                        "type": "effort",
-                        "values": ["none", "low", "medium", "high", "xhigh"]
-                    }]
+                    "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
                 }),
                 template_id: None,
             },

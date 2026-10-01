@@ -77,7 +77,7 @@ fn content_key(content: &str) -> String {
     stravia_runtime_contract::identifier::encode_digest(&Sha256::digest(content.as_bytes()).into())
 }
 
-// 每批一次 JOIN；避免随历史节点数逐条查询。SQL 层强制 Principal 一致。
+// 每批先读节点和引用元数据，再按唯一 (Principal, content key) 读取内容。
 // SQLite 的 principal-first 内容索引会让每个节点扫描同主体的全部引用；
 // 单目 + 只排除该索引条件，仍由 n.principal 的 TEXT affinity 执行等值校验。
 macro_rules! backend {
@@ -116,30 +116,51 @@ macro_rules! backend {
             let mut reference_count = 0usize;
             for batch in nodes.chunks_mut(400) {
                 let mut query = sqlx::QueryBuilder::<$db>::new(concat!(
-                    "SELECT n.id, CAST(n.storage_format AS BIGINT), r.path, r.content_key, c.content FROM turn_chain_nodes n \
+                    "SELECT n.id, CAST(n.storage_format AS BIGINT), n.principal, r.path, r.content_key FROM turn_chain_nodes n \
                      LEFT JOIN turn_chain_content_refs r ON r.node_id = n.id AND ",
                     $refs_principal,
-                    " LEFT JOIN turn_chain_contents c ON c.principal = r.principal AND c.content_key = r.content_key WHERE n.id IN ("
+                    " WHERE n.id IN ("
                 ));
                 let mut list = query.separated(",");
                 for node in batch.iter() { list.push_bind(node.id.as_str()); }
                 list.push_unseparated(")");
-                let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> =
+                let rows: Vec<(String, i64, String, Option<String>, Option<String>)> =
                     query.build_query_as().fetch_all(&mut *connection).await?;
-                let mut by_node: HashMap<String, (i64, Vec<(String, String)>)> = HashMap::new();
-                let mut contents = HashMap::new();
-                for (id, format, path, key, content) in rows {
+                let mut by_node: HashMap<String, (i64, Vec<(String, usize)>)> = HashMap::new();
+                let mut identities = HashMap::new();
+                for (id, format, principal, path, key) in rows {
                     let entry = by_node.entry(id).or_insert_with(|| (format, Vec::new()));
                     if let Some(path) = path {
                         let key = key.context("missing history content identity")?;
-                        let content = content.context("missing history content")?;
-                        if !contents.contains_key(&key) {
-                            ensure!(content_key(&content) == key, "damaged history content");
-                            contents.insert(key.clone(), serde_json::from_str::<Value>(&content)?);
-                        }
-                        entry.1.push((path, key));
+                        let next = identities.len();
+                        let index = *identities.entry((principal, key)).or_insert(next);
+                        entry.1.push((path, index));
                     }
                 }
+                let mut contents = vec![None; identities.len()];
+                let keys: Vec<_> = identities.keys().collect();
+                // Two parameters per identity; cap independently of the node batch.
+                // Empty references deliberately issue no content query.
+                for keys in keys.chunks(400) {
+                    let mut query = sqlx::QueryBuilder::<$db>::new(
+                        "SELECT principal, content_key, content FROM turn_chain_contents WHERE (principal, content_key) IN ("
+                    );
+                    let mut list = query.separated(",");
+                    for (principal, key) in keys {
+                        list.push("(").push_bind_unseparated(principal)
+                            .push_unseparated(",").push_bind_unseparated(key)
+                            .push_unseparated(")");
+                    }
+                    list.push_unseparated(")");
+                    let rows: Vec<(String, String, String)> =
+                        query.build_query_as().fetch_all(&mut *connection).await?;
+                    for (principal, key, content) in rows {
+                        ensure!(content_key(&content) == key, "damaged history content");
+                        let index = identities.get(&(principal, key)).context("unexpected history content identity")?;
+                        contents[*index] = Some(serde_json::from_str::<Value>(&content)?);
+                    }
+                }
+                ensure!(contents.iter().all(Option::is_some), "missing history content");
                 for node in batch {
                     let (format, mut references) = by_node.remove(node.id.as_str()).context("history node disappeared")?;
                     reference_count += references.len();
@@ -155,7 +176,7 @@ macro_rules! backend {
                                 ensure!(seen.insert(path.clone()), "duplicate history reference");
                                 let slot = value.pointer_mut(&path).context("invalid history content path")?;
                                 ensure!(slot.is_null(), "history reference overwrites content");
-                                *slot = contents.get(&key).context("missing history content")?.clone();
+                                *slot = contents[key].as_ref().context("missing history content")?.clone();
                             }
                             node.payload = value;
                         }

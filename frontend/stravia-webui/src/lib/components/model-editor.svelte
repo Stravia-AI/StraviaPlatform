@@ -427,6 +427,33 @@ function targetIndex(target: RouteTargetForm): number {
   return targets.findIndex((candidate) => candidate.key === target.key)
 }
 
+function targetProviderLabel(target: RouteTargetForm): string {
+  return (
+    providers.find((provider) => provider.id === target.providerId)?.name ||
+    target.providerId ||
+    m.model_editor_unconfigured_target()
+  )
+}
+
+function targetModelIdentity(
+  target: RouteTargetForm,
+  summary: ProviderModelSummary | undefined,
+): { label: string; technical: boolean } {
+  if (target.model === null) return { label: m.model_editor_provider_only_search_destination(), technical: false }
+  const modelId = target.model.trim()
+  const name = summary?.name.trim()
+  if (name) return { label: name, technical: name === modelId }
+  return modelId ? { label: modelId, technical: true } : { label: m.model_editor_choose_model(), technical: false }
+}
+
+function targetIssueLabels(target: RouteTargetForm, summary: ProviderModelSummary | undefined): string[] {
+  const labels: string[] = []
+  if (target.persisted && summary && !summary.available) labels.push(m.model_editor_model_no_longer_available())
+  if (providerOnlySearchUnavailable(target)) labels.push(m.model_editor_provider_only_search_unavailable())
+  if (unwritableThinkingLevels(target).length > 0) labels.push(m.model_editor_thinking_map_unwritable())
+  return labels
+}
+
 function targetConfigured(target: RouteTargetForm): boolean {
   return Boolean(target.providerId && (target.model === null || target.model.trim()))
 }
@@ -951,76 +978,78 @@ async function saveModel(): Promise<void> {
                     </span>
                     <strong class="font-technical text-lg tabular-nums">{laneIndex + 1}</strong>
                   </div>
-                  <div class="flex min-w-0 flex-wrap content-start items-stretch gap-2 p-2">
-                    {#each lane.targets as target (target.key)}
-                      {@const summary = selectedSummary(target)}
-                      {@const status = targetRuntimeStatus(target)}
-                      <div
-                        role="button"
-                        tabindex="0"
-                        aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                        data-slot="target-card"
-                        data-enabled="true"
-                        data-key={target.key}
-                        draggable="true"
-                        class={[
-                          'group @container/target flex min-h-20 min-w-0 flex-[1_1_15rem] cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
-                          draggedTargetKey === target.key && 'opacity-50',
-                        ]}
-                        onclick={() => editTarget(target)}
-                        onkeydown={(event) => {
-                          if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                            event.preventDefault()
-                            editTarget(target)
-                          }
-                        }}
-                        ondragstart={(event) => startTargetDrag(event, target)}
-                        ondragend={finishTargetDrag}
-                        ondragenter={allowTargetDrop}
-                        ondragover={allowTargetDrop}
-                        ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
+                  <div class="@container/lane min-w-0 p-2">
+                    <div class={['grid gap-2', lane.targets.length > 1 && '@2xl/lane:grid-cols-2']}>
+                      {#each lane.targets as target (target.key)}
+                        {@const summary = selectedSummary(target)}
+                        {@const status = targetRuntimeStatus(target)}
+                        {@const modelIdentity = targetModelIdentity(target, summary)}
+                        {@const issueLabels = targetIssueLabels(target, summary)}
                         <div
-                          class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 text-left @max-md/target:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)]">
-                          <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
-                          <span class="truncate font-medium">
-                            {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
-                          </span>
-                          <span class="min-w-0 flex-1 truncate font-technical text-sm text-muted-foreground">
-                            {target.model ?? m.model_editor_provider_only_search_destination()}
-                          </span>
-                          {#if status}
-                            <StatusIndicator
-                              compact
-                              class="@max-md/target:col-span-2 @max-md/target:col-start-2"
-                              label={status.credential_invalid
-                                ? m.model_editor_target_status_credential_invalid()
-                                : targetStateLabel(status.state, status.cooldown_remaining_ms)}
-                              tone={status.credential_invalid
-                                ? 'error'
-                                : status.state === 'available'
-                                  ? 'healthy'
-                                  : 'warning'} />
-                          {/if}
+                          role="button"
+                          tabindex="0"
+                          aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                          data-slot="target-card"
+                          data-enabled="true"
+                          data-key={target.key}
+                          draggable="true"
+                          class={[
+                            'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+                            draggedTargetKey === target.key && 'opacity-50',
+                          ]}
+                          onclick={() => editTarget(target)}
+                          onkeydown={(event) => {
+                            if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                              event.preventDefault()
+                              editTarget(target)
+                            }
+                          }}
+                          ondragstart={(event) => startTargetDrag(event, target)}
+                          ondragend={finishTargetDrag}
+                          ondragenter={allowTargetDrop}
+                          ondragover={allowTargetDrop}
+                          ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
+                          <div
+                            class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
+                            <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                            <span class="min-w-0">
+                              <span
+                                class={[
+                                  'block font-medium wrap-anywhere',
+                                  modelIdentity.technical && 'font-technical text-sm',
+                                ]}>{modelIdentity.label}</span>
+                              <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
+                                {targetProviderLabel(target)}
+                              </span>
+                            </span>
+                            {#if status}
+                              <StatusIndicator
+                                compact
+                                class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
+                                label={status.credential_invalid
+                                  ? m.model_editor_target_status_credential_invalid()
+                                  : targetStateLabel(status.state, status.cooldown_remaining_ms)}
+                                tone={status.credential_invalid
+                                  ? 'error'
+                                  : status.state === 'available'
+                                    ? 'healthy'
+                                    : 'warning'} />
+                            {/if}
+                          </div>
+                          <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
+                            {#each issueLabels as label (label)}
+                              <Badge variant="destructive">{label}</Badge>
+                            {/each}
+                            <ModelSpecification specification={summary?.specification ?? {}} density="target" />
+                          </div>
                         </div>
-                        <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
-                          {#if target.persisted && summary && !summary.available}
-                            <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
-                          {/if}
-                          {#if providerOnlySearchUnavailable(target)}
-                            <Badge variant="destructive">{m.model_editor_provider_only_search_unavailable()}</Badge>
-                          {/if}
-                          {#if unwritableThinkingLevels(target).length > 0}
-                            <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
-                          {/if}
-                          {#if summary}<ModelSpecification specification={summary.specification} />{/if}
-                        </div>
-                      </div>
-                    {/each}
-                    {#if isDraggingTarget}
-                      <span class="ml-auto flex min-h-10 items-center px-3 text-sm text-primary">
-                        {m.model_editor_drop_same_priority()}
-                      </span>
-                    {/if}
+                      {/each}
+                      {#if isDraggingTarget}
+                        <span class="col-span-full flex min-h-10 items-center justify-end px-3 text-sm text-primary">
+                          {m.model_editor_drop_same_priority()}
+                        </span>
+                      {/if}
+                    </div>
                   </div>
                 </section>
 
@@ -1059,6 +1088,8 @@ async function saveModel(): Promise<void> {
           <div class="flex flex-col gap-2">
             {#each disabledTargets as target (target.key)}
               {@const summary = selectedSummary(target)}
+              {@const modelIdentity = targetModelIdentity(target, summary)}
+              {@const issueLabels = targetIssueLabels(target, summary)}
               <div class="relative">
                 <div
                   role="button"
@@ -1068,7 +1099,7 @@ async function saveModel(): Promise<void> {
                   data-key={target.key}
                   draggable="true"
                   class={[
-                    'group flex min-h-20 w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
+                    'group flex w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
                     draggedTargetKey === target.key && 'opacity-50',
                   ]}
                   onclick={() => editTarget(target)}
@@ -1080,33 +1111,24 @@ async function saveModel(): Promise<void> {
                   }}
                   ondragstart={(event) => startTargetDrag(event, target)}
                   ondragend={finishTargetDrag}>
-                  <div class="flex w-full min-w-0 flex-col items-start text-left">
-                    <span class="flex w-full min-w-0 items-center gap-2">
-                      <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
-                      <span class="truncate font-medium">
-                        {providers.find((provider) => provider.id === target.providerId)?.name ||
-                          target.providerId ||
-                          m.model_editor_unconfigured_target()}
+                  <div class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 text-left">
+                    <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                    <span class="min-w-0">
+                      <span
+                        class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}
+                        >{modelIdentity.label}</span>
+                      <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
+                        {targetProviderLabel(target)}
                       </span>
                     </span>
-                    <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
-                      {target.model === null
-                        ? m.model_editor_provider_only_search_destination()
-                        : target.model || m.model_editor_choose_model()}
-                    </span>
                   </div>
-                  <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
-                    {#if target.persisted && summary && !summary.available}
-                      <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
-                    {/if}
-                    {#if providerOnlySearchUnavailable(target)}
-                      <Badge variant="destructive">{m.model_editor_provider_only_search_unavailable()}</Badge>
-                    {/if}
-                    {#if unwritableThinkingLevels(target).length > 0}
-                      <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
-                    {/if}
-                    {#if summary}<ModelSpecification specification={summary.specification} />{/if}
-                  </div>
+                  {#if issueLabels.length > 0}
+                    <div class="flex w-full min-w-0 flex-wrap gap-1.5 pl-6 pt-2">
+                      {#each issueLabels as label (label)}
+                        <Badge variant="destructive">{label}</Badge>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
                 <Button
                   type="button"

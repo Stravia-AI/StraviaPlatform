@@ -56,20 +56,6 @@ pub fn apply(
 }
 
 pub fn decorate_discovered_model(vendor_id: &str, model: &mut DiscoveredModel) {
-    if explicitly_disables_reasoning(&model.metadata) {
-        model
-            .capabilities
-            .retain(|capability| capability != MODEL_CAPABILITY_THINKING_TOGGLE);
-        if let Some(capabilities) = model
-            .metadata
-            .get_mut("capabilities")
-            .and_then(Value::as_array_mut)
-        {
-            capabilities
-                .retain(|capability| capability.as_str() != Some(MODEL_CAPABILITY_THINKING_TOGGLE));
-        }
-        return;
-    }
     if !supports_all_models(vendor_id)
         && toggle_profile(vendor_id, &model.id).is_some()
         && !model
@@ -84,14 +70,6 @@ pub fn decorate_discovered_model(vendor_id: &str, model: &mut DiscoveredModel) {
 }
 
 fn toggle_authorized(vendor_id: &str, channel: &str, provider: &ProviderSnapshot) -> bool {
-    if provider
-        .model_metadata
-        .as_ref()
-        .is_some_and(|metadata| explicitly_disables_reasoning(&metadata.extensions))
-    {
-        return false;
-    }
-
     let model_declares_capability = provider.model_metadata.as_ref().is_some_and(|metadata| {
         metadata
             .capabilities
@@ -109,8 +87,59 @@ fn toggle_authorized(vendor_id: &str, channel: &str, provider: &ProviderSnapshot
     model_declares_capability || (channel == "default" && supports_all_models(vendor_id))
 }
 
-fn explicitly_disables_reasoning(metadata: &std::collections::BTreeMap<String, Value>) -> bool {
-    metadata.get("reasoning").and_then(Value::as_bool) == Some(false)
+/// Normalize upstream discovery rows before publishing the persistent model contract.
+pub fn source_metadata(
+    object: &serde_json::Map<String, Value>,
+) -> std::collections::BTreeMap<String, Value> {
+    let mut metadata = object
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "attachment"
+                    | "reasoning"
+                    | "tool_call"
+                    | "structured_output"
+                    | "temperature"
+                    | "interleaved"
+                    | "reasoning_options"
+                    | "reasoning_levels"
+                    | "thinking_toggle"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if let Some(limit) = metadata.get_mut("limit").and_then(Value::as_object_mut) {
+        limit.retain(|key, _| key == "context");
+    }
+    let legacy_effort = object
+        .get("reasoning_options")
+        .and_then(|options| match options {
+            Value::Array(options) => options
+                .iter()
+                .find(|option| option.get("type").and_then(Value::as_str) == Some("effort")),
+            Value::Object(_) if options.get("type").and_then(Value::as_str) == Some("effort") => {
+                Some(options)
+            }
+            _ => None,
+        })
+        .and_then(|option| option.get("values"));
+    let efforts = object.get("reasoning_efforts").or(legacy_effort);
+    if let Some(values) = efforts.and_then(Value::as_array) {
+        let values = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && !value.eq_ignore_ascii_case("default")
+                    && !value.eq_ignore_ascii_case("null")
+            })
+            .map(|value| json!(value))
+            .collect();
+        metadata.insert("reasoning_efforts".into(), Value::Array(values));
+    }
+    metadata
 }
 
 fn prepare_reasoning_history(vendor_id: &str, model: &str, request: &mut AiRequest) {
@@ -469,7 +498,19 @@ mod tests {
     }
 
     #[test]
-    fn undeclared_or_explicitly_disabled_toggle_fails_closed() {
+    fn discovery_ingress_preserves_native_facts_without_legacy_model_flags() {
+        let value = json!({"reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","low","custom"]}],"limit":{"context":8192,"output":512},"capabilities":["thinking_toggle"],"native":{"mode":"real"}});
+        let metadata = source_metadata(value.as_object().unwrap());
+        assert_eq!(metadata["reasoning_efforts"], json!(["low", "custom"]));
+        assert_eq!(metadata["limit"], json!({"context":8192}));
+        assert!(!metadata.contains_key("reasoning"));
+        assert!(!metadata.contains_key("reasoning_options"));
+        assert_eq!(metadata["native"], json!({"mode":"real"}));
+        assert_eq!(metadata["capabilities"], json!(["thinking_toggle"]));
+    }
+
+    #[test]
+    fn undeclared_toggle_fails_closed() {
         let mut unknown = AiRequest::new("custom-model", Vec::new());
         unknown.reasoning.target_control = Some(TargetThinkingControl::Enabled);
         apply(
@@ -484,29 +525,6 @@ mod tests {
             common::encode_inference_request(
                 &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
                 &unknown
-            )
-            .is_err()
-        );
-
-        let mut disabled_provider = provider("mimo-v2-pro", false);
-        disabled_provider.model_metadata = Some(ModelMetadata {
-            extensions: BTreeMap::from([("reasoning".into(), Value::Bool(false))]),
-            ..ModelMetadata::default()
-        });
-        let mut disabled = AiRequest::new("mimo-v2-pro", Vec::new());
-        disabled.reasoning.target_control = Some(TargetThinkingControl::Enabled);
-        apply(
-            "xiaomi",
-            "default",
-            &disabled_provider,
-            &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-            &mut disabled,
-        )
-        .unwrap();
-        assert!(
-            common::encode_inference_request(
-                &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-                &disabled
             )
             .is_err()
         );

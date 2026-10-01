@@ -45,7 +45,6 @@ pub struct SearchProvider {
 pub struct SearchModel {
     pub model_id: String,
     pub available: bool,
-    pub tool_call: Option<bool>,
 }
 impl SearchModel {
     pub fn effective_available(&self) -> bool {

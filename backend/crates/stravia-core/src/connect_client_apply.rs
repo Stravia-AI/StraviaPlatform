@@ -34,7 +34,6 @@ pub struct ConnectClientModel {
     #[serde(default)]
     pub supports_image_input: bool,
     pub context_window: Option<u64>,
-    pub output_max_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -208,7 +207,7 @@ fn plan_openclaw(
                     json!(input_modalities(model, input.transparent_image_input_enabled)),
                 ),
             ]);
-            insert_optional_limits(&mut value, model, "contextWindow", "maxTokens");
+            insert_optional_context(&mut value, model, "contextWindow");
             JsonValue::Object(value)
         }).collect::<Vec<_>>(),
     });
@@ -433,7 +432,7 @@ fn plan_deepseek_harness(
                     json!(input_modalities(model, input.transparent_image_input_enabled)),
                 ),
             ]);
-            insert_optional_limits(&mut value, model, "contextWindow", "maxTokens");
+            insert_optional_context(&mut value, model, "contextWindow");
             JsonValue::Object(value)
         }).collect::<Vec<_>>(),
     });
@@ -764,11 +763,8 @@ fn open_responses_models(input: &ConnectClientApplyInput) -> JsonValue {
                 }),
             ),
         ]);
-        if let (Some(context), Some(output)) = (model.context_window, model.output_max_tokens) {
-            value.insert(
-                "limit".to_owned(),
-                json!({ "context": context, "output": output }),
-            );
+        if let Some(context) = model.context_window {
+            value.insert("limit".to_owned(), json!({ "context": context }));
         }
         (model.model_id.clone(), JsonValue::Object(value))
     })))
@@ -811,7 +807,7 @@ fn responses_provider(input: &ConnectClientApplyInput, base_url_key: &str) -> Js
                 }
                 value.insert("thinking".to_owned(), JsonValue::Object(thinking));
             }
-            insert_optional_limits(&mut value, model, "contextWindow", "maxTokens");
+            insert_optional_context(&mut value, model, "contextWindow");
             JsonValue::Object(value)
         })
         .collect::<Vec<_>>();
@@ -858,7 +854,6 @@ fn workbuddy_models(input: &ConnectClientApplyInput) -> Vec<JsonValue> {
                 ("supportsReasoning".to_owned(), json!(!efforts.is_empty())),
                 ("useCustomProtocol".to_owned(), json!(false)),
             ]);
-            insert_optional_limits(&mut value, model, "maxInputTokens", "maxOutputTokens");
             if !efforts.is_empty() {
                 value.insert(
                     "reasoning".to_owned(),
@@ -889,9 +884,6 @@ fn zcode_models(input: &ConnectClientApplyInput) -> JsonValue {
         if let Some(context) = model.context_window {
             limit.insert("context".to_owned(), json!(context));
         }
-        if let Some(output) = model.output_max_tokens {
-            limit.insert("output".to_owned(), json!(output));
-        }
         if !limit.is_empty() {
             value.insert("limit".to_owned(), JsonValue::Object(limit));
         }
@@ -899,17 +891,13 @@ fn zcode_models(input: &ConnectClientApplyInput) -> JsonValue {
     })))
 }
 
-fn insert_optional_limits(
+fn insert_optional_context(
     value: &mut JsonMap<String, JsonValue>,
     model: &ConnectClientModel,
     context_key: &str,
-    output_key: &str,
 ) {
     if let Some(context) = model.context_window {
         value.insert(context_key.to_owned(), json!(context));
-    }
-    if let Some(output) = model.output_max_tokens {
-        value.insert(output_key.to_owned(), json!(output));
     }
 }
 
@@ -1377,7 +1365,6 @@ mod tests {
             supported_thinking_levels: vec!["off".to_owned(), "medium".to_owned()],
             supports_image_input: true,
             context_window: Some(200_000),
-            output_max_tokens: Some(32_000),
         }
     }
 
@@ -1593,7 +1580,7 @@ name = "Other"
         #[serde(rename_all = "camelCase")]
         struct Model {
             context_window: u64,
-            max_tokens: u64,
+            max_tokens: Option<u64>,
         }
 
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -1608,7 +1595,7 @@ name = "Other"
         let model = &document.providers["stravia"].models[0];
 
         assert_eq!(model.context_window, 200_000);
-        assert_eq!(model.max_tokens, 32_000);
+        assert_eq!(model.max_tokens, None);
         assert!(!text.contains("$serde_json::private::Number"));
     }
 

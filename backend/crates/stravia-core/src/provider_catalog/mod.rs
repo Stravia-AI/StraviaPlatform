@@ -24,6 +24,7 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use parse::source_reasoning_efforts;
 use parse::*;
 use persist::*;
 pub(crate) use source::icon_content_type;

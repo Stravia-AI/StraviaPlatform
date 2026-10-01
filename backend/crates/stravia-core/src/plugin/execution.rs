@@ -1031,31 +1031,13 @@ fn model_metadata(record: &ProviderModelRecord) -> anyhow::Result<ModelMetadata>
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let image_input = if record
+    if record
         .metadata
         .modalities
         .as_ref()
         .is_some_and(|modalities| stravia_media::platform::supports_image(&modalities.input))
     {
-        Some(true)
-    } else {
-        record.metadata.attachment
-    };
-    for (name, supported) in [
-        ("image_input", image_input),
-        ("reasoning", record.metadata.reasoning),
-        ("tools", record.metadata.tool_call),
-        ("structured_output", record.metadata.structured_output),
-    ] {
-        match supported {
-            Some(true) => {
-                capabilities.insert(name.to_owned());
-            }
-            Some(false) => {
-                capabilities.remove(name);
-            }
-            None => {}
-        }
+        capabilities.insert("image_input".to_owned());
     }
     Ok(ModelMetadata {
         id: Some(record.model_id.clone()),

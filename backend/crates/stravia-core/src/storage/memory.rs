@@ -436,7 +436,6 @@ impl RouteStore for MemoryStorage {
                 .map(|level| level.as_str().to_string()),
             supported_thinking_levels: Vec::new(),
             context_window: None,
-            output_max_tokens: None,
             supports_image_input: false,
             targets,
         };
@@ -1768,9 +1767,7 @@ mod tests {
 
     fn reimport_metadata() -> crate::provider_models::ProviderModelMetadata {
         crate::provider_models::ProviderModelMetadata {
-            reasoning_options: Some(vec![crate::provider_models::ReasoningOption::Effort {
-                values: vec![Some("minimal".into()), Some("high".into())],
-            }]),
+            reasoning_efforts: Some(vec!["minimal".into(), "high".into()]),
             cost: Some(crate::provider_models::ModelCost {
                 context_over_200k: Some(crate::provider_models::PriceComponents {
                     input: Some(rust_decimal::Decimal::new(1, 6)),
@@ -1978,10 +1975,8 @@ mod tests {
         assert_eq!(
             active.supported_thinking_levels,
             vec![
-                ThinkingLevel::Off,
                 ThinkingLevel::Minimal,
                 ThinkingLevel::Low,
-                ThinkingLevel::Medium,
                 ThinkingLevel::High
             ]
         );

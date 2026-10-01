@@ -783,6 +783,13 @@ fn execute_inner(
                     },
                 ) {
                     AttemptFailureDisposition::RetrySame { delay } => {
+                        // An explicit upstream wait must fit in the current request
+                        // window. Never shorten it and hit the limited Target early.
+                        if failure.retry_after.is_some() && delay >= input.deadline.remaining() {
+                            attempts.skip_current();
+                            last_error = Some(failure);
+                            break;
+                        }
                         if retry_over_http {
                             transport_preference = TransportPreference::HttpOnly;
                         }
@@ -1059,29 +1066,7 @@ async fn prepare_attempt(
             "selected Provider Model supports image generation but not chat inference",
         ));
     }
-    let supports_tools = provider_model.is_some_and(|model| {
-        model
-            .capabilities
-            .iter()
-            .any(|capability| capability == "tools")
-    });
-    if input.purpose != super::ModelTurnPurpose::Compact
-        && input
-            .request
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty())
-        && !supports_tools
-    {
-        return Err(AttemptFailure::reroutable(
-            if stravia_web_search::native_web_search_requested(&input.request) {
-                "web_search_unsupported"
-            } else {
-                "tools_unsupported"
-            },
-            "selected provider model does not support function tools",
-        ));
-    }
+
     if request_contains_video(&input.request)
         && !provider_model.is_some_and(|model| vendor_metadata_supports_modality(model, "video"))
     {

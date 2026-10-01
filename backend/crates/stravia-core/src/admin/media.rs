@@ -115,7 +115,7 @@ mod tests {
                 crate::provider_models::CreateManualProviderModel {
                     metadata: serde_json::json!({
                         "id": "vision",
-                        "attachment": true,
+                        "reasoning_efforts": ["medium"],
                         "modalities": { "input": ["text", "image"], "output": ["text"] }
                     }),
                     template_id: None,

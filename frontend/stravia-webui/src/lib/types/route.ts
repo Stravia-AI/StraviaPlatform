@@ -10,7 +10,6 @@ export interface Route {
   default_thinking_level?: ThinkingLevel | null
   supported_thinking_levels: ThinkingLevel[]
   context_window?: number | null
-  output_max_tokens?: number | null
   supports_image_input?: boolean
   targets: Target[]
 }

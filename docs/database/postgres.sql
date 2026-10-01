@@ -13,7 +13,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -106,7 +105,7 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
+    mcp_access_enabled boolean DEFAULT false NOT NULL,
     concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
@@ -372,7 +371,7 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text CONSTRAINT models_name_not_null NOT NULL,
+    model_id text NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text NOT NULL,
     is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
@@ -536,15 +535,8 @@ CREATE TABLE public.provider_models (
     selection_policy text DEFAULT 'auto'::text NOT NULL,
     name text,
     family text,
-    attachment boolean,
-    reasoning boolean,
-    tool_call boolean,
     open_weights boolean,
-    structured_output boolean,
-    temperature boolean,
     limit_context bigint,
-    limit_input bigint,
-    limit_output bigint,
     cost_input numeric,
     cost_output numeric,
     cost_reasoning numeric,
@@ -559,8 +551,6 @@ CREATE TABLE public.provider_models (
     snapshot_state jsonb DEFAULT '{"type": "edited", "source": null}'::jsonb NOT NULL,
     CONSTRAINT provider_models_lifecycle_status_check CHECK ((lifecycle_status = ANY (ARRAY['alpha'::text, 'beta'::text, 'deprecated'::text]))),
     CONSTRAINT provider_models_limit_context_check CHECK (((limit_context IS NULL) OR (limit_context >= 0))),
-    CONSTRAINT provider_models_limit_input_check CHECK (((limit_input IS NULL) OR (limit_input >= 0))),
-    CONSTRAINT provider_models_limit_output_check CHECK (((limit_output IS NULL) OR (limit_output >= 0))),
     CONSTRAINT provider_models_metadata_json_check CHECK ((jsonb_typeof(metadata_json) = 'object'::text)),
     CONSTRAINT provider_models_presence_check CHECK ((presence = ANY (ARRAY['present'::text, 'missing'::text]))),
     CONSTRAINT provider_models_revision_check CHECK ((revision > 0)),

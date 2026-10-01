@@ -448,10 +448,7 @@ async fn apply_discovered_metadata_update(
     let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
     let result = sqlx::query(
         r#"UPDATE provider_models SET
-               presence = ?, lifecycle_status = ?, name = ?, family = ?, attachment = ?, reasoning = ?,
-               tool_call = ?, open_weights = ?, structured_output = ?, temperature = ?,
-               limit_context = ?, limit_input = ?, limit_output = ?,
-               cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
+               presence = ?, lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
                cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
                metadata_json = ?, snapshot_state = COALESCE(?, snapshot_state), metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
@@ -460,15 +457,8 @@ async fn apply_discovered_metadata_update(
     .bind(&metadata.status)
     .bind(&metadata.name)
     .bind(&metadata.family)
-    .bind(metadata.attachment)
-    .bind(metadata.reasoning)
-    .bind(metadata.tool_call)
     .bind(metadata.open_weights)
-    .bind(metadata.structured_output)
-    .bind(metadata.temperature)
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
     .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
@@ -502,11 +492,9 @@ async fn insert_record(
         r#"INSERT INTO provider_models (
                provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
                presence, lifecycle_status, selection_policy, name, family,
-               attachment, reasoning, tool_call, open_weights, structured_output, temperature,
-               limit_context, limit_input, limit_output,
-               cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
+               open_weights, limit_context, cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
                cost_input_audio, cost_output_audio, metadata_json
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&input.provider_id)
     .bind(&input.model_id)
@@ -518,15 +506,8 @@ async fn insert_record(
     .bind(input.selection_policy.as_str())
     .bind(&input.metadata.name)
     .bind(&input.metadata.family)
-    .bind(input.metadata.attachment)
-    .bind(input.metadata.reasoning)
-    .bind(input.metadata.tool_call)
     .bind(input.metadata.open_weights)
-    .bind(input.metadata.structured_output)
-    .bind(input.metadata.temperature)
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
     .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
@@ -558,10 +539,7 @@ async fn update_record_metadata(
     let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
     let result = sqlx::query(
         r#"UPDATE provider_models SET
-               lifecycle_status = ?, name = ?, family = ?, attachment = ?, reasoning = ?,
-               tool_call = ?, open_weights = ?, structured_output = ?, temperature = ?,
-               limit_context = ?, limit_input = ?, limit_output = ?,
-               cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
+               lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
                cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
                metadata_json = ?, snapshot_state = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND revision = ?"#,
@@ -569,15 +547,8 @@ async fn update_record_metadata(
     .bind(&metadata.status)
     .bind(&metadata.name)
     .bind(&metadata.family)
-    .bind(metadata.attachment)
-    .bind(metadata.reasoning)
-    .bind(metadata.tool_call)
     .bind(metadata.open_weights)
-    .bind(metadata.structured_output)
-    .bind(metadata.temperature)
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
-    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
     .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
@@ -696,8 +667,116 @@ mod tests {
 
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
 
+    #[tokio::test]
+    async fn model_specification_upgrade_preserves_data_and_target_maps() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../../../migrations/sqlite/0001_baseline.sql"),
+            include_str!("../../../migrations/sqlite/0002_data_contracts.sql"),
+            include_str!("../../../migrations/sqlite/0003_estimated_input_tokens.sql"),
+            include_str!("../../../migrations/sqlite/0004_observation_recovery_indexes.sql"),
+            include_str!("../../../migrations/sqlite/0005_credential_custom_rules.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(r#"INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key');
+            INSERT INTO models (id, model_id) VALUES ('route', 'client-model');
+            INSERT INTO model_backends (id, model_id, provider_id, model) VALUES ('target', 'route', 'provider', 'model');
+            INSERT INTO provider_models (provider_id, model_id, source_kind, presence, metadata_source_provider_id, revision, metadata_json)
+            VALUES ('provider', 'model', 'discovered', 'present', 'catalog', 7,
+            '{"id":"model","name":"Retained","attachment":true,"reasoning":true,"tool_call":true,"structured_output":true,"temperature":true,"interleaved":{"field":"reasoning_content"},"reasoning_levels":["low"],"thinking_toggle":true,"limit":{"context":12345,"input":100,"output":200},"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","null"," DEFAULT ","","none","high","custom","high"]},{"type":"budget_tokens","min":1024}],"custom":"keep"}');"#)
+            .execute(&pool).await.unwrap();
+        let retained_map = serde_json::json!([
+            {"level":"low","control":{"type":"effort","value":"old-generated"},"source":"generated"},
+            {"level":"high","control":{"type":"effort","value":"manual"},"source":"overridden"}
+        ]).to_string();
+        sqlx::query("UPDATE model_backends SET thinking_level_map = ? WHERE id = 'target'")
+            .bind(retained_map)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(r#"INSERT INTO provider_models (provider_id, model_id, source_kind, presence, metadata_json)
+            VALUES ('provider', 'toggle-only', 'manual', 'present', '{"id":"toggle-only","reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default",""]}]}'),
+                   ('provider', 'already-explicit', 'manual', 'present', '{"id":"already-explicit","reasoning_efforts":[null,"default","null","xhigh","vendor-effort","xhigh"],"reasoning_options":[{"type":"effort","values":["xhigh","stale-effort"]}]}'),
+                   ('provider', 'explicit-empty', 'manual', 'present', '{"id":"explicit-empty","reasoning_efforts":[],"reasoning_options":[{"type":"effort","values":["stale-effort"]}]}');"#)
+            .execute(&pool).await.unwrap();
+        let original_map: String =
+            sqlx::query_scalar("SELECT thinking_level_map FROM model_backends WHERE id = 'target'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0006_model_specification.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let json: String = sqlx::query_scalar("SELECT metadata_json FROM provider_models WHERE provider_id = 'provider' AND model_id = 'model'").fetch_one(&pool).await.unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            metadata["reasoning_efforts"],
+            serde_json::json!(["none", "high", "custom"])
+        );
+        assert_eq!(metadata["limit"], serde_json::json!({"context":12345}));
+        assert_eq!(metadata["custom"], "keep");
+        assert_eq!(metadata["name"], "Retained");
+        for key in [
+            "attachment",
+            "reasoning",
+            "tool_call",
+            "structured_output",
+            "temperature",
+            "interleaved",
+            "reasoning_options",
+            "reasoning_levels",
+            "thinking_toggle",
+        ] {
+            assert!(metadata.get(key).is_none(), "obsolete key {key}");
+        }
+        let empty_json: String = sqlx::query_scalar(
+            "SELECT metadata_json FROM provider_models WHERE model_id = 'toggle-only'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let empty: serde_json::Value = serde_json::from_str(&empty_json).unwrap();
+        assert!(empty.get("reasoning_efforts").is_none());
+        assert!(empty.get("reasoning_options").is_none());
+        let explicit_json: String = sqlx::query_scalar(
+            "SELECT metadata_json FROM provider_models WHERE model_id = 'already-explicit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let explicit: serde_json::Value = serde_json::from_str(&explicit_json).unwrap();
+        assert_eq!(
+            explicit["reasoning_efforts"],
+            serde_json::json!(["xhigh", "vendor-effort"])
+        );
+        let explicit_empty_json: String = sqlx::query_scalar(
+            "SELECT metadata_json FROM provider_models WHERE model_id = 'explicit-empty'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let explicit_empty: serde_json::Value = serde_json::from_str(&explicit_empty_json).unwrap();
+        assert!(explicit_empty.get("reasoning_efforts").is_none());
+        let map: String =
+            sqlx::query_scalar("SELECT thinking_level_map FROM model_backends WHERE id = 'target'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(map, original_map);
+        let state: (i64, Option<String>) = sqlx::query_as("SELECT revision, metadata_source_provider_id FROM provider_models WHERE model_id = 'model'").fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (7, Some("catalog".into())));
+    }
+
     use super::*;
-    use crate::provider_models::{ModelCost, ReasoningOption};
+    use crate::provider_models::ModelCost;
     use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
 
     #[tokio::test]
@@ -876,9 +955,7 @@ mod tests {
     fn refreshed_metadata() -> ProviderModelMetadata {
         ProviderModelMetadata {
             name: Some("Refreshed Model".into()),
-            reasoning_options: Some(vec![ReasoningOption::Effort {
-                values: vec![Some("low".into()), Some("high".into())],
-            }]),
+            reasoning_efforts: Some(vec!["low".into(), "high".into()]),
             cost: Some(ModelCost {
                 context_over_200k: Some(PriceComponents {
                     input: Some(Decimal::new(5, 6)),

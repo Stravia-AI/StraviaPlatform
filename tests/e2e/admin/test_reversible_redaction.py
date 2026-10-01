@@ -479,7 +479,7 @@ def test_target_retries_and_failover_keep_provider_text_protected(admin_env: dic
         second_provider = body["data"]["id"]
         status, body = http_request(
             "POST", f"{env['admin']}/api/v1/providers/{second_provider}/models",
-            payload={"model_id": "gpt-4o-mini", "metadata": {"name": "fallback", "tool_call": True}},
+            payload={"model_id": "gpt-4o-mini", "metadata": {"name": "fallback"}},
             headers=env["auth"],
         )
         assert status == 201, body

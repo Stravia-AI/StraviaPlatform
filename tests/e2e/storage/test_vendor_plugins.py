@@ -126,7 +126,6 @@ def _create_connection(
             "metadata": {
                 "id": "fixture-model",
                 "name": "Fixture model",
-                "tool_call": True,
             },
         },
     )

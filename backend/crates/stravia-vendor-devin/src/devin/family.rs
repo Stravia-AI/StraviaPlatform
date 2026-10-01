@@ -19,7 +19,6 @@ pub(crate) struct DevinFamily {
     pub selectors: Vec<String>,
     pub routers: Option<Vec<String>>,
     pub levels: Vec<String>,
-    pub thinking_toggle: bool,
     pub entry: Option<DevinModelConfig>,
 }
 
@@ -157,13 +156,6 @@ fn build_family(members: Vec<Member<'_>>) -> DevinFamily {
         }
     }
     let levels = selector::order_levels(levels.iter().map(String::as_str));
-    let has_1m = members.iter().any(|member| member.traits.context_1m);
-    let pool: Vec<&Member> = members
-        .iter()
-        .filter(|member| !has_1m || member.traits.context_1m)
-        .collect();
-    let thinking_count = pool.iter().filter(|member| member.traits.thinking).count();
-    let thinking_toggle = thinking_count > 0 && thinking_count < pool.len();
     let selectors = members
         .iter()
         .map(|member| member.selector.to_string())
@@ -186,7 +178,6 @@ fn build_family(members: Vec<Member<'_>>) -> DevinFamily {
         selectors,
         routers,
         levels,
-        thinking_toggle,
         entry: default_entry,
     }
 }
@@ -215,23 +206,12 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
         selector::SELECTOR_EXTENSION_KEY.to_string(),
         selector::table_extension_value(&table),
     );
-    metadata.insert("reasoning_levels".into(), json!(family.levels));
-    metadata.insert(
-        "thinking_toggle".into(),
-        Value::Bool(family.thinking_toggle),
-    );
-    let mut reasoning_options = Vec::new();
-    if family.levels.len() >= 2 {
-        reasoning_options.push(json!({"type": "effort", "values": family.levels}));
-    }
-    if family.thinking_toggle {
-        reasoning_options.push(json!({"type": "toggle"}));
-    }
-    if reasoning_options.is_empty() {
-        // 固定档位没有可选轴；显式空 Effort 阻止宿主推导通用档位。
-        reasoning_options.push(json!({"type": "effort", "values": []}));
-    }
-    metadata.insert("reasoning_options".into(), json!(reasoning_options));
+    let efforts = if family.levels.len() >= 2 {
+        family.levels.clone()
+    } else {
+        Vec::new()
+    };
+    metadata.insert("reasoning_efforts".into(), json!(efforts));
 
     let supports_images = family
         .entry
@@ -327,26 +307,20 @@ mod tests {
     fn discovery_exposes_ordered_efforts() {
         let model = discover(&["swe-2-high", "swe-2-medium", "swe-2-max"], None);
         assert_eq!(
-            model.metadata.get("reasoning_options"),
-            Some(&json!([{"type": "effort", "values": ["medium", "high", "max"]}]))
+            model.metadata.get("reasoning_efforts"),
+            Some(&json!(["medium", "high", "max"]))
         );
     }
 
     #[test]
     fn discovery_exposes_toggle_without_inventing_efforts() {
         let model = discover(&["test-family", "test-family-thinking"], None);
-        assert_eq!(
-            model.metadata.get("reasoning_options"),
-            Some(&json!([{"type": "toggle"}]))
-        );
+        assert_eq!(model.metadata.get("reasoning_efforts"), Some(&json!([])));
     }
 
     #[test]
     fn discovery_hides_picker_for_fixed_effort() {
         let model = discover(&["test-family-high"], None);
-        assert_eq!(
-            model.metadata.get("reasoning_options"),
-            Some(&json!([{"type": "effort", "values": []}]))
-        );
+        assert_eq!(model.metadata.get("reasoning_efforts"), Some(&json!([])));
     }
 }

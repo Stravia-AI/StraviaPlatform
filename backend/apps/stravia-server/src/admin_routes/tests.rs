@@ -1487,10 +1487,9 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
         ]
     );
 
-    // canonical 目录补齐上游未提供的通用规格与能力。
+    // canonical 目录补齐上游未提供的上下文。
     let deepseek = &entries[2];
     assert_eq!(deepseek["specification"]["limit"]["context"], 1000000);
-    assert_eq!(deepseek["specification"]["tool_call"], true);
 
     server.abort();
 

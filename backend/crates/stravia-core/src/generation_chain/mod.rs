@@ -675,7 +675,7 @@ impl crate::router::ContinuationLookup for GenerationChainContinuationLookup {
             .await
             .ok()?;
         (!materialized.effective_state.selected_target_key.is_empty())
-            .then_some(materialized.effective_state.selected_target_key)
+            .then(|| materialized.effective_state.selected_target_key.clone())
     }
 
     async fn prepare(

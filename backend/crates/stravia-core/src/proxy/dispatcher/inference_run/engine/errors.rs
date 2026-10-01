@@ -210,9 +210,7 @@ pub(super) fn model_turn_error_status(
         "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
         "model_not_found" | "STRAVIA_NOT_FOUND" => StatusCode::NOT_FOUND,
         "model_unavailable" | "provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
-        "tools_unsupported"
-        | "web_search_unsupported"
-        | "input_modality_unsupported"
+        "input_modality_unsupported"
         | "thinking_level_unsupported"
         | "compaction_unsupported"
         | "compaction_target_mismatch"

@@ -77,6 +77,147 @@ async fn serve_openai_status_repeated(
     (format!("http://{address}/v1"), calls)
 }
 
+async fn serve_rate_limit_then_success(retry_after: u64) -> (String, Arc<Mutex<Vec<Instant>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16 * 1024];
+            if socket.read(&mut request).await.unwrap() == 0 {
+                break;
+            }
+            observed.lock().push(Instant::now());
+            let (status, headers, body) = if attempt == 0 {
+                (
+                    429,
+                    format!("retry-after: {retry_after}\r\n"),
+                    serde_json::json!({"error":{"message":"temporarily rate limited","type":"rate_limit_error"}}),
+                )
+            } else {
+                (
+                    200,
+                    String::new(),
+                    serde_json::json!({"id":"retry-success","object":"chat.completion","created":1,"model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"retry succeeded"},"finish_reason":"stop"}]}),
+                )
+            };
+            let body = body.to_string();
+            socket.write_all(format!("HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{address}/v1"), calls)
+}
+
+async fn retry_window_fixture(
+    model: &str,
+    backup: bool,
+    retry_after: u64,
+) -> (
+    tempfile::TempDir,
+    Gateway,
+    crate::db::models::ApiKeyWithBindings,
+    Arc<Mutex<Vec<Instant>>>,
+) {
+    let (dir, gateway, _, key) =
+        gateway_with_captured_thinking(model, true, "backup response", None).await;
+    let success = gateway.admin().get_model(model).await.unwrap().targets[0]
+        .provider_id()
+        .to_string();
+    let (url, calls) = serve_rate_limit_then_success(retry_after).await;
+    let limited = add_captured_thinking_provider(&gateway, url).await;
+    let mut target = thinking_target(&limited, &[], 20);
+    target.target_retry_budget = Some(5);
+    let mut targets = vec![target];
+    if backup {
+        targets.push(thinking_target(&success, &[], 10));
+    }
+    set_thinking_targets(&gateway, model, targets).await;
+    (dir, gateway, key, calls)
+}
+
+#[tokio::test]
+async fn retry_after_outside_fixed_window_fails_over() {
+    let (_dir, gateway, key, calls) =
+        retry_window_fixture("retry-window-backup", true, 11450).await;
+    let turn = tokio::time::timeout(
+        Duration::from_secs(2),
+        gateway.model_turn.execute(
+            TurnInput::new(
+                Principal::new(key.id),
+                AiRequest::new("retry-window-backup", Vec::new()),
+            )
+            .with_execution(
+                CancellationToken::new(),
+                Deadline::fixed(Instant::now() + Duration::from_secs(5)),
+            ),
+        ),
+    )
+    .await
+    .expect("failover must not wait for the request deadline")
+    .expect("backup must succeed before deadline");
+    let output = turn.output.collect::<Vec<_>>().await;
+    assert!(
+        matches!(output.last(), Some(Ok(CanonicalEvent::Completed(response))) if response.output_text() == "backup response")
+    );
+    assert_eq!(calls.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn retry_after_outside_shared_window_preserves_upstream_error() {
+    let (_dir, gateway, key, calls) =
+        retry_window_fixture("retry-window-no-backup", false, 11450).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        gateway.model_turn.execute(
+            TurnInput::new(
+                Principal::new(key.id),
+                AiRequest::new("retry-window-no-backup", Vec::new()),
+            )
+            .with_execution(
+                CancellationToken::new(),
+                Deadline::from_now(Duration::from_secs(5)),
+            ),
+        ),
+    )
+    .await
+    .expect("upstream error must return before idle expiry");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("rate limit must fail"),
+    };
+    assert_eq!(error.upstream_status, Some(429));
+    assert_ne!(error.code, "deadline_exceeded");
+    assert_eq!(calls.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn retry_after_within_window_respects_delay() {
+    let (_dir, gateway, key, calls) = retry_window_fixture("retry-window-delay", false, 1).await;
+    let turn = gateway
+        .model_turn
+        .execute(
+            TurnInput::new(
+                Principal::new(key.id),
+                AiRequest::new("retry-window-delay", Vec::new()),
+            )
+            .with_execution(
+                CancellationToken::new(),
+                Deadline::fixed(Instant::now() + Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("same target retry");
+    let output = turn.output.collect::<Vec<_>>().await;
+    assert!(
+        matches!(output.last(), Some(Ok(CanonicalEvent::Completed(response))) if response.output_text() == "retry succeeded")
+    );
+    let calls = calls.lock();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].duration_since(calls[0]) >= Duration::from_secs(1));
+}
+
 async fn serve_openai_response(body: serde_json::Value) -> (String, Arc<AtomicUsize>) {
     serve_openai_status(200, body).await
 }
@@ -304,7 +445,20 @@ async fn gateway_with_captured_thinking(
         })
         .await
         .expect("Provider");
-    add_test_provider_model(&gateway, &provider.id).await;
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "upstream-model",
+            CreateManualProviderModel {
+                metadata: serde_json::json!({
+                    "id": "upstream-model",
+                    "reasoning_efforts": ["none", "minimal", "low", "medium", "high"],
+                }),
+                template_id: None,
+            },
+        )
+        .await
+        .expect("Provider Model with declared thinking efforts");
     let model = admin
         .create_model(CreateRoute {
             model_id: model_name.into(),
@@ -887,16 +1041,20 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
 }
 
 #[tokio::test]
-async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
+async fn execute_tools_without_model_capability_declarations() {
     let (base_url, calls) = serve_openai_response(serde_json::json!({
-        "id": "chatcmpl-unexpected",
+        "id": "chatcmpl-tool",
         "object": "chat.completion",
         "created": 1,
         "model": "upstream-model",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": "must not run"},
-            "finish_reason": "stop"
+            "message": {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call-lookup",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"query\":\"local\"}"}
+            }]},
+            "finish_reason": "tool_calls"
         }]
     }))
     .await;
@@ -972,17 +1130,23 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         meta: None,
     }]);
 
-    let error = match gateway
+    let turn = gateway
         .model_turn
         .execute(TurnInput::new(Principal::new(key.id), request))
         .await
-    {
-        Ok(_) => panic!("unknown function-tool capability must fail closed"),
-        Err(error) => error,
+        .expect("protocol-supported tools must reach the provider");
+    let events = turn.output.collect::<Vec<_>>().await;
+    let Some(Ok(CanonicalEvent::Completed(response))) = events.last() else {
+        panic!("expected completed tool response: {events:?}");
     };
-
-    assert_eq!(error.code, "tools_unsupported");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let tool = response
+        .tool_calls()
+        .next()
+        .expect("returned function call");
+    assert_eq!(tool.id, "call-lookup");
+    assert_eq!(tool.name, "lookup");
+    assert_eq!(tool.arguments, "{\"query\":\"local\"}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
