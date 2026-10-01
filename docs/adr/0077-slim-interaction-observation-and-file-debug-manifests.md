@@ -12,7 +12,9 @@ Interaction Observation 只持久化无法由其他来源给出的事实；Debug
 
 manifest 的路径校验、临时文件写入、`sync_all`、关闭与原子替换在单个 blocking 任务中完成，避免在异步执行器上关闭文件或逐操作调度。已完成 Trace 不再发布执行中快照；重复的相同终态只有先前确实写入成功才跳过，变化或失败仍写入。终态后的补充状态保留首次完成时间与既有过期时间，不因延迟更新续期。准入发布 manifest 与 Wire writer 可并发创建同一受管目录；后者仅接纳同根下真实非符号链接目录，分段文件仍用 `create_new`，不覆盖既有内容。
 
-升级顺序由 [ADR-0076](0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md) 定义：SQL 0006 与历史转换之后、SQL 0007 之前调用 `crate::interaction_observation::upgrade::export_debug_manifests_sqlite/postgres(conn, Option<&Path>)`，把旧 manifest 导出；SQL 0007 之后调用 `convert_event_storage_sqlite/postgres(conn)` 分短事务批次无损转换旧事件。两组钩子幂等、可中断续跑，既有 payload、顺序及独有诊断事实不因合并而丢弃。旧 `client_output_committed` 信号行删除而不改名为别名；admission 保存原始 sequence 的 `client_output_committed_sequence` 及 `legacy_lifecycle` 原始事实来源，固定截止水位的 Bundle 只在该 sequence 不超过 through-sequence 时应用提交事实。终态后迟到提交通过更高 sequence 的 `run_finished` 修订承载，保留原 finished_at。旧封块文本不伪造 Canonical Item 边界：删除旧随机 block_id 与合成 item，原元数据保存在 `legacy_text`，按旧 scope 与有序 parts 连续还原，不插入虚构空行。导出前已有 manifest 文件必须与数据库权威事实匹配，严格校验成功后才可删表。导出钩子把现存 `debug_trace_manifests` 行逐条写成 `manifest.json`（仍未完成的 running/writing 状态改写为 partial/`process_interrupted`，因为持有它们的进程已不存在），随后才执行 DROP。表非空而宿主未提供诊断目录时迁移显式失败，不静默丢弃诊断状态；schema exporter 在空表上不受影响，离线副本由 `migrate-data`/`optimize` 路径携带真实根目录完成同样导出。
+升级顺序由 [ADR-0076](0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md) 定义：SQL 0007 与历史转换之后、SQL 0008 之前调用 `crate::interaction_observation::upgrade::export_debug_manifests_sqlite/postgres(conn, Option<&Path>)`，把旧 manifest 导出；SQL 0008 之后调用 `convert_event_storage_sqlite/postgres(conn)` 分短事务批次无损转换旧事件。两组钩子幂等、可中断续跑，既有 payload、顺序及独有诊断事实不因合并而丢弃。旧 `client_output_committed` 信号行删除而不改名为别名；admission 保存原始 sequence 的 `client_output_committed_sequence` 及 `legacy_lifecycle` 原始事实来源，固定截止水位的 Bundle 只在该 sequence 不超过 through-sequence 时应用提交事实。终态后迟到提交通过更高 sequence 的 `run_finished` 修订承载，保留原 finished_at。旧封块文本不伪造 Canonical Item 边界：删除旧随机 block_id 与合成 item，原元数据保存在 `legacy_text`，按旧 scope 与有序 parts 连续还原，不插入虚构空行。导出前已有 manifest 文件必须与数据库权威事实匹配，严格校验成功后才可删表。导出钩子把现存 `debug_trace_manifests` 行写成 `manifest.json`，随后才执行 DROP。表非空而宿主未提供诊断目录时迁移显式失败，不静默丢弃诊断状态；schema exporter 在空表上不受影响，离线副本由 `migrate-data`/`optimize` 路径携带真实根目录完成同样导出。
+
+manifest 每批最多 200 条，在最多 8 个、随可用处理器确定的 blocking worker 中并行导出；错误先收口本批已启动的任务，再向上传播。旧事件批量并行解码，生命周期合并和数据库提交按原 sequence 串行执行；同批后续旧行如果已被合并修改，重新读取权威 payload，不能覆盖新增事实。转换期间为旧表建立 `(run_id, sequence)` 索引，并在 SQL 中过滤合并目标 kind，避免每条生命周期事实扫描全部旧事件或解码同 Run 的大段无关文本。旧表清理同时移除临时索引，不改变最终 schema 或已有 migration checksum。
 
 普通 Observation 事件同步收敛：
 
@@ -35,6 +37,6 @@ manifest 的路径校验、临时文件写入、`sync_all`、关闭与原子替�
 
 ## Consequences
 
-- SQLite 与 PostgreSQL 各获得一个增量 migration（0007），基线 schema 不受影响。升级前必须备份完整数据根及外部数据库；回退方式是恢复备份，旧二进制不能读取新 schema。迁移把现存事件 payload 解码旧编码后以新 codec 重写，属于一次性数据转换。
+- SQLite 与 PostgreSQL 各获得一个增量 migration（0008），基线 schema 不受影响。升级前必须备份完整数据根及外部数据库；回退方式是恢复备份，旧二进制不能读取新 schema。迁移把现存事件 payload 解码旧编码后以新 codec 重写，属于一次性数据转换。
 - 事件行数与字节估算均来自单一真实快照的离线重算，是估计值而非保证；合入验收采用配对 HTTP 回放，比较首 Token 与请求耗时的 p50/p99 及 SQL 开销，并隔离检查历史物化耗时；要求没有可重复复现的回退，而不是容忍固定百分比。这里定义验收门禁，不声明已执行基准或回放。
 - `docs/database/*.sql` 仍由 `stravia-tools dump-schema` 从全部迁移重新生成，代表迁移后的最终形态；多实例部署继续不共享 Debug 状态与实时唤醒。

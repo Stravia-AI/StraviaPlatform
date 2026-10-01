@@ -866,6 +866,8 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 
+迁移仍由单一数据库连接持有互斥锁并按阶段执行 SQL，不并发 schema 变更或 SQLite 写事务。历史每批最多 100 个节点，按节点 ID 游标推进并集中读取旧引用；JSON 还原、摘要、envelope 编码和批次唯一内容压缩交给有界 blocking worker。观测每批最多 200 条，旧表在转换期间建立 `(run_id, sequence)` 索引，生命周期合并只查询对应事件种类；批量解码与 manifest 导出使用同样的有界并发，worker 数随可用处理器确定，最多 8 个。事件合并按 sequence 串行执行，同批中被合并修改的旧行必须重读，不能把过期快照写回。每批数据库改动原子提交，失败只回滚当前批次，重启继续未完成数据；所有转换成功后才清理旧结构。日志记录迁移阶段、累计完成条数与总耗时，不记录历史正文、身份或诊断路径。
+
 每次新增或修改 migration，都必须通过工具同步重新生成两份参考文件，并与 migration 一并交付，不得手工修改 schema 正文：
 
 ```bash

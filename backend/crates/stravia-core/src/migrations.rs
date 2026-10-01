@@ -76,6 +76,8 @@ pub async fn run_sqlite_migrator(
     migrator: &Migrator,
     diagnostics: Option<&Path>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    tracing::info!(backend = "sqlite", "Starting database migration");
     let mut pinned = SqliteMigrationConnection {
         connection: pool.acquire().await?,
         // Arm before the first await which can disable FK enforcement.
@@ -96,23 +98,48 @@ pub async fn run_sqlite_migrator(
     Migrate::lock(&mut *pinned.connection).await?;
     let runner = unlocked_runner(migrator);
     if runner.version_exists(7) {
+        tracing::info!(
+            backend = "sqlite",
+            phase = "history_schema",
+            "Applying migration phase"
+        );
         runner
             .run_direct(Some(6), &mut *pinned.connection, false)
             .await?;
         runner
             .run_direct(Some(7), &mut *pinned.connection, false)
             .await?;
+        tracing::info!(
+            backend = "sqlite",
+            phase = "history_data",
+            "Applying migration phase"
+        );
         crate::turn_chain::upgrade::convert_history_sqlite(&mut pinned.connection).await?;
     }
     if runner.version_exists(8) {
+        tracing::info!(
+            backend = "sqlite",
+            phase = "debug_manifests",
+            "Applying migration phase"
+        );
         crate::interaction_observation::upgrade::export_debug_manifests_sqlite(
             &mut pinned.connection,
             diagnostics,
         )
         .await?;
+        tracing::info!(
+            backend = "sqlite",
+            phase = "observation_schema",
+            "Applying migration phase"
+        );
         runner
             .run_direct(Some(8), &mut *pinned.connection, false)
             .await?;
+        tracing::info!(
+            backend = "sqlite",
+            phase = "observation_data",
+            "Applying migration phase"
+        );
         crate::interaction_observation::upgrade::convert_event_storage_sqlite(
             &mut pinned.connection,
         )
@@ -137,6 +164,11 @@ pub async fn run_sqlite_migrator(
     ensure!(restored == 1, "SQLite foreign keys could not be restored");
     Migrate::unlock(&mut *pinned.connection).await?;
     pinned.foreign_keys_may_be_off = false;
+    tracing::info!(
+        backend = "sqlite",
+        elapsed_ms = started.elapsed().as_millis(),
+        "Database migration completed"
+    );
     Ok(())
 }
 
@@ -151,6 +183,8 @@ pub async fn run_postgres_migrator(
     migrator: &Migrator,
     diagnostics: Option<&Path>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    tracing::info!(backend = "postgres", "Starting database migration");
     let mut connection = pool.acquire().await?;
     // SQLx 0.9 can leave its session-level advisory lock held after a failed
     // migration. Never return this migration session to the pool.
@@ -159,22 +193,52 @@ pub async fn run_postgres_migrator(
     reject_incompatible_postgres(&mut connection, migrator).await?;
     let runner = unlocked_runner(migrator);
     if runner.version_exists(7) {
+        tracing::info!(
+            backend = "postgres",
+            phase = "history_schema",
+            "Applying migration phase"
+        );
         runner.run_direct(Some(6), &mut *connection, false).await?;
         runner.run_direct(Some(7), &mut *connection, false).await?;
+        tracing::info!(
+            backend = "postgres",
+            phase = "history_data",
+            "Applying migration phase"
+        );
         crate::turn_chain::upgrade::convert_history_postgres(&mut connection).await?;
     }
     if runner.version_exists(8) {
+        tracing::info!(
+            backend = "postgres",
+            phase = "debug_manifests",
+            "Applying migration phase"
+        );
         crate::interaction_observation::upgrade::export_debug_manifests_postgres(
             &mut connection,
             diagnostics,
         )
         .await?;
+        tracing::info!(
+            backend = "postgres",
+            phase = "observation_schema",
+            "Applying migration phase"
+        );
         runner.run_direct(Some(8), &mut *connection, false).await?;
+        tracing::info!(
+            backend = "postgres",
+            phase = "observation_data",
+            "Applying migration phase"
+        );
         crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
             .await?;
     }
     runner.run_direct(None, &mut *connection, false).await?;
     Migrate::unlock(&mut *connection).await?;
+    tracing::info!(
+        backend = "postgres",
+        elapsed_ms = started.elapsed().as_millis(),
+        "Database migration completed"
+    );
     Ok(())
 }
 

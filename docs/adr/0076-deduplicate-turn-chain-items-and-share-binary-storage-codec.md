@@ -18,7 +18,9 @@ Turn Chain 的不可变节点继续拥有模型历史事实，存储表示改为
 
 ## 升级与回退
 
-冻结的 0001–0005 不改写；0006 引入历史结构，0007 引入观测结构。启动在迁移互斥范围内按以下顺序执行：SQL 至 0005 → SQL 0006 → `crate::turn_chain::upgrade::convert_history_sqlite/postgres(&mut Connection)` → `crate::interaction_observation::upgrade::export_debug_manifests_sqlite/postgres(conn, Option<&Path>)` → SQL 0007 → `convert_event_storage_sqlite/postgres(conn)` → 后续 SQL。钩子以短事务批次幂等转换并可中断续跑；历史每批最多 100 个 `storage_format < 2` 节点，引用、payload 与转换工作状态在同一事务提交，全部完成后以 `DROP IF EXISTS` 删除 `turn_chain_legacy_refs` / `turn_chain_legacy_contents`，最后删除 `legacy_payload` 列；后续启动检测列不存在即跳过，清理中断也可续跑。不能仅凭 SQLx migration 已记录成功就跳过尚未完成的数据转换。
+冻结的 0001–0006 不改写；0006 保留模型规格升级，0007 引入历史结构，0008 引入观测结构。启动在迁移互斥范围内按以下顺序执行：SQL 至 0006 → SQL 0007 → `crate::turn_chain::upgrade::convert_history_sqlite/postgres(&mut Connection)` → `crate::interaction_observation::upgrade::export_debug_manifests_sqlite/postgres(conn, Option<&Path>)` → SQL 0008 → `convert_event_storage_sqlite/postgres(conn)` → 后续 SQL。钩子以短事务批次幂等转换并可中断续跑；历史每批最多 100 个 `storage_format < 2` 节点，按 ID 游标推进并批量读取旧引用。有界 blocking worker 并行还原 JSON、计算摘要、编码 envelope，并对批次唯一内容压缩；worker 数随可用处理器确定，最多 8 个。单一连接串行写入，引用、payload 与转换工作状态在同一事务提交，全部完成后以 `DROP IF EXISTS` 删除 `turn_chain_legacy_refs` / `turn_chain_legacy_contents`，最后删除 `legacy_payload` 列；后续启动检测列不存在即跳过，清理中断也可续跑。不能仅凭 SQLx migration 已记录成功就跳过尚未完成的数据转换。
+
+旧引用工作表在仍有 format 1 节点时建立迁移期 `(node_id, principal)` 索引，保证批量查询同时按节点和归属定位；不能只依赖 `(principal, content_key)` 索引，否则 SQLite 可能为每个节点扫描该 Principal 的全部旧引用。删旧表时同时移除此索引，不改变最终 schema 或既有 migration checksum。所有节点已转换、但旧表清理中途被关闭时，不再尝试为已删除的旧表建索引，继续完成剩余清理。
 
 存量 format 0/1 无损转换为 format 2，转换结束后清除旧内容/引用及过渡字段，正常读取不保留旧格式双路径。migration 入口为 `migrate_sqlite/postgres(pool, Option<&Path>)`；运行时与离线维护提供 `Some(paths.diagnostics())`，测试与 schema exporter 的空库可提供 `None`。非空旧 Debug manifest 表在无诊断目录时明确拒绝升级，不能静默丢数据。schema exporter 应用全部迁移及空库钩子，导出最终结构而非拼接 migration 文本。
 

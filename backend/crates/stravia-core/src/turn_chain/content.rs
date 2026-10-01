@@ -168,7 +168,7 @@ pub(super) fn encode(mut payload: Value) -> anyhow::Result<Encoded> {
 }
 
 macro_rules! backend {
-    ($put:ident, $restore:ident, $db:ty, $conn:ty, $lock:literal) => {
+    ($put:ident, $prepared:ident, $inner:ident, $restore:ident, $db:ty, $conn:ty, $lock:literal) => {
         /// Links an already-inserted node to its distinct content ids. Callers
         /// hold the contents table lock on PostgreSQL; SQLite serializes on the
         /// commit transaction. Empty contents skip every contents statement.
@@ -177,6 +177,28 @@ macro_rules! backend {
             node: &str,
             principal: &str,
             encoded: &Encoded,
+        ) -> anyhow::Result<()> {
+            $inner(connection, node, principal, encoded, None).await
+        }
+
+        /// Startup migration only: contents have already been codec-encoded
+        /// on a blocking worker. Runtime writes retain lazy compression.
+        pub(super) async fn $prepared(
+            connection: &mut $conn,
+            node: &str,
+            principal: &str,
+            encoded: &Encoded,
+            contents: &HashMap<String, Vec<u8>>,
+        ) -> anyhow::Result<()> {
+            $inner(connection, node, principal, encoded, Some(contents)).await
+        }
+
+        async fn $inner(
+            connection: &mut $conn,
+            node: &str,
+            principal: &str,
+            encoded: &Encoded,
+            prepared: Option<&HashMap<String, Vec<u8>>>,
         ) -> anyhow::Result<()> {
             if encoded.contents.is_empty() {
                 return Ok(());
@@ -222,7 +244,18 @@ macro_rules! backend {
                 for entry in chunk {
                     rows.push((
                         entry.0.as_str(),
-                        crate::storage_codec::encode(entry.1.as_slice())?,
+                        if let Some(contents) = prepared {
+                            std::borrow::Cow::Borrowed(
+                                contents
+                                    .get(&entry.0)
+                                    .context("missing prepared history content")?
+                                    .as_slice(),
+                            )
+                        } else {
+                            std::borrow::Cow::Owned(crate::storage_codec::encode(
+                                entry.1.as_slice(),
+                            )?)
+                        },
                     ));
                 }
                 let mut query = sqlx::QueryBuilder::<$db>::new(
@@ -231,7 +264,7 @@ macro_rules! backend {
                 query.push_values(rows.iter(), |mut row, (key, content)| {
                     row.push_bind(principal)
                         .push_bind(*key)
-                        .push_bind(content.as_slice());
+                        .push_bind(content.as_ref());
                 });
                 query.push(
                     " ON CONFLICT (principal, content_key) DO NOTHING RETURNING id, content_key",
@@ -384,6 +417,8 @@ macro_rules! backend {
 }
 backend!(
     put_sqlite,
+    put_sqlite_prepared,
+    put_sqlite_inner,
     restore_sqlite,
     sqlx::Sqlite,
     sqlx::SqliteConnection,
@@ -391,6 +426,8 @@ backend!(
 );
 backend!(
     put_postgres,
+    put_postgres_prepared,
+    put_postgres_inner,
     restore_postgres,
     sqlx::Postgres,
     sqlx::PgConnection,
