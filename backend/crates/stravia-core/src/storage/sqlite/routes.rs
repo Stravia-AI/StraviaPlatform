@@ -367,7 +367,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("foreign keys");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
         sqlx::query(
@@ -453,7 +453,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("foreign keys");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
         sqlx::query(
@@ -503,7 +503,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
         sqlx::query(

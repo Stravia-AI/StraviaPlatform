@@ -1,5 +1,11 @@
+use std::path::Path;
+
 use anyhow::ensure;
-use sqlx::{PgPool, Sqlite, SqlitePool, migrate::Migrator, pool::PoolConnection};
+use sqlx::{
+    PgPool, Sqlite, SqlitePool,
+    migrate::{Migrate, Migrator},
+    pool::PoolConnection,
+};
 
 static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
@@ -7,6 +13,17 @@ static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const INCOMPATIBLE_HISTORY: &str =
     "database has unknown, missing, or failed Stravia migration history; refusing to migrate";
 const UNRECOGNIZED_TABLES: &str = "database contains tables but no Stravia migration history; refusing to initialize over unrecognized data";
+
+fn unlocked_runner(migrator: &Migrator) -> Migrator {
+    Migrator {
+        migrations: migrator.migrations.clone(),
+        ignore_missing: migrator.ignore_missing,
+        locking: false,
+        no_tx: migrator.no_tx,
+        table_name: migrator.table_name.clone(),
+        create_schemas: migrator.create_schemas.clone(),
+    }
+}
 
 /// An installed history must be a successful, checksum-matching contiguous
 /// prefix of the migrations supplied by the caller (including offline copies).
@@ -48,12 +65,17 @@ impl Drop for SqliteMigrationConnection {
     }
 }
 
-pub async fn migrate_sqlite(pool: &SqlitePool) -> anyhow::Result<()> {
-    run_sqlite_migrator(pool, &SQLITE_MIGRATOR).await
+/// 应用受支持的增量迁移并转换历史数据。旧 Debug manifest 非空时必须提供诊断目录。
+pub async fn migrate_sqlite(pool: &SqlitePool, diagnostics: Option<&Path>) -> anyhow::Result<()> {
+    run_sqlite_migrator(pool, &SQLITE_MIGRATOR, diagnostics).await
 }
 
 /// Used by the isolated schema exporter with its runtime-resolved migration directory.
-pub async fn run_sqlite_migrator(pool: &SqlitePool, migrator: &Migrator) -> anyhow::Result<()> {
+pub async fn run_sqlite_migrator(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+    diagnostics: Option<&Path>,
+) -> anyhow::Result<()> {
     let mut pinned = SqliteMigrationConnection {
         connection: pool.acquire().await?,
         // Arm before the first await which can disable FK enforcement.
@@ -71,7 +93,32 @@ pub async fn run_sqlite_migrator(pool: &SqlitePool, migrator: &Migrator) -> anyh
     sqlx::query("PRAGMA foreign_keys=OFF")
         .execute(&mut *pinned.connection)
         .await?;
-    migrator
+    Migrate::lock(&mut *pinned.connection).await?;
+    let runner = unlocked_runner(migrator);
+    if runner.version_exists(6) {
+        runner
+            .run_direct(Some(5), &mut *pinned.connection, false)
+            .await?;
+        runner
+            .run_direct(Some(6), &mut *pinned.connection, false)
+            .await?;
+        crate::turn_chain::upgrade::convert_history_sqlite(&mut pinned.connection).await?;
+    }
+    if runner.version_exists(7) {
+        crate::interaction_observation::upgrade::export_debug_manifests_sqlite(
+            &mut pinned.connection,
+            diagnostics,
+        )
+        .await?;
+        runner
+            .run_direct(Some(7), &mut *pinned.connection, false)
+            .await?;
+        crate::interaction_observation::upgrade::convert_event_storage_sqlite(
+            &mut pinned.connection,
+        )
+        .await?;
+    }
+    runner
         .run_direct(None, &mut *pinned.connection, false)
         .await?;
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
@@ -88,22 +135,46 @@ pub async fn run_sqlite_migrator(pool: &SqlitePool, migrator: &Migrator) -> anyh
         .fetch_one(&mut *pinned.connection)
         .await?;
     ensure!(restored == 1, "SQLite foreign keys could not be restored");
+    Migrate::unlock(&mut *pinned.connection).await?;
     pinned.foreign_keys_may_be_off = false;
     Ok(())
 }
 
-pub async fn migrate_postgres(pool: &PgPool) -> anyhow::Result<()> {
-    run_postgres_migrator(pool, &POSTGRES_MIGRATOR).await
+/// 应用受支持的增量迁移并转换历史数据。旧 Debug manifest 非空时必须提供诊断目录。
+pub async fn migrate_postgres(pool: &PgPool, diagnostics: Option<&Path>) -> anyhow::Result<()> {
+    run_postgres_migrator(pool, &POSTGRES_MIGRATOR, diagnostics).await
 }
 
 /// Isolate SQLx's session-level advisory lock, including in schema exports.
-pub async fn run_postgres_migrator(pool: &PgPool, migrator: &Migrator) -> anyhow::Result<()> {
+pub async fn run_postgres_migrator(
+    pool: &PgPool,
+    migrator: &Migrator,
+    diagnostics: Option<&Path>,
+) -> anyhow::Result<()> {
     let mut connection = pool.acquire().await?;
     // SQLx 0.9 can leave its session-level advisory lock held after a failed
     // migration. Never return this migration session to the pool.
     connection.close_on_drop();
+    Migrate::lock(&mut *connection).await?;
     reject_incompatible_postgres(&mut connection, migrator).await?;
-    migrator.run_direct(None, &mut *connection, false).await?;
+    let runner = unlocked_runner(migrator);
+    if runner.version_exists(6) {
+        runner.run_direct(Some(5), &mut *connection, false).await?;
+        runner.run_direct(Some(6), &mut *connection, false).await?;
+        crate::turn_chain::upgrade::convert_history_postgres(&mut connection).await?;
+    }
+    if runner.version_exists(7) {
+        crate::interaction_observation::upgrade::export_debug_manifests_postgres(
+            &mut connection,
+            diagnostics,
+        )
+        .await?;
+        runner.run_direct(Some(7), &mut *connection, false).await?;
+        crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
+            .await?;
+    }
+    runner.run_direct(None, &mut *connection, false).await?;
+    Migrate::unlock(&mut *connection).await?;
     Ok(())
 }
 
@@ -195,8 +266,8 @@ mod tests {
     #[tokio::test]
     async fn sqlite_baseline_applies_to_empty_database_and_is_idempotent() {
         let pool = sqlite_pool().await;
-        migrate_sqlite(&pool).await.expect("fresh baseline");
-        migrate_sqlite(&pool)
+        migrate_sqlite(&pool, None).await.expect("fresh baseline");
+        migrate_sqlite(&pool, None)
             .await
             .expect("baseline re-run is a no-op");
 
@@ -261,25 +332,65 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO model_backends (id, model_id, provider_id, priority, target_retry_budget) VALUES ('t', 'r', 'p', -3, 3)")
             .execute(&pool).await.unwrap();
-        for (id, parent) in [("parent", None), ("child", Some("parent"))] {
-            sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) VALUES (?, 'response', ?, 'alice', 1, '{\"items\":[1]}', 1, 100)")
-                .bind(id).bind(parent).execute(&pool).await.unwrap();
+        let expires_at = chrono::Utc::now().timestamp_millis() + 60_000;
+        for (id, parent, payload, format) in [
+            ("parent", None, r#"{"items":[1]}"#, 0),
+            (
+                "child",
+                Some("parent"),
+                r#"{"data":{"items":[null]},"references":1}"#,
+                1,
+            ),
+        ] {
+            sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, storage_format) VALUES (?, 'response', ?, 'api-key:alice', 1, ?, 1, ?, ?)")
+                .bind(id).bind(parent).bind(payload).bind(expires_at).bind(format).execute(&pool).await.unwrap();
         }
+        use sha2::Digest;
+        let marker_reference = "abcdefghijklmnopqrstuvwxyzab";
+        let artifact_id = stravia_runtime_contract::identifier::encode_digest(
+            &sha2::Sha256::digest(b"isolated migration media").into(),
+        );
+        let media = serde_json::json!({
+            "type": "image", "source": {"type": "url", "url": format!("stravia://artifacts/{artifact_id}")}, "detail": "high"
+        });
+        let historical = serde_json::json!({
+            "id": "raw-item-id", "phase": "final", "meta": {"source": "fixture", "reference": marker_reference},
+            "content": [
+                {"type": "text", "text": "historical payload".repeat(100)},
+                media.clone(),
+                {"type": "text", "text": format!("<!--sh:{marker_reference}-->\n")}
+            ]
+        });
+        let content = serde_json::to_string(&historical).unwrap();
+        let key = stravia_runtime_contract::identifier::encode_digest(
+            &sha2::Sha256::digest(content.as_bytes()).into(),
+        );
+        sqlx::query("INSERT INTO turn_chain_contents (principal, content_key, content) VALUES ('api-key:alice', ?, ?)")
+            .bind(&key).bind(&content).execute(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO turn_chain_contents VALUES ('alice', 'content', 'historical payload')",
+            "INSERT INTO turn_chain_content_refs VALUES ('child', 'api-key:alice', '/items/0', ?)",
         )
+        .bind(&key)
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO turn_chain_content_refs VALUES ('child', 'alice', '$.items[0]', 'content')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
+        let call = serde_json::json!({"id": "call-fixture", "name": "fixture-tool", "arguments": "{\"query\":\"rust\"}"});
+        let segment = serde_json::json!({
+            "kind": "platform", "call": call,
+            "result": {"type": "tool_result", "tool_use_id": "call-fixture", "content": [media], "content_kind": "content_blocks", "is_error": false}
+        });
+        let segment_bytes = serde_json::to_string(&segment).unwrap();
+        sqlx::query("INSERT INTO history_markers (reference, principal, kind, activity, tool_id, call_payload, segment_payload, execution_state, execution_deadline, published_at, created_at, updated_at, expires_at) VALUES (?, 'api-key:alice', 'platform', 'Fixture platform call', 'call-fixture', ?, ?, 'completed', ?, 1, 1, 1, ?)")
+            .bind(marker_reference).bind(serde_json::to_string(&call).unwrap()).bind(&segment_bytes).bind(expires_at).bind(expires_at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO native_compactions (id, principal, source_generation_id, operation_id, payload, created_at, expires_at) VALUES ('compaction-fixture', 'api-key:alice', 'child', 'op-fixture', '{}', 1, ?)")
+            .bind(expires_at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at, expires_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, 0, 1, 1, 100)")
             .execute(&pool).await.unwrap();
 
-        migrate_sqlite(&pool).await.unwrap();
-        migrate_sqlite(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
         let (snapshot, metadata): (String, String) = sqlx::query_as("SELECT snapshot_state, metadata_json FROM provider_models WHERE provider_id='p' AND model_id='upstream'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(snapshot, "{\"type\":\"edited\",\"source\":null}");
@@ -290,12 +401,75 @@ mod tests {
             .execute(&pool).await.is_err());
         assert!(sqlx::query("UPDATE provider_models SET snapshot_state='not json' WHERE provider_id='p' AND model_id='upstream'")
             .execute(&pool).await.is_err());
-        let retained: (String, String, i64) = sqlx::query_as("SELECT n.payload, c.content, (SELECT background_active FROM inference_run_observations WHERE id='run') FROM turn_chain_nodes n JOIN turn_chain_content_refs r ON r.node_id=n.id JOIN turn_chain_contents c ON c.principal=r.principal AND c.content_key=r.content_key WHERE n.id='child'")
-            .fetch_one(&pool).await.unwrap();
+        use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        )
+        .materialize(
+            &stravia_runtime_contract::Principal::new("alice"),
+            TurnNodeKind::Response,
+            &TurnNodeId::new("child"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(nodes[0].payload, serde_json::json!({"items":[1]}));
+        assert_eq!(nodes[1].payload, serde_json::json!({"items":[historical]}));
+        use crate::history_marker::{
+            HiddenHistorySegment, HistoryMarkerStore, PlatformExecutionState, SqlHistoryMarkerStore,
+        };
+        let restored = SqlHistoryMarkerStore::sqlite(pool.clone())
+            .resolve(
+                &stravia_runtime_contract::Principal::new("alice"),
+                marker_reference,
+            )
+            .await
+            .unwrap()
+            .expect("retained platform marker");
         assert_eq!(
-            retained,
-            ("{\"items\":[1]}".into(), "historical payload".into(), 2)
+            restored.execution_state,
+            Some(PlatformExecutionState::Completed)
         );
+        assert!(restored.published);
+        let expected_segment: HiddenHistorySegment = serde_json::from_value(segment).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.segment.unwrap()).unwrap(),
+            serde_json::to_value(expected_segment).unwrap()
+        );
+        assert!(
+            SqlHistoryMarkerStore::sqlite(pool.clone())
+                .resolve(
+                    &stravia_runtime_contract::Principal::new("bob"),
+                    marker_reference
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (native_source, native_payload): (String, String) = sqlx::query_as("SELECT source_generation_id, payload FROM native_compactions WHERE id='compaction-fixture'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(native_source, "child");
+        assert_eq!(native_payload, "{}");
+        let stored_segment: String =
+            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=?")
+                .bind(marker_reference)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_segment, segment_bytes);
+        assert!(
+            sqlx::query("DELETE FROM turn_chain_nodes WHERE id='child'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT background_active FROM inference_run_observations WHERE id='run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 2);
         sqlx::query("UPDATE inference_run_observations SET background_active = 3 WHERE id = 'run'")
             .execute(&pool)
             .await
@@ -332,10 +506,22 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) VALUES ('foreign', 'response', 'parent', 'bob', 1, '{}', 1, 100)")
-            .execute(&pool).await.is_err());
-        assert!(sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) VALUES ('wrong-kind', 'agent', 'parent', 'alice', 1, '{}', 1, 100)")
-            .execute(&pool).await.is_err());
+        let valid_payload =
+            crate::storage_codec::encode(br#"{"data":{},"slots":[],"contents":[]}"#).unwrap();
+        for (id, kind, principal) in [
+            ("foreign", "response", "api-key:bob"),
+            ("wrong-kind", "agent", "api-key:alice"),
+        ] {
+            let error = sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, storage_format) VALUES (?, ?, 'parent', ?, 1, ?, 1, 100, 2)")
+                .bind(id).bind(kind).bind(principal).bind(&valid_payload).execute(&pool).await.unwrap_err();
+            assert!(
+                error
+                    .as_database_error()
+                    .unwrap()
+                    .is_foreign_key_violation(),
+                "{error}"
+            );
+        }
         let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await
@@ -350,7 +536,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let error = migrate_sqlite(&pool).await.unwrap_err().to_string();
+        let error = migrate_sqlite(&pool, None).await.unwrap_err().to_string();
         assert!(error.contains("unrecognized"), "{error}");
     }
 
@@ -374,7 +560,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let error = migrate_sqlite(&pool).await.unwrap_err().to_string();
+        let error = migrate_sqlite(&pool, None).await.unwrap_err().to_string();
         assert!(error.contains("unknown, missing, or failed"), "{error}");
     }
 
@@ -395,7 +581,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        migrate_sqlite(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await
@@ -446,7 +632,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(migrate_sqlite(&pool).await.is_err());
+        assert!(migrate_sqlite(&pool, None).await.is_err());
         let original: String = sqlx::query_scalar("SELECT balance FROM models WHERE id = 'r'")
             .fetch_one(&pool)
             .await
@@ -461,22 +647,22 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO turn_chain_nodes (id, kind, principal, payload_version, payload, created_at, expires_at) VALUES ('parent', 'response', 'alice', 1, '{}', 1, 2)")
+        sqlx::query("INSERT INTO turn_chain_nodes (id, kind, principal, payload_version, payload, created_at, expires_at) VALUES ('parent', 'response', 'api-key:alice', 1, '{}', 1, 2)")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at) VALUES ('child', 'response', 'parent', 'bob', 1, '{}', 1, 2)")
             .execute(&pool).await.unwrap();
-        assert!(migrate_sqlite(&pool).await.is_err());
+        assert!(migrate_sqlite(&pool, None).await.is_err());
         let legacy_parent: String =
             sqlx::query_scalar("SELECT parent_id FROM turn_chain_nodes WHERE id='child'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(legacy_parent, "parent");
-        sqlx::query("UPDATE turn_chain_nodes SET principal='alice' WHERE id='child'")
+        sqlx::query("UPDATE turn_chain_nodes SET principal='api-key:alice' WHERE id='child'")
             .execute(&pool)
             .await
             .unwrap();
-        migrate_sqlite(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
         let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await
@@ -508,6 +694,37 @@ mod tests {
             .run_to(1, &pool)
             .await
             .expect("v1 baseline");
+        let expires_at = chrono::Utc::now().timestamp_millis() + 600_000;
+        let marker_reference = "abcdefghijklmnopqrstuvwxyzab";
+        let item = serde_json::json!({
+            "id": "pg-raw-item", "phase": "final", "meta": {"reference": marker_reference},
+            "content": [
+                {"type": "text", "text": "迁移媒体😀".repeat(100)},
+                {"type": "image", "source": {"type": "url", "url": "https://example.invalid/fixture.png"}, "detail": "high"},
+                {"type": "text", "text": format!("<!--sh:{marker_reference}-->\n")}
+            ]
+        });
+        let parent_payload = serde_json::json!({"items": [item.clone()]});
+        sqlx::query("INSERT INTO turn_chain_nodes (id,kind,principal,payload_version,payload,created_at,expires_at,storage_format) VALUES ('pg-parent','response','api-key:alice',6,$1,1,$2,0)")
+            .bind(serde_json::to_string(&parent_payload).unwrap()).bind(expires_at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO turn_chain_nodes (id,kind,parent_id,principal,payload_version,payload,created_at,expires_at,storage_format) VALUES ('pg-child','response','pg-parent','api-key:alice',6,'{\"data\":{\"items\":[null]},\"references\":1}',1,$1,1)")
+            .bind(expires_at).execute(&pool).await.unwrap();
+        use sha2::Digest;
+        let item_bytes = serde_json::to_string(&item).unwrap();
+        let content_key = stravia_runtime_contract::identifier::encode_digest(
+            &sha2::Sha256::digest(item_bytes.as_bytes()).into(),
+        );
+        sqlx::query("INSERT INTO turn_chain_contents (principal,content_key,content) VALUES ('api-key:alice',$1,$2)")
+            .bind(&content_key).bind(&item_bytes).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO turn_chain_content_refs (node_id,principal,path,content_key) VALUES ('pg-child','api-key:alice','/items/0',$1)")
+            .bind(&content_key).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO native_compactions (id,principal,source_generation_id,operation_id,payload,created_at,expires_at) VALUES ('pg-compaction','api-key:alice','pg-child','pg-op','{}',1,$1)")
+            .bind(expires_at).execute(&pool).await.unwrap();
+        let call = serde_json::json!({"id":"pg-call","name":"fixture-tool","arguments":"{}"});
+        let segment = serde_json::json!({"kind":"platform","call":call,"result":{"type":"tool_result","tool_use_id":"pg-call","content":[item["content"][0].clone(),item["content"][1].clone()],"content_kind":"content_blocks","is_error":false}});
+        let segment_bytes = serde_json::to_string(&segment).unwrap();
+        sqlx::query("INSERT INTO history_markers (reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,published_at,created_at,updated_at,expires_at) VALUES ($1,'api-key:alice','platform','Fixture platform call','pg-call',$2,$3,'completed',$4,1,1,1,$4)")
+            .bind(marker_reference).bind(serde_json::to_string(&call).unwrap()).bind(&segment_bytes).bind(expires_at).execute(&pool).await.unwrap();
         sqlx::query(
             "INSERT INTO models (id, model_id, balance) VALUES ('invalid', 'invalid', 'unknown')",
         )
@@ -515,23 +732,73 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(10), migrate_postgres(&pool))
-                .await
-                .expect("migration failure must not hang")
-                .is_err()
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                migrate_postgres(&pool, None)
+            )
+            .await
+            .expect("migration failure must not hang")
+            .is_err()
         );
         sqlx::query("UPDATE models SET balance='traffic_equalization' WHERE id='invalid'")
             .execute(&pool)
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), migrate_postgres(&pool))
-            .await
-            .expect("failed migration leaked advisory lock")
-            .expect("v1 upgrade");
-        migrate_postgres(&pool)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            migrate_postgres(&pool, None),
+        )
+        .await
+        .expect("failed migration leaked advisory lock")
+        .expect("v1 upgrade");
+        migrate_postgres(&pool, None)
             .await
             .expect("upgrade re-run is a no-op");
-        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
+        use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
+        let principal = stravia_runtime_contract::Principal::new("alice");
+        let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone())
+            .materialize(
+                &principal,
+                TurnNodeKind::Response,
+                &TurnNodeId::new("pg-child"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored[0].payload, parent_payload);
+        assert_eq!(restored[1].payload, serde_json::json!({"items": [item]}));
+        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_chain_contents")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(distinct, 1);
+        use crate::history_marker::{
+            HiddenHistorySegment, HistoryMarkerStore, SqlHistoryMarkerStore,
+        };
+        let marker = SqlHistoryMarkerStore::postgres(pool.clone())
+            .resolve(&principal, marker_reference)
+            .await
+            .unwrap()
+            .unwrap();
+        let expected_segment: HiddenHistorySegment = serde_json::from_value(segment).unwrap();
+        assert_eq!(
+            serde_json::to_value(marker.segment.unwrap()).unwrap(),
+            serde_json::to_value(expected_segment).unwrap()
+        );
+        let raw_segment: String =
+            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=$1")
+                .bind(marker_reference)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(raw_segment, segment_bytes);
+        let source: String = sqlx::query_scalar(
+            "SELECT source_generation_id FROM native_compactions WHERE id='pg-compaction'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(source, "pg-child");
+        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at, expires_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, false, 1, 1, 100)")
             .execute(&pool).await.unwrap();

@@ -1,6 +1,6 @@
 # Connect Client Interaction Observation 设计
 
-> **目标契约已接受，相关实现尚未迁移。** Canonical Item 的诊断持久化边界以 [ADR-0062](../adr/0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 为准；Debug 的 wire-only 捕获边界以 [ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md) 为准。下文描述目标行为，不表示当前存储与捕获实现已经完成切换。
+> Canonical Item 的诊断持久化边界以 [ADR-0062](../adr/0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 为准；Debug 的 wire-only 捕获边界以 [ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md) 为准；事件收敛与 Debug manifest 文件化以 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md) 为准。
 
 ## 1. 目标
 
@@ -76,7 +76,7 @@ HTTP 等待允许一个兜底闲置边界：叶等待 Run 的 `last_active_at` �
 
 WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run 且尚未由完整工具回传解除等待的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。结果先到时不追加虚假断线；关闭先到时保留真实断线历史。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，同一进程内仍等待合法续接、24 小时闲置超时或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填 `client_disconnected`。
 
-启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，记录 `process_restarted`，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage、`last_active_at` 和 `expires_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
+启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，以 `run_state_changed` 承载，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`；不再单独持久化 `process_restarted` kind。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage、`last_active_at` 和 `expires_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
 
 HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。Observation 在流处理任务完成 Generation Chain 提交尝试后记录最终状态与已提交的节点关联；协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。公开工具交付后的 `waiting_client` 使用流处理任务最终确定的状态。
 
@@ -97,9 +97,9 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
 - Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`；失败或未完成 attempt 定义上没有已确认用量，不参与统计；
 - Provider 汇总的 `avg_output_tps` 按已完成 attempt 的 `Σoutput_tokens / Σ净生成耗时` 计算；净生成耗时取 `duration_ms - first_token_ms`，首 Token 未报告或差值小于 50ms 时回退 `duration_ms`。任一已完成 attempt 未报告输出或耗时、或总生成耗时为零时为 `null`；
-- Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。单个 `usage_confirmed` 事件不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
+- Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
-- 收到新的上游 usage 后更新持久化投影并推送 SSE。
+- 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`、易失 usage 或 reset 协议。
 
 请求记录的链路 Token 阈值按整个根 DAG（含子孙）累计。已确认部分仍采用卡片的输入、输出、缓存读与缓存写合计；尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
 
@@ -140,7 +140,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 归并窗口不限制诊断来源连接。来源记录仍须在保留期内，匹配仍须完整且唯一；不能先按归并窗口过滤较旧候选，再把剩余候选宣称为唯一来源。诊断连接不建立 Generation Chain 执行父边。
 
-`compaction_operation` 保存 standalone/inline、所属 Model Turn、来源、登记 ID、阶段、耗时与错误分类；所选 Target/Provider 沿用 Target attempt，usage 仅沿用每 attempt 一次的 `usage_confirmed`。Standalone 是真实操作，不落空 Generation；回放旧 state 不再登记压缩操作。
+`compaction_operation` 保存 standalone/inline、所属 Model Turn、来源、登记 ID、阶段、耗时与错误分类；所选 Target/Provider 沿用 Target attempt，usage 仅沿用每 attempt 一次的确认用量投影及 `target_attempt_finished.usage`。Standalone 是真实操作，不落空 Generation；回放旧 state 不再登记压缩操作。
 
 `native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation 或有效输入。分组按 ADR-0053 诊断规则，不恢复已删除历史。来源卡片已清理时不从核心存储复活。
 
@@ -205,16 +205,12 @@ clear_history() -> ClearHistoryResult
 - `model_turn_started`
 - `target_attempt_started`
 - `target_attempt_finished`
-- `model_thinking_delta`
-- `model_thinking_finished`
+- `model_thinking`
 - `platform_tool_started`
 - `platform_tool_finished`
 - `client_tool_handoff`
 - `client_tool_result`
-- `client_visible_content_delta`
-- `usage_confirmed`
-- `client_output_committed`
-- `delivery_finished`
+- `client_visible_content`
 - `run_finished`
 - `interaction_relinked`
 - `observation_gap`
@@ -222,13 +218,17 @@ clear_history() -> ClearHistoryResult
 
 `platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
-客户端工具结果按收到的批次查询当前 Run 及明确 `parent_run_id` 祖先，只使用同一 Principal、仍在保留期内的调用证据。最近一次 `client_tool_handoff` 确定调用边界；相同 ID 的新 handoff 是新调用。只有与该调用最近结果的脱敏后正文、`is_error` 均相同时才跳过重复写入。正文变化、错误状态变化、分支结果与新调用保留；没有 handoff 证据，或最近结果正文缺失、为 null 时，不跨越该不确定边界去重。比较状态只存在于当前批次，不另存正文副本或原始凭据摘要。既有历史事件不回写、不删除。
+客户端工具结果只从已核验 Generation Chain 父节点的本次 `client_delta` 捕获，不再复制父节点完整窗口；没有已核验父节点时不从父历史推断结果。收到的本次新增结果再按批次查询当前 Run 及明确 `parent_run_id` 祖先，只使用同一 Principal、仍在保留期内的调用证据。最近一次 `client_tool_handoff` 确定调用边界；相同 ID 的新 handoff 是新调用。只有与该调用最近结果的脱敏后正文、`is_error` 均相同时才跳过重复写入。正文变化、错误状态变化、分支结果与新调用保留；没有 handoff 证据，或最近结果正文缺失、为 null 时，不跨越该不确定边界去重。比较状态只存在于当前批次，不另存正文副本或原始凭据摘要。工具去重本身不回写或删除既有结果；升级时事件编码与生命周期合并另按 ADR-0077 无损转换。
 
-`model_thinking_delta` 只接收上游可读 thinking / reasoning summary 文本，并以 Model Turn、Target attempt、Canonical Item 与项内 part 隔离增量脱敏和汇聚状态。签名、密文、obfuscation 和不透明快照不作为普通思考正文。`client_visible_content_delta` 仍只接收 Client Projection 已交付的可见内容。
+生命周期事件把 `usage_confirmed` 合并到 `target_attempt_finished.usage`（`ConfirmedUsage | null`），把 `delivery_finished` 合并到 `run_finished.delivery`（`{status, reason, completed_at} | null`）；失败、中断前已收到的用量与交付事实也保留，早到事实先更新投影，不能因尚未终态而丢弃。`delivery_completed_at` 保存于 Run 投影。`generation_associated`、`client_output_committed` 只更新投影，不再落独立事件；启动恢复以 `run_state_changed` 维持 SSE 唤醒。
 
-普通诊断内容按 Canonical Item 收口持久化：同一 item 的流式碎片汇聚为一项，保留项内 part 的边界和顺序；具有独立身份的 item 即使类型相同也不得合并。正常结束保存完整 item；可处理的失败或取消保存已实际收到的内容并标为未完成，不补造未收到的尾部。item 首次落盘只发生在收口时，不周期性持久化中间快照；进程突然崩溃可以丢失整个尚未落盘的 item。
+`model_thinking_delta` 与 `client_visible_content_delta` 仅用于易失实时通道，不是持久化 kind。`model_thinking_delta` 只接收上游可读 thinking / reasoning summary 文本，并以 Model Turn、Target attempt、Canonical Item 与项内 part 隔离增量脱敏和汇聚状态。签名、密文、obfuscation 和不透明快照不作为普通思考正文。`client_visible_content_delta` 仍只接收 Client Projection 已交付的可见内容。
 
-物理存储可以为容量、压缩或文件布局分块，但物理块不得成为新的语义 item，也不得改变 item 身份或 part 边界；本设计不预先指定迁移后的 schema。现有队列容量、背压与 gap 行为继续成立，容量边界不得以时间或字节阈值强制把一个 Canonical Item 持久化成多个内容项。
+普通诊断内容按 Canonical Item 收口持久化为 `model_thinking` 或 `client_visible_content`：每个 item 一行，payload 保存 `text`、`parts`、`block_id`、`item` 与 `complete`，思考内容另带 Model Turn/attempt 关联。同一 item 的流式碎片汇聚为一项，保留项内 part 的边界和顺序；具有独立身份的 item 即使类型相同也不得合并。正常结束保存完整 item；可处理的失败或取消保存已实际收到的内容并标为未完成，不补造未收到的尾部。item 首次落盘只发生在收口时，不周期性持久化中间快照；进程突然崩溃可以丢失整个尚未落盘的 item。实时与持久内容共享 scope 与真实源 item ordinal：可见内容在 Run 内、thinking 在 attempt 内稳定编号，迟到 provider ID 不改变 block_id。WebSocket 仅累计已成功发送并确认的客户端帧，失败或断线收口为 `complete=false`，不补入未发送正文。
+
+旧封块行不能推断真实 Canonical Item 边界：转换移除随机 block_id 与合成 item，原元数据收进 `legacy_text`，读者按原 scope 与有序 parts 连续呈现，不插入虚构空行。旧提交信号行删除，admission 中的 `client_output_committed_sequence` 与 `legacy_lifecycle` 保留原水位与事实来源；Bundle 仅应用 sequence 不超过 through-sequence 的事实，终态后的迟到提交以更高 sequence 的 `run_finished` 修订承载并保留原完成时间。
+
+物理存储可以为容量、压缩或文件布局分块，但物理块不得成为新的语义 item，也不得改变 item 身份或 part 边界；最终 schema 由迁移与生成的参考 SQL 定义。现有队列容量、背压与 gap 行为继续成立，容量边界不得以时间或字节阈值强制把一个 Canonical Item 持久化成多个内容项。
 
 工具结果批次先对查询 ID 去重，再沿既有祖先与 handoff 边界比较。批内比较引用已接收事件的位置，不再次复制大正文；不按跨交互的相同 payload 全局去重，缺失调用证据、正文变化及 null 边界仍保留。
 
@@ -242,7 +242,7 @@ Debug Trace 只记录四个方向的原始应用协议级收发：Connect Client
 
 每条 Wire 记录保留必要的关联元数据，包括适用的 Interaction、Run、Model Turn、Target attempt、方向、协议、transport、顺序与 UTC 时间。既有 Target attempt 身份与生命周期、usage、工具事件、失败与取消继续由普通 Observation 持久化并随 Bundle 导出，不把旧 `target_selected` 迁入普通 Observation，也不复制到 Debug Trace。Debug 原始字节不等待 Canonical Item 收口，普通 Observation 的内容收口也不阻塞 wire 捕获或下游转发。
 
-Wire 记录直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、item 内容、工具结果及 Trace manifest 状态仍持久化并驱动 SSE。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减；manifest 按既有维护周期或显式生命周期边界持久化。Interaction 导出票据排空目标 Interaction 的 Trace 后固定截止水位；既有 ZIP 截止水位不能包含之后的新捕获。
+Wire 记录直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、item 内容与工具结果持久化并驱动 SSE；Trace manifest 仅写本地文件，不产生普通事件。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减；manifest 按既有维护周期或显式生命周期边界持久化。Interaction 导出票据排空目标 Interaction 的 Trace 后固定截止水位；既有 ZIP 截止水位不能包含之后的新捕获。
 
 原始 body chunk、SSE 字节与 WebSocket 应用 message 在传输边界观察到后即可排队，不以完整 JSON、SSE、NDJSON、Connect message 或 Canonical Item 收口作为记录前提。只有 HTTP `Authorization` header 的值在入队前替换，媒体与其他 header、URL、body 和 message 内容原样保留；编码进分段文件与物理批处理不得改变可恢复的字节、方向和顺序。
 
@@ -258,10 +258,12 @@ Observation writer 为持久化事件分配递增 `event_sequence`。事件及�
 
 SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
 
+同一 Gateway 内，历史与普通 Observation 的 SQLite 写入先取得共享异步写锁，再取得连接和事务；锁覆盖实际写入至提交，不覆盖独立只读查询或 manifest/Trace 文件操作。清理中的 owner 快照读事务在文件 tombstone 操作前提交，不持有 SQLite 写锁等待文件系统。PostgreSQL 保持原数据库并发与锁协议。
+
 页面先查询快照并取得 `snapshot_sequence`，再从该 sequence 订阅，避免查询与订阅之间丢事件。重连携带最后确认的 sequence：
 
 - cursor 仍在保留范围内：补发缺失事件；
-- cursor 已清理：发送 `reset_required`，前端重新查询当前时间页；
+- cursor 已清理：发送 `reset_required`，前端重新查询当前时间页；只按保留窗口下界判断，不把删除或合并造成的内部稀疏 sequence 当作失效 cursor，范围内正常重放；
 - SSE 断开不影响 Observation 写入。
 
 当前只保证连接到同一 Gateway 实例的实时唤醒；SQLite/PostgreSQL 中已持久化的历史仍由查询接口读取。多实例通知与共享 Trace storage 不在本设计范围内。
@@ -317,15 +319,15 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 #### `observation_events`
 
-保存 sequence、关联 ID、kind、occurred_at 和普通安全 payload。按 Interaction/Run/sequence、全局 sequence、过期时间建立索引。
+保存 sequence、关联 ID、kind、occurred_at 和普通安全 payload。payload 为共用 storage codec 编码的二进制（SQLite BLOB / PostgreSQL BYTEA）；SQL 过滤字段 `tool_id`、`operation_id` 提升为列。Interaction/Run/sequence 与全局 sequence 索引保留；移除未使用的 event expiry 索引，rejection 索引仅覆盖非空行，工具索引使用 `(run_id, tool_id, sequence DESC)` 部分索引。二进制布局与升级顺序见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。
 
 #### `rejected_request_observations`
 
 保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联和过期时间。Migration 0045 起额外保存可空的 `started_at`、`duration_ms`、`failure_json` 与来源快照 `request_model`、`api_key_id`、`api_key_name`，供失败请求投影使用；这些列全部可空、不回填历史，也不引入新的 Principal 外键。它不保存 Principal，也不伪造 Interaction ID。
 
-#### `debug_trace_manifests`
+#### Debug manifest（文件，不是关系表）
 
-保存 Run 或 Rejected Request、相对目录、已写字节、事件数、`complete | partial`、部分原因、创建/完成/过期时间。绝不保存绝对路径或可下载凭据。
+`debug_trace_manifests` 已由迁移 0007 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、失败请求列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先写入 manifest 终态，不再持久化或广播 `trace_manifest_updated`。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。
 
 ### 6.2 Debug 分段文件
 
@@ -336,6 +338,7 @@ payload 写入 `GatewayConfig.data_dir` 下由 Observation 模块拥有的目录
 ```text
 diagnostics/observation-debug/
 └── <trace-id>/
+    ├── manifest.json
     ├── segment-000001.jsonl
     ├── segment-000002.jsonl
     └── ...
@@ -369,16 +372,11 @@ diagnostics/observation-debug/
 
 Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_retention_days`；默认 7 天。
 
-清理顺序：
-
-1. 在数据库把待删除 Trace 标记 tombstone；
-2. 幂等删除对应受管目录；
-3. 删除 manifest、events、runs、interactions/rejections；
-4. 启动时扫描并回收无 manifest 的孤儿目录，以及完成遗留 tombstone。
+清理不再依赖数据库 manifest 或 tombstone：按 manifest 的 `expires_at` 回收目录；删除先 rename 为 `.deleting-*`，随后幂等删除，启动补完中断的删除并回收无 manifest 的孤儿目录。关系数据清理后另删 owner 已不存在的 Trace 目录。
 
 “清除历史记录”只删除非活动 Interaction 与 Rejected Request；`running` 和 `waiting_client` 保留，并在结果中报告跳过数量。清理不取消 Inference Run。
 
-“清除 Debug 数据”只删除 Debug 内容：全部 manifest 标记 tombstone、关闭活动 writer 句柄后删除受管目录、删除 manifest 行。活动 Run 的 Trace 停止并标记 `debug_data_cleared` partial；请求记录、Rejected Request 与 Debug 开关状态不变，后续准入的 Run 继续正常捕获。
+“清除 Debug 数据”关闭活动 writer 后删除全部受管目录并清空进程内索引。活动 Run 的 Trace 停止并标记 `debug_data_cleared` partial；请求记录、Rejected Request 与 Debug 开关状态不变，后续准入的 Run 继续正常捕获。
 
 ## 7. Debug 开关与脱敏
 

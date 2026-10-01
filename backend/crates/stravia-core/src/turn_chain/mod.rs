@@ -6,6 +6,7 @@ use stravia_runtime_contract::turn_chain::*;
 
 mod content;
 mod sql;
+pub(crate) mod upgrade;
 
 pub use sql::SqlTurnChainStore;
 
@@ -16,10 +17,10 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite Turn Chain test pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite Turn Chain test migrations");
-    SqlTurnChainStore::sqlite(pool)
+    SqlTurnChainStore::sqlite(pool, std::sync::Arc::new(tokio::sync::Mutex::new(())))
 }
 
 #[cfg(test)]

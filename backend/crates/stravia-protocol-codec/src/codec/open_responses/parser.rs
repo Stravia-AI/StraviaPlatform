@@ -732,6 +732,18 @@ fn sse_frame_boundary(buffer: &str) -> Option<(usize, usize)> {
 }
 
 impl ResponsesStreamParser {
+    /// Decode one complete Open Responses WebSocket event using the same
+    /// validation and canonical conversion as the SSE transport.
+    pub fn parse_websocket_event(&mut self, payload: &Value) -> Result<Vec<AiStreamDelta>> {
+        let mut deltas = Vec::new();
+        self.parse_event(
+            payload.get("type").and_then(Value::as_str),
+            payload,
+            &mut deltas,
+        )?;
+        Ok(deltas)
+    }
+
     pub(crate) fn parse_chunk(&mut self, raw: &str) -> Result<Vec<AiStreamDelta>> {
         self.buffer.push_str(raw);
         let mut deltas = Vec::new();

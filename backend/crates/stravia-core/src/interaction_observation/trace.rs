@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
@@ -132,12 +132,6 @@ pub(crate) struct TraceSegmentSnapshot {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ReconcileReport {
-    pub removed_tombstones: Vec<String>,
-    pub removed_orphans: Vec<String>,
-}
-
 #[derive(Clone)]
 pub(crate) struct TraceManager {
     inner: Arc<ManagerInner>,
@@ -148,6 +142,7 @@ struct ManagerInner {
     tx: mpsc::Sender<WriterCommand>,
     producer: parking_lot::Mutex<RecordProducer>,
     actual_retained: AtomicU64,
+    clear_generation: AtomicU64,
     available: bool,
 }
 
@@ -196,6 +191,7 @@ pub(crate) struct TraceHandle {
 }
 
 struct TraceState {
+    clear_generation: u64,
     // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
     queued_sequence: parking_lot::Mutex<i64>,
     protected: super::redaction::ProtectedSecrets,
@@ -305,6 +301,7 @@ impl TraceManager {
             tx,
             producer: parking_lot::Mutex::new(RecordProducer::default()),
             actual_retained: AtomicU64::new(retained),
+            clear_generation: AtomicU64::new(0),
             available: true,
         });
         tokio::spawn(writer_loop(Arc::clone(&inner), rx));
@@ -320,6 +317,7 @@ impl TraceManager {
                 tx,
                 producer: parking_lot::Mutex::new(RecordProducer::default()),
                 actual_retained: AtomicU64::new(0),
+                clear_generation: AtomicU64::new(0),
                 available: false,
             }),
         }
@@ -328,6 +326,7 @@ impl TraceManager {
     pub(crate) fn create(&self) -> TraceHandle {
         let trace_id = stravia_runtime_contract::identifier::new_id();
         let state = Arc::new(TraceState {
+            clear_generation: self.inner.clear_generation.load(Ordering::Acquire),
             queued_sequence: parking_lot::Mutex::new(0),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
@@ -379,7 +378,9 @@ impl TraceManager {
 
     pub(crate) async fn delete(&self, trace_id: &str) -> io::Result<()> {
         if !self.inner.available {
-            return Err(writer_unavailable());
+            // A degraded manager never created managed directories, so a delete
+            // has nothing to remove and trivially succeeds.
+            return Ok(());
         }
         let directory = self.checked_trace_directory(trace_id)?;
         let root = self.inner.root.clone();
@@ -398,7 +399,11 @@ impl TraceManager {
     /// earlier records are written then removed, later records fail as unavailable.
     pub(crate) async fn delete_all(&self) -> io::Result<()> {
         if !self.inner.available {
-            return Err(writer_unavailable());
+            // Still fence live handles: the generation bump makes existing
+            // manifests read as cleared, and no managed files can exist.
+            self.inner.clear_generation.fetch_add(1, Ordering::AcqRel);
+            self.inner.actual_retained.store(0, Ordering::Release);
+            return Ok(());
         }
         let (response, receive) = oneshot::channel();
         self.inner
@@ -421,32 +426,6 @@ impl TraceManager {
         {
             tracing::debug!(%error, "trace writer dropped shutdown acknowledgement");
         }
-    }
-
-    pub(crate) async fn reconcile(
-        &self,
-        retained_trace_ids: HashSet<String>,
-        tombstoned_trace_ids: HashSet<String>,
-    ) -> io::Result<ReconcileReport> {
-        if !self.inner.available {
-            return Ok(ReconcileReport::default());
-        }
-        for id in retained_trace_ids.iter().chain(tombstoned_trace_ids.iter()) {
-            validate_trace_id(id)?;
-        }
-        let root = self.inner.root.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            reconcile_directories(&root, &retained_trace_ids, &tombstoned_trace_ids)
-        })
-        .await
-        .map_err(|error| {
-            io::Error::other(format!("trace reconciliation task failed: {error}"))
-        })??;
-        let retained = managed_size(&self.inner.root)?;
-        self.inner
-            .actual_retained
-            .store(retained, Ordering::Release);
-        Ok(result)
     }
 
     fn checked_trace_directory(&self, trace_id: &str) -> io::Result<PathBuf> {
@@ -553,7 +532,16 @@ impl TraceHandle {
         self.mark_partial(STORAGE_ERROR, false);
     }
 
+    pub(super) fn is_finished(&self) -> bool {
+        self.state.finished.load(Ordering::Acquire)
+    }
+
     pub(crate) fn manifest(&self) -> TraceManifest {
+        if self.state.clear_generation
+            != self.manager.inner.clear_generation.load(Ordering::Acquire)
+        {
+            self.mark_partial("debug_data_cleared", true);
+        }
         let mut reasons: Vec<String> = self
             .state
             .reasons
@@ -699,7 +687,11 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                 let _ = response.send(result);
             }
             WriterCommand::ClearAll { response } => {
+                // Fence every handle, even when Create/recording failed or Finish removed its writer.
+                inner.clear_generation.fetch_add(1, Ordering::AcqRel);
                 for (_, mut writer) in writers.drain() {
+                    writer.state.stopped.store(true, Ordering::Release);
+                    writer.state.reasons.insert("debug_data_cleared".to_owned());
                     // 先关闭句柄再删目录，Windows 上打开的文件无法删除。
                     if let Err(error) = writer.shutdown(&inner.actual_retained).await {
                         tracing::debug!(%error, "trace writer close failed during clear");
@@ -871,7 +863,23 @@ async fn create_writer(
 ) -> io::Result<ActiveWriter> {
     validate_trace_id(trace_id)?;
     let directory = root.join(trace_id);
-    tokio::fs::create_dir(&directory).await?;
+    match tokio::fs::create_dir(&directory).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // manifest 写者可以先创建目录；仍拒绝链接、越界路径和已有 segment 的覆盖。
+            let metadata = tokio::fs::symlink_metadata(&directory).await?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || tokio::fs::canonicalize(&directory).await?.parent() != Some(root)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsafe trace directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
     let file = open_segment(&directory, 1).await?;
     Ok(ActiveWriter {
         directory,
@@ -986,33 +994,6 @@ fn snapshot_directory(
     })
 }
 
-fn reconcile_directories(
-    root: &Path,
-    retained: &HashSet<String>,
-    tombstoned: &HashSet<String>,
-) -> io::Result<ReconcileReport> {
-    let mut report = ReconcileReport::default();
-    let mut ordered_tombstones: Vec<&String> = tombstoned.iter().collect();
-    ordered_tombstones.sort();
-    for id in ordered_tombstones {
-        remove_managed_directory(root, &root.join(id))?;
-        // A missing directory is already a successfully completed tombstone.
-        report.removed_tombstones.push((*id).clone());
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let id = entry.file_name().to_string_lossy().into_owned();
-        if validate_trace_id(&id).is_err() {
-            continue;
-        }
-        if !retained.contains(&id) {
-            remove_managed_directory(root, &entry.path())?;
-            report.removed_orphans.push(id);
-        }
-    }
-    Ok(report)
-}
-
 fn remove_managed_directory(root: &Path, directory: &Path) -> io::Result<u64> {
     if !directory.exists() {
         return Ok(0);
@@ -1035,14 +1016,28 @@ fn remove_managed_directory(root: &Path, directory: &Path) -> io::Result<u64> {
         ));
     }
     let bytes = directory_size(&canonical)?;
-    fs::remove_dir_all(canonical)?;
+    let deleting = root.join(format!(
+        ".deleting-{}",
+        stravia_runtime_contract::identifier::new_id()
+    ));
+    fs::rename(canonical, &deleting)?;
+    fs::remove_dir_all(deleting)?;
     Ok(bytes)
 }
 
 fn clear_managed_directories(root: &Path) -> io::Result<()> {
+    if !root.is_dir() {
+        // A missing or displaced managed root holds no trace directories.
+        return Ok(());
+    }
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if validate_trace_id(&entry.file_name().to_string_lossy()).is_ok() {
+        if validate_trace_id(&entry.file_name().to_string_lossy()).is_ok()
+            || entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".deleting-")
+        {
             remove_managed_directory(root, &entry.path())?;
         }
     }
@@ -1114,6 +1109,29 @@ pub(crate) fn optimize_trace_directory(root: &Path) -> io::Result<Vec<(String, u
                 "trace directory is not a directory",
             ));
         }
+        let manifest_path = entry.path().join("manifest.json");
+        let mut manifest = match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "trace manifest is not a regular file",
+                    ));
+                }
+                let manifest: super::manifest_index::FileTraceManifest =
+                    serde_json::from_slice(&fs::read(&manifest_path)?)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if manifest.trace_id != id || manifest.relative_directory != id {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "trace manifest directory mismatch",
+                    ));
+                }
+                Some(manifest)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
         let mut bytes = 0;
         for segment in fs::read_dir(entry.path())? {
             let segment = segment?;
@@ -1127,6 +1145,24 @@ pub(crate) fn optimize_trace_directory(root: &Path) -> io::Result<Vec<(String, u
                 ));
             }
             bytes += super::trace_storage::optimize_segment(&segment.path())?;
+        }
+        if let Some(manifest) = manifest.as_mut() {
+            manifest.bytes_written = bytes;
+            let temporary = entry.path().join(format!(
+                ".manifest-{}.tmp",
+                stravia_runtime_contract::identifier::new_id()
+            ));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            use std::io::Write;
+            serde_json::to_writer(&mut file, manifest)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &manifest_path)?;
         }
         reports.push((id, bytes));
     }

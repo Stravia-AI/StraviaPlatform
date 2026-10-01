@@ -36,23 +36,12 @@ pub async fn optimize_data_copy(root: &Path) -> anyhow::Result<StorageOptimizati
         )
         .await?;
     let result = async {
-        crate::migrations::migrate_sqlite(&pool).await?;
+        crate::migrations::migrate_sqlite(&pool, Some(&paths.diagnostics())).await?;
         let traces = paths.diagnostics().join("observation-debug");
         let reports = tokio::task::spawn_blocking(move || {
             crate::interaction_observation::optimize_trace_directory(&traces)
         })
         .await??;
-        let mut transaction = pool.begin().await?;
-        for (id, bytes) in &reports {
-            sqlx::query(
-                "UPDATE debug_trace_manifests SET bytes_written = $1 WHERE relative_directory = $2",
-            )
-            .bind(i64::try_from(*bytes)?)
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
         let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
             .fetch_one(&pool)
             .await?;

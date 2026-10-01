@@ -23,7 +23,9 @@ fn artifact_reference_identity_ignores_question_and_rejects_non_digest_identitie
 async fn download_grants_and_readers_survive_expiry_and_store_reconstruction() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let root = directory.path().join("artifacts");
     let time = Arc::new(std::sync::atomic::AtomicI64::new(1_800_000_000_000));
     let controlled = time.clone();
@@ -110,7 +112,9 @@ async fn download_grants_and_readers_survive_expiry_and_store_reconstruction() {
 async fn empty_text_artifacts_remain_readable_and_owner_scoped() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let store = LocalArtifactStore::sqlite(pool, directory.path().join("artifacts"));
     let principal = Principal::new("empty-text-owner");
     let artifact = store
@@ -144,7 +148,9 @@ async fn empty_text_artifacts_remain_readable_and_owner_scoped() {
 async fn common_ingestion_reserves_staging_and_releases_completed_slots() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let store = LocalArtifactStore::sqlite(pool, directory.path().join("artifacts"));
     let principal = Principal::new("ingestion-owner");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -260,7 +266,9 @@ async fn cancelled_s3_read_removes_partial_cache_without_blocking_configuration(
     });
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let root = directory.path().join("artifacts");
     let store = LocalArtifactStore::sqlite(pool.clone(), &root);
     let settings = ArtifactSettings {
@@ -376,7 +384,9 @@ async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
     });
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let root = directory.path().join("artifacts");
     let store = LocalArtifactStore::sqlite(pool.clone(), &root);
     let settings = ArtifactSettings {
@@ -591,7 +601,9 @@ async fn cancelled_retention_excludes_cleanup_until_its_sql_write_settles() {
         )
         .await
         .unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let time = Arc::new(std::sync::atomic::AtomicI64::new(1000));
     let controlled = Arc::clone(&time);
     let root = directory.path().join("artifacts");
@@ -705,7 +717,9 @@ async fn postgres_download_lifecycle_survives_reconstruction() {
         .connect(&url)
         .await
         .unwrap();
-    crate::migrations::migrate_postgres(&pool).await.unwrap();
+    crate::migrations::migrate_postgres(&pool, None)
+        .await
+        .unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = LocalArtifactStore::postgres(pool.clone(), root.path());
     let owner = Principal::new("pg-owner");
@@ -823,7 +837,9 @@ async fn s3_multipart_native_download_and_platform_relay_preserve_bytes() {
     };
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let store = LocalArtifactStore::sqlite(pool.clone(), directory.path().join("artifacts"));
     let rebuilt = LocalArtifactStore::sqlite(pool.clone(), directory.path().join("artifacts"));
     let mut settings = ArtifactSettings {
@@ -928,7 +944,7 @@ async fn multipart_upload_is_principal_scoped_and_survives_store_reconstruction(
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1023,7 +1039,7 @@ async fn failed_ready_artifact_file_cleanup_keeps_its_database_record() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool.clone(), data_dir.path().join("artifacts"));
@@ -1086,7 +1102,7 @@ async fn batch_retention_extension_cannot_revive_expired_artifacts() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool.clone(), data_dir.path().join("artifacts"));
@@ -1130,7 +1146,7 @@ async fn sweep_expired_upload_removes_staging_before_upload_metadata() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1200,7 +1216,7 @@ async fn concurrent_upload_creation_enforces_principal_staging_quota() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1249,7 +1265,7 @@ async fn concurrent_parts_cannot_exceed_the_declared_upload_size() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
@@ -1298,7 +1314,7 @@ async fn stable_artifact_id_is_shared_by_ingest_chunkings_and_store_reconstructi
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1404,7 +1420,7 @@ async fn stable_artifact_id_scopes_to_owner_mime_and_bytes() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
@@ -1493,7 +1509,7 @@ async fn concurrent_identical_uploads_converge_on_one_artifact_id() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1576,7 +1592,7 @@ async fn duplicate_upload_extends_retention_without_shortening_it() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1652,7 +1668,7 @@ async fn duplicate_upload_while_reader_held_neither_hangs_nor_corrupts() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
@@ -1712,7 +1728,7 @@ async fn reupload_after_expiry_sweep_restores_the_same_artifact_id() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let root = data_dir.path().join("artifacts");
@@ -1778,7 +1794,7 @@ async fn failed_duplicate_complete_upload_keeps_existing_ready_artifact() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));

@@ -72,6 +72,12 @@ export function mergeObservationRuns(current: RunDetail[], incoming: RunDetail[]
 }
 
 export function withoutCommittedBlocks(blocks: LiveContentBlock[], detail: InteractionDetail): LiveContentBlock[] {
-  const committed = new Set(detail.runs.flatMap((run) => run.events.map(eventBlockId)))
+  const committed = new Set(
+    detail.runs.flatMap((run) =>
+      run.events
+        .filter((event) => event.kind === 'client_visible_content' || event.kind === 'model_thinking')
+        .map(eventBlockId),
+    ),
+  )
   return blocks.filter((block) => !committed.has(block.block_id))
 }

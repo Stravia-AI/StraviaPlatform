@@ -721,7 +721,9 @@ mod tests {
     async fn stale_reconciliation_rolls_back_all_sqlite_updates() {
         let data_dir = tempfile::tempdir().unwrap();
         let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
                      VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -803,7 +805,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         sqlx::query(
@@ -860,7 +862,9 @@ mod tests {
     async fn reimport_fixture() -> (tempfile::TempDir, SqliteStorage) {
         let data_dir = tempfile::tempdir().unwrap();
         let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",

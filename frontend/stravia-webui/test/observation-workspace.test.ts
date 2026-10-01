@@ -119,7 +119,16 @@ function streamEvent(
       run_id: 'r1',
       rejection_id: null,
       kind,
-      payload: {},
+      payload:
+        kind === 'model_thinking' || kind === 'client_visible_content'
+          ? {
+              text: 'delta',
+              parts: [{ type: 'text', text: 'delta' }],
+              item: `text:${sequence}`,
+              block_id: `block:${sequence}`,
+              complete: true,
+            }
+          : {},
     },
   }
 }
@@ -350,17 +359,17 @@ describe('stream updates', () => {
     await h.controller.start()
     // 跟随中：思考增量与工具调用不移动视口，只有输出预览追加触发 focusLatest。
     const focused = h.focusLatestCalls.length
-    await h.emit(streamEvent(6, 'i1', 999_500, 'model_thinking_delta'))
+    await h.emit(streamEvent(6, 'i1', 999_500, 'model_thinking'))
     await h.emit(streamEvent(7, 'i1', 999_501, 'platform_tool_finished'))
     expect(h.focusLatestCalls).toHaveLength(focused)
-    await h.emit(streamEvent(8, 'i1', 999_502, 'client_visible_content_delta'))
+    await h.emit(streamEvent(8, 'i1', 999_502, 'client_visible_content'))
     expect(h.focusLatestCalls).toHaveLength(focused + 1)
     // 暂停后同理：非预览事件不点亮「新活动·跟随」。
     h.controller.pauseFollow()
-    await h.emit(streamEvent(9, 'i1', 999_503, 'model_thinking_delta'))
+    await h.emit(streamEvent(9, 'i1', 999_503, 'model_thinking'))
     await h.emit(streamEvent(10, 'i1', 999_504, 'client_tool_result'))
     expect(h.snap().hasNewActivity).toBe(false)
-    await h.emit(streamEvent(11, 'i1', 999_505, 'client_visible_content_delta'))
+    await h.emit(streamEvent(11, 'i1', 999_505, 'client_visible_content'))
     expect(h.snap().hasNewActivity).toBe(true)
   })
 

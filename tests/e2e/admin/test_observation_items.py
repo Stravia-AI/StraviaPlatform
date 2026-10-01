@@ -499,6 +499,25 @@ def test_wire_bundle_is_four_direction_raw_only_and_malformed_capture_stays_comp
             "completed four-direction wire trace",
             lambda: _final_detail(env, route_id, prompt),
         )
+        content_events = [
+            event for event in valid["runs"][-1]["events"]
+            if event["kind"] == "client_visible_content"
+        ]
+        assert len(content_events) == 1
+        content = content_events[0]["payload"]
+        assert content["text"] == "wire-one-two"
+        assert content["complete"] is True
+        assert "".join(part.get("text", "") for part in content["parts"]) == "wire-one-two"
+        assert isinstance(content["item"], dict)
+        refreshed = _detail(env, valid["interaction"]["id"])
+        refreshed_content = next(
+            event["payload"] for event in refreshed["runs"][-1]["events"]
+            if event["kind"] == "client_visible_content"
+        )
+        assert refreshed_content["block_id"] == content["block_id"]
+        assert not {
+            "client_visible_content_delta", "model_thinking_delta"
+        } & {event["kind"] for event in valid["runs"][-1]["events"]}
         _, _, archive = download_observation_bundle(env, valid)
         records = observation_bundle_events(archive)
         _assert_wire_only(records)
@@ -672,26 +691,23 @@ def test_running_bundle_fixes_incomplete_sse_prefix_and_preserves_inline_media(
         )
         run_id = admitted_event["data"]["run_id"]
         interaction_id = admitted_event["data"]["interaction_id"]
-        baseline_event = _sse_event(
-            env,
-            int(admitted_event["id"]),
-            lambda event: event["event"] == "observation"
-            and event["data"]["kind"] == "trace_manifest_updated"
-            and event["data"]["run_id"] == run_id,
-        )
-        baseline_bytes = baseline_event["data"]["payload"]["bytes_written"]
+        def captured_prefix() -> tuple[dict[str, Any], bytes] | None:
+            detail = _detail(env, interaction_id)
+            run = next(run for run in detail["runs"] if run["id"] == run_id)
+            if not run.get("trace"):
+                return None
+            _, _, archive = download_observation_bundle(env, detail)
+            records = observation_bundle_events(archive)
+            if _payload_bytes(records, "upstream_response") != provider.barrier_prefix:  # type: ignore[attr-defined]
+                return None
+            return detail, archive
 
         provider.prefix_release.set()  # type: ignore[attr-defined]
         assert provider.barrier_started.wait(timeout=10)  # type: ignore[attr-defined]
-        captured_event = _sse_event(
-            env,
-            int(baseline_event["id"]),
-            lambda event: event["event"] == "observation"
-            and event["data"]["kind"] == "trace_manifest_updated"
-            and event["data"]["run_id"] == run_id
-            and event["data"]["payload"]["bytes_written"] > baseline_bytes,
+        running, running_archive = _wait_for(
+            "captured incomplete upstream SSE prefix",
+            captured_prefix,
         )
-        running = _detail(env, interaction_id)
         assert running["runs"][-1]["status"] == "running"
         ticket_status, ticket_body = http_request(
             "POST",
@@ -701,7 +717,6 @@ def test_running_bundle_fixes_incomplete_sse_prefix_and_preserves_inline_media(
         )
         assert ticket_status == 200, ticket_body
         delayed_ticket = ticket_body["data"]
-        _, _, running_archive = download_observation_bundle(env, running)
         running_records = observation_bundle_events(running_archive)
         assert all(record.get("layer") == "wire" for record in running_records)
         assert all(record.get("stage") is None for record in running_records)
@@ -734,14 +749,10 @@ def test_running_bundle_fixes_incomplete_sse_prefix_and_preserves_inline_media(
         assert status == 200, client_body
         assert b"barrier-prefix-and-tail" in client_body
 
-        _sse_event(
-            env,
-            int(captured_event["id"]),
-            lambda event: event["event"] == "observation"
-            and event["data"]["kind"] == "run_finished"
-            and event["data"]["run_id"] == run_id,
+        finished = _wait_for(
+            "terminal run with completed wire trace",
+            lambda: _final_detail(env, _route_id, prompt),
         )
-        finished = _detail(env, interaction_id)
         assert finished["runs"][-1]["status"] != "running"
         _, _, finished_archive = download_observation_bundle(env, finished)
         finished_records = observation_bundle_events(finished_archive)

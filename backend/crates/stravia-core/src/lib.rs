@@ -28,6 +28,7 @@ pub mod proxy;
 pub(crate) mod reversible_redaction;
 pub mod router;
 pub mod storage;
+pub(crate) mod storage_codec;
 pub mod thinking;
 pub mod turn_chain;
 pub(crate) mod web_access;

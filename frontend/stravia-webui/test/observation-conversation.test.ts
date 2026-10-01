@@ -75,14 +75,11 @@ function detail(runs: RunDetail[], tail = ''): InteractionDetail {
 
 describe('observation conversation', () => {
   test('prepending and replaying overlapping event pages preserves causal text and existing messages', () => {
-    const first = run('first', 1, [event('first', 2, 'client_visible_content_delta', { text: 'Unchanged' })])
-    const latest = run('latest', 2, [event('latest', 5, 'client_visible_content_delta', { text: 'B' })])
+    const first = run('first', 1, [event('first', 2, 'client_visible_content', { text: 'Unchanged' })])
+    const latest = run('latest', 2, [event('latest', 5, 'client_visible_content', { text: 'B' })])
     const current = detail([first, latest])
     const before = observationConversationMessages(current)
-    const older = {
-      ...latest,
-      events: [event('latest', 4, 'client_visible_content_delta', { text: 'A' }), latest.events[0]],
-    }
+    const older = { ...latest, events: [event('latest', 4, 'client_visible_content', { text: 'A' }), latest.events[0]] }
     const merged = mergeObservationRuns(current.runs, [older], true)
     const replay = mergeObservationRuns(merged, [older], true)
     const after = observationConversationMessages({ ...current, runs: replay }, [], before)
@@ -93,9 +90,7 @@ describe('observation conversation', () => {
   })
 
   test('live blocks extend one Markdown message and commit removes only the matching overlay', () => {
-    const current = detail([
-      run('first', 1, [event('first', 1, 'client_visible_content_delta', { text: '| A | B |\\n' })]),
-    ])
+    const current = detail([run('first', 1, [event('first', 1, 'client_visible_content', { text: '| A | B |\\n' })])])
     const block: LiveContentBlock = {
       block_id: 'block-a',
       interaction_id: 'interaction',
@@ -113,9 +108,22 @@ describe('observation conversation', () => {
     const committed = {
       ...current,
       runs: mergeObservationRuns(current.runs, [
-        { ...current.runs[0], events: [event('first', 2, block.kind, { text: block.text, block_id: block.block_id })] },
+        {
+          ...current.runs[0],
+          events: [
+            event('first', 2, 'client_visible_content', {
+              text: block.text,
+              block_id: block.block_id,
+              parts: [{ type: 'text', text: block.text }],
+              item: 'text:1',
+              complete: false,
+            }),
+          ],
+        },
       ]),
     }
+    expect(observationConversationMessages(committed, [block], live)[1].text).toBe(live[1].text)
+    expect(observationConversationMessages(committed, [block], live)[1].unsaved).toBe(false)
     const after = observationConversationMessages(committed, withoutCommittedBlocks([block], committed), live)
     expect(after[1].text).toBe(live[1].text)
     expect(after[1].unsaved).toBe(false)
@@ -151,14 +159,14 @@ describe('observation conversation', () => {
     const messages = observationConversationMessages(
       detail(
         [
-          run('child', 2, [event('child', 8, 'client_visible_content_delta', { text: 'Second response' })]),
+          run('child', 2, [event('child', 8, 'client_visible_content', { text: 'Second response' })]),
           run('first', 1, [
-            event('first', 4, 'client_visible_content_delta', { text: ' world' }),
+            event('first', 4, 'client_visible_content', { text: ' world' }),
             event('first', 3, 'checkpoint', { text: 'private system prompt' }),
-            event('first', 2, 'client_visible_content_delta', { text: 'Hello' }),
+            event('first', 2, 'client_visible_content', { text: 'Hello' }),
             event('first', 5, 'platform_tool_finished', { text: 'private tool result' }),
-            event('other-run', 6, 'client_visible_content_delta', { text: 'unrelated response' }),
-            event('first', 7, 'client_visible_content_delta', { text: { raw: 'not display text' } }),
+            event('other-run', 6, 'client_visible_content', { text: 'unrelated response' }),
+            event('first', 7, 'client_visible_content', { text: { raw: 'not display text' } }),
           ]),
         ],
         'Second response',
@@ -179,12 +187,12 @@ describe('observation conversation', () => {
           kind: 'input_preview_recorded',
           text: 'Actual user question',
         }),
-        event('root-run', 3, 'client_visible_content_delta', { text: 'First response' }),
+        event('root-run', 3, 'client_visible_content', { text: 'First response' }),
       ]),
       run('tool-continuation', 2, [
         event('tool-continuation', 4, 'run_admitted', { has_new_user: false }),
         event('tool-continuation', 5, 'input_preview_recorded', { kind: 'input_preview_recorded' }),
-        event('tool-continuation', 6, 'client_visible_content_delta', { text: 'Tool continuation' }),
+        event('tool-continuation', 6, 'client_visible_content', { text: 'Tool continuation' }),
       ]),
       run('pending-tool-result-with-user', 3, [
         event('pending-tool-result-with-user', 7, 'run_admitted', {
@@ -195,7 +203,7 @@ describe('observation conversation', () => {
           kind: 'input_preview_recorded',
           text: 'Actual user question',
         }),
-        event('pending-tool-result-with-user', 9, 'client_visible_content_delta', { text: 'Follow-up response' }),
+        event('pending-tool-result-with-user', 9, 'client_visible_content', { text: 'Follow-up response' }),
       ]),
     ])
     const messages = observationConversationMessages(current)
@@ -213,13 +221,13 @@ describe('observation conversation', () => {
   test('keeps the root preview while its paged event is outside the loaded window', () => {
     const current = {
       ...detail([
-        run('root-run', 1, [event('root-run', 3, 'client_visible_content_delta', { text: 'First response' })]),
+        run('root-run', 1, [event('root-run', 3, 'client_visible_content', { text: 'First response' })]),
         run('follow-up', 2, [
           event('follow-up', 4, 'input_preview_recorded', {
             kind: 'input_preview_recorded',
             text: 'Visible follow-up',
           }),
-          event('follow-up', 5, 'client_visible_content_delta', { text: 'Follow-up response' }),
+          event('follow-up', 5, 'client_visible_content', { text: 'Follow-up response' }),
         ]),
       ]),
       older_events_cursor: 3,
@@ -240,7 +248,7 @@ describe('observation conversation', () => {
     const current = observationConversationMessages(
       detail(
         [
-          run('first', 1, [event('first', 2, 'client_visible_content_delta', { text: 'Actual response' })]),
+          run('first', 1, [event('first', 2, 'client_visible_content', { text: 'Actual response' })]),
           run('child', 2, []),
         ],
         'Retained ending',

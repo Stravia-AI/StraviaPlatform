@@ -8,6 +8,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
@@ -29,9 +30,13 @@ pub(super) struct AdmitPayload {
 }
 
 pub(super) const QUEUE_CAPACITY: usize = 2048;
+pub(super) const LIVE_COALESCE_BYTES: usize = 16 * 1024;
 
 pub(super) enum WriterCommand {
     ClearTail,
+    ClearDebug {
+        response: oneshot::Sender<anyhow::Result<()>>,
+    },
     ClientDisconnected {
         runs: Vec<String>,
     },
@@ -92,6 +97,7 @@ pub(super) enum WriterCommand {
 
 pub(super) struct WriterDeps {
     pub store: ObservationStore,
+    pub debug_trace_index: Arc<super::manifest_index::DebugTraceIndex>,
     pub retention_days: Arc<AtomicU32>,
     pub updates: broadcast::Sender<ObservationUpdate>,
     pub trace_sequence: Arc<AtomicI64>,
@@ -105,6 +111,7 @@ pub(super) struct WriterDeps {
 
 struct WriterContext<'a> {
     store: &'a ObservationStore,
+    debug_trace_index: &'a super::manifest_index::DebugTraceIndex,
     retention: &'a AtomicU32,
     updates: &'a broadcast::Sender<ObservationUpdate>,
     trace_sequence: &'a AtomicI64,
@@ -115,6 +122,7 @@ pub(super) fn spawn(
 ) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let WriterDeps {
         store,
+        debug_trace_index,
         retention_days,
         updates,
         trace_sequence,
@@ -129,13 +137,16 @@ pub(super) fn spawn(
     let handle = tokio::spawn(async move {
         let mut attribution =
             RunAttribution::new(ObservationEvidence::new(store.clone(), generation_chains));
-        // 只合并同一 Run 中相邻且同作用域的正文或思考增量，不跨事件边界重排。
+        // Volatile previews may be coalesced for live subscribers only. Durable
+        // diagnostic content arrives separately at canonical item boundaries.
         let mut pending_text = TextBuffer {
+            retained_bytes: 0,
             blocks: HashMap::new(),
             live,
             gaps: unpersisted_gaps.clone(),
         };
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
+        let mut terminal_facts: HashMap<String, (Option<DeliveryOutcome>, bool)> = HashMap::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -143,6 +154,7 @@ pub(super) fn spawn(
         let mut maintenance = tokio::time::Instant::now();
         let context = WriterContext {
             store: &store,
+            debug_trace_index: &debug_trace_index,
             retention: retention_days.as_ref(),
             updates: &updates,
             trace_sequence: trace_sequence.as_ref(),
@@ -165,8 +177,6 @@ pub(super) fn spawn(
                             .expire(now(), retention_days.load(Ordering::Acquire));
                         attribution.sweep(now());
                         pending_text.publish_live(&updates);
-                        let due: Vec<_> = pending_text.blocks.iter().filter(|(_, block)| block.due()).map(|(run, _)| run.clone()).collect();
-                        for run in due { flush_one(&context, &attribution, &mut pending_text, &run).await; }
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
                         flush_active_manifests(
@@ -210,18 +220,33 @@ pub(super) fn spawn(
             }
             match command {
                 Some(WriterCommand::ClearTail) => attribution.clear_tail(),
+                Some(WriterCommand::ClearDebug { response }) => {
+                    for trace in active_traces.lock().values() {
+                        trace.mark_partial("debug_data_cleared", true);
+                    }
+                    let result = async {
+                        traces.delete_all().await?;
+                        let ids = debug_trace_index.mark_all_debug_tombstones().await?;
+                        debug_trace_index.delete_manifests(&ids).await?;
+                        partial_trace_count.store(0, Ordering::Release);
+                        persisted_manifests.clear();
+                        Ok(())
+                    }
+                    .await;
+                    let _ = response.send(result);
+                }
                 Some(WriterCommand::ClientDisconnected { runs }) => {
                     for run_id in runs {
                         match store.disconnect_waiting_client(&run_id, now()).await {
                             Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                             Ok(None) => {}
-                            Err(_) => {
+                            Err(error) => {
                                 unpersisted_gaps.lock().record(&run_id, now());
                                 if let Some(interaction) = attribution.interaction_for_run(&run_id)
                                 {
                                     pending_gaps.insert(interaction.to_owned(), now());
                                 }
-                                tracing::warn!(%run_id, "client disconnect persistence failed");
+                                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client disconnect persistence failed");
                             }
                         }
                     }
@@ -250,11 +275,11 @@ pub(super) fn spawn(
                         Ok::<_, anyhow::Error>(())
                     }
                     .await;
-                    if result.is_err() {
+                    if let Err(error) = result {
                         unpersisted_gaps.lock().record(&run_id, at);
                         pending_gaps.insert(interaction.to_owned(), at);
                         // SQL errors may include result bind values; never log payloads.
-                        tracing::warn!(%run_id, "client tool result persistence failed");
+                        tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
                     }
                 }
                 Some(WriterCommand::InputPreview { run_id, preview }) => {
@@ -271,9 +296,9 @@ pub(super) fn spawn(
                             publish(&updates, &trace_sequence, event);
                         }
                         Ok(None) => {}
-                        Err(_) => {
+                        Err(error) => {
                             // Never include SQL bind values or input text in diagnostics.
-                            tracing::warn!(%run_id, "input preview persistence failed");
+                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "input preview persistence failed");
                             pending_gaps.insert(interaction.to_owned(), at);
                         }
                     }
@@ -399,7 +424,7 @@ pub(super) fn spawn(
                         Ok(event) => {
                             if let Some(trace) = trace {
                                 let manifest = trace.manifest();
-                                match store
+                                match debug_trace_index
                                     .save_manifest(
                                         Some(&start.id),
                                         None,
@@ -496,56 +521,42 @@ pub(super) fn spawn(
                     };
                     let mut event = event;
                     super::redaction::redact_run_event(&mut event);
-                    if pending_text
-                        .blocks
-                        .get(&run_id)
-                        .is_some_and(|block| !same_scope(&block.event, &event))
-                    {
-                        flush_one(&context, &attribution, &mut pending_text, &run_id).await;
-                    }
-                    let text = text_mut(&mut event).expect("text event");
-                    let incoming = std::mem::take(text);
-                    let mut rest = incoming.as_str();
-                    let mut sealed = Vec::new();
-                    while !rest.is_empty() {
-                        let block =
-                            pending_text
-                                .blocks
-                                .entry(run_id.clone())
-                                .or_insert_with(|| {
-                                    TextBlock::new(
-                                        event.clone(),
-                                        interaction.clone(),
-                                        run_id.clone(),
-                                    )
-                                });
-                        let take = block.append(rest);
-                        rest = &rest[take..];
-                        if take == 0
-                            || text_mut(&mut block.event).expect("text block").len()
-                                == super::codec::CONTENT_BLOCK_BYTES
-                        {
-                            sealed.push(pending_text.blocks.remove(&run_id).expect("sealed block"));
-                            if sealed.len() == 32 {
-                                persist_blocks(
-                                    &context,
-                                    &pending_text,
-                                    &interaction,
-                                    &run_id,
-                                    std::mem::take(&mut sealed),
-                                )
-                                .await;
-                            }
+                    let id = delta_block_id(&event, &run_id);
+                    let part_index = delta_part_index(&event);
+                    let incoming = std::mem::take(text_mut(&mut event).expect("text event"));
+                    let retained_bytes = pending_text.retained_bytes;
+                    let block = pending_text.blocks.entry(id).or_insert_with(|| {
+                        TextBlock::new(event, interaction.clone(), run_id.clone())
+                    });
+                    let previous_bytes = block.allocated_bytes;
+                    let growth_headroom = match &block.event {
+                        RunEvent::ClientVisibleContentDelta { text, .. }
+                        | RunEvent::ModelThinkingDelta { text, .. } => {
+                            text.capacity().saturating_mul(2)
                         }
+                        _ => 0,
+                    };
+                    if retained_bytes
+                        .saturating_add(growth_headroom)
+                        .saturating_add(incoming.len().saturating_mul(4))
+                        > 8 * 1024 * 1024
+                    {
+                        block.overflowed = true;
+                        block.parts.clear();
+                        block.allocated_bytes = 0;
+                        *text_mut(&mut block.event).expect("text block") = String::new();
+                        block.revision += 1;
+                    } else {
+                        block.append_part(part_index, &incoming);
                     }
-                    if !sealed.is_empty() {
-                        persist_blocks(&context, &pending_text, &interaction, &run_id, sealed)
-                            .await;
-                    }
+                    pending_text.retained_bytes =
+                        retained_bytes - previous_bytes + block.allocated_bytes;
+                    pending_text.publish_live(&updates);
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
                     flush_one(&context, &attribution, &mut pending_text, &run_id).await;
-                    let mut batch = vec![(event, None, now())];
+                    let block_id = canonical_block_id(&event);
+                    let mut batch = vec![(event, block_id, now())];
                     while batch.len() < 64 {
                         match rx.try_recv() {
                             Ok(WriterCommand::Event {
@@ -559,7 +570,8 @@ pub(super) fn spawn(
                                         | RunEvent::NativeCompactionAssociated { .. }
                                 ) =>
                             {
-                                batch.push((event, None, now()))
+                                let block_id = canonical_block_id(&event);
+                                batch.push((event, block_id, now()))
                             }
                             Ok(command) => {
                                 deferred = Some(command);
@@ -568,9 +580,28 @@ pub(super) fn spawn(
                             Err(_) => break,
                         }
                     }
-                    for (event, _, _) in &batch {
-                        if matches!(event, RunEvent::ClientOutputCommitted) {
-                            attribution.output_committed(&run_id);
+                    for (event, block_id, occurred_at) in &batch {
+                        if let Some(id) = block_id {
+                            if let Some(block) = pending_text.blocks.remove(id) {
+                                pending_text.retained_bytes -= block.allocated_bytes;
+                            }
+                            pending_text.live.remove(id);
+                        }
+                        match event {
+                            RunEvent::ClientOutputCommitted => {
+                                attribution.output_committed(&run_id);
+                                terminal_facts.entry(run_id.clone()).or_default().1 = true;
+                            }
+                            RunEvent::DeliveryFinished { status, reason } => {
+                                terminal_facts.entry(run_id.clone()).or_default().0 =
+                                    Some(DeliveryOutcome {
+                                        status: status.clone(),
+                                        reason: reason.clone(),
+                                        completed_at: (status == "delivered")
+                                            .then_some(*occurred_at),
+                                    });
+                            }
+                            _ => {}
                         }
                     }
                     if let Some(interaction) = attribution.interaction_for_run(&run_id) {
@@ -589,7 +620,7 @@ pub(super) fn spawn(
                                     publish(&updates, &trace_sequence, event);
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 unpersisted_gaps.lock().record(&run_id, at);
                                 pending_gaps.insert(interaction.to_owned(), at);
                                 let _ = updates.send(ObservationUpdate::LiveGap {
@@ -597,16 +628,46 @@ pub(super) fn spawn(
                                     run_id: run_id.clone(),
                                     reason: "persistence_failed".into(),
                                 });
-                                tracing::warn!(%run_id, "observation event persistence failed");
+                                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "observation event persistence failed");
                             }
                         }
                     }
                 }
                 Some(WriterCommand::Finish {
                     run_id,
-                    outcome,
+                    mut outcome,
                     finished_at,
                 }) => {
+                    if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
+                        outcome.client_output_committed |= committed;
+                        if outcome.delivery.is_none() {
+                            outcome.delivery = delivery;
+                        }
+                    }
+                    let trace = active_traces.lock().get(&run_id).cloned();
+                    if let Some(trace) = trace {
+                        let manifest = trace.finish().await;
+                        let at = now();
+                        match debug_trace_index
+                            .save_manifest(
+                                Some(&run_id),
+                                None,
+                                &manifest,
+                                at,
+                                expires(at, retention_days.load(Ordering::Relaxed)),
+                                true,
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                persisted_manifests.insert(run_id.clone(), manifest);
+                            }
+                            Err(error) => {
+                                trace.mark_observation_gap();
+                                tracing::warn!(%run_id, %error, "terminal trace manifest persistence failed");
+                            }
+                        }
+                    }
                     persist_finish(
                         &context,
                         &mut attribution,
@@ -687,7 +748,38 @@ pub(super) fn spawn(
                                 }
                             }
                         }
-                        if let Some((outcome, finished_at)) = pending_finish {
+                        if pending_finish.is_some()
+                            && let Some(trace) = &trace
+                        {
+                            let manifest = trace.finish().await;
+                            let at = now();
+                            match debug_trace_index
+                                .save_manifest(
+                                    Some(run_id),
+                                    None,
+                                    &manifest,
+                                    at,
+                                    expires(at, retention_days.load(Ordering::Relaxed)),
+                                    true,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    persisted_manifests.insert(run_id.to_owned(), manifest);
+                                }
+                                Err(error) => {
+                                    trace.mark_observation_gap();
+                                    tracing::warn!(%run_id, %error, "terminal trace manifest persistence failed");
+                                }
+                            }
+                        }
+                        if let Some((mut outcome, finished_at)) = pending_finish {
+                            if let Some((delivery, committed)) = terminal_facts.remove(run_id) {
+                                outcome.client_output_committed |= committed;
+                                if outcome.delivery.is_none() {
+                                    outcome.delivery = delivery;
+                                }
+                            }
                             persist_finish(
                                 &context,
                                 &mut attribution,
@@ -726,50 +818,34 @@ pub(super) fn spawn(
                         let manifest = trace.finish().await;
                         let at = now();
                         let expiry = expires(at, retention_days.load(Ordering::Relaxed));
-                        let persisted = if let Some(run_id) = run_id.as_deref() {
-                            if let Some(interaction_id) = attribution.interaction_for_run(run_id) {
-                                match store
-                                    .persist_manifest_event(
-                                        interaction_id,
-                                        run_id,
-                                        &manifest,
-                                        at,
-                                        expiry,
-                                        true,
-                                    )
-                                    .await
-                                {
-                                    Ok(event) => {
-                                        publish(&updates, &trace_sequence, event);
-                                        Ok(())
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            } else {
-                                store
-                                    .save_manifest(Some(run_id), None, &manifest, at, expiry, true)
-                                    .await
-                            }
-                        } else {
-                            store
-                                .save_manifest(
-                                    None,
-                                    rejection_id.as_deref(),
-                                    &manifest,
-                                    at,
-                                    expiry,
-                                    true,
-                                )
-                                .await
-                        };
-                        match persisted {
-                            Ok(()) => persisted_partial = manifest.status == "partial",
-                            Err(error) => {
-                                tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
-                            }
+                        // The index retains terminal manifests in memory even when
+                        // the durable write fails, so the finalized partial count
+                        // covers indexed failures as well as persisted manifests.
+                        persisted_partial = manifest.status == "partial"
+                            && !manifest
+                                .reasons
+                                .iter()
+                                .any(|reason| reason == "debug_data_cleared");
+                        if !run_id.as_ref().is_some_and(|run_id| {
+                            persisted_manifests
+                                .get(run_id)
+                                .is_some_and(|previous| manifests_match(previous, &manifest))
+                        }) && let Err(error) = debug_trace_index
+                            .save_manifest(
+                                run_id.as_deref(),
+                                rejection_id.as_deref(),
+                                &manifest,
+                                at,
+                                expiry,
+                                true,
+                            )
+                            .await
+                        {
+                            tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
                         }
                     }
                     if let Some(run_id) = run_id {
+                        terminal_facts.remove(&run_id);
                         let mut active = active_traces.lock();
                         active.remove(&run_id);
                         if persisted_partial {
@@ -856,6 +932,10 @@ async fn flush_active_manifests(
         if trace.flush().await.is_err() {
             trace.mark_observation_gap();
         }
+        // Finish 已保存终态；维护不能将它重新发布为未完成捕获。
+        if trace.is_finished() {
+            continue;
+        }
         let manifest = trace.manifest();
         if persisted
             .get(&run_id)
@@ -865,10 +945,10 @@ async fn flush_active_manifests(
         }
         let at = now();
         match context
-            .store
-            .persist_manifest_event(
-                interaction_id,
-                &run_id,
+            .debug_trace_index
+            .save_manifest(
+                Some(&run_id),
+                None,
                 &manifest,
                 at,
                 expires(at, context.retention.load(Ordering::Relaxed)),
@@ -876,9 +956,8 @@ async fn flush_active_manifests(
             )
             .await
         {
-            Ok(event) => {
+            Ok(()) => {
                 persisted.insert(run_id, manifest);
-                publish(context.updates, context.trace_sequence, event);
             }
             Err(error) => {
                 trace.mark_observation_gap();
@@ -886,6 +965,27 @@ async fn flush_active_manifests(
             }
         }
     }
+}
+
+/// Persistence errors may echo SQL statements, bind values or payload text;
+/// only the driver error class and database error code are safe diagnostics.
+fn redacted_persist_cause(error: &anyhow::Error) -> String {
+    for cause in error.chain() {
+        match cause.downcast_ref::<sqlx::Error>() {
+            Some(sqlx::Error::Database(database)) => {
+                return match database.code() {
+                    Some(code) => format!("database:{:?}:{code}", database.kind()),
+                    None => format!("database:{:?}", database.kind()),
+                };
+            }
+            Some(_) => return "sqlx".to_owned(),
+            None => {}
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return format!("io:{:?}", io.kind());
+        }
+    }
+    "persistence".to_owned()
 }
 
 fn publish(
@@ -915,6 +1015,7 @@ async fn persist_finish(
     at: i64,
 ) {
     flush_one(context, attribution, pending_text, run_id).await;
+    pending_text.retain(|run| run != run_id);
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
         let expiry = expires(at, context.retention.load(Ordering::Relaxed));
         use tracing::Instrument as _;
@@ -935,7 +1036,7 @@ async fn persist_finish(
                 }
                 publish(context.updates, context.trace_sequence, value);
             }
-            Err(_) => {
+            Err(error) => {
                 pending_text.gaps.lock().record(run_id, at);
                 if let Err(error) = context.store.mark_observation_gap(interaction).await {
                     tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
@@ -945,7 +1046,7 @@ async fn persist_finish(
                     run_id: run_id.to_owned(),
                     reason: "persistence_failed".into(),
                 });
-                tracing::warn!(%run_id, "observation finish persistence failed");
+                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "observation finish persistence failed");
             }
         }
     }
@@ -957,7 +1058,11 @@ async fn flush_text(
     attribution: &RunAttribution<ObservationEvidence>,
     pending: &mut TextBuffer,
 ) {
-    let ids: Vec<_> = pending.blocks.keys().cloned().collect();
+    let ids: Vec<_> = pending
+        .blocks
+        .values()
+        .map(|block| block.run.clone())
+        .collect();
     for id in ids {
         flush_one(context, attribution, pending, &id).await;
     }
@@ -968,67 +1073,12 @@ async fn flush_one(
     pending: &mut TextBuffer,
     run_id: &str,
 ) {
-    let Some(block) = pending.blocks.remove(run_id) else {
-        return;
-    };
-    let Some(interaction) = attribution.interaction_for_run(run_id) else {
-        pending.live.remove(&block.id);
-        return;
-    };
-    persist_blocks(context, pending, interaction, run_id, vec![block]).await;
-}
-async fn persist_blocks(
-    context: &WriterContext<'_>,
-    pending: &TextBuffer,
-    interaction: &str,
-    run_id: &str,
-    blocks: Vec<TextBlock>,
-) {
-    let at = now();
-    let events: Vec<_> = blocks
-        .into_iter()
-        .map(|block| {
-            pending.publish_block(&block, context.updates);
-            (block.event, Some(block.id), block.at)
-        })
-        .collect();
-    use tracing::Instrument as _;
-    let span = tracing::info_span!(target: "stravia::perf", "observation.writer.persist_text", status = tracing::field::Empty);
-    let result = context
-        .store
-        .persist_run_events(
-            interaction,
-            run_id,
-            &events,
-            expires(at, context.retention.load(Ordering::Relaxed)),
-        )
-        .instrument(span.clone())
-        .await;
-    span.record("status", if result.is_ok() { "completed" } else { "error" });
-    drop(span);
-    for (_, id, _) in &events {
-        pending.live.remove(id.as_deref().expect("block id"));
-    }
-    match result {
-        Ok(events) => {
-            for event in events {
-                publish(context.updates, context.trace_sequence, event);
-            }
-        }
-        Err(_) => {
-            pending.gaps.lock().record(run_id, at);
-            if let Err(error) = context.store.mark_observation_gap(interaction).await {
-                tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
-            }
-            let _ = context.updates.send(ObservationUpdate::LiveGap {
-                interaction_id: interaction.to_owned(),
-                run_id: run_id.to_owned(),
-                reason: "persistence_failed".into(),
-            });
-            tracing::warn!(%run_id, "observation text persistence failed");
-        }
+    let _ = attribution;
+    for block in pending.blocks.values().filter(|block| block.run == run_id) {
+        pending.publish_block(block, context.updates);
     }
 }
+
 pub(super) fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -1042,49 +1092,81 @@ struct TextBlock {
     run: String,
     event: RunEvent,
     at: i64,
-    started: tokio::time::Instant,
     revision: u64,
     published: u64,
+    parts: std::collections::BTreeMap<CanonicalPartIndex, String>,
+    overflowed: bool,
+    allocated_bytes: usize,
 }
 impl TextBlock {
     fn new(event: RunEvent, interaction: String, run: String) -> Self {
         Self {
-            id: stravia_runtime_contract::identifier::new_id(),
+            id: delta_block_id(&event, &run),
             interaction,
             run,
             event,
             at: now(),
-            started: tokio::time::Instant::now(),
             revision: 0,
             published: 0,
+            parts: Default::default(),
+            overflowed: false,
+            allocated_bytes: 0,
         }
     }
-    fn due(&self) -> bool {
-        self.started.elapsed() >= Duration::from_secs(2)
-    }
+    #[cfg(test)]
     fn append(&mut self, text: &str) -> usize {
-        let pending = text_mut(&mut self.event).expect("text block");
-        let mut take = text
+        self.append_part(delta_part_index(&self.event), text);
+        text.len()
+    }
+    fn append_part(&mut self, part_index: CanonicalPartIndex, text: &str) {
+        if text.is_empty() || self.overflowed {
+            return;
+        }
+        if text_mut(&mut self.event)
+            .expect("text block")
             .len()
-            .min(super::codec::CONTENT_BLOCK_BYTES - pending.len());
-        while !text.is_char_boundary(take) {
-            take -= 1;
-        }
-        if take > 0 {
-            pending.push_str(&text[..take]);
+            .saturating_add(text.len())
+            > 8 * 1024 * 1024
+        {
+            self.overflowed = true;
+            self.parts.clear();
+            self.allocated_bytes = 0;
+            *text_mut(&mut self.event).expect("text block") = String::new();
             self.revision += 1;
+            return;
         }
-        take
+        let appends_at_end = self
+            .parts
+            .keys()
+            .next_back()
+            .is_none_or(|last| part_index >= *last);
+        let part = self.parts.entry(part_index).or_default();
+        let previous_part_capacity = part.capacity();
+        part.push_str(text);
+        self.allocated_bytes += part.capacity() - previous_part_capacity;
+        let pending = text_mut(&mut self.event).expect("text block");
+        let previous_text_capacity = pending.capacity();
+        if appends_at_end {
+            pending.push_str(text);
+        } else {
+            pending.clear();
+            for part in self.parts.values() {
+                pending.push_str(part);
+            }
+        }
+        self.allocated_bytes += pending.capacity() - previous_text_capacity;
+        self.revision += 1;
     }
     fn live(&self) -> LiveContentBlock {
         let (kind, turn, attempt, text) = match &self.event {
-            RunEvent::ClientVisibleContentDelta { text } => {
+            RunEvent::ClientVisibleContentDelta { text, .. } => {
                 ("client_visible_content_delta", None, None, text)
             }
             RunEvent::ModelThinkingDelta {
                 model_turn_id,
                 attempt_id,
                 text,
+                ..
             } => (
                 "model_thinking_delta",
                 Some(model_turn_id.clone()),
@@ -1107,6 +1189,7 @@ impl TextBlock {
     }
 }
 struct TextBuffer {
+    retained_bytes: usize,
     blocks: HashMap<String, TextBlock>,
     live: Arc<super::live::LiveState>,
     gaps: Arc<Mutex<super::UnpersistedGaps>>,
@@ -1117,7 +1200,7 @@ impl TextBuffer {
             return;
         }
         let value = block.live();
-        if self.live.replace(value.clone()) {
+        if !block.overflowed && self.live.replace(value.clone()) {
             if updates.receiver_count() > 0 {
                 let _ = updates.send(ObservationUpdate::LiveContent(value));
             }
@@ -1138,11 +1221,16 @@ impl TextBuffer {
                 continue;
             }
             let value = block.live();
-            if self.live.replace(value.clone()) {
+            if !block.overflowed && self.live.replace(value.clone()) {
                 if updates.receiver_count() > 0 {
                     let _ = updates.send(ObservationUpdate::LiveContent(value));
                 }
             } else {
+                block.overflowed = true;
+                self.retained_bytes -= block.allocated_bytes;
+                block.allocated_bytes = 0;
+                block.parts.clear();
+                *text_mut(&mut block.event).expect("text block") = String::new();
                 self.live.remove(&block.id);
                 if updates.receiver_count() > 0 {
                     let _ = updates.send(ObservationUpdate::LiveGap {
@@ -1156,19 +1244,28 @@ impl TextBuffer {
         }
     }
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
-        self.blocks.retain(|run, block| {
-            if keep(run) {
+        self.blocks.retain(|_, block| {
+            if keep(&block.run) {
                 true
             } else {
+                self.retained_bytes -= block.allocated_bytes;
                 self.live.remove(&block.id);
                 false
             }
         });
     }
 }
+fn canonical_block_id(event: &RunEvent) -> Option<String> {
+    match event {
+        RunEvent::ModelThinking { block_id, .. }
+        | RunEvent::ClientVisibleContent { block_id, .. } => Some(block_id.clone()),
+        _ => None,
+    }
+}
+
 pub(super) fn text_mut(event: &mut RunEvent) -> Option<&mut String> {
     match event {
-        RunEvent::ClientVisibleContentDelta { text }
+        RunEvent::ClientVisibleContentDelta { text, .. }
         | RunEvent::ModelThinkingDelta { text, .. } => Some(text),
         _ => None,
     }
@@ -1178,7 +1275,7 @@ pub(super) fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
         (
             RunEvent::ClientVisibleContentDelta { .. },
             RunEvent::ClientVisibleContentDelta { .. },
-        ) => true,
+        ) => delta_identity(left) == delta_identity(right),
         (
             RunEvent::ModelThinkingDelta {
                 model_turn_id: l,
@@ -1190,46 +1287,45 @@ pub(super) fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
                 attempt_id: b,
                 ..
             },
-        ) => l == r && a == b,
+        ) => l == r && a == b && delta_identity(left) == delta_identity(right),
         _ => false,
     }
+}
+
+fn delta_identity(event: &RunEvent) -> (usize, CanonicalPartIndex) {
+    match event {
+        RunEvent::ClientVisibleContentDelta {
+            item_ordinal,
+            part_index,
+            ..
+        }
+        | RunEvent::ModelThinkingDelta {
+            item_ordinal,
+            part_index,
+            ..
+        } => (*item_ordinal, *part_index),
+        _ => unreachable!("canonical delta"),
+    }
+}
+fn delta_part_index(event: &RunEvent) -> CanonicalPartIndex {
+    delta_identity(event).1
+}
+fn delta_block_id(event: &RunEvent, run_id: &str) -> String {
+    let scope = match event {
+        RunEvent::ModelThinkingDelta { attempt_id, .. } => attempt_id.as_str(),
+        _ => run_id,
+    };
+    super::canonical_item_block_id(scope, delta_identity(event).0)
 }
 
 #[cfg(test)]
 mod block_tests {
     use super::*;
     #[test]
-    fn byte_and_time_seals_preserve_utf8_and_scope() {
-        let original = "你好🙂abc".repeat(6000);
-        let mut rest = original.as_str();
-        let mut recovered = String::new();
-        let event = RunEvent::ClientVisibleContentDelta {
-            text: String::new(),
-        };
-        while !rest.is_empty() {
-            let mut block = TextBlock::new(event.clone(), "interaction".into(), "run".into());
-            let take = block.append(rest);
-            assert!(take > 0 && take <= super::super::codec::CONTENT_BLOCK_BYTES);
-            recovered.push_str(&block.live().text);
-            rest = &rest[take..];
-            assert!(!block.due());
-            block.started -= Duration::from_secs(2);
-            assert!(block.due());
-        }
-        assert_eq!(recovered, original);
-        let thinking = |attempt: &str| RunEvent::ModelThinkingDelta {
-            model_turn_id: "turn".into(),
-            attempt_id: attempt.into(),
-            text: String::new(),
-        };
-        assert!(!same_scope(&thinking("one"), &thinking("two")));
-        assert!(!same_scope(&thinking("one"), &event));
-        assert!(!same_scope(&event, &RunEvent::ClientOutputCommitted));
-    }
-    #[test]
     fn live_revisions_replace_and_committed_identity_is_removable() {
         let mirror = Arc::new(super::super::live::LiveState::default());
         let buffer = TextBuffer {
+            retained_bytes: 0,
             blocks: HashMap::new(),
             live: mirror.clone(),
             gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
@@ -1237,6 +1333,8 @@ mod block_tests {
         let (updates, mut receiver) = broadcast::channel(8);
         let mut block = TextBlock::new(
             RunEvent::ClientVisibleContentDelta {
+                item_ordinal: 0,
+                part_index: (false, 0),
                 text: String::new(),
             },
             "interaction".into(),
@@ -1257,5 +1355,40 @@ mod block_tests {
         assert_eq!(mirror.snapshot()[0].text, "first second");
         mirror.remove(&second.block_id);
         assert!(mirror.snapshot().is_empty());
+    }
+    #[test]
+    fn canonical_items_keep_identity_ordered_parts_and_cumulative_revisions() {
+        let delta = |ordinal| RunEvent::ClientVisibleContentDelta {
+            item_ordinal: ordinal,
+            part_index: (false, 0),
+            text: String::new(),
+        };
+        let mut first = TextBlock::new(delta(3), "interaction".into(), "run".into());
+        let second = TextBlock::new(delta(4), "interaction".into(), "run".into());
+        assert!(!same_scope(&first.event, &second.event));
+        assert_ne!(first.id, second.id);
+        first.append_part((false, 1), "tail");
+        let initial = first.live();
+        first.append_part((false, 0), "head");
+        first.append_part((false, 1), "!");
+        let final_live = first.live();
+        assert_eq!(final_live.text, "headtail!");
+        assert_eq!(initial.block_id, final_live.block_id);
+        assert!(final_live.revision > initial.revision);
+        let durable = RunEvent::ClientVisibleContent {
+            text: final_live.text,
+            parts: vec![],
+            block_id: super::super::canonical_item_block_id("run", 3),
+            item: serde_json::json!({"id":"late-provider-id"}),
+            complete: true,
+        };
+        assert_eq!(
+            canonical_block_id(&durable).as_deref(),
+            Some(first.id.as_str())
+        );
+        first.append_part((false, 0), &"x".repeat(LIVE_COALESCE_BYTES * 2));
+        assert_eq!(first.id, initial.block_id);
+        assert!(first.live().text.ends_with("tail!"));
+        assert!(first.revision > final_live.revision);
     }
 }

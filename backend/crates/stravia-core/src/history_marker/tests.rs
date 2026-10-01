@@ -13,7 +13,7 @@ async fn sqlite_store() -> Arc<dyn HistoryMarkerStore> {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     Arc::new(SqlHistoryMarkerStore::sqlite(pool))
@@ -235,7 +235,7 @@ async fn postgres_history_marker_store_contract_when_configured() {
         .connect_with(options)
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::migrate_postgres(&pool)
+    crate::migrations::migrate_postgres(&pool, None)
         .await
         .expect("PostgreSQL migrations");
     assert_store_contract(Arc::new(SqlHistoryMarkerStore::postgres(pool.clone()))).await;
@@ -252,7 +252,7 @@ async fn sqlite_claim_is_atomic_across_store_instances() {
     let pool = crate::db::init_pool(data_dir.path())
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let first: Arc<dyn HistoryMarkerStore> = Arc::new(SqlHistoryMarkerStore::sqlite(pool.clone()));

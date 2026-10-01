@@ -198,7 +198,9 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
         pool.clone(),
         directory.path().join("artifacts"),
@@ -215,7 +217,10 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
         .await
         .unwrap();
     let chain = GenerationChain::from_turn_chain(
-        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(pool)),
+        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool,
+            Arc::new(tokio::sync::Mutex::new(())),
+        )),
         DEFAULT_GENERATION_CHAIN_TTL,
         Some(artifacts),
     );
@@ -277,10 +282,15 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let compaction = crate::compaction::Compaction::sqlite(pool.clone());
     let chain = GenerationChain::from_turn_chain(
-        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(pool)),
+        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool,
+            Arc::new(tokio::sync::Mutex::new(())),
+        )),
         DEFAULT_GENERATION_CHAIN_TTL,
         None,
     )
@@ -364,7 +374,9 @@ async fn native_window_excludes_only_verified_items_from_new_input() {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let compaction = crate::compaction::Compaction::sqlite(pool);
     let owner = principal("leading-user");
     let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
@@ -523,7 +535,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let marker_store: Arc<dyn crate::history_marker::HistoryMarkerStore> =
@@ -699,7 +711,7 @@ async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let marker_store: Arc<dyn crate::history_marker::HistoryMarkerStore> =

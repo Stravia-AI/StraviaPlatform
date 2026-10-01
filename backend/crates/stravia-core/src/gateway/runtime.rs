@@ -27,12 +27,14 @@ async fn run_provider_allowance_sampler<F, Fut>(
 
 async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageRuntime> {
     let root = crate::data_paths::resolve_data_dir(&config.data_dir)?;
-    crate::data_paths::DataPaths::new(&root).prepare()?;
+    let paths = crate::data_paths::DataPaths::new(&root);
+    paths.prepare()?;
+    let diagnostics = paths.diagnostics();
     let (storage_kind, storage, sqlite_pool, postgres_pool): StorageRuntime =
         match config.storage.backend {
             StorageBackendKind::Sqlite => {
                 let pool = db::init_pool(&config.data_dir).await?;
-                migrations::migrate_sqlite(&pool).await?;
+                migrations::migrate_sqlite(&pool, Some(&diagnostics)).await?;
                 let sqlite_storage = SqliteStorage::from_pool(pool.clone());
                 (
                     RuntimeStorageKind::Sqlite,
@@ -45,7 +47,7 @@ async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageR
                 let backend_config = to_sql_backend_config(&config.storage.postgres, "postgres")?;
                 let postgres_storage = PostgresStorage::connect(backend_config).await?;
                 let pool = postgres_storage.pool().clone();
-                migrations::migrate_postgres(&pool).await?;
+                migrations::migrate_postgres(&pool, Some(&diagnostics)).await?;
                 (
                     RuntimeStorageKind::Postgres,
                     Arc::new(postgres_storage),
@@ -107,7 +109,7 @@ impl Gateway {
                 .max_connections(1)
                 .connect("sqlite::memory:")
                 .await?;
-            migrations::migrate_sqlite(&pool).await?;
+            migrations::migrate_sqlite(&pool, None).await?;
             Some(pool)
         } else {
             sqlite_pool.clone()
@@ -141,14 +143,21 @@ impl Gateway {
                 7
             }
         };
-        let turn_chains = if let Some(pool) = history_sqlite_pool.as_ref() {
-            turn_chain::SqlTurnChainStore::sqlite(pool.clone())
+        let (turn_chains, sqlite_write_gate) = if let Some(pool) = history_sqlite_pool.as_ref() {
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
+            (
+                turn_chain::SqlTurnChainStore::sqlite(pool.clone(), Arc::clone(&gate)),
+                Some(gate),
+            )
         } else {
-            turn_chain::SqlTurnChainStore::postgres(
-                postgres_pool
-                    .as_ref()
-                    .expect("Gateway requires a SQL history store")
-                    .clone(),
+            (
+                turn_chain::SqlTurnChainStore::postgres(
+                    postgres_pool
+                        .as_ref()
+                        .expect("Gateway requires a SQL history store")
+                        .clone(),
+                ),
+                None,
             )
         };
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
@@ -283,6 +292,7 @@ impl Gateway {
             retention_days,
             !matches!(storage_kind, RuntimeStorageKind::Memory),
             generation_chains.clone(),
+            sqlite_write_gate,
         )
         .await;
         let allowance_samples = match storage_kind {

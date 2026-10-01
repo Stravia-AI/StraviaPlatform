@@ -25,6 +25,12 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 SERVER_STARTUP_TIMEOUT = 180.0
 
 
+def encode_storage_json(value: Any) -> bytes:
+    """Encode JSON fixture input as an uncompressed storage payload."""
+    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return body + b"\x00" * 5 + len(body).to_bytes(8, "little") + b"\x01"
+
+
 # ── Port utilities ──────────────────────────────────────────────────────────
 
 

@@ -495,7 +495,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory SQLite");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
         let storage: DynStorage = Arc::new(SqliteStorage::from_pool(pool));

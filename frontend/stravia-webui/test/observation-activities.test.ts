@@ -79,91 +79,87 @@ function tools(value: InteractionDetail, id: string): ToolActivity[] {
 }
 
 describe('observation activities', () => {
-  test('preserves thinking paragraphs across live, durable and mixed delivery', () => {
+  test('reconciles a durable thinking item with its live block without losing paragraphs', () => {
     const root = run('root')
+    root.debug_enabled = false
     const value = detail([root])
-    const scope = { model_turn_id: 'turn', attempt_id: 'attempt' }
-    const chunks = [
-      '**Selecting top ',
-      'five candidate features**',
-      '\n',
-      '\n**Implementing temp path and timestamp retrieval**',
-    ]
-    const blocks = chunks.map((text, index) => ({
-      ...scope,
-      block_id: `thinking-${index}`,
+    const text = '**Selecting top five candidate features**\n\n**Implementing temp path and timestamp retrieval**'
+    const block = {
+      block_id: 'thinking',
       interaction_id: 'interaction',
       run_id: root.id,
       kind: 'model_thinking_delta' as const,
-      occurred_at: index,
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      occurred_at: 1,
       revision: 1,
       text,
-    }))
-    const expected = '**Selecting top five candidate features**\n\n**Implementing temp path and timestamp retrieval**'
-    const text = (remaining = blocks) =>
-      observationConversationActivities(value, remaining)
-        .get('assistant:root')!
-        .filter((activity) => activity.kind === 'thinking')
-        .map((activity) => activity.text)
-    expect(text()).toEqual([expected])
-    for (let index = 0; index < chunks.length; index++) {
-      event(root, index + 1, 'model_thinking_delta', { ...scope, text: chunks[index] })
-      expect(text(blocks.slice(index + 1))).toEqual([expected])
     }
-    expect(text([])).toEqual([expected])
-  })
-
-  test('accumulates ordinary thinking without Debug and stops failed attempts and runs before summary refresh', () => {
-    const root = run('root')
-    root.debug_enabled = false
-    const scope = { model_turn_id: 'turn', attempt_id: 'attempt' }
-    event(root, 1, 'model_thinking_delta', { ...scope, text: 'Read' })
-    const value = detail([root])
-    const first = observationConversationActivities(value)
-      .get('assistant:root')!
-      .find((activity) => activity.kind === 'thinking')!
-    event(root, 2, 'model_thinking_delta', { ...scope, text: ' carefully', signature: 'opaque' })
-    root.events.push(root.events[1])
-    expect(observationConversationActivities(value).get('assistant:root')).toEqual([
-      { ...first, text: 'Read carefully', live: true },
-    ])
-    event(root, 3, 'target_attempt_finished', { ...scope, status: 'failed' })
-    event(root, 4, 'model_thinking_delta', { ...scope, attempt_id: 'retry', text: 'Retry' })
-    expect(
-      observationConversationActivities(value)
-        .get('assistant:root')
-        ?.map((activity) => activity.live),
-    ).toEqual([false, true])
-    event(root, 5, 'run_finished', { status: 'failed' })
-    expect(
-      observationConversationActivities(value)
-        .get('assistant:root')
-        ?.map((activity) => activity.live),
-    ).toEqual([false, false])
+    const live = observationConversationActivities(value, [block]).get('assistant:root')![0]
+    expect(live).toMatchObject({ text, live: true })
+    event(root, 1, 'model_thinking', {
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      block_id: block.block_id,
+      item: 'thinking:0',
+      text,
+      parts: [{ type: 'text', text }],
+      complete: true,
+    })
+    expect(observationConversationActivities(value, [block]).get('assistant:root')).toEqual([{ ...live, live: false }])
+    expect(observationConversationActivities(value).get('assistant:root')).toEqual([{ ...live, live: false }])
     expect(observationConversationMessages(value).find((message) => message.id === 'assistant:root')?.text).toBe('')
   })
 
-  test('resumes the same thinking marker without ending another active attempt', () => {
+  test('keeps partial failed thinking durable and reconciles retries independently', () => {
     const root = run('root')
     root.debug_enabled = false
-    const scope = { model_turn_id: 'turn', attempt_id: 'attempt' }
-    event(root, 1, 'model_thinking_delta', { ...scope, text: 'First.' })
-    event(root, 2, 'model_thinking_finished', scope)
     const value = detail([root])
-    const first = observationConversationActivities(value).get('assistant:root')![0]
-    expect(first.live).toBe(false)
-    event(root, 3, 'model_thinking_delta', { ...scope, text: ' Again.' })
-    event(root, 4, 'model_thinking_delta', { ...scope, attempt_id: 'parallel', text: 'Independent.' })
-    expect(observationConversationActivities(value).get('assistant:root')).toEqual([
-      { ...first, text: 'First. Again.', live: true },
-      expect.objectContaining({ text: 'Independent.', live: true }),
+    event(root, 1, 'model_thinking', {
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      block_id: 'first',
+      item: 'thinking:0',
+      text: 'Read carefully',
+      parts: [{ type: 'text', text: 'Read carefully' }],
+      complete: false,
+    })
+    root.events.push(root.events[0])
+    event(root, 2, 'target_attempt_finished', {
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      status: 'failed',
+      usage: null,
+    })
+    const retry = {
+      block_id: 'retry',
+      interaction_id: 'interaction',
+      run_id: root.id,
+      kind: 'model_thinking_delta' as const,
+      model_turn_id: 'turn',
+      attempt_id: 'retry',
+      occurred_at: 3,
+      revision: 1,
+      text: 'Retry',
+    }
+    expect(observationConversationActivities(value, [retry]).get('assistant:root')).toMatchObject([
+      { text: 'Read carefully', live: false },
+      { text: 'Retry', live: true },
     ])
-    event(root, 5, 'model_thinking_finished', scope)
-    expect(
-      observationConversationActivities(value)
-        .get('assistant:root')
-        ?.map((activity) => activity.live),
-    ).toEqual([false, true])
+    event(root, 4, 'model_thinking', {
+      model_turn_id: 'turn',
+      attempt_id: 'retry',
+      block_id: 'retry',
+      item: 'thinking:1',
+      text: 'Retry',
+      parts: [{ type: 'text', text: 'Retry' }],
+      complete: false,
+    })
+    event(root, 5, 'run_finished', { status: 'failed', delivery: null })
+    expect(observationConversationActivities(value, [retry]).get('assistant:root')).toMatchObject([
+      { text: 'Read carefully', live: false },
+      { text: 'Retry', live: false },
+    ])
   })
 
   test('preserves explicit null tool input and results without inventing missing content', () => {

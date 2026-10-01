@@ -745,7 +745,7 @@ mod tests {
             .connect_with(options.options([("search_path", schema.as_str())]))
             .await
             .expect("isolated PostgreSQL pool");
-        crate::migrations::migrate_postgres(&pool)
+        crate::migrations::migrate_postgres(&pool, None)
             .await
             .expect("PostgreSQL migrations");
         let storage = PostgresStorage::from_pool(pool.clone());

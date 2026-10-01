@@ -27,7 +27,7 @@ async fn postgres_retention_contracts() {
     // the pool and drop the schema before the failure is propagated.
     let scenario_pool = pool.clone();
     let result = tokio::spawn(async move {
-        crate::migrations::migrate_postgres(&scenario_pool)
+        crate::migrations::migrate_postgres(&scenario_pool, None)
             .await
             .expect("PostgreSQL migrations");
         assert_resolving_a_branch_renews_its_predecessors_but_not_its_sibling(
@@ -93,7 +93,9 @@ async fn store() -> (Compaction, sqlx::SqlitePool) {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     (Compaction::sqlite(pool.clone()), pool)
 }
 

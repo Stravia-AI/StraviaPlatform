@@ -1,15 +1,17 @@
 use super::*;
 use sqlx::Connection;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum SqlTurnChainStore {
-    Sqlite(SqlitePool),
+    Sqlite(SqlitePool, Arc<tokio::sync::Mutex<()>>),
     Postgres(PgPool),
 }
 
 impl SqlTurnChainStore {
-    pub fn sqlite(pool: SqlitePool) -> Self {
-        Self::Sqlite(pool)
+    /// 同池的 Observation 写入口必须共享 gate；写方法内部取得锁，调用方不得预先持锁。
+    pub fn sqlite(pool: SqlitePool, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self::Sqlite(pool, gate)
     }
 
     pub fn postgres(pool: PgPool) -> Self {
@@ -18,10 +20,11 @@ impl SqlTurnChainStore {
 
     async fn remove_unreferenced_contents(&self) -> anyhow::Result<()> {
         const DELETE: &str = "DELETE FROM turn_chain_contents WHERE NOT EXISTS \
-            (SELECT 1 FROM turn_chain_content_refs r WHERE r.principal = turn_chain_contents.principal \
-             AND r.content_key = turn_chain_contents.content_key)";
+            (SELECT 1 FROM turn_chain_node_contents r WHERE r.principal = turn_chain_contents.principal \
+             AND r.content_id = turn_chain_contents.id)";
         match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, gate) => {
+                let _write_gate = gate.lock().await;
                 sqlx::query(DELETE).execute(pool).await?;
             }
             Self::Postgres(pool) => {
@@ -57,11 +60,13 @@ fn decode_node(
     kind: TurnNodeKind,
     parent_id: Option<String>,
     payload_version: i64,
-    payload: String,
+    payload: Vec<u8>,
 ) -> Result<TurnNode, TurnUnavailable> {
     let payload_version = u32::try_from(payload_version)
         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
-    let payload = serde_json::from_str(&payload)
+    let bytes = crate::storage_codec::decode(&payload)
+        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+    let payload = serde_json::from_slice(&bytes)
         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
     Ok(TurnNode {
         id,
@@ -101,9 +106,9 @@ impl TurnChainStore for SqlTurnChainStore {
         use tracing::Instrument as _;
         let principal = principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
-        let rows: Vec<(String, Option<String>, i64, String, i64, i64)> = async {
+        let rows: Vec<(String, Option<String>, i64, Vec<u8>, i64, i64)> = async {
             match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _) => {
                 // CROSS JOIN 固定 ancestors 为外层：否则无统计信息的 SQLite 会按
                 // (principal, kind) 扫描该主体全部节点，耗时随链深 × 节点数增长。
                 sqlx::query_as(
@@ -185,12 +190,13 @@ impl TurnChainStore for SqlTurnChainStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
         match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _) => {
                 content::restore_sqlite(
                     &mut *pool
                         .acquire()
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
+                    &principal,
                     &mut nodes,
                 )
                 .await
@@ -201,6 +207,7 @@ impl TurnChainStore for SqlTurnChainStore {
                         .acquire()
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
+                    &principal,
                     &mut nodes,
                 )
                 .await
@@ -222,7 +229,7 @@ impl TurnChainStore for SqlTurnChainStore {
         let expires_at = unix_millis_after(commit.idle_ttl);
         let encoded = content::encode(commit.payload)
             .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
-        tracing::Span::current().record("reference_count", encoded.refs.len() as u64);
+        tracing::Span::current().record("reference_count", encoded.contents.len() as u64);
         let payload = &encoded.payload;
         let payload_version = i64::from(commit.payload_version);
         let prefix_namespace = commit
@@ -243,7 +250,9 @@ impl TurnChainStore for SqlTurnChainStore {
             .map(|prefix| prefix.completed_at);
 
         match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, gate) => {
+                // 先与 Observation 协调，再拿连接和写事务，避免进入 SQLite busy handler 竞争。
+                let _write_gate = gate.lock().await;
                 let mut connection = pool
                     .acquire()
                     .await
@@ -296,8 +305,9 @@ impl TurnChainStore for SqlTurnChainStore {
                 sqlx::query(
                     "INSERT INTO turn_chain_nodes \
                      (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, \
-                      prefix_namespace, prefix_fingerprint, prefix_item_count, prefix_completed_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      prefix_namespace, prefix_fingerprint, prefix_item_count, prefix_completed_at, \
+                      storage_format) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)",
                 )
                 .bind(commit.id.as_str())
                 .bind(commit.kind.as_str())
@@ -317,12 +327,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 content::put_sqlite(&mut transaction, commit.id.as_str(), &principal, &encoded)
                     .await
                     .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
-                sqlx::query("UPDATE turn_chain_nodes SET storage_format = $1 WHERE id = $2")
-                    .bind(encoded.format)
-                    .bind(commit.id.as_str())
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+
                 transaction
                     .commit()
                     .await
@@ -333,6 +338,14 @@ impl TurnChainStore for SqlTurnChainStore {
                     .begin()
                     .await
                     .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                if !encoded.contents.is_empty() {
+                    // Nodes without externalized contents cannot lose a GC
+                    // race, so they skip the contents table lock entirely.
+                    sqlx::query("LOCK TABLE turn_chain_contents IN ROW EXCLUSIVE MODE")
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                }
                 let duplicate: Option<(i64,)> =
                     sqlx::query_as("SELECT 1::BIGINT FROM turn_chain_nodes WHERE id = $1")
                         .bind(commit.id.as_str())
@@ -373,8 +386,9 @@ impl TurnChainStore for SqlTurnChainStore {
                 sqlx::query(
                     "INSERT INTO turn_chain_nodes \
                      (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, \
-                      prefix_namespace, prefix_fingerprint, prefix_item_count, prefix_completed_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                      prefix_namespace, prefix_fingerprint, prefix_item_count, prefix_completed_at, \
+                      storage_format) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 2)",
                 )
                 .bind(commit.id.as_str())
                 .bind(commit.kind.as_str())
@@ -394,12 +408,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 content::put_postgres(&mut transaction, commit.id.as_str(), &principal, &encoded)
                     .await
                     .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
-                sqlx::query("UPDATE turn_chain_nodes SET storage_format = $1 WHERE id = $2")
-                    .bind(encoded.format)
-                    .bind(commit.id.as_str())
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+
                 transaction
                     .commit()
                     .await
@@ -427,7 +436,7 @@ impl TurnChainStore for SqlTurnChainStore {
         let principal = principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         let rows: Vec<(String, i64, i64)> = match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _) => {
                 let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
                     "SELECT id, prefix_item_count, prefix_completed_at FROM turn_chain_nodes \
                      WHERE principal = ",
@@ -514,7 +523,9 @@ impl TurnChainStore for SqlTurnChainStore {
          ),
     ) -> Result<(), TurnUnavailable> {
         macro_rules! rebuild {
-            ($pool:expr, $restore:ident) => {{
+            ($pool:expr, $restore:ident $(, $gate:expr)?) => {{
+                // SQLite: 持共享池写闸门跨整个事务，直到 commit 完成。
+                $(let _write_gate = $gate.lock().await;)?
                 let mut transaction = $pool.begin().await
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                 let now = chrono::Utc::now().timestamp_millis();
@@ -526,7 +537,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 ).bind(&stale).bind(now).fetch_all(&mut *transaction).await
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                 for (id, principal, completed_at) in heads {
-                    let rows: Vec<(String, Option<String>, i64, String, i64)> = sqlx::query_as(
+                    let rows: Vec<(String, Option<String>, i64, Vec<u8>, i64)> = sqlx::query_as(
                         "WITH RECURSIVE ancestors(id, parent_id, payload_version, payload, expires_at, depth) AS (\
                          SELECT id, parent_id, payload_version, payload, expires_at, 0 FROM turn_chain_nodes \
                          WHERE id = $1 AND principal = $2 AND kind = 'response' \
@@ -545,7 +556,7 @@ impl TurnChainStore for SqlTurnChainStore {
                     let mut nodes = rows.into_iter().map(|(id, parent_id, version, payload, _)| {
                         decode_node(TurnNodeId::new(id), TurnNodeKind::Response, parent_id, version, payload)
                     }).collect::<Result<Vec<_>, _>>()?;
-                    content::$restore(&mut transaction, &mut nodes).await
+                    content::$restore(&mut transaction, &principal, &mut nodes).await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                     let Some(prefix) = decode(nodes, completed_at)
                         .map_err(TurnUnavailable::Storage)? else { continue };
@@ -557,7 +568,7 @@ impl TurnChainStore for SqlTurnChainStore {
             }};
         }
         match self {
-            Self::Sqlite(pool) => rebuild!(pool, restore_sqlite),
+            Self::Sqlite(pool, gate) => rebuild!(pool, restore_sqlite, gate),
             Self::Postgres(pool) => rebuild!(pool, restore_postgres),
         }
         Ok(())
@@ -568,15 +579,18 @@ impl TurnChainStore for SqlTurnChainStore {
         let mut removed = 0_u64;
         loop {
             let rows = match self {
-                Self::Sqlite(pool) => sqlx::query(
-                    "DELETE FROM turn_chain_nodes WHERE expires_at <= ? \
-                     AND NOT EXISTS (SELECT 1 FROM turn_chain_nodes child \
-                     WHERE child.parent_id = turn_chain_nodes.id)",
-                )
-                .bind(now)
-                .execute(pool)
-                .await
-                .map(|result| result.rows_affected()),
+                Self::Sqlite(pool, gate) => {
+                    let _write_gate = gate.lock().await;
+                    sqlx::query(
+                        "DELETE FROM turn_chain_nodes WHERE expires_at <= ? \
+                         AND NOT EXISTS (SELECT 1 FROM turn_chain_nodes child \
+                         WHERE child.parent_id = turn_chain_nodes.id)",
+                    )
+                    .bind(now)
+                    .execute(pool)
+                    .await
+                    .map(|result| result.rows_affected())
+                }
                 Self::Postgres(pool) => sqlx::query(
                     "DELETE FROM turn_chain_nodes node WHERE expires_at <= $1 \
                      AND NOT EXISTS (SELECT 1 FROM turn_chain_nodes child \
@@ -595,6 +609,73 @@ impl TurnChainStore for SqlTurnChainStore {
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
                 return Ok(removed);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+impl SqlTurnChainStore {
+    /// Test-only rewrite hook: restores every stored node payload, applies
+    /// `edit`, then re-encodes it back into format 2 storage in one transaction
+    /// per node. Lets fixture-style tests simulate pre-existing payload shapes
+    /// without reaching into the binary envelope or the contents tables.
+    pub(crate) async fn rewrite_payloads(
+        &self,
+        mut edit: impl FnMut(&mut serde_json::Value),
+    ) -> anyhow::Result<()> {
+        macro_rules! rewrite {
+            ($pool:expr, $put:ident, $restore:ident, $lock:literal $(, $gate:expr)?) => {{
+                let rows: Vec<(String, String, Vec<u8>)> =
+                    sqlx::query_as("SELECT id, principal, payload FROM turn_chain_nodes")
+                        .fetch_all($pool)
+                        .await?;
+                for (id, principal, payload) in rows {
+                    let envelope: serde_json::Value =
+                        serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
+                    let mut nodes = vec![TurnNode {
+                        id: TurnNodeId::new(id.clone()),
+                        kind: TurnNodeKind::Response,
+                        parent_id: None,
+                        payload_version: 1,
+                        payload: envelope,
+                    }];
+                    {
+                        let mut connection = $pool.acquire().await?;
+                        content::$restore(&mut connection, &principal, &mut nodes).await?;
+                    }
+                    let mut payload = nodes.into_iter().next().expect("restored node").payload;
+                    edit(&mut payload);
+                    let encoded = content::encode(payload)?;
+                    $(let _write_gate = $gate.lock().await;)?
+                    let mut transaction = $pool.begin().await?;
+                    if !encoded.contents.is_empty() {
+                        sqlx::query($lock).execute(&mut *transaction).await?;
+                    }
+                    sqlx::query("DELETE FROM turn_chain_node_contents WHERE node_id = $1")
+                        .bind(&id)
+                        .execute(&mut *transaction)
+                        .await?;
+                    content::$put(&mut transaction, &id, &principal, &encoded).await?;
+                    sqlx::query("UPDATE turn_chain_nodes SET payload = $1 WHERE id = $2")
+                        .bind(encoded.payload.as_slice())
+                        .bind(&id)
+                        .execute(&mut *transaction)
+                        .await?;
+                    transaction.commit().await?;
+                }
+                anyhow::Ok(())
+            }};
+        }
+        match self {
+            Self::Sqlite(pool, gate) => {
+                rewrite!(pool, put_sqlite, restore_sqlite, "SELECT 1", gate)
+            }
+            Self::Postgres(pool) => rewrite!(
+                pool,
+                put_postgres,
+                restore_postgres,
+                "LOCK TABLE turn_chain_contents IN ROW EXCLUSIVE MODE"
+            ),
         }
     }
 }

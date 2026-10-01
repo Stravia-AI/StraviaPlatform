@@ -333,7 +333,7 @@ mod tests {
             return Ok(());
         };
         let result = async {
-            crate::migrations::migrate_postgres(&store.pool).await?;
+            crate::migrations::migrate_postgres(&store.pool, None).await?;
             let provider = create_provider(&store, "p1").await?;
 
             // 代际不匹配 → 不标记

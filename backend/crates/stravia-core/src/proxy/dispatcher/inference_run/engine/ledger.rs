@@ -82,9 +82,34 @@ impl RunLedger {
             response
                 .items
                 .iter()
-                .filter_map(|item| item.output_text_ref().or_else(|| item.refusal_ref()))
-                .filter(|text| !text.is_empty())
-                .map(ToOwned::to_owned),
+                .enumerate()
+                .flat_map(|(ordinal, item)| {
+                    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
+                    if item
+                        .output_text_ref()
+                        .or_else(|| item.refusal_ref())
+                        .is_none()
+                    {
+                        return Vec::new();
+                    }
+                    match &item.content {
+                        MessageContent::Text(text) => vec![(ordinal, 0, text.clone())],
+                        MessageContent::Blocks(parts) => parts
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(part_index, part)| match part {
+                                ContentBlock::Text { text, .. } => {
+                                    Some((ordinal, part_index, text.clone()))
+                                }
+                                ContentBlock::Refusal { refusal } => {
+                                    Some((ordinal, part_index, refusal.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    }
+                })
+                .filter(|(_, _, text)| !text.is_empty()),
         );
     }
 

@@ -873,6 +873,8 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
+Turn Chain format 2 在同一 Principal 内按 raw JSON 内容项摘要去重，至少 256B 的指定历史槽外置为内容行；节点 envelope 的 `slots` 保存路径与重复位置，`contents` 保存唯一摘要，`turn_chain_node_contents` 只保存不同内容的引用集合而非每个路径一行。复合外键约束节点与内容归属；写入先查已有项再插缺失项，物化按链批量读取并核验正文摘要，持锁 GC 维持引用安全。节点 envelope、内容及普通 Observation payload 使用同一二进制 codec，压缩门槛仍为 128B。精确的 14 字节 trailer、启动分阶段转换钩子、备份恢复与无可重复性能回退验收见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 状态不再进入关系表：`diagnostics/observation-debug/<trace_id>/manifest.json` 配合进程内 `DebugTraceIndex` 提供详情、失败请求列表与 Bundle 状态，单实例文件可见性不变；事件收敛见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+
 本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
 Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日志，宿主就绪后写应用日志目录，不可写时回退临时目录并提示。日志只包含版本、平台、阶段与安全分类后的错误，单文件上限 2 MiB，保留一份轮转备份；不记录凭据或任意原始异常内容。恢复 IPC 仅授予本地 `main` WebView，不依赖 HTTP 或管理员会话。关键初始化失败先清理已启动的业务资源再发布失败状态；只有网关、会话和监听器都已安装后才进入正常界面，重启使用完整进程生命周期，不做原地重试或自动数据修复。
@@ -970,6 +972,7 @@ CREATE TABLE inference_run_observations (
     status TEXT NOT NULL,
     debug_enabled INTEGER NOT NULL,
     client_output_committed INTEGER NOT NULL,
+    delivery_completed_at INTEGER,
     last_event_sequence INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 );
@@ -1006,21 +1009,7 @@ CREATE TABLE rejected_request_observations (
     code TEXT NOT NULL,
     status_code INTEGER NOT NULL,
     debug_enabled INTEGER NOT NULL,
-    debug_status TEXT NOT NULL,
     expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE debug_trace_manifests (
-    trace_id TEXT PRIMARY KEY,
-    run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
-    rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
-    relative_directory TEXT NOT NULL UNIQUE,
-    bytes_written INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    partial_reason TEXT,
-    tombstoned INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    CHECK ((run_id IS NOT NULL) <> (rejection_id IS NOT NULL))
 );
 
 CREATE TABLE observation_events (
@@ -1030,7 +1019,9 @@ CREATE TABLE observation_events (
     run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
     rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
-    payload TEXT NOT NULL,
+    payload BLOB NOT NULL, -- PostgreSQL: BYTEA
+    tool_id TEXT,
+    operation_id TEXT,
     expires_at INTEGER NOT NULL
 );
 
@@ -1058,7 +1049,7 @@ CREATE TABLE provider_oauth_credentials (
 
 基线 schema 不再包含旧 `request_logs`，Observation schema 与 sequence/index 自初始创建即存在，不做 Generation Chain backfill。没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/series/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
 
-Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 7 天）；大 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；Trace 先 tombstone、幂等删除目录，再删除 owner rows，启动 reconciliation 继续处理 tombstone 与 orphan directory。
+Observation metadata、文件 manifest 与 Trace segment 共用 `log_retention_days`（默认 7 天）；Debug 原始 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；文件删除先 rename 为 `.deleting-*` 再幂等完成，启动 reconciliation 继续中断删除并回收无 manifest 的孤儿目录。owner rows 清理后删除已无 owner 的目录。
 
 > Target 的共享连续失败计数、冷却、半开探测与进行中输入占位由 `RoutePolicyState`（`router/selector.rs`）在当前 Gateway 进程内管理，**不持久化到数据库，也不跨进程同步**；成功率调度证据仍从持久化的 Target attempt observations 派生。
 

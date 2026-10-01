@@ -179,6 +179,8 @@ pub(crate) async fn generate(
     .await;
     if standalone {
         observer.finish(crate::interaction_observation::RunOutcome {
+            client_output_committed: false,
+            delivery: None,
             delivery_completed_at: None,
             status: match &result {
                 Ok(_) => "completed",

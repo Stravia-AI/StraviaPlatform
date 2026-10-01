@@ -105,17 +105,6 @@ CREATE TABLE credential_custom_rules (
     updated_at  INTEGER NOT NULL
 );
 
-CREATE TABLE debug_trace_manifests (
-    trace_id TEXT PRIMARY KEY,
-    run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
-    rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
-    relative_directory TEXT NOT NULL UNIQUE,
-    bytes_written INTEGER NOT NULL DEFAULT 0, event_count INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL, partial_reason TEXT, tombstoned INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL, completed_at INTEGER, expires_at INTEGER NOT NULL,
-    CHECK ((run_id IS NOT NULL) <> (rejection_id IS NOT NULL))
-);
-
 CREATE TABLE history_markers (
     reference TEXT PRIMARY KEY,
     principal TEXT NOT NULL,
@@ -164,7 +153,7 @@ CREATE TABLE inference_run_observations (
     finished_at INTEGER,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL
-, failure_json TEXT, request_model TEXT);
+, failure_json TEXT, request_model TEXT, delivery_completed_at INTEGER);
 
 CREATE TABLE interaction_observations (
     id TEXT PRIMARY KEY,
@@ -267,12 +256,13 @@ CREATE TABLE native_compactions (
 );
 
 CREATE TABLE observation_events (
-    sequence INTEGER PRIMARY KEY,
-    occurred_at INTEGER NOT NULL,
-    interaction_id TEXT REFERENCES interaction_observations(id) ON DELETE CASCADE,
-    run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
-    rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL
+sequence INTEGER PRIMARY KEY,
+occurred_at INTEGER NOT NULL,
+interaction_id TEXT REFERENCES interaction_observations(id) ON DELETE CASCADE,
+run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
+kind TEXT NOT NULL, payload BLOB NOT NULL, expires_at INTEGER NOT NULL,
+tool_id TEXT, operation_id TEXT
 );
 
 CREATE TABLE observation_pending_tools (
@@ -436,7 +426,7 @@ CREATE TABLE providers (
 CREATE TABLE rejected_request_observations (
     id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,
     ingress_protocol TEXT NOT NULL, stage TEXT NOT NULL, code TEXT NOT NULL, status_code INTEGER NOT NULL,
-    debug_enabled INTEGER NOT NULL, debug_status TEXT NOT NULL, last_event_sequence INTEGER NOT NULL,
+    debug_enabled INTEGER NOT NULL, last_event_sequence INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 , failure_json TEXT, request_model TEXT, api_key_id TEXT, api_key_name TEXT, started_at INTEGER, duration_ms INTEGER);
 
@@ -471,41 +461,26 @@ CREATE TABLE target_attempt_observations (
     last_event_sequence INTEGER NOT NULL
 );
 
-CREATE TABLE turn_chain_content_refs (
-    node_id TEXT NOT NULL,
-    principal TEXT NOT NULL,
-    path TEXT NOT NULL,
-    content_key TEXT NOT NULL,
-    PRIMARY KEY (node_id, path),
-    FOREIGN KEY (node_id, principal) REFERENCES turn_chain_nodes(id, principal) ON DELETE CASCADE,
-    FOREIGN KEY (principal, content_key) REFERENCES turn_chain_contents(principal, content_key)
+CREATE TABLE turn_chain_contents (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, content_key TEXT NOT NULL, content BLOB NOT NULL,
+ UNIQUE(principal, content_key), UNIQUE(principal, id)
 );
 
-CREATE TABLE turn_chain_contents (
-    principal TEXT NOT NULL,
-    content_key TEXT NOT NULL,
-    content TEXT NOT NULL,
-    PRIMARY KEY (principal, content_key)
-);
+CREATE TABLE turn_chain_node_contents (
+ node_id TEXT NOT NULL, principal TEXT NOT NULL, content_id BIGINT NOT NULL,
+ PRIMARY KEY(node_id, content_id),
+ FOREIGN KEY(node_id, principal) REFERENCES turn_chain_nodes(id, principal) ON DELETE CASCADE,
+ FOREIGN KEY(principal, content_id) REFERENCES turn_chain_contents(principal, id) ON DELETE RESTRICT
+) WITHOUT ROWID;
 
 CREATE TABLE "turn_chain_nodes" (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('response', 'agent', 'web_search')),
-    parent_id TEXT,
-    principal TEXT NOT NULL,
-    payload_version INTEGER NOT NULL CHECK (payload_version > 0),
-    payload TEXT NOT NULL CHECK (json_valid(payload)),
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    prefix_namespace TEXT,
-    prefix_fingerprint TEXT,
-    prefix_item_count INTEGER,
-    prefix_completed_at INTEGER,
-    storage_format INTEGER NOT NULL DEFAULT 0 CHECK (storage_format IN (0, 1)),
-    UNIQUE (id, principal),
-    UNIQUE (id, principal, kind),
-    FOREIGN KEY (parent_id, principal, kind)
-        REFERENCES "turn_chain_nodes"(id, principal, kind) ON DELETE RESTRICT
+ id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('response','agent','web_search')),
+ parent_id TEXT, principal TEXT NOT NULL, payload_version INTEGER NOT NULL CHECK(payload_version>0),
+ payload BLOB NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+ prefix_namespace TEXT, prefix_fingerprint TEXT, prefix_item_count INTEGER, prefix_completed_at INTEGER,
+ storage_format INTEGER NOT NULL DEFAULT 2 CHECK(storage_format IN (0,1,2)),
+ UNIQUE(id,principal), UNIQUE(id,principal,kind),
+ FOREIGN KEY(parent_id,principal,kind) REFERENCES "turn_chain_nodes"(id,principal,kind) ON DELETE RESTRICT
 );
 
 CREATE TABLE vendor_data_recovery (
@@ -560,8 +535,6 @@ CREATE TABLE web_providers (
     )
 );
 
-CREATE INDEX debug_manifests_expiry_idx ON debug_trace_manifests(tombstoned, expires_at);
-
 CREATE INDEX idx_admin_sessions_expiry ON admin_sessions(expires_at);
 
 CREATE INDEX idx_agent_definition_revisions_slug
@@ -606,14 +579,6 @@ CREATE INDEX idx_oauth_creds_expires ON provider_oauth_credentials(expires_at);
 
 CREATE INDEX idx_oauth_creds_status ON provider_oauth_credentials(status);
 
-CREATE INDEX idx_observation_events_client_tool_call
-    ON observation_events(run_id, json_extract(payload, '$.tool_id'), sequence DESC)
-    WHERE kind IN ('client_tool_handoff', 'client_tool_result');
-
-CREATE INDEX idx_observation_events_context
-ON observation_events (interaction_id, sequence)
-WHERE kind IN ('compaction_operation', 'native_compaction_associated', 'retained_tail_associated');
-
 CREATE INDEX idx_provider_allowance_samples_item_time
     ON provider_allowance_samples(provider_id, allowance_key, sampled_at);
 
@@ -635,20 +600,17 @@ ON reversible_redaction_mappings(expires_at);
 CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
 ON reversible_redaction_mappings(principal, expires_at);
 
-CREATE INDEX idx_turn_chain_content_refs_content ON turn_chain_content_refs(principal, content_key);
-
 CREATE INDEX idx_turn_chain_expiry ON turn_chain_nodes(expires_at);
 
-CREATE UNIQUE INDEX idx_turn_chain_node_principal ON turn_chain_nodes(id, principal);
+CREATE INDEX idx_turn_chain_node_contents_content_id ON turn_chain_node_contents(principal, content_id);
+
+CREATE UNIQUE INDEX idx_turn_chain_node_principal ON turn_chain_nodes(id,principal);
 
 CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id);
 
-CREATE INDEX idx_turn_chain_principal_kind ON turn_chain_nodes(principal, kind);
+CREATE INDEX idx_turn_chain_principal_kind ON turn_chain_nodes(principal,kind);
 
-CREATE INDEX idx_turn_chain_reusable_prefix ON turn_chain_nodes (
-    principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC,
-    prefix_completed_at DESC, expires_at, id DESC
-) WHERE prefix_namespace IS NOT NULL;
+CREATE INDEX idx_turn_chain_reusable_prefix ON turn_chain_nodes(principal,kind,prefix_namespace,prefix_fingerprint,prefix_item_count DESC,prefix_completed_at DESC,expires_at,id DESC) WHERE prefix_namespace IS NOT NULL;
 
 CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
 
@@ -679,13 +641,15 @@ CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_
 
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
 
-CREATE INDEX observation_events_expiry_idx ON observation_events(expires_at, sequence);
+CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id,sequence);
 
-CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id, sequence);
+CREATE INDEX observation_events_operation_idx ON observation_events(operation_id,sequence) WHERE operation_id IS NOT NULL;
 
-CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id, sequence);
+CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id,sequence) WHERE rejection_id IS NOT NULL;
 
-CREATE INDEX observation_events_run_idx ON observation_events(run_id, sequence);
+CREATE INDEX observation_events_run_idx ON observation_events(run_id,sequence);
+
+CREATE INDEX observation_events_tool_idx ON observation_events(tool_id,sequence) WHERE tool_id IS NOT NULL;
 
 CREATE INDEX observation_pending_tools_expiry_idx
     ON observation_pending_tools(expires_at);
@@ -718,14 +682,6 @@ BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER api_keys_boolean_update BEFORE UPDATE ON api_keys
 WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
-BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
-
-CREATE TRIGGER debug_trace_manifests_boolean_insert BEFORE INSERT ON debug_trace_manifests
-WHEN (typeof(NEW.tombstoned) <> 'integer' OR NEW.tombstoned NOT IN (0, 1))
-BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
-
-CREATE TRIGGER debug_trace_manifests_boolean_update BEFORE UPDATE ON debug_trace_manifests
-WHEN (typeof(NEW.tombstoned) <> 'integer' OR NEW.tombstoned NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER inference_run_observations_boolean_insert BEFORE INSERT ON inference_run_observations

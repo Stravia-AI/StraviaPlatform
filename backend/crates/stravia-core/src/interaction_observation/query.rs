@@ -53,7 +53,7 @@ COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens,
 i.observation_gap,i.last_event_sequence,
 CAST(MAX(CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) THEN 1 ELSE 0 END) AS BIGINT) failed_request,
 CAST(MAX(CASE WHEN r.client_output_committed THEN 1 ELSE 0 END) AS BIGINT) client_output_delivered,
-CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
+CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,
 CAST(SUM(CASE
@@ -183,14 +183,6 @@ struct RejectionRow {
     debug_enabled: bool,
     debug_status: String,
 }
-#[derive(FromRow)]
-struct ManifestRow {
-    trace_id: String,
-    status: String,
-    bytes_written: i64,
-    event_count: i64,
-    partial_reason: Option<String>,
-}
 
 impl super::InteractionObservation {
     pub async fn credential_discoveries(
@@ -223,7 +215,7 @@ const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX
 impl ObservationStore {
     pub(super) async fn contains_gap_run(&self, run_id: &str) -> anyhow::Result<bool> {
         Ok(match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _, _) => {
                 sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=?)",
                 )
@@ -231,7 +223,7 @@ impl ObservationStore {
                 .fetch_one(pool)
                 .await?
             }
-            Self::Postgres(pool) => {
+            Self::Postgres(pool, _) => {
                 sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=$1)",
                 )
@@ -257,7 +249,7 @@ impl ObservationStore {
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
         let (mut rows, observation_gap): (Vec<DiscoveryRow>, bool) = match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _, _) => {
                 let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=1 AND expires_at>?)")
                     .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DISCOVERY_SELECT);
@@ -279,7 +271,7 @@ impl ObservationStore {
                     .push_bind((limit + 1) as i64);
                 (builder.build_query_as().fetch_all(pool).await?, gap)
             }
-            Self::Postgres(pool) => {
+            Self::Postgres(pool, _) => {
                 let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=TRUE AND expires_at>$1)")
                     .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Postgres>::new(DISCOVERY_SELECT);
@@ -315,10 +307,10 @@ impl ObservationStore {
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             // 只读取普通发现事件的安全元数据，不读取请求正文或秘密映射。
-            let payloads: Vec<String> = match self {
-                Self::Sqlite(pool) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=? AND kind='credential_mappings_created' AND expires_at>? AND occurred_at<=?")
+            let payloads: Vec<Vec<u8>> = match self {
+                Self::Sqlite(pool, _, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=? AND kind='credential_mappings_created' AND expires_at>? AND occurred_at<=?")
                     .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-                Self::Postgres(pool) => sqlx::query_scalar("SELECT payload::text FROM observation_events WHERE interaction_id=$1 AND kind='credential_mappings_created' AND expires_at>$2 AND occurred_at<=$3")
+                Self::Postgres(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='credential_mappings_created' AND expires_at>$2 AND occurred_at<=$3")
                     .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
             };
             let mut count = 0i64;
@@ -329,9 +321,8 @@ impl ObservationStore {
                 struct Payload {
                     discoveries: Vec<CredentialDiscovery>,
                 }
-                let payload: Payload = serde_json::from_value(super::codec::decode_payload(
-                    serde_json::from_str(&payload)?,
-                )?)?;
+                let payload: Payload =
+                    serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
                 count += payload.discoveries.len() as i64;
                 for discovery in payload.discoveries {
                     rule_ids.extend(discovery.rule_ids);
@@ -368,7 +359,7 @@ impl ObservationStore {
         // Leave room for the sequence bound under SQLite's historical 999-variable limit.
         for ids in interactions.chunks(900) {
             let events = match self {
-                Self::Sqlite(pool) => {
+                Self::Sqlite(pool, _, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
                         "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (",
                     );
@@ -380,9 +371,9 @@ impl ObservationStore {
                     query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
                     map_sqlite_events(query.build().fetch_all(pool).await?)?
                 }
-                Self::Postgres(pool) => {
+                Self::Postgres(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id IN (",
+                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (",
                     );
                     let mut separated = query.separated(",");
                     for id in ids {
@@ -415,8 +406,10 @@ impl ObservationStore {
         let span = tracing::info_span!(target: "stravia::perf", "observation.query.forest_roots", status = tracing::field::Empty);
         let roots = async {
             match self {
-                Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await,
-                Self::Postgres(p) => {
+                Self::Sqlite(p, _, _) => {
+                    forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await
+                }
+                Self::Postgres(p, _) => {
                     forest_roots_postgres(p, &q, start, end, bounded_end, limit).await
                 }
             }
@@ -432,12 +425,12 @@ impl ObservationStore {
             .map(|(id, _)| id.clone())
             .collect();
         let rows = match self {
-            Self::Sqlite(p) => interactions_for_roots_sqlite(p, &root_ids).await?,
-            Self::Postgres(p) => interactions_for_roots_postgres(p, &root_ids).await?,
+            Self::Sqlite(p, _, _) => interactions_for_roots_sqlite(p, &root_ids).await?,
+            Self::Postgres(p, _) => interactions_for_roots_postgres(p, &root_ids).await?,
         };
         let matched = match self {
-            Self::Sqlite(p) => matching_in_roots_sqlite(p, &q, &root_ids).await?,
-            Self::Postgres(p) => matching_in_roots_postgres(p, &q, &root_ids).await?,
+            Self::Sqlite(p, _, _) => matching_in_roots_sqlite(p, &q, &root_ids).await?,
+            Self::Postgres(p, _) => matching_in_roots_postgres(p, &q, &root_ids).await?,
         };
         let mut roots: Vec<ForestRoot> = root_rows
             .iter()
@@ -476,6 +469,7 @@ impl ObservationStore {
         for root in &mut roots {
             for interaction in &mut root.interactions {
                 interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
+                interaction.debug_status = self.interaction_debug_status(&interaction.id).await?;
             }
         }
         let next_cursor =
@@ -504,22 +498,23 @@ impl ObservationStore {
             filters.window_index,
         )?;
         let Some(selected_row) = (match self {
-            Self::Sqlite(p) => interaction_sqlite(p, id).await?,
-            Self::Postgres(p) => interaction_postgres(p, id).await?,
+            Self::Sqlite(p, _, _) => interaction_sqlite(p, id).await?,
+            Self::Postgres(p, _) => interaction_postgres(p, id).await?,
         }) else {
             return Ok(None);
         };
         let root_id = selected_row.root_id.clone();
         let root_ids = [root_id.clone()];
         let root_rows = match self {
-            Self::Sqlite(p) => interactions_for_roots_sqlite(p, &root_ids).await?,
-            Self::Postgres(p) => interactions_for_roots_postgres(p, &root_ids).await?,
+            Self::Sqlite(p, _, _) => interactions_for_roots_sqlite(p, &root_ids).await?,
+            Self::Postgres(p, _) => interactions_for_roots_postgres(p, &root_ids).await?,
         };
         let matched = match self {
-            Self::Sqlite(p) => matching_in_roots_sqlite(p, &filters, &root_ids).await?,
-            Self::Postgres(p) => matching_in_roots_postgres(p, &filters, &root_ids).await?,
+            Self::Sqlite(p, _, _) => matching_in_roots_sqlite(p, &filters, &root_ids).await?,
+            Self::Postgres(p, _) => matching_in_roots_postgres(p, &filters, &root_ids).await?,
         };
         let mut selected = summary(selected_row.clone(), matched.contains(id));
+        selected.debug_status = self.interaction_debug_status(id).await?;
         let mut root_interactions: Vec<_> = root_rows
             .into_iter()
             .map(|row| {
@@ -536,6 +531,7 @@ impl ObservationStore {
         let mut context = self.context_events(&ids, snapshot_sequence).await?;
         for interaction in &mut root_interactions {
             interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
+            interaction.debug_status = self.interaction_debug_status(&interaction.id).await?;
             if interaction.id == id {
                 selected.context_events = interaction.context_events.clone();
             }
@@ -654,8 +650,8 @@ impl ObservationStore {
             ObservationQueryError::InvalidEventPage
         );
         let exists = match self {
-            Self::Sqlite(pool) => interaction_sqlite(pool, id).await?.is_some(),
-            Self::Postgres(pool) => interaction_postgres(pool, id).await?.is_some(),
+            Self::Sqlite(pool, _, _) => interaction_sqlite(pool, id).await?.is_some(),
+            Self::Postgres(pool, _) => interaction_postgres(pool, id).await?.is_some(),
         };
         if !exists {
             return Ok(None);
@@ -678,7 +674,7 @@ impl ObservationStore {
         let limit = query.limit.unwrap_or(200) as usize;
         let forward = query.after_sequence.is_some();
         let mut events = match self {
-            Self::Sqlite(pool) => {
+            Self::Sqlite(pool, _, _) => {
                 let mut sql = QueryBuilder::<sqlx::Sqlite>::new(
                     "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=",
                 );
@@ -701,9 +697,9 @@ impl ObservationStore {
                 drop(span);
                 map_sqlite_events(rows?)?
             }
-            Self::Postgres(pool) => {
+            Self::Postgres(pool, _) => {
                 let mut sql = QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id=",
+                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=",
                 );
                 sql.push_bind(id).push(" AND sequence<=").push_bind(through);
                 if let Some(after) = query.after_sequence {
@@ -743,15 +739,33 @@ impl ObservationStore {
         id: &str,
         through: i64,
     ) -> anyhow::Result<Option<InteractionDetail>> {
+        self.bounded_interaction_for_bundle(id, through, true).await
+    }
+
+    async fn bounded_interaction_for_bundle(
+        &self,
+        id: &str,
+        through: i64,
+        include_root: bool,
+    ) -> anyhow::Result<Option<InteractionDetail>> {
         // 与 get_interaction 相同：run 行先于快照读取，避免终态事件被分页截掉。
         let runs = self.runs(id).await?;
-        let Some(snapshot) = self
+        let Some(mut snapshot) = self
             .get_interaction_summary(id, ForestQuery::default())
             .await?
         else {
             return Ok(None);
         };
         let snapshot_sequence = through.min(snapshot.snapshot_sequence);
+        snapshot
+            .interaction
+            .context_events
+            .retain(|event| event.sequence <= snapshot_sequence);
+        for interaction in &mut snapshot.root.interactions {
+            interaction
+                .context_events
+                .retain(|event| event.sequence <= snapshot_sequence);
+        }
         let mut events = Vec::new();
         let mut after = 0;
         loop {
@@ -767,10 +781,252 @@ impl ObservationStore {
             };
             after = next;
         }
+        let mut details = self.run_details(runs, events).await?;
+        details.retain(|run| run.events.iter().any(|event| event.kind == "run_admitted"));
+        for run in &mut details {
+            let terminal = run
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.kind == "run_finished");
+            if let Some(event) = terminal {
+                let outcome: RunOutcome = serde_json::from_value(event.payload.clone())?;
+                run.status = outcome.status;
+                run.terminal_reason = outcome.terminal_reason;
+                run.user_interrupted = run.status == "user_interrupted";
+                run.finished_at = Some(
+                    event
+                        .payload
+                        .get("finished_at")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(event.occurred_at),
+                );
+                run.generation_node_id = outcome.generation_node_id;
+                run.generation_parent_id = event
+                    .payload
+                    .get("generation_parent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                run.client_output_committed = event
+                    .payload
+                    .get("client_output_committed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+            } else {
+                run.status = "running".into();
+                run.terminal_reason = None;
+                run.user_interrupted = false;
+                run.finished_at = None;
+                run.generation_node_id = None;
+            }
+            for state in run.events.iter().filter(|event| {
+                event.kind == "run_state_changed"
+                    && terminal.is_none_or(|finished| event.sequence > finished.sequence)
+            }) {
+                if let Some(status) = state
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    run.status = status.into();
+                }
+                run.user_interrupted = state
+                    .payload
+                    .get("user_interrupted")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(run.user_interrupted);
+                if let Some(reason) = state
+                    .payload
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    run.terminal_reason = Some(reason.into());
+                }
+                if run.status != "running" && run.finished_at.is_none() {
+                    run.finished_at = Some(state.occurred_at);
+                }
+            }
+            let mut attempts = std::collections::HashMap::<&str, ConfirmedUsage>::new();
+            for event in &run.events {
+                if matches!(
+                    event.kind.as_str(),
+                    "target_attempt_started" | "target_attempt_finished"
+                ) && let Some(id) = event
+                    .payload
+                    .get("attempt_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    let usage = event
+                        .payload
+                        .get("usage")
+                        .filter(|value| !value.is_null())
+                        .map(|value| serde_json::from_value(value.clone()))
+                        .transpose()?
+                        .unwrap_or_default();
+                    attempts.insert(id, usage);
+                }
+            }
+            run.usage = ConfirmedUsage::aggregate(attempts.values());
+            let admission = run.events.iter().find(|event| event.kind == "run_admitted");
+            run.client_output_committed = terminal
+                .and_then(|event| event.payload.get("client_output_committed"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || run.events.iter().any(|event| {
+                    event.kind == "run_admitted"
+                        && event.payload["client_output_committed_sequence"]
+                            .as_i64()
+                            .is_some_and(|sequence| sequence <= through)
+                });
+            run.generation_node_id = terminal
+                .and_then(|event| event.payload.get("generation_node_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            run.generation_parent_id = terminal
+                .and_then(|event| event.payload.get("generation_parent_id"))
+                .or_else(|| admission.and_then(|event| event.payload.get("generation_parent_id")))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
+        let parents: HashSet<_> = details
+            .iter()
+            .filter_map(|run| run.parent_run_id.as_deref())
+            .collect();
+        snapshot.interaction.status = super::grouping::rollup_status(
+            details
+                .iter()
+                .map(|run| (run.status.as_str(), !parents.contains(run.id.as_str()))),
+        )
+        .into();
+        snapshot.interaction.usage =
+            ConfirmedUsage::aggregate(details.iter().map(|run| &run.usage));
+        // Run aggregates already carry per-attempt coverage, rather than one attempt per run.
+        snapshot.interaction.usage.coverage = Some(
+            details
+                .iter()
+                .filter_map(|run| run.usage.coverage.as_ref())
+                .fold(UsageCoverage::default(), |mut sum, coverage| {
+                    sum.attempt_count += coverage.attempt_count;
+                    sum.missing_input_tokens += coverage.missing_input_tokens;
+                    sum.missing_output_tokens += coverage.missing_output_tokens;
+                    sum.missing_cache_read_tokens += coverage.missing_cache_read_tokens;
+                    sum.missing_cache_write_tokens += coverage.missing_cache_write_tokens;
+                    sum.missing_reasoning_tokens += coverage.missing_reasoning_tokens;
+                    sum
+                }),
+        );
+        snapshot.interaction.last_event_sequence = details
+            .iter()
+            .flat_map(|run| &run.events)
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or(0);
+        let mut ordered_events: Vec<_> = details.iter().flat_map(|run| &run.events).collect();
+        ordered_events.sort_unstable_by_key(|event| event.sequence);
+        snapshot.interaction.generation_root_id = ordered_events
+            .iter()
+            .rev()
+            .filter(|event| matches!(event.kind.as_str(), "run_admitted" | "run_finished"))
+            .find_map(|event| event.payload.get("generation_root_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let mut blocks = Vec::<(String, String)>::new();
+        for event in &ordered_events {
+            if event.kind == "client_visible_content"
+                && let Some(text) = event
+                    .payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+            {
+                let canonical = event
+                    .payload
+                    .get("block_id")
+                    .and_then(serde_json::Value::as_str);
+                let id = canonical.map(str::to_owned).unwrap_or_else(|| {
+                    format!(
+                        "legacy:{:?}:{}:{}",
+                        event.run_id, event.payload["model_turn_id"], event.payload["attempt_id"]
+                    )
+                });
+                if let Some((_, previous)) = blocks.iter_mut().find(|(block, _)| *block == id) {
+                    if canonical.is_some() {
+                        *previous = text.into();
+                    } else {
+                        previous.push_str(text);
+                    }
+                } else {
+                    blocks.push((id, text.into()));
+                }
+            }
+        }
+        snapshot.interaction.visible_tail = blocks
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join(super::store::TURN_SEPARATOR);
+        snapshot.interaction.last_active_at = ordered_events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.kind.as_str(),
+                    "run_finished" | "run_interrupted" | "run_superseded" | "run_state_changed"
+                )
+            })
+            .map(|event| event.occurred_at)
+            .max()
+            .unwrap_or(snapshot.interaction.started_at);
+        snapshot.interaction.failed_request = details.iter().any(|run| {
+            run.status == "failed"
+                && run.finished_at.is_some()
+                && !matches!(
+                    run.terminal_reason.as_deref(),
+                    Some(
+                        "cancelled"
+                            | "client_disconnected"
+                            | "websocket_delivery_dropped"
+                            | "request_aborted"
+                    )
+                )
+        });
+        snapshot.interaction.client_output_delivered =
+            details.iter().any(|run| run.client_output_committed);
+        if details.is_empty() {
+            return Ok(None);
+        }
+        for interaction in &mut snapshot.root.interactions {
+            if interaction.id == snapshot.interaction.id {
+                *interaction = snapshot.interaction.clone();
+            } else if include_root {
+                if let Some(detail) = Box::pin(self.bounded_interaction_for_bundle(
+                    &interaction.id,
+                    snapshot_sequence,
+                    false,
+                ))
+                .await?
+                {
+                    *interaction = detail.interaction;
+                } else {
+                    interaction.last_event_sequence = 0;
+                }
+            }
+        }
+        if include_root {
+            snapshot
+                .root
+                .interactions
+                .retain(|interaction| interaction.last_event_sequence != 0);
+            snapshot.root.last_active_at = snapshot
+                .root
+                .interactions
+                .iter()
+                .map(|interaction| interaction.last_active_at)
+                .max()
+                .unwrap_or(snapshot.interaction.last_active_at);
+        }
         Ok(Some(InteractionDetail {
             interaction: snapshot.interaction,
             root: snapshot.root,
-            runs: self.run_details(runs, events).await?,
+            runs: details,
             snapshot_sequence,
             older_events_cursor: None,
         }))
@@ -786,12 +1042,24 @@ impl ObservationStore {
         let snapshot_sequence = self.max_sequence().await?;
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
         let (total, mut rows) = match self {
-            Self::Sqlite(p) => rejections_sqlite(p, &q, start, end, bounded_end, limit).await?,
-            Self::Postgres(p) => rejections_postgres(p, &q, start, end, bounded_end, limit).await?,
+            Self::Sqlite(p, _, _) => {
+                rejections_sqlite(p, &q, start, end, bounded_end, limit).await?
+            }
+            Self::Postgres(p, _) => {
+                rejections_postgres(p, &q, start, end, bounded_end, limit).await?
+            }
         };
         let next_cursor =
             (rows.len() > limit as usize).then(|| rows[limit as usize - 1].id.clone());
         rows.truncate(limit as usize);
+        for row in &mut rows {
+            if row.debug_enabled {
+                row.debug_status = self
+                    .debug_trace_index()
+                    .for_rejection(&row.id)
+                    .map_or_else(|| "partial".into(), |trace| trace.status);
+            }
+        }
         Ok(RejectionPage {
             items: rows.into_iter().map(rejection_summary).collect(),
             total,
@@ -801,10 +1069,16 @@ impl ObservationStore {
     }
     pub async fn get_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
         let row = match self {
-            Self::Sqlite(p) => rejection_sqlite(p, id).await?,
-            Self::Postgres(p) => rejection_postgres(p, id).await?,
+            Self::Sqlite(p, _, _) => rejection_sqlite(p, id).await?,
+            Self::Postgres(p, _) => rejection_postgres(p, id).await?,
         };
-        let Some(row) = row else { return Ok(None) };
+        let Some(mut row) = row else { return Ok(None) };
+        if row.debug_enabled {
+            row.debug_status = self
+                .debug_trace_index()
+                .for_rejection(&row.id)
+                .map_or_else(|| "partial".into(), |trace| trace.status);
+        }
         // 与 interaction 详情相同：快照序列在行读取之后获取，避免截掉行状态已见的终态事件。
         let snapshot_sequence = self.max_sequence().await?;
         let events = self.rejection_events(id, snapshot_sequence).await?;
@@ -818,13 +1092,13 @@ impl ObservationStore {
 
     async fn runs(&self, id: &str) -> anyhow::Result<Vec<RunRow>> {
         match self {
-            Self::Sqlite(p) => {
+            Self::Sqlite(p, _, _) => {
                 let mut b = QueryBuilder::<sqlx::Sqlite>::new(RUN_SELECT);
                 b.push_bind(id)
                     .push(" GROUP BY r.id ORDER BY r.started_at,r.id");
                 Ok(b.build_query_as().fetch_all(p).await?)
             }
-            Self::Postgres(p) => {
+            Self::Postgres(p, _) => {
                 let mut b = QueryBuilder::<sqlx::Postgres>::new(RUN_SELECT);
                 b.push_bind(id)
                     .push(" GROUP BY r.id ORDER BY r.started_at,r.id");
@@ -833,12 +1107,40 @@ impl ObservationStore {
         }
     }
     async fn manifest_for_run(&self, id: &str) -> anyhow::Result<Option<TraceManifest>> {
-        let row=match self{Self::Sqlite(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE run_id=?").bind(id).fetch_optional(p).await?,Self::Postgres(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE run_id=$1").bind(id).fetch_optional(p).await?};
-        Ok(row.map(manifest))
+        Ok(self.debug_trace_index().for_run(id))
     }
     async fn manifest_for_rejection(&self, id: &str) -> anyhow::Result<Option<TraceManifest>> {
-        let row=match self{Self::Sqlite(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE rejection_id=?").bind(id).fetch_optional(p).await?,Self::Postgres(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE rejection_id=$1").bind(id).fetch_optional(p).await?};
-        Ok(row.map(manifest))
+        Ok(self.debug_trace_index().for_rejection(id))
+    }
+    async fn interaction_debug_status(&self, id: &str) -> anyhow::Result<String> {
+        let runs: Vec<(String, bool)> = match self {
+            Self::Sqlite(pool, _, _) => sqlx::query_as(
+                "SELECT id,debug_enabled FROM inference_run_observations WHERE interaction_id=?",
+            )
+            .bind(id)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT id,debug_enabled FROM inference_run_observations WHERE interaction_id=$1",
+            )
+            .bind(id)
+            .fetch_all(pool)
+            .await?,
+        };
+        Ok(if runs.iter().all(|(_, enabled)| !enabled) {
+            "none"
+        } else if runs.iter().all(|(id, enabled)| {
+            *enabled
+                && self
+                    .debug_trace_index()
+                    .for_run(id)
+                    .is_some_and(|trace| trace.status == "complete")
+        }) {
+            "complete"
+        } else {
+            "partial"
+        }
+        .into())
     }
     async fn rejection_events(
         &self,
@@ -846,8 +1148,8 @@ impl ObservationStore {
         through: i64,
     ) -> anyhow::Result<Vec<ObservationEvent>> {
         match self {
-            Self::Sqlite(pool) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=? AND sequence<=? ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
-            Self::Postgres(pool) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE rejection_id=$1 AND sequence<=$2 ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+            Self::Sqlite(pool, _, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=? AND sequence<=? ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+            Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=$1 AND sequence<=$2 ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
         }
     }
 }
@@ -1117,7 +1419,7 @@ async fn matching_in_roots_postgres(
         .collect())
 }
 
-const REJECTION_SELECT: &str = "SELECT r.id,r.occurred_at,r.method,r.path,r.ingress_protocol,r.stage,r.code,r.status_code,r.debug_enabled,CASE WHEN NOT r.debug_enabled THEN 'none' WHEN m.trace_id IS NULL THEN 'partial' ELSE m.status END debug_status FROM rejected_request_observations r LEFT JOIN debug_trace_manifests m ON m.rejection_id=r.id ";
+const REJECTION_SELECT: &str = "SELECT r.id,r.occurred_at,r.method,r.path,r.ingress_protocol,r.stage,r.code,r.status_code,r.debug_enabled,CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END debug_status FROM rejected_request_observations r ";
 async fn rejections_sqlite(
     p: &sqlx::SqlitePool,
     q: &RejectionQuery,
@@ -1187,16 +1489,6 @@ async fn rejection_postgres(p: &sqlx::PgPool, id: &str) -> anyhow::Result<Option
     Ok(b.build_query_as().fetch_optional(p).await?)
 }
 
-fn manifest(r: ManifestRow) -> TraceManifest {
-    TraceManifest {
-        trace_id: r.trace_id,
-        enabled: true,
-        status: r.status,
-        bytes_written: r.bytes_written.max(0) as u64,
-        event_count: r.event_count.max(0) as u64,
-        reasons: r.partial_reason.into_iter().collect(),
-    }
-}
 fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
     InteractionSummary {
         context_events: Vec::new(),
@@ -1251,8 +1543,8 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
                 run_id: r.try_get(3)?,
                 rejection_id: r.try_get(4)?,
                 kind: r.try_get(5)?,
-                payload: super::codec::decode_payload(serde_json::from_str(
-                    &r.try_get::<String, _>(6)?,
+                payload: serde_json::from_slice(&crate::storage_codec::decode(
+                    &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
             }))
         })
@@ -1269,8 +1561,8 @@ fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<O
                 run_id: r.try_get(3)?,
                 rejection_id: r.try_get(4)?,
                 kind: r.try_get(5)?,
-                payload: super::codec::decode_payload(serde_json::from_str(
-                    &r.try_get::<String, _>(6)?,
+                payload: serde_json::from_slice(&crate::storage_codec::decode(
+                    &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
             }))
         })
@@ -1289,8 +1581,14 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        let store = ObservationStore::Sqlite(pool);
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         let at = chrono::Utc::now().timestamp_millis();
         let metadata = crate::interaction_observation::RequestMetadata::default();
         // HTTP 到达时间由真实时钟决定；仅在存储边界固定同毫秒，验证跨来源的平局顺序。
@@ -1331,6 +1629,8 @@ mod tests {
                     &RunOutcome {
                         status: "failed".into(),
                         terminal_reason: Some("historical_failure".into()),
+                        delivery: None,
+                        client_output_committed: false,
                         delivery_completed_at: None,
                         generation_node_id: None,
                         generation_root_id: None,
@@ -1414,8 +1714,14 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        let store = ObservationStore::Sqlite(pool.clone());
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         let at = 1_000i64;
         for (id, status, reason, committed) in [
             (
@@ -1469,6 +1775,33 @@ mod tests {
                 .bind(id)
                 .execute(&pool)
                 .await?;
+                let sequence = store.max_sequence().await? + 1;
+                let admission = sqlx::query("SELECT sequence,payload FROM observation_events WHERE run_id=? AND kind='run_admitted'").bind(id).fetch_one(&pool).await?;
+                let mut payload: serde_json::Value = serde_json::from_slice(
+                    &crate::storage_codec::decode(&admission.try_get::<Vec<u8>, _>("payload")?)?,
+                )?;
+                payload["client_output_committed_sequence"] = sequence.into();
+                sqlx::query("UPDATE observation_events SET payload=? WHERE sequence=?")
+                    .bind(crate::storage_codec::encode(&serde_json::to_vec(
+                        &payload,
+                    )?)?)
+                    .bind(admission.try_get::<i64, _>("sequence")?)
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("UPDATE observation_sequence SET next_sequence=? WHERE singleton_id=1")
+                    .bind(sequence + 1)
+                    .execute(&pool)
+                    .await?;
+                let committed_bundle = store
+                    .get_interaction_for_bundle(id, sequence)
+                    .await?
+                    .unwrap();
+                assert!(committed_bundle.interaction.client_output_delivered);
+                let before_commit = store
+                    .get_interaction_for_bundle(id, sequence - 1)
+                    .await?
+                    .unwrap();
+                assert!(!before_commit.interaction.client_output_delivered);
             }
             store
                 .finish_run(
@@ -1477,6 +1810,8 @@ mod tests {
                     &RunOutcome {
                         status: status.into(),
                         terminal_reason: reason.map(str::to_owned),
+                        delivery: None,
+                        client_output_committed: committed,
                         delivery_completed_at: None,
                         generation_node_id: None,
                         generation_root_id: None,
@@ -1501,6 +1836,28 @@ mod tests {
                 snapshot.interaction.client_output_delivered, delivered,
                 "{id}"
             );
+            let through = store.max_sequence().await?;
+            let bundle = store
+                .get_interaction_for_bundle(id, through)
+                .await?
+                .unwrap();
+            assert_eq!(
+                bundle.interaction.client_output_delivered, delivered,
+                "bundle {id}"
+            );
+            let admission_sequence: i64 =
+                sqlx::query_scalar("SELECT MIN(sequence) FROM observation_events WHERE run_id=?")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await?;
+            let historical = store
+                .get_interaction_for_bundle(id, admission_sequence)
+                .await?
+                .unwrap();
+            assert!(
+                !historical.interaction.client_output_delivered,
+                "historical {id}"
+            );
         }
         Ok(())
     }
@@ -1511,18 +1868,30 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        let store = ObservationStore::Sqlite(pool.clone());
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         // An empty root must not touch observation storage at all.
         assert!(store.context_events(&[], 10).await?.is_empty());
-        sqlx::query("CREATE TABLE observation_events (sequence INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, interaction_id TEXT, run_id TEXT, rejection_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)")
+        sqlx::query("CREATE TABLE observation_events (sequence INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, interaction_id TEXT, run_id TEXT, rejection_id TEXT, kind TEXT NOT NULL, payload BLOB NOT NULL)")
             .execute(&pool).await?;
         let ids: Vec<_> = (0..1_801)
             .map(|index| format!("interaction-{index}"))
             .collect();
         let mut tx = pool.begin().await?;
         for (index, id) in ids.iter().enumerate() {
-            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,'compaction_operation','{}')")
-                .bind(index as i64 + 1).bind(id).execute(&mut *tx).await?;
+            sqlx::query(
+                "INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,'compaction_operation',?)",
+            )
+            .bind(index as i64 + 1)
+            .bind(id)
+            .bind(crate::storage_codec::encode(b"{}")?)
+            .execute(&mut *tx)
+            .await?;
         }
         for (sequence, kind) in [
             (1_802i64, "retained_tail_associated"),
@@ -1530,10 +1899,11 @@ mod tests {
             (1_804, "client_tool_result"),
             (1_805, "compaction_operation"),
         ] {
-            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,?,'{}')")
+            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,?,?)")
                 .bind(sequence)
                 .bind(&ids[0])
                 .bind(kind)
+                .bind(crate::storage_codec::encode(b"{}")?)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -1675,8 +2045,14 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        let store = ObservationStore::Sqlite(pool);
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         let request = AiRequest::new(
             "swe-2",
             vec![AiItem {
@@ -1759,8 +2135,15 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        pending_input_estimate_scenario(&ObservationStore::Sqlite(pool)).await
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        pending_input_estimate_scenario(&ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        ))
+        .await
     }
 
     #[tokio::test]
@@ -1787,8 +2170,14 @@ mod tests {
                 .connect_with(options.options([("search_path", schema.as_str())]))
                 .await?;
             let result = async {
-                crate::migrations::migrate_postgres(&pool).await?;
-                pending_input_estimate_scenario(&ObservationStore::Postgres(pool.clone())).await
+                crate::migrations::migrate_postgres(&pool, None).await?;
+                pending_input_estimate_scenario(&ObservationStore::Postgres(
+                    pool.clone(),
+                    std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                        std::path::Path::new(""),
+                    )),
+                ))
+                .await
             }
             .await;
             pool.close().await;
@@ -1965,8 +2354,14 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        let store = ObservationStore::Sqlite(pool);
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         admit_chain_node(&store, "small", "small", None, 1).await?;
         confirm_displayed_tokens(&store, "small", 1_000, 1_000, 0, 0, 2).await?;
         admit_chain_node(&store, "large", "large", None, 1).await?;
@@ -2031,8 +2426,14 @@ mod tests {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        crate::migrations::migrate_sqlite(&pool).await?;
-        let store = ObservationStore::Sqlite(pool);
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         for index in 0..3 {
             let id = format!("root-{index}");
             admit_chain_node(&store, &id, &id, None, 1).await?;

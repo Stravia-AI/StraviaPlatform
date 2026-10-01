@@ -31,7 +31,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let root = data_dir.path().join("artifacts");
@@ -120,7 +120,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let artifacts = Arc::new(LocalArtifactStore::sqlite(
@@ -185,7 +185,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let artifacts = Arc::new(LocalArtifactStore::sqlite(
@@ -246,7 +246,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let artifacts = Arc::new(LocalArtifactStore::sqlite(
@@ -350,7 +350,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let artifacts = Arc::new(LocalArtifactStore::sqlite(
@@ -462,7 +462,7 @@ mod tests {
         let pool = crate::db::init_pool(data_dir.path())
             .await
             .expect("SQLite pool");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
         let artifacts = Arc::new(LocalArtifactStore::sqlite(

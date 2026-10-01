@@ -166,7 +166,7 @@ fn ai_response_to_deltas(
     }
     deltas
 }
-fn visible_delta_text(
+pub(super) fn visible_delta_text(
     delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
 ) -> Option<&str> {
     match delta {
@@ -693,9 +693,14 @@ pub(super) async fn orchestrate(
             generation_parent_id: generation_parent_id.clone(),
         },
     );
-    // Use the received request snapshot, never restored history or hook-added results.
-    // Publication waits for the observer's credential-protected preview boundary.
-    observer.capture_client_tool_results(&client_request.items);
+    // Generation Chain has removed restored parent history from this verified
+    // delta. Only newly submitted results belong to this run.
+    let submitted_items = generation_chain_write
+        .as_ref()
+        .map_or(client_request.items.as_slice(), |write| {
+            write.request_delta().items.as_slice()
+        });
+    observer.capture_client_tool_results(submitted_items);
     if has_new_user {
         observer.capture_input_preview(&client_request.items);
     }

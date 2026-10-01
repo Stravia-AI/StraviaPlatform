@@ -357,12 +357,30 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         // Each mode has its own Principal, so a missing stream commit cannot
         // pass by finding the preceding unary request's saved Artifact.
         let rows = gateway._sqlite_pool.as_ref().unwrap();
-        let payloads: Vec<String> =
-            sqlx::query_scalar("SELECT payload FROM turn_chain_nodes WHERE principal = ?")
+        let nodes: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, kind FROM turn_chain_nodes WHERE principal = ?")
                 .bind(Principal::new(key.id.clone()).continuation_key())
                 .fetch_all(rows)
                 .await
                 .unwrap();
+        let owner = Principal::new(key.id.clone());
+        let mut payloads = Vec::new();
+        for (id, kind) in nodes {
+            let kind: stravia_runtime_contract::turn_chain::TurnNodeKind =
+                serde_json::from_value(serde_json::Value::String(kind)).unwrap();
+            for node in gateway
+                .turn_chains
+                .materialize(
+                    &owner,
+                    kind,
+                    &stravia_runtime_contract::turn_chain::TurnNodeId::new(id),
+                )
+                .await
+                .unwrap()
+            {
+                payloads.push(node.payload.to_string());
+            }
+        }
         assert!(payloads.iter().all(|payload| !payload.contains(&encoded)));
         let reference = payloads
             .iter()

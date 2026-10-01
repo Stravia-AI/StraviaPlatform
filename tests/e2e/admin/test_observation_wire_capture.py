@@ -4,10 +4,8 @@ import base64
 import http.client
 import io
 import json
-import sqlite3
 import time
 import zipfile
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -15,6 +13,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
+from tests.e2e.admin.test_compaction_diagnostics import _semantic, diagnostic_provider
 from tests.e2e.admin.test_observations import (
     _create_route,
     _detail,
@@ -184,6 +183,56 @@ def test_http_wire_capture_preserves_exact_nonsecret_body(admin_env: dict[str, A
 
 @pytest.mark.e2e
 @pytest.mark.admin
+@pytest.mark.parametrize("stream", [False, True], ids=["json", "sse"])
+def test_observation_decodes_exact_large_unicode_upstream_content(
+    admin_env: dict[str, Any], diagnostic_provider: Any, stream: bool,
+) -> None:
+    _enable_debug(admin_env)
+    conversation = diagnostic_provider(f"wire-unicode-{stream}")
+    text = "\n\n".join(
+        f"段落 {number}: café — 保留完整的上游文本和空白。 " + "large upstream body 文本 " * 80
+        for number in range(32)
+    )
+    messages = [{"role": "user", "content": "return the prepared Unicode paragraphs"}]
+    answer = {"role": "assistant", "content": text}
+    if stream:
+        # The existing HTTP provider sends this prepared answer, independently of
+        # the request text; exercise its SSE transport as well as JSON delivery.
+        conversation.accepted[_semantic(messages)] = answer
+        status, response = _raw_post(
+            conversation.env,
+            json.dumps({"model": conversation.name, "messages": messages, "stream": True}).encode("utf-8"),
+            authorization=conversation.key,
+        )
+        assert status == 200, response
+        returned = "".join(
+            json.loads(line[6:])["choices"][0]["delta"].get("content", "")
+            for line in response.decode("utf-8").splitlines()
+            if line.startswith("data: {")
+        )
+        assert returned == text
+    else:
+        returned, _ = conversation.send(messages, answer=answer)
+        assert returned["content"] == text
+
+    detail = _wait_for(
+        "finalized large Unicode upstream trace",
+        lambda: _finalized_route_detail(conversation.env, conversation.route_id),
+    )
+    content_events = [
+        event for event in detail["runs"][0]["events"]
+        if event["kind"] == "client_visible_content"
+    ]
+    assert "".join(event["payload"]["text"] for event in content_events) == text
+    _, _, archive = download_observation_bundle(conversation.env, detail)
+    records = observation_bundle_events(archive)
+    assert {event["direction"] for event in records} == {
+        "client_to_platform", "upstream_request", "upstream_response", "platform_to_client",
+    }
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 @pytest.mark.parametrize(
     "debug_enabled,fragmented",
     [(True, False), (False, True)],
@@ -244,7 +293,7 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
     visible_event = next(
         event
         for event in detail["runs"][0]["events"]
-        if event["kind"] == "client_visible_content_delta"
+        if event["kind"] == "client_visible_content"
     )
     replay = _sse_event(admin_env, visible_event["sequence"] - 1)
     serialized_replay = json.dumps(replay)
@@ -262,21 +311,6 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
     assert any(safe.encode() in content for content in contents)
 
     data_dir = Path(admin_env["data_dir"])
-    with closing(sqlite3.connect(data_dir / "db" / "gateway.db")) as connection:
-        tails = connection.execute(
-            "SELECT visible_tail FROM interaction_observations WHERE id = ?",
-            (detail["interaction"]["id"],),
-        ).fetchall()
-        events = connection.execute(
-            "SELECT payload FROM observation_events WHERE interaction_id = ?",
-            (detail["interaction"]["id"],),
-        ).fetchall()
-    assert all(sentinel not in value for (value,) in tails + events)
-    for (stored,) in events:
-        payload = json.loads(stored)
-        if "text_storage" in payload:
-            with zipfile.ZipFile(io.BytesIO(base64.b64decode(payload["text_storage"]["data"]))) as compressed:
-                assert sentinel not in compressed.read("content").decode("utf-8")
     # Generation Chain preserves business content; only diagnostic artifacts use this policy.
     trace = detail["runs"][0]["trace"]
     if debug_enabled:
@@ -288,9 +322,13 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
                 if line.startswith("data: ") and line[6:] != "[DONE]":
                     json.loads(line[6:])
         trace_dir = data_dir / "diagnostics" / "observation-debug" / trace["trace_id"]
-        for path in trace_dir.rglob("*"):
-            if path.is_file():
-                assert sentinel.encode() in path.read_bytes(), path
+        manifest = json.loads((trace_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["schema_version"] >= 2
+        assert manifest["trace_id"] == trace["trace_id"]
+        assert manifest["run_id"] == detail["runs"][0]["id"]
+        assert manifest["status"] == trace["status"]
+        assert manifest["completed_at"] is not None
+        assert manifest["tombstoned"] is False
     else:
         assert trace is None
         assert records == []

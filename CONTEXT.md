@@ -71,6 +71,11 @@ _避免使用_：Network Capture、Packet Capture
 Inference Run Debug Trace 是单个 Inference Run 准入时按当前进程级 Debug 开关独立决定是否生成的完整诊断，由该 Run 的四方向 Wire Debug Capture 组成，仅保留 wire 载荷、Run 关联与捕获完整性所需元数据，不保留独立 canonical 阶段或其他独立内部诊断阶段内容。Trace 与所属请求记录采用相同保留期并一起删除；Debug 开关不跨进程重启保持。Debug 捕获独立于普通 Observation 的按 item 收口内容；普通 Observation 的生命周期、用量与工具事件仍按既有契约记录。
 _避免使用_：Request Log、Wire Debug Capture（当指包含 Run 关联与捕获完整度信息的完整诊断）
 
+## Debug Trace Manifest
+
+Debug Trace Manifest 是单条 Debug Trace 的捕获完整性与保留状态说明；它表达归属、已捕获内容规模、完成或部分捕获及缺口原因，不是模型历史、执行状态或独立 Observation 事实。它随 Trace 所在实例可见，不能以共享数据库存在推断其他实例也能读取原始捕获。
+_避免使用_：请求记录、共享抓包索引、模型历史
+
 ## Interaction Debug Bundle
 
 Interaction Debug Bundle 是管理员在某一时间点导出的版本化 ZIP 诊断包，汇总一个 Connect Client Interaction 中当时已落盘的全部 Inference Run Debug Trace。Bundle 必须说明 Interaction 状态、导出时间、schema 版本，以及每个 Inference Run 的捕获状态；部分存在时明确列出未捕获或不完整的 Run，不得表示为完整。

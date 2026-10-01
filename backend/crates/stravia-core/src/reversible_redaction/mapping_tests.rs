@@ -152,13 +152,17 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
 async fn sqlite_mapping_concurrency_lifecycle_isolation_and_restart() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .unwrap();
     let store = SqlMappingStore::sqlite(pool.clone());
     let (owner, reference, secret) = assert_store_contract(&store).await;
     drop(store);
     pool.close().await;
     let reopened = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&reopened).await.unwrap();
+    crate::migrations::migrate_sqlite(&reopened, None)
+        .await
+        .unwrap();
     let restored = SqlMappingStore::sqlite(reopened.clone())
         .active(&owner)
         .await
@@ -194,7 +198,9 @@ async fn postgres_mapping_contract_when_configured() {
         .connect_with(options.clone())
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::migrate_postgres(&pool).await.unwrap();
+    crate::migrations::migrate_postgres(&pool, None)
+        .await
+        .unwrap();
     let store = SqlMappingStore::postgres(pool.clone());
     let (owner, reference, secret) = assert_store_contract(&store).await;
     drop(store);
@@ -204,7 +210,7 @@ async fn postgres_mapping_contract_when_configured() {
         .connect_with(options)
         .await
         .unwrap();
-    crate::migrations::migrate_postgres(&reopened)
+    crate::migrations::migrate_postgres(&reopened, None)
         .await
         .unwrap();
     let restored = SqlMappingStore::postgres(reopened.clone())

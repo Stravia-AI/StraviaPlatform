@@ -560,11 +560,14 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
 
     // Simulate durable indexes written by the previous projection, without
     // changing immutable payloads or parent edges.
-    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool) = backend.as_ref() else {
+    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool, gate) = backend.as_ref() else {
         unreachable!()
     };
-    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
-        .bind(b.id()).execute(pool).await.unwrap();
+    {
+        let _write_gate = gate.lock().await;
+        sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
+            .bind(b.id()).execute(pool).await.unwrap();
+    }
     backend
         .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
         .await
@@ -649,11 +652,19 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .execute(pool)
         .await
         .unwrap();
+    // The stored payload is the binary format-2 envelope; rebuilds must leave
+    // it byte-identical.
+    let payload_before: Vec<u8> =
+        sqlx::query_scalar("SELECT payload FROM turn_chain_nodes WHERE id = ?")
+            .bind(b.id())
+            .fetch_one(pool)
+            .await
+            .unwrap();
     backend
         .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
         .await
         .unwrap();
-    let unavailable: (Option<String>, Option<String>, String) = sqlx::query_as(
+    let unavailable: (Option<String>, Option<String>, Vec<u8>) = sqlx::query_as(
         "SELECT prefix_namespace, parent_id, payload FROM turn_chain_nodes WHERE id = ?",
     )
     .bind(b.id())
@@ -662,10 +673,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     .unwrap();
     assert_eq!(unavailable.0, None);
     assert_eq!(unavailable.1.as_deref(), Some(a.id()));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&unavailable.2).unwrap(),
-        nodes[1].payload
-    );
+    assert_eq!(unavailable.2, payload_before);
 }
 
 #[tokio::test]
@@ -880,7 +888,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
@@ -971,7 +979,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         .connect("sqlite::memory:")
         .await
         .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool)
+    crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(

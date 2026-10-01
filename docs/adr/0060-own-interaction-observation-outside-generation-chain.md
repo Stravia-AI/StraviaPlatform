@@ -4,7 +4,7 @@ status: accepted
 
 # 在 Generation Chain 之外拥有 Interaction Observation
 
-> **部分被取代。** [ADR-0062](0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 取代本 ADR 所链接设计 §5.1 的诊断文本按时间/大小封块边界；[ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 取代本 ADR 的 Wire/canonical Debug payload 与凭据统一脱敏约束，并取代所链接设计 §6.2 的媒体外置、不可恢复与 omission 规则。两项目标契约均已接受；ADR-0063 的原始四方向 Wire 已迁移，ADR-0062 的 Canonical Item 持久化仍待公共 payload 确认与实现。本 ADR 其余关于 Observation 所有权、Generation Chain 隔离、保留、清理与失败不影响推理的决策仍为 accepted。下文保留原始决策背景，不应把已取代条款视为当前目标。
+> **部分被取代。** [ADR-0062](0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 取代本 ADR 所链接设计 §5.1 的诊断文本按时间/大小封块边界；[ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 取代本 ADR 的 Wire/canonical Debug payload 与凭据统一脱敏约束，并取代所链接设计 §6.2 的媒体外置、不可恢复与 omission 规则；[ADR-0077](0077-slim-interaction-observation-and-file-debug-manifests.md) 取代「数据库只保存 manifest 与索引」——Debug manifest 改为受管目录内的 `manifest.json`，索引改为进程内 `DebugTraceIndex`，同时删除 `debug_trace_manifests` 表与 `trace_manifest_updated` 事件。三项取代契约均已接受，当前实施契约以对应 ADR 为准。本 ADR 其余关于 Observation 所有权、Generation Chain 隔离、保留、清理与失败不影响推理的决策仍为 accepted；单实例承诺由 ADR-0077 原样延续。下文保留原始决策背景，不应把已取代条款视为当前目标。
 
 Stravia 以 crate-private `InteractionObservation` 深模块拥有 Connect Client Interaction、Inference Run、Model Turn、Target attempt、Platform Tool、Delivery、Confirmed Upstream Usage 与 Debug Trace 的诊断投影。Inference Run 等执行模块只提交 typed observation event；Generation Chain 仍只保存完整交付的 `completed` / `incomplete` 模型历史，并仅向 Observation 提供已确认的 parent/root 关联。这样进行中、失败、取消、断线和拒绝请求可以实时展示并保留，而不会把可变运行状态塞进模型历史事实源。
 

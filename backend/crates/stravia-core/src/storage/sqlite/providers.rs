@@ -283,7 +283,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("foreign keys");
-        crate::migrations::migrate_sqlite(&pool)
+        crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
         SqliteProviderStore { pool }

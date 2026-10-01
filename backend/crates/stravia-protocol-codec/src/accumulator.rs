@@ -11,6 +11,11 @@ use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Usage;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
 
+/// Ordered source part identity: `(is_reasoning_content, index)`.
+/// The explicit category keeps summaries before content without reserving bits
+/// from a platform-dependent `usize` index.
+pub type CanonicalPartIndex = (bool, usize);
+
 enum AccumulatedItem {
     Text(String),
     Refusal(String),
@@ -42,6 +47,10 @@ pub struct StreamResponseAccumulator {
     pub stop_reason: Option<String>,
     pub terminal: Option<(String, Option<serde_json::Value>)>,
     pub usage: Usage,
+    next_item_ordinal: usize,
+    indexed_mode: bool,
+    indexed_ordinals: BTreeMap<usize, usize>,
+    derived_ordinals: BTreeMap<usize, usize>,
 }
 
 fn completed_item_semantic_shell(item: &AiItem) -> AiItem {
@@ -82,6 +91,101 @@ impl StreamResponseAccumulator {
     }
 
     pub fn apply(&mut self, delta: &AiStreamDelta) {
+        self.apply_content(delta);
+    }
+
+    /// Apply a delta, retaining the identity assigned to its canonical item.
+    /// Source indices and unindexed slots have separate namespaces; completion
+    /// and late IDs retain published identity. Use this for every observed delta.
+    pub fn apply_with_identity(
+        &mut self,
+        delta: &AiStreamDelta,
+    ) -> Option<(usize, CanonicalPartIndex)> {
+        self.apply_content(delta);
+        let indexed = match delta {
+            AiStreamDelta::TextDeltaWithMetadata {
+                output_index: Some(index),
+                content_index: Some(part),
+                ..
+            }
+            | AiStreamDelta::ThinkingDeltaWithMetadata {
+                output_index: Some(index),
+                content_index: Some(part),
+                ..
+            }
+            | AiStreamDelta::ReasoningSummaryDelta {
+                output_index: Some(index),
+                content_index: Some(part),
+                ..
+            } => Some((*index, *part)),
+            AiStreamDelta::RefusalDeltaWithIndex {
+                output_index,
+                content_index,
+                ..
+            } => Some((*output_index, *content_index)),
+            AiStreamDelta::ProtectedThinkingStart { index } => Some((*index, 0)),
+            AiStreamDelta::ItemDone { index, item }
+                if !item
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.get("__google_media_part").is_some()) =>
+            {
+                Some((*index, 0))
+            }
+            _ => None,
+        };
+        if let Some((index, part)) = indexed {
+            if !matches!(delta, AiStreamDelta::ItemDone { .. }) {
+                self.indexed_mode = true;
+            }
+            if !self.indexed_ordinals.contains_key(&index) {
+                let ordinal =
+                    if !self.indexed_mode && matches!(delta, AiStreamDelta::ItemDone { .. }) {
+                        self.derived_ordinals.get(&index).copied()
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| {
+                        let ordinal = self.next_item_ordinal;
+                        self.next_item_ordinal += 1;
+                        ordinal
+                    });
+                self.indexed_ordinals.insert(index, ordinal);
+            }
+            return Some((
+                self.indexed_ordinals[&index],
+                (
+                    matches!(delta, AiStreamDelta::ThinkingDeltaWithMetadata { .. }),
+                    part,
+                ),
+            ));
+        }
+        // Allocate from the accumulator's real item slots, including tools and
+        // opaque items. Indexed and unindexed namespaces share one allocator.
+        for index in self.derived_ordinals.len()..self.items.len() {
+            self.derived_ordinals.insert(index, self.next_item_ordinal);
+            self.next_item_ordinal += 1;
+        }
+        match delta {
+            AiStreamDelta::ThinkingDelta(_)
+            | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+            | AiStreamDelta::ReasoningSummaryDelta { .. }
+            | AiStreamDelta::TextDelta(_)
+            | AiStreamDelta::TextDeltaWithMetadata { .. }
+            | AiStreamDelta::RefusalDelta(_) => self.items.len().checked_sub(1).map(|index| {
+                (
+                    self.derived_ordinals[&index],
+                    (
+                        matches!(delta, AiStreamDelta::ThinkingDeltaWithMetadata { .. }),
+                        0,
+                    ),
+                )
+            }),
+            _ => None,
+        }
+    }
+
+    fn apply_content(&mut self, delta: &AiStreamDelta) {
         match delta {
             AiStreamDelta::MessageStart { id, model } => {
                 if self.id.is_empty() {
@@ -279,6 +383,15 @@ impl StreamResponseAccumulator {
     }
 
     pub fn into_ai_response(self) -> AiResponse {
+        self.materialize(false).0
+    }
+
+    /// Return response items with identities established by apply_with_identity.
+    pub fn into_ai_response_with_ordinals(self) -> (AiResponse, Vec<usize>) {
+        self.materialize(true)
+    }
+
+    fn materialize(self, collect_ordinals: bool) -> (AiResponse, Vec<usize>) {
         let Self {
             id,
             model,
@@ -293,6 +406,10 @@ impl StreamResponseAccumulator {
             indexed_reasoning_summary,
             indexed_reasoning_content,
             usage,
+            next_item_ordinal: _,
+            indexed_mode: _,
+            indexed_ordinals,
+            derived_ordinals,
         } = self;
         let mut resp = AiResponse::new(id, model);
         let has_indexed = !indexed_text.is_empty()
@@ -300,8 +417,11 @@ impl StreamResponseAccumulator {
             || !indexed_reasoning_summary.is_empty()
             || !indexed_reasoning_content.is_empty();
         let mut indexed_tools = BTreeMap::new();
+        let mut tool_ordinals = BTreeMap::new();
         let mut derived = Vec::new();
-        for item in items {
+        let mut derived_ids = Vec::new();
+        let mut ordinals = Vec::new();
+        for (source_index, item) in items.into_iter().enumerate() {
             match item {
                 AccumulatedItem::ToolCall(index) if completed_items.is_empty() && has_indexed => {
                     if let Some(tool) = tool_calls
@@ -311,11 +431,17 @@ impl StreamResponseAccumulator {
                         .cloned()
                     {
                         indexed_tools.insert(index, AiItem::function_call(tool));
+                        if collect_ordinals {
+                            tool_ordinals.insert(index, derived_ordinals[&source_index]);
+                        }
                     }
                 }
                 item => {
                     if let Some(item) = accumulated_item_to_ai(item, &tool_calls) {
                         derived.push(item);
+                        if collect_ordinals {
+                            derived_ids.push(derived_ordinals[&source_index]);
+                        }
                     }
                 }
             }
@@ -328,7 +454,17 @@ impl StreamResponseAccumulator {
                 &indexed_reasoning_content,
             );
             indexed_items.extend(indexed_tools);
+            if collect_ordinals {
+                ordinals.extend(indexed_items.keys().map(|index| {
+                    indexed_ordinals
+                        .get(index)
+                        .or_else(|| tool_ordinals.get(index))
+                        .copied()
+                        .expect("indexed item identity")
+                }));
+            }
             resp.items = indexed_items.into_values().collect();
+            ordinals.extend(derived_ids);
             resp.items.extend(derived);
         } else {
             let mut context = ReconciliationContext {
@@ -341,9 +477,23 @@ impl StreamResponseAccumulator {
             };
             resp.items = completed_items
                 .into_iter()
-                .map(|(index, completed)| reconcile_completed_item(completed, index, &mut context))
+                .map(|(index, completed)| {
+                    if collect_ordinals {
+                        ordinals.push(indexed_ordinals[&index]);
+                    }
+                    reconcile_completed_item(completed, index, &mut context)
+                })
                 .collect();
-            resp.items.extend(context.remaining.into_iter().flatten());
+            if collect_ordinals {
+                for (item, ordinal) in context.remaining.into_iter().zip(derived_ids) {
+                    if let Some(item) = item {
+                        resp.items.push(item);
+                        ordinals.push(ordinal);
+                    }
+                }
+            } else {
+                resp.items.extend(context.remaining.into_iter().flatten());
+            }
         }
         resp.stop_reason = stop_reason;
         resp.usage = usage;
@@ -361,7 +511,7 @@ impl StreamResponseAccumulator {
                 }),
             );
         }
-        resp
+        (resp, ordinals)
     }
 }
 
@@ -958,6 +1108,125 @@ mod tests {
         assert_eq!(response.items[0].output_text_ref(), Some("first"));
         assert_eq!(response.items[1].refusal_ref(), Some("second"));
     }
+    #[test]
+    fn late_item_id_preserves_published_canonical_identity() {
+        let mut accumulator = StreamResponseAccumulator::default();
+        let identity = accumulator
+            .apply_with_identity(&AiStreamDelta::ThinkingDelta("reason".into()))
+            .unwrap();
+        let mut item = AiItem::thinking("reason", None);
+        item.meta = Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                serde_json::json!({"id": "late-id"}),
+            ),
+        );
+        let completed = accumulator
+            .apply_with_identity(&AiStreamDelta::ItemDone { index: 0, item })
+            .unwrap();
+        let (response, ordinals) = accumulator.into_ai_response_with_ordinals();
+        assert_eq!(completed.0, identity.0);
+        assert_eq!(ordinals, [identity.0]);
+        assert_eq!(response.items[0].id_ref(), Some("late-id"));
+    }
+
+    #[test]
+    fn sparse_indexed_and_unindexed_items_keep_distinct_identities() {
+        let mut accumulator = StreamResponseAccumulator::default();
+        let late_source = accumulator
+            .apply_with_identity(&AiStreamDelta::ReasoningSummaryDelta {
+                text: "second".into(),
+                obfuscation: None,
+                output_index: Some(9),
+                content_index: Some(0),
+            })
+            .unwrap();
+        let derived = accumulator
+            .apply_with_identity(&AiStreamDelta::ThinkingDelta("unindexed".into()))
+            .unwrap();
+        let early_source = accumulator
+            .apply_with_identity(&AiStreamDelta::ReasoningSummaryDelta {
+                text: "first".into(),
+                obfuscation: None,
+                output_index: Some(2),
+                content_index: Some(0),
+            })
+            .unwrap();
+        assert_ne!(late_source.0, derived.0);
+        assert_ne!(early_source.0, derived.0);
+        assert_ne!(early_source.0, late_source.0);
+        let (response, ordinals) = accumulator.into_ai_response_with_ordinals();
+        assert_eq!(ordinals, [early_source.0, late_source.0, derived.0]);
+        assert_eq!(response.items[0].reasoning_ref().unwrap().0, ["first"]);
+        assert_eq!(response.items[1].reasoning_ref().unwrap().0, ["second"]);
+        assert!(
+            matches!(&response.items[2].content, MessageContent::Blocks(parts) if matches!(&parts[0], ContentBlock::Thinking { thinking, .. } if thinking == "unindexed"))
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_maximum_index_still_precedes_content() {
+        let mut accumulator = StreamResponseAccumulator::default();
+        let content = accumulator
+            .apply_with_identity(&AiStreamDelta::ThinkingDeltaWithMetadata {
+                text: "content".into(),
+                obfuscation: None,
+                output_index: Some(3),
+                content_index: Some(0),
+            })
+            .unwrap();
+        let summary = accumulator
+            .apply_with_identity(&AiStreamDelta::ReasoningSummaryDelta {
+                text: "summary".into(),
+                obfuscation: None,
+                output_index: Some(3),
+                content_index: Some(usize::MAX),
+            })
+            .unwrap();
+        assert_eq!(summary.0, content.0);
+        assert!(summary.1 < content.1);
+        let response = accumulator.into_ai_response();
+        let (summary, content, _) = response.items[0].reasoning_ref().unwrap();
+        assert_eq!(summary, ["summary"]);
+        assert_eq!(content, ["content"]);
+    }
+
+    #[test]
+    fn reasoning_parts_order_summary_before_content_despite_arrival_order() {
+        let mut accumulator = StreamResponseAccumulator::default();
+        let content = accumulator
+            .apply_with_identity(&AiStreamDelta::ThinkingDeltaWithMetadata {
+                text: "content".into(),
+                obfuscation: None,
+                output_index: Some(3),
+                content_index: Some(0),
+            })
+            .unwrap();
+        let second = accumulator
+            .apply_with_identity(&AiStreamDelta::ReasoningSummaryDelta {
+                text: "second".into(),
+                obfuscation: None,
+                output_index: Some(3),
+                content_index: Some(1),
+            })
+            .unwrap();
+        let first = accumulator
+            .apply_with_identity(&AiStreamDelta::ReasoningSummaryDelta {
+                text: "first".into(),
+                obfuscation: None,
+                output_index: Some(3),
+                content_index: Some(0),
+            })
+            .unwrap();
+        assert_eq!(content.0, first.0);
+        assert_eq!(second.0, first.0);
+        assert!(first.1 < second.1 && second.1 < content.1);
+        let (response, ordinals) = accumulator.into_ai_response_with_ordinals();
+        assert_eq!(ordinals, [first.0]);
+        let (summary, reasoning, _) = response.items[0].reasoning_ref().unwrap();
+        assert_eq!(summary, ["first", "second"]);
+        assert_eq!(reasoning, ["content"]);
+    }
+
     #[test]
     fn indexed_reasoning_deltas_remain_separate_items() {
         let mut accumulator = StreamResponseAccumulator::default();

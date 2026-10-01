@@ -325,7 +325,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         Compaction::sqlite(pool)
     }
 
@@ -411,7 +413,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         let owner = Principal::new("owner");
         let record = Compaction::sqlite(pool.clone())
             .register(&owner, registration("operation"))
@@ -440,7 +444,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         sqlx::query("CREATE TRIGGER deny_native_state BEFORE INSERT ON native_compaction_states BEGIN SELECT RAISE(FAIL, 'injected failure'); END")
             .execute(&pool).await.unwrap();
         let store = Compaction::sqlite(pool);
@@ -466,7 +472,9 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        crate::migrations::migrate_sqlite(&pool).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
         let store = Compaction::sqlite(pool);
         let owner = Principal::new("owner");
         let record = store

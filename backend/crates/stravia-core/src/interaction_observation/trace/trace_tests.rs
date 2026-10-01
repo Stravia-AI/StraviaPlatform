@@ -44,6 +44,35 @@ async fn persisted_records(handle: &TraceHandle) -> Vec<TraceRecord> {
 }
 
 #[tokio::test]
+async fn manifest_directory_created_before_trace_writer_preserves_wire_capture() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    // 当前线程在首次 await 前不会处理 Create，固定复现 manifest 写者先创建目录的顺序。
+    std::fs::create_dir(
+        directory
+            .path()
+            .join("observation-debug")
+            .join(handle.manifest().trace_id),
+    )
+    .expect("manifest writer directory");
+    assert_eq!(
+        handle.record(wire_record(
+            1,
+            "sse_chunk",
+            Value::String("data: captured\n\n".into())
+        )),
+        TraceWriteOutcome::Queued
+    );
+    let manifest = handle.finish().await;
+    assert_eq!(manifest.status, "complete");
+    let records = persisted_records(&handle).await;
+    assert_eq!(records[0].sequence, 1);
+    assert_eq!(records[0].payload, "data: captured\n\n");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn wire_chunks_are_exported_immediately_without_protocol_reassembly() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");

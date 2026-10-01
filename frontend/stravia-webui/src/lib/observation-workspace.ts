@@ -824,9 +824,9 @@ export class ObservationWorkspaceController {
     ) {
       await this.loadFailures()
     }
-    // 「新活动·跟随」只响应输出预览（visible_tail）的追加；思考增量与工具调用
+    // 「新活动·跟随」只响应输出预览（visible_tail）的追加；思考条目与工具调用
     // 仍照常落库刷新卡片数据，但不点亮跟随入口、不移动视口。
-    const extendsOutputPreview = streamEvent.kind === 'client_visible_content_delta'
+    const extendsOutputPreview = streamEvent.kind === 'client_visible_content'
     if (this.#followPaused && extendsOutputPreview) this.#hasNewActivity = true
     if (!this.#liveWindow && streamEvent.interaction_id && streamEvent.occurred_at >= this.#windowEnd) {
       const root = this.#roots.find((item) =>
