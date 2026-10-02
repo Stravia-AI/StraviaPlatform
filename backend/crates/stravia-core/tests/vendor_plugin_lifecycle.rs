@@ -301,6 +301,7 @@ async fn connection(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 enabled: true,
                 provider_id: provider.id.clone(),
                 model: Some("fixture-model".into()),
@@ -326,7 +327,7 @@ async fn api_key(gateway: &Gateway, routes: &[&str]) -> anyhow::Result<String> {
         .create_api_key(CreateApiKey {
             key: None,
             name: "Lifecycle fixture key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -1044,6 +1045,7 @@ async fn compatible_update_keeps_continuation_recovery_on_the_original_component
             "lifecycle-continuation-recovery",
             UpdateRoute {
                 targets: Some(vec![CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: target.provider_id.clone(),
                     model: Some("fixture-model".into()),
                     enabled: true,

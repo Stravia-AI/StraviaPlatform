@@ -809,6 +809,12 @@ pub fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) ->
     } else {
         AiError::kind_from_status(status, Some(&value))
     };
+    // WIT 错误只携带字符串；明确请求级证据随诊断传回宿主，不能丢掉 code。
+    let message = if AiError::is_request_error_evidence(&kind, Some(&value)) {
+        value.to_string()
+    } else {
+        message
+    };
     model_error_with_facts(kind, Some(status), retry_after(headers), message)
 }
 

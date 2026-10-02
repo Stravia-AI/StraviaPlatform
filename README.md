@@ -54,7 +54,7 @@ Agent behavior is defined and versioned by the platform — Stravia is not a use
 
 - **Drop-in endpoint for AI coding clients** — point Claude Code, Codex CLI, Gemini CLI, or OpenCode at `127.0.0.1:23471` and keep working. Each client keeps its own protocol; Stravia handles translation, routing, and failover.
 - **Tools that run for you** — built-in web search (local search uses an installed Chrome/Chromium browser; the container includes Chromium) and image understanding execute inside Stravia and hand results back to the model. Expose them over MCP or add them automatically to compatible requests.
-- **Keys, spend, and request history in one place** — give each app its own key with model and concurrency limits, see the usage providers actually report, watch every request live, and download a full debug bundle when something goes wrong.
+- **Keys, spend, and request history in one place** — give each app its own key with model access and RPM limits, see the usage providers actually report, watch every request live, and download a full debug bundle when something goes wrong.
 - **Local-first, one Rust core** — a desktop app or a headless server binary; SQLite by default, PostgreSQL for teams; local or S3 file storage. No cloud dependency.
 
 ## Quick Start

@@ -292,7 +292,7 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "MCP key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
@@ -322,7 +322,7 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
     }
 }
 
-async fn set_concurrency_limit(app: &TestApp, limit: i32) {
+async fn set_rpm_limit(app: &TestApp, limit: i32) {
     app.gateway
         .admin()
         .update_api_key(
@@ -330,7 +330,7 @@ async fn set_concurrency_limit(app: &TestApp, limit: i32) {
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: Some(Some(limit)),
+                rpm_limit: Some(Some(limit)),
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
@@ -342,7 +342,7 @@ async fn set_concurrency_limit(app: &TestApp, limit: i32) {
             },
         )
         .await
-        .expect("set concurrency limit");
+        .expect("set RPM limit");
 }
 
 async fn serve_media_report(
@@ -424,7 +424,7 @@ async fn media_test_app_with_answer(
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Media MCP key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -497,6 +497,7 @@ async fn media_test_app_with_answer(
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("vision".into()),
                 enabled: true,
@@ -693,7 +694,7 @@ async fn official_client_discovers_lists_and_calls_tools() {
 }
 
 #[tokio::test]
-async fn mcp_tool_call_and_proxy_run_share_principal_concurrency_limit() {
+async fn mcp_tool_call_and_proxy_run_share_principal_rpm_limit() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let app = test_app_with_tools(vec![Arc::new(BlockingMcpTool {
@@ -702,7 +703,7 @@ async fn mcp_tool_call_and_proxy_run_share_principal_concurrency_limit() {
         release: Arc::clone(&release),
     })])
     .await;
-    set_concurrency_limit(&app, 1).await;
+    set_rpm_limit(&app, 1).await;
 
     let client = connect(&app).await;
     let first_call = tokio::spawn(async move {
@@ -734,20 +735,20 @@ async fn mcp_tool_call_and_proxy_run_share_principal_concurrency_limit() {
         rejected_mcp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
-            .is_none()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|seconds| seconds > 0 && seconds <= 60)
     );
     let body: Value = rejected_mcp.json().await.expect("MCP limit response");
-    assert_eq!(body["error"]["type"], "STRAVIA_CONCURRENCY_LIMIT");
-    assert_eq!(
-        body["error"]["message"],
-        "Principal Concurrency Limit is full."
-    );
+    assert_eq!(body["error"]["type"], "STRAVIA_RPM_LIMIT");
 
     let proxy_endpoint = app.endpoint.strip_suffix("/mcp").expect("MCP endpoint");
     let rejected_proxy = http
         .post(format!("{proxy_endpoint}/v1/chat/completions"))
         .bearer_auth(&app.token)
-        .json(&json!({ "model": "unconfigured", "messages": [] }))
+        .json(
+            &json!({ "model": "unconfigured", "messages": [{"role": "user", "content": "hello"}] }),
+        )
         .send()
         .await
         .expect("rejected Proxy Inference Run");
@@ -759,10 +760,27 @@ async fn mcp_tool_call_and_proxy_run_share_principal_concurrency_limit() {
         rejected_proxy
             .headers()
             .get(reqwest::header::RETRY_AFTER)
-            .is_none()
+            .is_some()
     );
     let body: Value = rejected_proxy.json().await.expect("Proxy limit response");
-    assert_eq!(body["error"]["type"], "STRAVIA_CONCURRENCY_LIMIT");
+    assert_eq!(body["error"]["type"], "STRAVIA_RPM_LIMIT");
+    let rejected_compact = http
+        .post(format!("{proxy_endpoint}/v1/responses/compact"))
+        .bearer_auth(&app.token)
+        .json(&json!({ "model": "unconfigured", "input": "hello" }))
+        .send()
+        .await
+        .expect("rejected remote compaction");
+    assert_eq!(
+        rejected_compact.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert!(
+        rejected_compact
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .is_some()
+    );
 
     release.notify_one();
     let completed = first_call.await.expect("first tools/call task");
@@ -772,13 +790,23 @@ async fn mcp_tool_call_and_proxy_run_share_principal_concurrency_limit() {
     );
 
     let client = connect(&app).await;
-    let resumed = client
-        .call_tool(CallToolRequestParams::new("blocking"))
+    client
+        .list_tools(None)
         .await
-        .expect("tools/call after lease release");
+        .expect("listing remains uncharged after completion");
+    let still_rejected = http
+        .post(&app.endpoint)
+        .bearer_auth(&app.token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "blocking", "arguments": {} }
+        }))
+        .send()
+        .await
+        .expect("completed execution retains quota");
     assert_eq!(
-        resumed.structured_content,
-        Some(json!({ "complete": true }))
+        still_rejected.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
     );
 }
 
@@ -1083,7 +1111,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Other MCP owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -1127,7 +1155,7 @@ async fn media_tool_requires_mcp_access_independently_from_transparent_injection
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: None,
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
@@ -1156,7 +1184,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: None,
                 mcp_access_enabled: Some(true),
                 transparent_injection_enabled: Some(false),
@@ -1194,7 +1222,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: None,
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
@@ -1264,7 +1292,7 @@ async fn mcp_transport_preserves_bearer_only_authentication_mappings() {
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: Some(false),
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
@@ -1335,7 +1363,7 @@ async fn expired_mcp_credential_uses_canonical_unauthorized_status() {
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,

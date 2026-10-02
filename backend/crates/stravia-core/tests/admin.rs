@@ -633,6 +633,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
                 display_name: None,
                 balance: None,
                 targets: vec![CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: provider.id.clone(),
                     model: Some(model.id.clone()),
                     enabled: true,
@@ -660,6 +661,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
                 UpdateRoute {
                     is_enabled: Some(is_enabled),
                     targets: Some(vec![CreateTarget {
+                        rpm_pool_id: None,
                         provider_id: provider.id.clone(),
                         model: Some(model.id.clone()),
                         enabled: true,
@@ -896,6 +898,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("private/model".to_string()),
                 enabled: true,
@@ -1376,6 +1379,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
             balance: Some("traffic_equalization".to_string()),
             targets: vec![
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: original.id.clone(),
                     model: Some("source-upstream-model".to_string()),
                     enabled: true,
@@ -1386,6 +1390,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: fallback.id.clone(),
                     model: Some("fallback-upstream-model".to_string()),
                     enabled: true,
@@ -1480,6 +1485,7 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: original.id.clone(),
                 model: Some("source-upstream-model".to_string()),
                 enabled: true,
@@ -1802,6 +1808,7 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("gpt-4".to_string()),
                 enabled: true,
@@ -1849,6 +1856,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
             display_name: None,
             balance: Some("traffic_equalization".to_string()),
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("gpt-4".to_string()),
                 enabled: true,

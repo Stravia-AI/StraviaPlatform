@@ -54,7 +54,7 @@ pub(crate) struct ModelAccessGrant {
 pub(crate) struct AuthenticatedPrincipal {
     pub(crate) principal: stravia_runtime_contract::Principal,
     pub(crate) api_key_name: String,
-    pub(crate) concurrency_limit: Option<i32>,
+    pub(crate) rpm_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ impl<'a> Security<'a> {
         Ok(AuthenticatedPrincipal {
             principal: stravia_runtime_contract::Principal::new(key.id),
             api_key_name: key.name,
-            concurrency_limit: key.concurrency_limit,
+            rpm_limit: key.rpm_limit,
         })
     }
 
@@ -425,7 +425,7 @@ mod tests {
                     name: "Test key".into(),
                     is_enabled: true,
                     expires_at: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     inject_media_understanding: false,
                     transparent_injection_enabled: true,
                     inject_web_search: true,

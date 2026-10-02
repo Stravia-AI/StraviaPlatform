@@ -26,7 +26,7 @@ interface KeyForm {
   key: string
   customKey: boolean
   name: string
-  concurrencyLimit: string
+  rpmLimit: string
   expiresAt: string
   enabled: boolean
   mcpAccessEnabled: boolean
@@ -74,7 +74,7 @@ function keyForm(source: ApiKey | undefined = apiKey): KeyForm {
     key: source?.key ?? '',
     customKey: source != null,
     name: source?.name ?? '',
-    concurrencyLimit: source?.concurrency_limit ? String(source.concurrency_limit) : '',
+    rpmLimit: source?.rpm_limit ? String(source.rpm_limit) : '',
     expiresAt: source?.expires_at ? toDateTimeLocal(source.expires_at) : '',
     enabled: source?.is_enabled ?? true,
     mcpAccessEnabled: source?.mcp_access_enabled ?? false,
@@ -91,11 +91,6 @@ function toDateTimeLocal(value: string): string {
   if (Number.isNaN(date.valueOf())) return ''
   const offset = date.getTimezoneOffset() * 60_000
   return new Date(date.valueOf() - offset).toISOString().slice(0, 16)
-}
-
-function positiveInteger(value: string): number | undefined {
-  const number = Number.parseInt(value, 10)
-  return Number.isFinite(number) && number > 0 ? number : undefined
 }
 
 function setModelChecked(modelId: string, checked: boolean): void {
@@ -140,7 +135,7 @@ async function saveKey(): Promise<void> {
     const input = {
       key: apiKey || form.customKey ? form.key.trim() : undefined,
       name: form.name.trim(),
-      concurrency_limit: positiveInteger(form.concurrencyLimit) ?? null,
+      rpm_limit: form.rpmLimit === '' || form.rpmLimit == null ? null : Number(form.rpmLimit),
       mcp_access_enabled: form.mcpAccessEnabled,
       transparent_injection_enabled: form.transparentInjectionEnabled,
       inject_web_search: form.injectWebSearch,
@@ -290,12 +285,12 @@ async function saveKey(): Promise<void> {
     </Field.Group>
     <Field.Group class="flex-row flex-wrap items-end gap-4">
       <Field.Field orientation="vertical" class="w-auto min-w-52 flex-1">
-        <Field.Label for="api-key-concurrency-limit" hint={m.api_key_editor_concurrency_limit_help()}>
-          {m.api_key_editor_maximum_concurrent_executions()}
+        <Field.Label for="api-key-rpm-limit" hint={m.api_key_editor_rpm_limit_help()}>
+          {m.api_key_editor_requests_per_minute()}
         </Field.Label>
         <Input
-          id="api-key-concurrency-limit"
-          bind:value={form.concurrencyLimit}
+          id="api-key-rpm-limit"
+          bind:value={form.rpmLimit}
           min="1"
           step="1"
           type="number"

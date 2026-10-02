@@ -4,6 +4,7 @@ export interface RouteTargetForm {
   key: string
   id?: string
   providerId: string
+  rpmPoolId: string | null
   model: string | null
   enabled: boolean
   priority: number
@@ -71,6 +72,7 @@ export function createRouteTarget(targets: RouteTargetForm[], values: Partial<Ro
   return {
     key: nextTargetKey(targets),
     providerId: '',
+    rpmPoolId: null,
     model: '',
     enabled: false,
     priority: 0,
@@ -99,6 +101,7 @@ export function createRouteTargetForms(
         createRouteTarget(targets, {
           id: target.id,
           providerId: target.provider_id,
+          rpmPoolId: target.rpm_pool_id ?? null,
           model: target.model,
           enabled: target.enabled ?? true,
           priority: target.priority,
@@ -285,6 +288,7 @@ export function buildRouteTargets(targets: RouteTargetForm[]): {
     .filter((target) => target.providerId && (target.model === null || target.model.trim()))
     .map((target): CreateTarget => ({
       provider_id: target.providerId,
+      rpm_pool_id: target.rpmPoolId,
       model: target.model === null ? null : target.model.trim(),
       enabled: target.enabled,
       priority: Number(target.priority),

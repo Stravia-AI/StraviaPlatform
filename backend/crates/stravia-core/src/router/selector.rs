@@ -3,7 +3,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use parking_lot::Mutex;
 
@@ -16,6 +17,7 @@ use stravia_runtime_contract::protocol::ir::ProtocolExt;
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
     pub destination: TargetDestination,
+    pub rpm_pool_id: Option<String>,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
@@ -84,6 +86,7 @@ pub struct RouteSchedulingSnapshot {
 /// router-private so callers can only obtain it through `RouteSelector`.
 #[derive(Debug, Clone)]
 pub struct RouteAttemptContext {
+    pub(super) cooldown: CooldownAttempts,
     pub(super) principal: String,
     pub(super) route_id: String,
     pub(super) conversation: Option<ConversationIdentity>,
@@ -91,6 +94,40 @@ pub struct RouteAttemptContext {
     pub(super) cache_affinity_target: Option<String>,
     pub(super) estimated_uncached_input_tokens: u64,
     pub(super) now_ms: u64,
+}
+
+/// 同一个客户端根请求共享，隐藏续轮不能重新领取冷却例外。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CooldownAttempts {
+    inner: Arc<Mutex<CooldownAttemptsInner>>,
+}
+
+#[derive(Debug, Default)]
+struct CooldownAttemptsInner {
+    selected: HashSet<String>,
+    consumed: HashSet<String>,
+    last_selected: Option<String>,
+}
+
+impl CooldownAttempts {
+    fn eligible(&self, key: &str, preferred: Option<&str>) -> bool {
+        preferred == Some(key) || self.inner.lock().selected.contains(key)
+    }
+
+    fn claim(&self, key: &str) -> bool {
+        self.inner.lock().consumed.insert(key.to_owned())
+    }
+
+    fn selected(&self, key: &str) {
+        let mut inner = self.inner.lock();
+        inner.selected.insert(key.to_owned());
+        inner.last_selected = Some(key.to_owned());
+    }
+
+    fn available(&self, key: &str, preferred: Option<&str>) -> bool {
+        let inner = self.inner.lock();
+        (preferred == Some(key) || inner.selected.contains(key)) && !inner.consumed.contains(key)
+    }
 }
 
 /// Observable runtime state of one Route Target, owned by `RoutePolicyState`.
@@ -130,6 +167,7 @@ struct TargetRuntime {
     consecutive_failures: u32,
     /// Cooldown expiry in `RoutePolicyState::now_ms` terms; `0` = not cooling.
     cooldown_until: u64,
+    retry_after_until: u64,
     /// Generation of the latest cooldown write.
     epoch: u64,
     /// Epoch claimed by the in-flight half-open probe, if any. Only ever
@@ -214,6 +252,7 @@ impl RoutePolicyStateInner {
                 || current.is_some_and(|runtime| runtime.probe_epoch == Some(epoch)));
         let next = TargetRuntime {
             consecutive_failures,
+            retry_after_until: current.map_or(0, |runtime| runtime.retry_after_until),
             cooldown_until: if should_cool {
                 now_ms.saturating_add(cooldown_ms as u64)
             } else {
@@ -258,6 +297,15 @@ impl Default for RoutePolicyState {
 impl RoutePolicyState {
     pub fn now_ms(&self) -> u64 {
         self.origin.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    pub(crate) fn permits_send(&self, target_key: &str, epoch: u64, single_attempt: bool) -> bool {
+        let inner = self.inner.lock();
+        inner.targets.get(target_key).map_or(epoch == 0, |runtime| {
+            runtime.epoch == epoch
+                && runtime.retry_after_until <= self.now_ms()
+                && (runtime.cooldown_until == 0 || single_attempt)
+        })
     }
 
     /// Observable runtime status of one target key. A key with no runtime
@@ -339,6 +387,28 @@ impl RoutePolicyState {
         let now_ms = self.now_ms();
         let mut inner = self.inner.lock();
         inner.record_failure(target_key, epoch, retry_budget, cooldown_ms, now_ms)
+    }
+
+    pub(crate) fn record_failure_with_retry_after(
+        &self,
+        target_key: &str,
+        epoch: u64,
+        retry_budget: i32,
+        cooldown_ms: i64,
+        retry_after: Option<Duration>,
+    ) {
+        let now_ms = self.now_ms();
+        let mut inner = self.inner.lock();
+        if inner
+            .record_failure(target_key, epoch, retry_budget, cooldown_ms, now_ms)
+            .is_some()
+            && let Some(delay) = retry_after
+            && let Some(runtime) = inner.targets.get_mut(target_key)
+        {
+            runtime.retry_after_until = runtime
+                .retry_after_until
+                .max(now_ms.saturating_add(delay.as_millis().min(u64::MAX as u128) as u64));
+        }
     }
 
     /// Provider 内部恢复会吞掉原失败，只有仍可继续时在这里计数。
@@ -469,6 +539,8 @@ pub struct RouteAttemptPolicy {
     current_epoch: u64,
     /// `true` while this policy holds the target's half-open probe slot.
     current_probe: bool,
+    current_exception: bool,
+    preferred: Option<String>,
 }
 
 impl RouteAttemptPolicy {
@@ -507,7 +579,8 @@ impl RouteAttemptPolicy {
                         .is_none()
                         .then(|| context.cache_affinity_target.clone())
                         .flatten()
-                });
+                })
+                .or_else(|| context.cooldown.inner.lock().last_selected.clone());
             (inner.in_flight_input.clone(), preferred)
         };
         let snapshots = snapshot
@@ -537,6 +610,7 @@ impl RouteAttemptPolicy {
                 .targets
                 .get(&key)
                 .is_some_and(|runtime| runtime.cooldown_until > now_ms)
+                && !context.cooldown.available(&key, preferred.as_deref())
             {
                 continue;
             }
@@ -554,10 +628,10 @@ impl RouteAttemptPolicy {
             let group = order_group(strategy, group, &snapshots, &in_flight);
             ordered.extend(group.into_iter().map(to_selected));
         }
-        if let Some(preferred) = preferred
+        if let Some(preferred) = preferred.as_ref()
             && let Some(index) = ordered
                 .iter()
-                .position(|target| selected_target_key(target) == preferred)
+                .position(|target| selected_target_key(target) == *preferred)
         {
             let preferred = ordered.remove(index);
             ordered.insert(0, preferred);
@@ -569,6 +643,58 @@ impl RouteAttemptPolicy {
             current_target_key: None,
             current_epoch: 0,
             current_probe: false,
+            current_exception: false,
+            preferred,
+        }
+    }
+
+    pub(crate) fn preferred_target_key(&self) -> Option<&str> {
+        self.preferred.as_deref()
+    }
+
+    pub fn candidates(&self) -> &[SelectedTarget] {
+        self.ordered.as_slice()
+    }
+
+    /// 仅观察当前健康资格；RPM 等待不能提前占用半开槽或冷却例外。
+    pub(crate) fn retain_eligible(&mut self, excluded: &HashSet<String>) {
+        let inner = self.state.inner.lock();
+        let now_ms = self.context.now_ms.max(self.state.now_ms());
+        let cooldown = &self.context.cooldown;
+        let preferred = self.preferred.as_deref();
+        self.ordered = self
+            .ordered
+            .by_ref()
+            .filter(|target| {
+                let key = selected_target_key(target);
+                if excluded.contains(&key) {
+                    return false;
+                }
+                let Some(runtime) = inner.targets.get(&key) else {
+                    return true;
+                };
+                if runtime.retry_after_until > now_ms {
+                    return false;
+                }
+                if runtime.cooldown_until == 0 {
+                    return true;
+                }
+                if runtime.cooldown_until > now_ms {
+                    return cooldown.available(&key, preferred);
+                }
+                runtime.probe_epoch.is_none()
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+    }
+
+    /// 尚未发送时归还本策略领取的机会；调用者必须以发送状态作证。
+    pub fn release_unsent_exception(&mut self) {
+        if self.current_exception
+            && let Some(key) = self.current_target_key.as_ref()
+        {
+            self.context.cooldown.inner.lock().consumed.remove(key);
+            self.current_exception = false;
         }
     }
 
@@ -604,23 +730,39 @@ impl RouteAttemptPolicy {
             let now_ms = self.context.now_ms.max(self.state.now_ms());
             let mut inner = self.state.inner.lock();
             let mut probe_epoch = None;
+            let mut exception = false;
+            if inner
+                .targets
+                .get(&key)
+                .is_some_and(|runtime| runtime.retry_after_until > now_ms)
+            {
+                continue;
+            }
             match inner.targets.get(&key) {
                 Some(runtime) if runtime.cooldown_until > 0 => {
-                    if runtime.cooldown_until > now_ms {
-                        // Actively cooling: never eligible.
+                    if runtime.retry_after_until > now_ms {
                         continue;
                     }
-                    if runtime.probe_epoch.is_some() {
+                    if runtime.cooldown_until > now_ms {
+                        if !self
+                            .context
+                            .cooldown
+                            .eligible(&key, self.preferred.as_deref())
+                            || !self.context.cooldown.claim(&key)
+                        {
+                            continue;
+                        }
+                        exception = true;
+                    } else if runtime.probe_epoch.is_some() {
                         // Another request already holds the single probe.
                         continue;
+                    } else {
+                        let epoch = inner.next_epoch();
+                        let runtime = inner.targets.get_mut(&key).expect("target entry");
+                        runtime.epoch = epoch;
+                        runtime.probe_epoch = Some(epoch);
+                        probe_epoch = Some(epoch);
                     }
-                    // Claim and fence the probe atomically. A cancelled probe's
-                    // late result must not affect its replacement.
-                    let epoch = inner.next_epoch();
-                    let runtime = inner.targets.get_mut(&key).expect("target entry");
-                    runtime.epoch = epoch;
-                    runtime.probe_epoch = Some(epoch);
-                    probe_epoch = Some(epoch);
                 }
                 _ => {}
             }
@@ -638,6 +780,8 @@ impl RouteAttemptPolicy {
                     .unwrap_or(0)
             });
             self.current_probe = probe_epoch.is_some();
+            self.current_exception = exception;
+            self.context.cooldown.selected(&key);
             self.current_target_key = Some(key);
             return Some(target);
         }
@@ -655,12 +799,30 @@ impl RouteAttemptPolicy {
             match inner.targets.get(key) {
                 None => self.current_epoch == 0 && !self.current_probe,
                 Some(runtime) => {
-                    runtime.epoch == self.current_epoch
+                    runtime.retry_after_until <= self.context.now_ms.max(self.state.now_ms())
+                        && runtime.epoch == self.current_epoch
                         && (runtime.cooldown_until == 0
+                            || self.current_exception
                             || (self.current_probe
                                 && runtime.probe_epoch == Some(self.current_epoch)))
                 }
             }
+        };
+        let allowed = if !allowed && !self.current_exception {
+            let inner = self.state.inner.lock();
+            if let Some(runtime) = inner.targets.get(key)
+                && runtime.cooldown_until > self.context.now_ms.max(self.state.now_ms())
+                && runtime.retry_after_until <= self.context.now_ms.max(self.state.now_ms())
+                && self.context.cooldown.claim(key)
+            {
+                self.current_epoch = runtime.epoch;
+                self.current_exception = true;
+                true
+            } else {
+                false
+            }
+        } else {
+            allowed
         };
         if !allowed {
             self.skip_current();
@@ -673,11 +835,13 @@ impl RouteAttemptPolicy {
             self.release_current(&key);
         }
         self.current_probe = false;
+        self.current_exception = false;
     }
 
     pub fn accept_current(&mut self) {
         self.current_target_key = None;
         self.current_probe = false;
+        self.current_exception = false;
     }
 
     /// Epoch of the target generation currently selected by this policy.
@@ -688,9 +852,9 @@ impl RouteAttemptPolicy {
         self.current_epoch
     }
 
-    /// `true` when the currently selected attempt is the half-open probe.
+    /// 半开探测与本请求的冷却例外都只允许一次实际尝试，禁用 transport 内部恢复。
     pub fn current_is_probe(&self) -> bool {
-        self.current_probe
+        self.current_probe || self.current_exception
     }
 
     pub fn record_failure(
@@ -705,6 +869,13 @@ impl RouteAttemptPolicy {
             now_ms,
             jitter_sample,
         } = failure;
+        if matches!(
+            kind,
+            AiErrorKind::ContextLengthExceeded | AiErrorKind::ContentFiltered
+        ) {
+            self.skip_current();
+            return AttemptFailureDisposition::Stop;
+        }
         let key = selected_target_key(target);
         // Never trust a stale signal timestamp over the evidence clock or the
         // state's own clock — the floor keeps cooldown writes monotonic.
@@ -717,15 +888,24 @@ impl RouteAttemptPolicy {
             target.target_cooldown_ms,
             now_ms,
         );
+        if failures.is_some()
+            && let Some(delay) = retry_after
+            && let Some(runtime) = self.state.inner.lock().targets.get_mut(&key)
+        {
+            runtime.retry_after_until = runtime
+                .retry_after_until
+                .max(now_ms.saturating_add(delay.as_millis().min(u64::MAX as u128) as u64));
+        }
         if client_output_committed || !can_fail_over {
             self.skip_current();
             return AttemptFailureDisposition::Stop;
         }
         if !self.current_probe
+            && !self.current_exception
             && transient_failure(&kind)
             && let Some(failures) = failures
             && failures <= target.target_retry_budget.max(0) as u32
-            && self.retry_current()
+            && (retry_after.is_some() || self.retry_current())
         {
             let cap_ms = 500_u64
                 .saturating_mul(1_u64 << (failures - 1).min(4))
@@ -961,6 +1141,7 @@ fn persisted_target_key(target: &TargetConfig) -> String {
 fn to_selected(target: &TargetConfig) -> SelectedTarget {
     SelectedTarget {
         destination: target.destination.clone(),
+        rpm_pool_id: target.rpm_pool_id.clone(),
         priority: target.priority,
         first_token_timeout_ms: target.first_token_timeout_ms,
         target_retry_budget: target.target_retry_budget,
@@ -989,6 +1170,7 @@ mod tests {
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
+            rpm_pool_id: None,
             created_at: String::new(),
             thinking_level_map: Vec::new(),
         }
@@ -1006,6 +1188,7 @@ mod tests {
 
     fn context(now_ms: u64) -> RouteAttemptContext {
         RouteAttemptContext {
+            cooldown: CooldownAttempts::default(),
             principal: "principal".into(),
             route_id: "route".into(),
             conversation: None,
@@ -1921,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_cooldown_blocks_old_retries_and_ignores_late_success() {
+    fn newer_cooldown_preserves_selected_exception_and_rejects_stale_success() {
         let state = RoutePolicyState::default();
         let mut recovering = target("recovering", 1);
         recovering.target_retry_budget = 1;
@@ -1929,6 +2112,7 @@ mod tests {
         let mut old = policy_at(&state, &targets, 10_000);
         let mut opener = policy_at(&state, &targets, 10_000);
         let old_target = old.next_healthy().expect("old request");
+        let original_epoch = old.current_epoch();
         let selected = opener.next_healthy().expect("concurrent request");
         assert_eq!(
             old.record_failure(&old_target, failure_at(AiErrorKind::Timeout, 10_000)),
@@ -1940,10 +2124,20 @@ mod tests {
             opener.record_failure(&selected, failure_at(AiErrorKind::QuotaExceeded, 10_000)),
             AttemptFailureDisposition::TryNextTarget
         );
-        assert!(!old.retry_current());
-        state.record_success(old.context(), "recovering:model", old.current_epoch());
+        assert!(old.retry_current());
+        state.record_success(old.context(), "recovering:model", original_epoch);
         assert_eq!(
             state.target_status_at("recovering:model", 10_001).state,
+            TargetRuntimeState::CoolingDown
+        );
+        let exception_epoch = old.current_epoch();
+        assert_eq!(
+            old.record_failure(&old_target, failure_at(AiErrorKind::Timeout, 10_001)),
+            AttemptFailureDisposition::TryNextTarget
+        );
+        state.record_success(old.context(), "recovering:model", exception_epoch);
+        assert_eq!(
+            state.target_status_at("recovering:model", 10_002).state,
             TargetRuntimeState::CoolingDown
         );
         assert_eq!(next_provider(&mut old).as_deref(), Some("fallback"));

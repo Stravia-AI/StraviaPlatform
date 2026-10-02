@@ -29,7 +29,7 @@ pub struct ApiKeyAccessRecord {
     pub name: String,
     pub is_enabled: bool,
     pub expires_at: Option<String>,
-    pub concurrency_limit: Option<i32>,
+    pub rpm_limit: Option<i32>,
     pub transparent_injection_enabled: bool,
     pub inject_media_understanding: bool,
     pub inject_web_search: bool,

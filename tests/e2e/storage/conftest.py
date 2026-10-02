@@ -232,6 +232,31 @@ def build_harness(work_dir: Path) -> None:
                         .execute(&pool)
                         .await?;
                     }
+                    "verify_rpm_migration" => {
+                        let mut connection = pool.acquire().await?;
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
+                            .execute(&mut *connection).await?;
+                        let directory = PathBuf::from("backend/crates/stravia-core/migrations/postgres");
+                        let mut files = std::fs::read_dir(&directory)?
+                            .map(|entry| entry.map(|entry| entry.path()))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        files.sort();
+                        for file in files.iter().filter(|path| !path.file_name().unwrap().to_string_lossy().starts_with("0009")) {
+                            sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(file)?))
+                                .execute(&mut *connection).await?;
+                        }
+                        sqlx::query("INSERT INTO api_keys (id, token, name, concurrency_limit) VALUES ('old', 'old-token', 'Old key', 5)")
+                            .execute(&mut *connection).await?;
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(directory.join("0009_rpm_admission.sql"))?))
+                            .execute(&mut *connection).await?;
+                        let rpm: Option<i32> = sqlx::query_scalar("SELECT rpm_limit FROM api_keys WHERE id = 'old'")
+                            .fetch_one(&mut *connection).await?;
+                        ensure!(rpm.is_none(), "old concurrency must not become RPM");
+                        let old_columns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'api_keys' AND column_name = 'concurrency_limit'")
+                            .bind(&schema).fetch_one(&mut *connection).await?;
+                        ensure!(old_columns == 0, "old concurrency column remains");
+                        println!("rpm_migration_clears_old_limit=true");
+                    }
                     "inspect_observation" => {
                         let tables: i64 = sqlx::query_scalar(
                             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('interaction_observations', 'inference_run_observations', 'model_turn_observations', 'target_attempt_observations', 'observation_events', 'rejected_request_observations')",
@@ -370,7 +395,7 @@ def build_harness(work_dir: Path) -> None:
             let api_key = admin.create_api_key(CreateApiKey {
                 key: None,
                 name: format!("{backend}-e2e-key"),
-                concurrency_limit: Some(10),
+                rpm_limit: Some(10),
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
                 inject_media_understanding: false,
@@ -386,6 +411,20 @@ def build_harness(work_dir: Path) -> None:
             }))?).await?;
             let reread_key = admin.get_api_key(&api_key.id).await?;
             ensure!(reread_key.inject_media_generation, "media generation injection selection persists independently");
+            ensure!(reread_key.rpm_limit == Some(10), "RPM survives omitted updates");
+            admin.update_api_key(&api_key.id, serde_json::from_value(serde_json::json!({
+                "rpm_limit": null
+            }))?).await?;
+            ensure!(admin.get_api_key(&api_key.id).await?.rpm_limit.is_none(), "explicit null clears RPM");
+            for invalid in [0, -1] {
+                ensure!(admin.update_api_key(&api_key.id, serde_json::from_value(serde_json::json!({
+                    "rpm_limit": invalid
+                }))?).await.is_err(), "nonpositive RPM rejected");
+            }
+            admin.update_api_key(&api_key.id, serde_json::from_value(serde_json::json!({
+                "rpm_limit": 1
+            }))?).await?;
+            ensure!(admin.get_api_key(&api_key.id).await?.rpm_limit == Some(1), "positive RPM persists");
 
             ensure!(admin.list_providers().await?.len() == 1, "provider count");
             let routes = admin.list_models().await?;
@@ -458,6 +497,14 @@ def build_harness(work_dir: Path) -> None:
             ensure!(ok.status() == StatusCode::OK, "valid key should 200");
             let body: serde_json::Value = ok.json().await?;
             ensure!(body["choices"][0]["message"]["content"].as_str() == Some("ok"), "content mismatch");
+            let rejected = client.post(&url).bearer_auth(&api_key.token).json(&payload).send().await?;
+            ensure!(rejected.status() == StatusCode::TOO_MANY_REQUESTS, "same backend API key enforces RPM");
+            let retry_after = rejected.headers().get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u64>().ok());
+            ensure!(retry_after.is_some_and(|seconds| seconds > 0 && seconds <= 60), "RPM rejection includes conservative Retry-After");
+            admin.update_api_key(&api_key.id, serde_json::from_value(serde_json::json!({
+                "rpm_limit": null
+            }))?).await?;
 
             let mut observation_roots = 0i64;
             let mut stats_requests = 0i64;

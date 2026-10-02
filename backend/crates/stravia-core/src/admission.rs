@@ -1,186 +1,105 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use parking_lot::Mutex;
+use tokio::time::Instant;
 
 use crate::error::GatewayError;
 use stravia_runtime_contract::Principal;
 
-/// Gateway-local coordinator for Principal Concurrency Limit admission.
-///
-/// Every root request is recorded, including Principals without a configured
-/// limit, so lowering a limit affects only later admission without cancelling
-/// work already in progress.
+const WINDOW: Duration = Duration::from_secs(60);
+
+/// 单实例 Principal RPM：检查与记录在同一锁内完成，结束或取消不返还额度。
 pub(crate) struct PrincipalAdmission {
-    state: Mutex<AdmissionState>,
-    released: tokio::sync::Notify,
+    state: Mutex<HashMap<String, PrincipalWindow>>,
 }
 
-struct AdmissionState {
-    active_by_principal: HashMap<String, usize>,
-    limit_by_principal: HashMap<String, Option<i32>>,
+struct PrincipalWindow {
+    limit: Option<i32>,
+    starts: VecDeque<Instant>,
 }
 
 impl PrincipalAdmission {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(AdmissionState {
-                active_by_principal: HashMap::new(),
-                limit_by_principal: HashMap::new(),
-            }),
-            released: tokio::sync::Notify::new(),
+            state: Mutex::new(HashMap::new()),
         }
     }
 
-    pub(crate) fn set_limit(&self, principal_id: &str, concurrency_limit: Option<i32>) {
+    pub(crate) fn set_limit(&self, principal_id: &str, rpm_limit: Option<i32>) {
         let mut state = self.state.lock();
-        state
-            .limit_by_principal
-            .insert(principal_id.to_owned(), concurrency_limit);
+        if let Some(window) = state.get_mut(principal_id) {
+            // 不限期间没有可重建的历史；受限数值调整保留已准入窗口。
+            if window.limit.is_none() || rpm_limit.is_none() {
+                window.starts.clear();
+            }
+            window.limit = rpm_limit;
+        } else {
+            state.insert(
+                principal_id.to_owned(),
+                PrincipalWindow {
+                    limit: rpm_limit,
+                    starts: VecDeque::new(),
+                },
+            );
+        }
     }
 
     pub(crate) fn remove_principal(&self, principal_id: &str) {
-        let mut state = self.state.lock();
-        state.limit_by_principal.remove(principal_id);
+        self.state.lock().remove(principal_id);
     }
 
     pub(crate) fn acquire(
-        self: &Arc<Self>,
+        &self,
         principal: &Principal,
-        concurrency_limit: Option<i32>,
-    ) -> Result<PrincipalAdmissionLease, GatewayError> {
-        let principal_id = principal.api_key_id().to_owned();
+        rpm_limit: Option<i32>,
+    ) -> Result<(), GatewayError> {
         let mut state = self.state.lock();
-        let limit = *state
-            .limit_by_principal
-            .entry(principal_id.clone())
-            .or_insert(concurrency_limit);
-        let limit = normalize_limit(limit)?;
-        let active = state
-            .active_by_principal
-            .entry(principal_id.clone())
-            .or_default();
-        if limit.is_some_and(|limit| *active >= limit) {
-            return Err(GatewayError::ConcurrencyLimitExceeded);
+        if let Some(window) = state.get_mut(principal.api_key_id()) {
+            return window.acquire();
         }
-        *active += 1;
-
-        Ok(PrincipalAdmissionLease {
-            coordinator: Arc::clone(self),
-            principal_id,
-        })
-    }
-
-    pub(crate) async fn acquire_wait(
-        self: &Arc<Self>,
-        principal: &Principal,
-        concurrency_limit: Option<i32>,
-    ) -> Result<PrincipalAdmissionLease, GatewayError> {
-        loop {
-            let released = self.released.notified();
-            match self.acquire(principal, concurrency_limit) {
-                Ok(lease) => return Ok(lease),
-                Err(GatewayError::ConcurrencyLimitExceeded) => released.await,
-                Err(error) => return Err(error),
-            }
+        if rpm_limit.is_none() {
+            return Ok(());
         }
-    }
-
-    fn release(&self, principal_id: &str) {
-        let mut state = self.state.lock();
-        let Some(active) = state.active_by_principal.get_mut(principal_id) else {
-            return;
+        let mut window = PrincipalWindow {
+            limit: rpm_limit,
+            starts: VecDeque::new(),
         };
-        debug_assert!(*active > 0, "admission lease released exactly once");
-        *active -= 1;
-        if *active == 0 {
-            state.active_by_principal.remove(principal_id);
-        }
-        drop(state);
-        self.released.notify_waiters();
+        let result = window.acquire();
+        state.insert(principal.api_key_id().to_owned(), window);
+        result
     }
 }
 
-fn normalize_limit(value: Option<i32>) -> Result<Option<usize>, GatewayError> {
-    value
-        .map(|value| {
-            usize::try_from(value).map_err(|_| {
+impl PrincipalWindow {
+    fn acquire(&mut self) -> Result<(), GatewayError> {
+        let Some(limit) = self.limit else {
+            return Ok(());
+        };
+        let limit = usize::try_from(limit)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| {
                 GatewayError::internal(anyhow::anyhow!(
-                    "stored Principal Concurrency Limit must be positive"
+                    "stored Principal RPM limit must be positive"
                 ))
-            })
-        })
-        .transpose()
-        .and_then(|limit| {
-            if limit == Some(0) {
-                Err(GatewayError::internal(anyhow::anyhow!(
-                    "stored Principal Concurrency Limit must be positive"
-                )))
-            } else {
-                Ok(limit)
-            }
-        })
-}
-
-pub(crate) struct PrincipalAdmissionLease {
-    coordinator: Arc<PrincipalAdmission>,
-    principal_id: String,
-}
-
-impl Drop for PrincipalAdmissionLease {
-    fn drop(&mut self) {
-        self.coordinator.release(&self.principal_id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::PrincipalAdmission;
-    use crate::error::GatewayError;
-    use stravia_runtime_contract::Principal;
-
-    #[test]
-    fn configured_limit_wins_over_stale_authenticated_snapshot() {
-        let admission = Arc::new(PrincipalAdmission::new());
-        let principal = Principal::new("key");
-        let first = admission
-            .acquire(&principal, None)
-            .expect("unlimited authenticated snapshot");
-
-        admission.set_limit(principal.api_key_id(), Some(1));
-        assert!(matches!(
-            admission.acquire(&principal, None),
-            Err(GatewayError::ConcurrencyLimitExceeded)
-        ));
-
-        drop(first);
-        admission
-            .acquire(&principal, None)
-            .expect("slot released for next root request");
-    }
-
-    #[tokio::test]
-    async fn waiting_admission_acquires_after_inherited_slot_release() {
-        let admission = Arc::new(PrincipalAdmission::new());
-        let principal = Principal::new("key");
-        let inherited = admission
-            .acquire(&principal, Some(1))
-            .expect("originating request slot");
-        let waiting = tokio::spawn({
-            let admission = Arc::clone(&admission);
-            let principal = principal.clone();
-            async move { admission.acquire_wait(&principal, Some(1)).await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
-
-        drop(inherited);
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
-            .await
-            .expect("waiter notified after inherited slot release")
-            .expect("waiter task")
-            .expect("waiter admission");
+            })?;
+        let now = Instant::now();
+        while self
+            .starts
+            .front()
+            .is_some_and(|start| now.duration_since(*start) >= WINDOW)
+        {
+            self.starts.pop_front();
+        }
+        if self.starts.len() >= limit {
+            // 降低限额后可能需要多个旧记录离窗，不能只提示最老记录的时间。
+            let expires = self.starts[self.starts.len() - limit] + WINDOW;
+            let remaining = expires.duration_since(now);
+            let retry_after_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
+            return Err(GatewayError::PrincipalRpmExceeded { retry_after_secs });
+        }
+        self.starts.push_back(now);
+        Ok(())
     }
 }

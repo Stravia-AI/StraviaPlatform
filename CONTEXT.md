@@ -128,13 +128,23 @@ _避免使用_：管理会话、Principal、管理员身份
 
 ## Principal
 
-Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、配额、并发限制与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
+Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、请求频率额度与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
 _避免使用_：Anonymous Principal、Client Session
 
-## Principal Concurrency Limit
+## API Key Root RPM
 
-Principal Concurrency Limit 是同一 Principal 在单一受支持 Gateway 实例中可拥有的活跃客户端执行根请求的最大数量；每个 Proxy Inference Run 与每次 MCP `tools/call` 各占一个名额。所有活跃根请求都会被计数，`NULL` 表示不限，正整数表示上限；它在 Principal 认证成功、Request Hook 或 MCP 工具执行尚未开始时占用，持续到完整交付或终止清理完成。根请求内的重试、隐藏 Model Turn、透明 Platform Tool call、透明 function call 与嵌套执行复用同一名额，不额外占用并发；已发布 History Marker 的后台 Platform Tool Execution 继承原根请求名额直到执行终态。匹配该 Marker 的请求可以在不占名额时等待 execution，汇合后再正常竞争名额；除此之外，超过上限的新请求会立即被拒绝，不进入等待队列。更新后的限制只影响后续准入，不中断已开始的执行。
-_避免使用_：RPM、RPD、TPM、TPD、连接数
+API Key Root RPM 是同一 Principal 在严格滑动 60 秒内可准入的客户端执行根请求数。Proxy Inference Run、remote compaction 和 MCP `tools/call` 共享这一额度；同根内部重试、隐藏 Model Turn、透明工具与后台执行不重复计入口请求。独立续接或重发是新根；WebSocket 连接复用不合并生成请求。不限表示没有本地请求频率上限，而非无限上游容量；长流、chunk、token 和心跳不增加计数，执行结束也不退回窗口记录。
+_避免使用_：Principal Concurrency Limit、执行并发数、连接数、TPM、RPD
+
+## RootRequest
+
+RootRequest 是一次已准入客户端根请求共享的执行上下文。它跨内部 Model Turn、工具与后台执行保留同根身份、累计等待和受控冷却尝试的归属，不是活跃执行名额，也不是客户端 Session。独立客户端续接建立新的 RootRequest。
+_避免使用_：Concurrency Lease、Session、Model Turn
+
+## RPM Pool
+
+RPM Pool 是共享上游请求频率额度的容量身份；同一 Provider 与 upstream model 的默认目的地跨 Route 共享，也可由管理员将不同 Target 显式归入一个共享池。每次实际上游请求包括重试各计一次；显式共享池替代默认池，不双重扣额。池不是健康身份，成员不因此共享失败计数、冷却或凭据状态。
+_避免使用_：Target Health、Route、Session、并发池
 
 ## Hook
 

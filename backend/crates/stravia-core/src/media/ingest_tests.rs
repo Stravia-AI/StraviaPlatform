@@ -57,6 +57,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("vision".into()),
                 enabled: true,
@@ -74,7 +75,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "attachment-owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -318,6 +319,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("painter".into()),
                 enabled: true,
@@ -337,7 +339,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
             .create_api_key(crate::db::models::CreateApiKey {
                 key: None,
                 name: format!("painter-owner-{method}"),
-                concurrency_limit: None,
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,

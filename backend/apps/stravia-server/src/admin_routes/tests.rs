@@ -980,6 +980,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("upstream-model".into()),
                 enabled: true,

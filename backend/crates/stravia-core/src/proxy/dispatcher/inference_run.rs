@@ -114,9 +114,17 @@ impl Run {
             cancellation.cancel();
         });
         let span = tracing::info_span!(target: "stravia::perf", "proxy.inference_run.orchestrate", status = tracing::field::Empty);
-        let response = engine::orchestrate(self.input, &mut self.inference_run, &mut self.phase)
-            .instrument(span.clone())
-            .await;
+        let response = crate::rpm::scope_root_request(
+            crate::rpm::RootRequest::default(),
+            // 根作用域只持有指针，不能把整个编排 Future 再嵌入 HTTP worker 栈帧。
+            Box::pin(engine::orchestrate(
+                self.input,
+                &mut self.inference_run,
+                &mut self.phase,
+            )),
+        )
+        .instrument(span.clone())
+        .await;
         span.record(
             "status",
             if response.status().as_u16() == 499 {

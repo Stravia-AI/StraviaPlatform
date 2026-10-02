@@ -145,6 +145,10 @@ impl Gateway {
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
+        let rpm_setting = storage.settings().get(crate::rpm::SETTINGS_KEY).await?;
+        let rpm_config = crate::rpm::RpmConfig::from_setting(rpm_setting.as_deref())?;
+        let rpm_admission = crate::rpm::TargetAdmission::default();
+        rpm_admission.configure(rpm_config);
         let provider_catalog = provider_catalog::ProviderCatalog::new(
             paths.catalog_root(),
             config.catalog_base_url.clone(),
@@ -393,6 +397,7 @@ impl Gateway {
             history_marker_execution_gate: Arc::new(tokio::sync::RwLock::new(())),
             lifecycle: Arc::new(GatewayLifecycle::new()),
             principal_admission: Arc::new(admission::PrincipalAdmission::new()),
+            rpm_admission,
             lifecycle_owner: true,
         };
         crate::startup_progress::report(
@@ -554,12 +559,22 @@ impl Gateway {
                         let reload = tokio::select! {
                             _ = cancellation.cancelled() => return,
                             result = async {
+                                let _reload = crate::rpm::CONFIG_WRITE.lock().await;
+                                let value = gw_poll.storage.settings().get(crate::rpm::SETTINGS_KEY).await?;
+                                let config = crate::rpm::RpmConfig::from_setting(value.as_deref())?;
                                 gw_poll
                                     .model_cache
                                     .write()
                                     .await
                                     .reload(gw_poll.storage.routes())
-                                    .await
+                                    .await?;
+                                gw_poll.rpm_admission.configure(config);
+                                if let Some(keys) = gw_poll.storage.api_keys() {
+                                    for key in keys.list().await? {
+                                        gw_poll.principal_admission.set_limit(&key.id, key.rpm_limit);
+                                    }
+                                }
+                                Ok::<(), anyhow::Error>(())
                             } => result,
                         };
                         if let Err(error) = reload {

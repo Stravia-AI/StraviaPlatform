@@ -164,7 +164,7 @@ stravia/
 │           │   └── upload_grant.rs   # 固定期限上传授权、回放保护与上传说明
 │           ├── provider_catalog/ # Catalog facade / types / source / parse / persist
 │           ├── turn_chain/       # SqlTurnChainStore 与集成回归
-│           ├── admission.rs      # Principal Concurrency Limit（private）
+│           ├── rpm/              # RootRequest、严格滑动 RPM 与实际发送门禁
 │           ├── error.rs          # GatewayError taxonomy
 │           ├── router/           # 选路装配(selection) / RouteAttemptPolicy / RoutePolicyState / CacheAffinity / ContinuationLookup
 │           ├── interaction_observation/ # Interaction Observation deep module（crate-private）
@@ -250,7 +250,7 @@ Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静�
 ```
 admin · agent · auth · config · connect_client_apply · db · error · history_marker
 hook · mcp · plugin · protocol · provider · provider_catalog · provider_models · proxy
-router · storage · thinking · turn_chain
+router · rpm · storage · thinking · turn_chain
 ```
 
 crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`reversible_redaction`、`web_access`、`web_search`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
@@ -371,7 +371,7 @@ DeliveryAdapter → ProtocolPair client encode（non-stream JSON / stream SSE / 
 
 Client credential policy 只存在于 crate-private `proxy/security` deep module。该 module 直接使用 `AuthAccessStore` seam：Inference profile 接受 Bearer、`x-api-key` 与 `x-goog-api-key`，MCP profile 只接受 Bearer；models list 复用同一 implementation，凭据无效或存储失败时 fail-closed。Security interface 返回 Principal、Model access grant、visible Model IDs 或 typed `GatewayError`，不修改 `RequestContext`，不记录日志，也不渲染 transport response。
 
-Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并获取根执行准入名额，在 Hook 后针对 final Model 检查绑定；Target retry、隐藏 Model Turn 和透明 Tool 调用复用同一根请求名额。普通 Target retry 属于同一 round，复用该 round 的授权结果。Active Provider 与 Provider Model lookup 仍由 Inference Run 拥有。Expired client credential 统一映射为 `AuthFailure::Expired` 与 HTTP 401；MCP 保持其他 401/403/503 mapping，models list 仅返回有效 Key 已绑定的 Model。Principal Concurrency Limit 仅在单个 Gateway 进程内生效。
+Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次 API Key Root RPM，在 Hook 后针对 final Model 检查绑定；Target retry、隐藏 Model Turn、透明 Tool 与后台 execution 保留同一 RootRequest，不重复计入口请求。普通 Target retry 属于同一 round，复用该 round 的授权结果。Active Provider 与 Provider Model lookup 仍由 Inference Run 拥有。Expired client credential 统一映射为 `AuthFailure::Expired` 与 HTTP 401；MCP 保持其他 401/403/503 mapping，models list 仅返回有效 Key 已绑定的 Model。RPM 运行态只在单个 Gateway 实例内共享，配置持久化但窗口不持久化，重启清空窗口；不协调多实例额度。
 
 ### 3.3 内部表示（IR）
 
@@ -726,7 +726,7 @@ Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提�
 | `BadRequest` | 400 | 客户端格式错误 |
 | `Unauthorized` | 401 | 无有效 API Token |
 | `Forbidden` | 403 | Token 状态异常或无权限 |
-| `ConcurrencyLimitExceeded` | 429 | Principal 的根执行数达到并发上限 |
+| `PrincipalRpmExceeded` | 429 | API Key 根请求 RPM 超限；`STRAVIA_RPM_LIMIT`，附向上取整的 `Retry-After` |
 | `RouteNotFound` | 404 | 无匹配模型/路由 |
 | `ProtocolUnsupported` | 400 | 协议不支持 |
 | `ProtocolLossyRejected` | 422 | lossy 转换被拒绝 |
@@ -775,7 +775,7 @@ Route 与 API Token 是**独立管理、多对多绑定**的关系（经 `api_ke
 ```
 API Token ──── (授权绑定) ──── Route
   │                             │
-  ├── 并发上限: concurrency_limit ├── 匹配键 (model_id)
+  ├── 根请求 RPM: rpm_limit       ├── 匹配键 (model_id)
   ├── 过期时间                  ├── 后端列表 (model_backends)
   ├── 状态: is_enabled           ├── 调度策略 (balance)
   └── 名称                       └── 语义 (operation)
@@ -785,7 +785,7 @@ API Token ──── (授权绑定) ──── Route
 
 Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
 
-### 8.3 代理请求鉴权与并发准入流程
+### 8.3 代理请求鉴权与 RPM 准入流程
 
 ```
 1. 从请求头提取 `api_token`
@@ -795,17 +795,51 @@ Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
    a. 不存在 → 401 invalid token
    b. `is_enabled == false` → 403 token revoked
    c. `expires_at < now` → 401 token expired
-4. 认证成功后，在 Request Hook 前获取一个根执行准入名额
-   └── 已达 `concurrency_limit` → `ConcurrencyLimitExceeded` (429)
+4. 认证成功后，在 Request Hook 前原子检查并计入根请求 RPM
+   └── 已达 `rpm_limit` → `PrincipalRpmExceeded` (429) + Retry-After
 5. 执行 Request Hook，再按最终 `model` 精确匹配 `models.model_id`
    └── 未匹配 → `GatewayError::ModelNotFound` (404)
 6. 最终模型不在 API Key 绑定列表（`api_key_models`）→ 403 forbidden
 7. 执行路由转发 → `model_backends` → 健康感知 target 选择
 
-MCP 的外部 `tools/call` 与 Proxy 的 `Inference Run` 共用同一 Principal
-准入计数；嵌套模型轮次、Platform Tool 和 MCP 工具内部调用不重复占用名额。
-准入名额直到完整响应交付、流终止或客户端断开后的清理完成才释放。
+MCP tools/call、Proxy inference 与 remote compaction 共用同一 Key 窗口；
+MCP session、discovery、工具列表等非执行入口不计数。
+内部轮次及工具共享 RootRequest；独立客户端续接或重发各计新根请求。
 ```
+
+窗口为单调时间的 `(t - 60s, t]`，恰好满 60 秒的记录已离窗；允许瞬时使用剩余额度，不使用固定发送间隔或令牌桶。`rpm_limit` 缺省／`null` 为不限，正整数为上限，零及负数无效；更新省略保持、`null` 清除、正数设置。入口超限不排队、不运行 Hook 或工具，不增加记录。已准入后失败、取消或完成不退回记录；流仍活跃时记录也会在 60 秒离窗，chunk、token、心跳不重复计数。WebSocket upgrade 不作为执行请求计数，每次独立生成事件分别计根请求；复用客户端或上游连接都不合并请求。配置更新影响后续准入而不取消活跃流；已有受限窗口在改限后保留，从不限改为有限不重建未记录历史。
+
+### 8.4 RPM Pool 发送门禁与配置
+
+默认 RPM Pool 以 `(provider_id, upstream model)` 为身份，同目的地跨 Route 共享；Provider-only Target 的 `model` 为 `null`。Target 的 `rpm_pool_id` 非空时改扣该显式共享池，不再扣默认池。`pools` 是池名称与限额的唯一权威来源，成员关系由 Route `targets[].rpm_pool_id` 保存，不能在 Target 上保存不同池额度，也不从凭据推测账号关系。容量身份与 `provider_id:model` 的共享健康身份分离；显式共享池不合并冷却、失败计数或凭据失效。
+
+管理面的目的地限额在对应 Provider 详情编辑；实例共享池只在 Model services 列表页编辑名称和 RPM，并展示已保存成员。Provider 详情链接到该唯一入口，Route 编辑器负责选择池绑定；Gateway Settings 负责累计等待和队列容量。保存仅合并当前表面实际修改的目的地或池，避免旧草稿覆盖其他表面已保存的配置。
+
+Host 在每次实际 HTTP 发送或 WebSocket 逻辑请求发送前原子准入，覆盖正常请求、同 Target 重试、failover、隐藏 Model Turn、能力调用、冷却额外尝试和 Provider Transport 内部重发。握手、连接复用、chunk 与心跳不是新的模型请求。本地准备、未发送取消及等待不预扣额度；已发起的连接／响应失败不退回记录。发送边界重新检查当前额度、授权、可用性、deadline 与取消，防止等待后迟到发送。
+
+Route 缓存发布与发送准入有原子先后顺序：资格读取期间发生的绑定、禁用或配置更新使旧快照失效，不能在更新成功后继续按旧池准入。同一冷却额外尝试或半开探测的并发 transport 调用也只能一个成功占用机会。兼容 Vendor 更新不改变已准入操作的固定 component 能力合同；当前授权、禁用、凭据状态和 Model 可用性仍是门禁。
+
+有 Target Continuation、Conversation Affinity、合格 Cache Affinity 或本根已选中依据的原 Target 优先有限等待，即使备用有额度也保留默认 5 秒窗口；内部轮次与重试不重置。优先等待结束后重查候选当前额度，再按既有优先级与调度原子竞争，不沿旧快照扎堆备用。全部候选暂时无额度时等待下一可准入事件；所有池等待共享 RootRequest 的默认 30 秒累计预算且受剩余 deadline 限制。同根切池不重复占队列，默认每实例最多 128 个等待根；取消、deadline、预算耗尽均清理占用，窗口恰在预算到期释放也不能让旧根迟到发送。**128 不是活跃流并发上限**；未设置 RPM 的池没有本地发送速率保护，长流仍可积累在途资源。
+
+管理认证保护 `GET/PUT /api/v1/settings/rpm_admission`，Desktop 复用 AdminService。GET 返回 `{data: string}`，其中 string 是规范化配置 JSON；PUT 接受 `{value: string}`，string 内的实际 DTO 为：
+
+```json
+{
+  "preferred_wait_ms": 5000,
+  "total_wait_ms": 30000,
+  "queue_capacity": 128,
+  "destinations": [
+    {"provider_id": "provider-id", "model": "upstream-model", "rpm_limit": 60}
+  ],
+  "pools": [
+    {"id": "shared-pool", "name": "Shared capacity", "rpm_limit": null}
+  ]
+}
+```
+
+缺失顶层字段取默认值，`destinations`／`pools` 默认空数组，所有池 RPM 默认不限；未知字段拒绝。`preferred_wait_ms <= total_wait_ms`，总等待须在支持的整数时长内，队列容量必须正数；名称、ID、Provider/model 必须非空且无首尾空白，`model` 可为 `null`。目的地 `(provider_id, model)` 与池 ID 不得重复，限额只能为 `null` 或正整数。保存验证全部现有 Target 的绑定，拒绝删除仍被引用的池或绑定不存在的池；成功持久化后激活配置。WebUI 的 API Key 编辑显示根 RPM，Provider 设置目的地额度，Route Target 选择共享池，Gateway 设置累计等待和队列边界。
+
+本地发送等待耗尽为 `target_rpm_exceeded`（429，可确定恢复时间时附 `Retry-After`）；队列满为 `target_rpm_queue_full`（503，不伪造恢复时间）。`target_rpm_busy` 是发送前额度竞争变化的内部重新选路信号；取消与 deadline 分别保留 `cancelled`／`deadline_exceeded`。明确上游 `Retry-After` 仍是硬门禁，不能缩短重发；已有保留原上游错误的分支不改成普通等待超时。冷却额外尝试及请求错误隔离见 [ADR-0034](../adr/0034-layer-route-target-selection.md)。
 
 ---
 
@@ -893,6 +927,10 @@ Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日
 
 旧布局仍不可升级；`stravia-tools migrate-data` 可以搬迁具有受支持迁移前缀的数据根：停机复制、校验 SQLite schema 与快照完整性后发布完整目标，不修改源 schema、不连接外部后端，也不自动删除源数据。目标由宿主启动时应用尚未执行的迁移。Artifact、Trace 和 `plugins/artifacts/` 中的本地导入 Component 随数据根复制；内嵌 `base` 由程序二进制提供。插件继续使用同一 `--from` / `--to` 根目录契约。数据库与本地导入文件必须配套备份；远程 PostgreSQL 备份不包含 Component，不能单独作为完整实例备份。路径取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
+#### API Key RPM 升级
+
+升级前停机并备份完整实例数据与外部 PostgreSQL 数据库，记录需要重新配置的 Key 策略。两后端增量迁移 `0009_rpm_admission` 删除 `concurrency_limit`，新增 `rpm_limit` 并将所有现有 Key 置为 `NULL`，**包括旧非空并发上限；不复制、不估算、不转换旧数值。管理员设置新 RPM 前全部不限**，且不保留任何并发上限。应在重新开放客户端流量前通过 API Key 管理面设置所需 RPM，并按 §8.4 配置目的地／共享池与 Target 绑定。旧字段和旧错误不再接受，客户端配置也需改为新字段。重启保留配置但清空入口与池运行窗口；多实例不共享窗口。回退须恢复升级前备份，不让旧程序打开新 schema。
+
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 
 ```bash
@@ -934,6 +972,7 @@ CREATE TABLE model_backends (
     model_id               TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
     provider_id            TEXT NOT NULL REFERENCES providers(id),
     model                  TEXT NOT NULL,  -- 上游实际模型名
+    rpm_pool_id            TEXT,           -- null 使用默认目的地池
     enabled                INTEGER NOT NULL DEFAULT 1,
     priority               INTEGER NOT NULL DEFAULT 0,
     thinking_level_map     TEXT NOT NULL,
@@ -947,7 +986,7 @@ CREATE TABLE api_keys (
     id                 TEXT PRIMARY KEY,
     token              TEXT NOT NULL UNIQUE,  -- sk-<32位hex>
     name               TEXT NOT NULL,
-    concurrency_limit  INTEGER CHECK (concurrency_limit > 0),
+    rpm_limit          INTEGER CHECK (rpm_limit > 0),
     is_enabled         INTEGER NOT NULL DEFAULT 1,
     expires_at         TEXT
 );
@@ -1107,7 +1146,7 @@ Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}
 
 ### 12.2 Principal admission boundary（当前实现）
 
-每个有效 API Key 建立的 Principal 维护活动根请求计数。Proxy Inference Run 与 MCP `tools/call` 在认证后、Hook 或工具执行前各获取一个 slot；根请求内的重试、隐藏 Model Turn、Platform Tool 和 function call 复用该 slot，完整交付或终止清理后释放。超出 `concurrency_limit` 立即返回 HTTP 429，不排队，也不发送 `Retry-After`。
+每个有效 API Key 建立的 Principal 按严格滑动 60 秒维护根请求 RPM；Proxy、remote compaction 与 MCP `tools/call` 在认证后、Hook 或工具执行前计一次。根内所有轮次、工具和后台执行共享 RootRequest，每次真实发送另经 RPM Pool。入口超限立即 429 与 `Retry-After`，无入口队列；Target 等待有累计预算与实例队列边界，详见 §8.3–8.4。没有活跃执行并发上限或按执行生命周期释放的名额。
 
 ### 12.3 Fixture 契约测试体系
 

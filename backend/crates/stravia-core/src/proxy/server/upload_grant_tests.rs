@@ -17,7 +17,7 @@ async fn create_key(gateway: &Gateway) -> crate::db::models::ApiKeyWithBindings 
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Upload grant owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

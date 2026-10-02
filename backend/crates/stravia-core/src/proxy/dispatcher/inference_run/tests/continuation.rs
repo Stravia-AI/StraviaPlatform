@@ -1301,6 +1301,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    rpm_pool_id: None,
                     thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect(),

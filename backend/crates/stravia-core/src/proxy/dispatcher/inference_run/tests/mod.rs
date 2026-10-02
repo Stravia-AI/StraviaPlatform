@@ -718,7 +718,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -735,7 +735,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
             .create_api_key(crate::db::models::CreateApiKey {
                 key: None,
                 name: KEY_NAME.into(),
-                concurrency_limit: None,
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
@@ -750,7 +750,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
     bearer_headers(&key.token)
 }
 
-async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
+async fn set_rpm_limit(gateway: &Gateway, limit: i32) {
     let key = gateway
         .admin()
         .list_api_keys()
@@ -766,7 +766,7 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
             crate::db::models::UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: Some(Some(limit)),
+                rpm_limit: Some(Some(limit)),
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
@@ -778,7 +778,7 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
             },
         )
         .await
-        .expect("set Principal Concurrency Limit");
+        .expect("set Principal RPM limit");
 }
 
 #[derive(Default)]
@@ -1371,6 +1371,7 @@ async fn configure_route_with_protocol(
             first_token_timeout_ms: None,
             target_retry_budget: Some(0),
             target_cooldown_ms: None,
+            rpm_pool_id: None,
             thinking_level_map: if protocol == "anthropic-messages" {
                 use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
                 use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
@@ -1437,6 +1438,7 @@ async fn set_target_retry_budget(gateway: &Gateway, model: &str, budget: i32) {
                             first_token_timeout_ms: Some(target.first_token_timeout_ms),
                             target_retry_budget: Some(budget),
                             target_cooldown_ms: Some(target.target_cooldown_ms),
+                            rpm_pool_id: None,
                             thinking_level_map: target.thinking_level_map,
                         })
                         .collect(),
@@ -1857,7 +1859,7 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -2030,7 +2032,7 @@ async fn assert_hidden_round_rechecks_access(
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: format!("Hidden-round {} key", mutation.tool_id()),
-            concurrency_limit: Some(1),
+            rpm_limit: Some(1),
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -2115,6 +2117,8 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     .expect("Gateway");
     configure_route(&gateway, "buffered-platform-only", &[base_url]).await;
 
+    authorized_headers(&gateway).await;
+    set_rpm_limit(&gateway, 1).await;
     let response = execute_non_stream(gateway.clone(), "buffered-platform-only").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)

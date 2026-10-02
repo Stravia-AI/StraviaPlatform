@@ -50,7 +50,7 @@ pub(super) fn provider_select(suffix: Option<&str>) -> String {
 
 pub(super) fn api_key_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
+        "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -66,7 +66,7 @@ pub(super) fn api_key_with_bindings(row: ApiKey, model_ids: Vec<String>) -> ApiK
         id: row.id,
         token: row.token,
         name: row.name,
-        concurrency_limit: row.concurrency_limit,
+        rpm_limit: row.rpm_limit,
         is_enabled: row.is_enabled,
         mcp_access_enabled: row.mcp_access_enabled,
         transparent_injection_enabled: row.transparent_injection_enabled,

@@ -65,7 +65,7 @@ async fn document_fixture() -> (
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "read key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,

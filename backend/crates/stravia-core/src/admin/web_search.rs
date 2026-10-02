@@ -89,6 +89,7 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 targets: vec![crate::db::models::CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: provider.id.clone(),
                     model: Some("tool-model".into()),
                     enabled: true,

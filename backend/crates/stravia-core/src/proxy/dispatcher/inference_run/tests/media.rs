@@ -34,6 +34,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: parent_provider.id,
                 model: Some("vision".into()),
                 enabled: true,
@@ -91,7 +92,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Media-only reader".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
@@ -184,6 +185,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: parent_provider.id,
                 model: Some("parent".into()),
                 enabled: true,
@@ -237,6 +239,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: media_provider.id,
                 model: Some("vision".into()),
                 enabled: true,
@@ -262,7 +265,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Media caller".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: true,
@@ -537,6 +540,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             balance: Some("traffic_equalization".into()),
             targets: vec![
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: bridge.id,
                     model: Some("bridge".into()),
                     enabled: true,
@@ -547,6 +551,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: native.id,
                     model: Some("native".into()),
                     enabled: true,
@@ -568,6 +573,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: no_tools.id,
                 model: Some("unsupported".into()),
                 enabled: true,
@@ -586,7 +592,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Native Media caller".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

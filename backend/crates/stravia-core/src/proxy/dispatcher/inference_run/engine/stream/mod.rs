@@ -103,7 +103,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     // 生产任务返回响应头后仍继续运行；在 spawn 前创建子 span，显式携带父链。
     let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.stream", status = tracing::field::Empty);
     let status_span = span.clone();
-    tokio::spawn(async move {
+    let root_request = crate::rpm::current_root_request();
+    tokio::spawn(crate::rpm::scope_root_request(root_request, async move {
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
             ingress,
             egress,
@@ -661,7 +662,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             break 'model_legs;
         }
         status_span.record("status", stream_status);
-    }.instrument(span));
+    }).instrument(span));
 
     match preflight_rx.await {
         Ok(Ok(())) => {}

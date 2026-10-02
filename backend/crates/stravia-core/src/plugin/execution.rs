@@ -93,6 +93,8 @@ pub(crate) struct VendorCallContext {
     pub(crate) response_continuation_available: Arc<AtomicBool>,
     pub(crate) client_headers: Vec<(String, String)>,
     pub(crate) metadata: BTreeMap<String, Value>,
+    pub(crate) send_admission: Option<crate::rpm::SendAdmission>,
+    pub(crate) root_request: crate::rpm::RootRequest,
 }
 
 impl VendorCallContext {
@@ -108,6 +110,8 @@ impl VendorCallContext {
             response_continuation_available: Arc::new(AtomicBool::new(false)),
             client_headers: Vec::new(),
             metadata: BTreeMap::new(),
+            send_admission: None,
+            root_request: crate::rpm::current_root_request(),
         }
     }
 }
@@ -145,6 +149,10 @@ impl PreparedVendorExecution {
 
     pub(crate) fn vendor_id(&self) -> &str {
         &self.vendor_id
+    }
+
+    pub(crate) fn pinned_component(&self) -> LoadedPlugin {
+        self.plugin.clone()
     }
 
     pub(crate) fn descriptor(&self) -> &stravia_vendor_sdk::ProviderDescriptor {
@@ -748,6 +756,7 @@ impl Gateway {
         )
         .with_observer(context.observer.clone())
         .with_observation_scope(context.model_turn_id.clone(), context.attempt_id.clone())
+        .with_send_admission(context.send_admission.clone())
         .with_response_continuation_available(context.response_continuation_available.clone())
         .with_websocket_pool(
             self.vendor_websocket_pool.clone(),

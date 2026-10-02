@@ -17,6 +17,7 @@ import DesktopClientSettings from '$lib/components/desktop-client-settings.svelt
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
+import RpmManagement from '$lib/components/rpm-management.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -573,6 +574,7 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
         </div>{/if}
     </section>
 
+    <div id="rpm" class="scroll-mt-20 pb-8"><RpmManagement /></div>
     <section id="proxy" class="route-section scroll-mt-20 pb-8" aria-labelledby="proxy-title">
       <div class="route-section-header">
         <div>

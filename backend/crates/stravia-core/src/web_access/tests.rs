@@ -288,7 +288,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Web key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
@@ -641,7 +641,7 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Web key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
@@ -723,7 +723,7 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Web key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
@@ -900,7 +900,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Web key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,

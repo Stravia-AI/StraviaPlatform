@@ -32,14 +32,15 @@ use crate::router::{
 use crate::router::{ContinuationLookup, ContinuationTarget};
 use stravia_runtime_contract::Deadline;
 use stravia_runtime_contract::hook::RouteContext;
+use stravia_runtime_contract::protocol::ir::AiError;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 use stravia_runtime_contract::thinking::ThinkingLevel;
 use stravia_vendor_runtime::{RuntimeError, RuntimeEvent};
 use stravia_vendor_sdk::{
-    Capability, ErrorKind, OperationOutput, TRANSPORT_PREFERENCE_METADATA_KEY, TransportFailure,
-    TransportPreference,
+    AiErrorKind, Capability, ErrorKind, OperationOutput, TRANSPORT_PREFERENCE_METADATA_KEY,
+    TransportFailure, TransportPreference,
 };
 
 #[derive(Clone)]
@@ -637,37 +638,41 @@ fn execute_inner(
         }
         .map_err(model_turn_gateway_error)?;
 
-        let mut attempts = executor
-            .selector
-            .select(
-                &input.principal,
-                &route,
-                &input.request,
-                input.request.meta.media_routing.as_ref(),
-                input.observer.as_ref(),
-                routing_estimate,
-            )
-            .await
-            .map_err(|error| match error {
-                crate::router::SelectionError::SchedulingEvidence(source) => ModelTurnError::new(
-                    "route_scheduling_unavailable",
-                    format!("Route scheduling snapshot is unavailable: {source}"),
-                ),
-                crate::router::SelectionError::MediaPlanExhausted => ModelTurnError::new(
-                    "input_modality_unsupported",
-                    "No eligible Target remains for the fixed Media routing plan",
-                ),
-                crate::router::SelectionError::NoEligibleTarget => {
-                    ModelTurnError::new("model_unavailable", "Model has no configured Target")
-                }
-            })?;
-
         let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
             || stravia_protocol_codec::codec::compaction::native_compaction_requested(
                 &input.request,
             );
-        let mut last_error = None;
-        while let Some(target) = attempts.next_healthy() {
+        let mut last_error: Option<AttemptFailure> = None;
+        let mut excluded = std::collections::HashSet::new();
+        'targets: loop {
+            let mut attempts =
+                match select_with_rpm(&executor, &route, &input, routing_estimate, &excluded).await
+                {
+                    Ok(attempts) => attempts,
+                    Err(error)
+                        if last_error.is_some()
+                            && matches!(
+                                error.code.as_str(),
+                                "model_unavailable" | "provider_unavailable"
+                            ) =>
+                    {
+                        break;
+                    }
+                    Err(error)
+                        if matches!(
+                            error.code.as_str(),
+                            "target_rpm_exceeded" | "deadline_exceeded"
+                        ) && last_error.as_ref().is_some_and(|failure| {
+                            failure.error.upstream_error_kind == Some(AiErrorKind::QuotaExceeded)
+                        }) =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let Some(target) = attempts.next_healthy() else {
+                break;
+            };
             let mut transport_preference = TransportPreference::Automatic;
             loop {
                 // The target may have been re-cooled by another request while this
@@ -675,6 +680,7 @@ fn execute_inner(
                 if !attempts.retry_current() {
                     break;
                 }
+                let mut sent = None;
                 let result = match prepare_attempt(
                     &executor,
                     &route,
@@ -691,6 +697,7 @@ fn execute_inner(
                     // upstream send, not only before the backoff sleep.
                     Ok(_) if !attempts.retry_current() => break,
                     Ok(mut prepared) => {
+                        sent = Some(prepared.sent.clone());
                         prepared.first_token_timed_out = (target.first_token_timeout_ms != 0
                             && input.observer.is_some())
                         .then(|| Arc::new(AtomicBool::new(false)));
@@ -730,6 +737,23 @@ fn execute_inner(
                     }
                     Err(failure) => failure,
                 };
+                if failure.error.code == "target_rpm_busy" {
+                    attempts.release_unsent_exception();
+                    attempts.skip_current();
+                    continue 'targets;
+                }
+                if failure.error.code == "target_ineligible" {
+                    if !sent
+                        .as_ref()
+                        .is_some_and(|sent| sent.load(Ordering::Acquire))
+                    {
+                        attempts.release_unsent_exception();
+                    }
+                    attempts.skip_current();
+                    excluded.insert(selected_target_key(&target));
+                    last_error = Some(failure);
+                    continue 'targets;
+                }
                 if native_compaction_requested {
                     if failure.error.code == "vendor_operation_unsupported" {
                         failure = AttemptFailure::terminal(
@@ -755,6 +779,10 @@ fn execute_inner(
                     record_upstream_failure(&attempts, &target, &failure);
                     return Err(failure.finish(input.observer.as_ref()));
                 };
+                if request_level_failure(&failure) {
+                    attempts.skip_current();
+                    return Err(failure.finish(input.observer.as_ref()));
+                }
                 // 错误类别可能合并不同 HTTP 状态；共享计数不能扩大原有同目标重试范围。
                 if kind.is_retryable()
                     && failure.transport_failure.is_none()
@@ -804,6 +832,7 @@ fn execute_inner(
                     }
                 }
             }
+            excluded.insert(crate::router::selector::selected_target_key(&target));
         }
 
         Err(last_error
@@ -812,6 +841,74 @@ fn execute_inner(
             })
             .finish(input.observer.as_ref()))
     })
+}
+
+async fn select_with_rpm(
+    executor: &LiveModelTurnExecutor,
+    route: &crate::db::models::RouteConfig,
+    input: &TurnInput,
+    routing_estimate: u64,
+    excluded: &std::collections::HashSet<String>,
+) -> Result<crate::router::RouteAttemptPolicy, ModelTurnError> {
+    let admission = &executor.gateway.rpm_admission;
+    loop {
+        let version = admission.version();
+        let routes = executor.gateway.model_cache.read().await;
+        let current_route = routes
+            .models
+            .iter()
+            .find(|current| current.id == route.id && current.is_enabled)
+            .ok_or_else(|| {
+                ModelTurnError::new("model_unavailable", "Model is no longer available")
+            })?;
+        let mut policy = executor
+            .selector
+            .select(
+                &input.principal,
+                current_route,
+                &input.request,
+                input.request.meta.media_routing.as_ref(),
+                input.observer.as_ref(),
+                routing_estimate,
+                &input.root_request.cooldown,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::router::SelectionError::SchedulingEvidence(source) => ModelTurnError::new(
+                    "route_scheduling_unavailable",
+                    format!("Route scheduling snapshot is unavailable: {source}"),
+                ),
+                crate::router::SelectionError::MediaPlanExhausted => ModelTurnError::new(
+                    "input_modality_unsupported",
+                    "No eligible Target remains for the fixed Media routing plan",
+                ),
+                crate::router::SelectionError::NoEligibleTarget => {
+                    ModelTurnError::new("model_unavailable", "Model has no configured Target")
+                }
+            })?;
+        drop(routes);
+        let wait = admission.filter_candidates(&mut policy, &input.root_request, excluded);
+        if let Some((next, preferred)) = wait {
+            admission
+                .wait(
+                    &input.root_request,
+                    next,
+                    preferred,
+                    &input.cancellation,
+                    &input.deadline,
+                    version,
+                )
+                .await
+                .map_err(|error| error.model_error())?;
+        } else if !policy.is_empty() {
+            return Ok(policy);
+        } else {
+            return Err(ModelTurnError::new(
+                "provider_unavailable",
+                "No eligible Target remains",
+            ));
+        }
+    }
 }
 
 const UPSTREAM_NOT_STARTED: u8 = 0;
@@ -846,6 +943,7 @@ impl Drop for UpstreamLocalWork<'_> {
 
 struct PreparedAttempt {
     model_turn_id: String,
+    authorization: ModelTurnAuthorization,
     route: RouteContext,
     provider_name: String,
     compact: bool,
@@ -872,6 +970,9 @@ struct PreparedAttempt {
     upstream_state: Arc<AtomicU8>,
     allow_recovery: bool,
     can_refresh_auth: bool,
+    root_request: crate::rpm::RootRequest,
+    send_failure: Arc<parking_lot::Mutex<Option<crate::rpm::runtime::AdmissionError>>>,
+    sent: Arc<AtomicBool>,
 }
 
 struct AttemptFailure {
@@ -1355,6 +1456,7 @@ async fn prepare_attempt(
 
     Ok(PreparedAttempt {
         model_turn_id: model_turn_id.to_owned(),
+        authorization: input.authorization,
         route: RouteContext {
             model_id: route.id.to_string(),
             provider_id: target.provider_id().to_string(),
@@ -1386,6 +1488,9 @@ async fn prepare_attempt(
         upstream_state: Arc::new(AtomicU8::new(UPSTREAM_NOT_STARTED)),
         allow_recovery: !compact && !native_compaction_requested && !probe,
         can_refresh_auth,
+        root_request: input.root_request.clone(),
+        send_failure: Arc::default(),
+        sent: Arc::default(),
     })
 }
 
@@ -1406,12 +1511,13 @@ impl AttemptRoutePolicy {
             .record_success(&self.context, &selected_target_key(target), self.epoch);
     }
 
-    fn record_failure(&self, target: &SelectedTarget) {
-        self.state.record_failure(
+    fn record_failure(&self, target: &SelectedTarget, retry_after: Option<Duration>) {
+        self.state.record_failure_with_retry_after(
             &selected_target_key(target),
             self.epoch,
             target.target_retry_budget,
             target.target_cooldown_ms,
+            retry_after,
         );
     }
 }
@@ -1961,6 +2067,14 @@ async fn drive_vendor_attempt(
         )
         .instrument(attempt.span())
         .await;
+        let outcome = if let Some(error) = prepared.send_failure.lock().take() {
+            let error = error.model_error();
+            let mut failure = AttemptFailure::terminal(&error.code, &error.message);
+            failure.error = Box::new(error);
+            Err(failure)
+        } else {
+            outcome
+        };
 
         // 剥离后的重放没有再被判为推理拒绝（无论成功还是因其它原因失败），就记住该级
         // 剥离掉的全部载荷。这是保守的过度近似：同一级中可能只有部分载荷是被拒原因。
@@ -2268,14 +2382,12 @@ async fn drive_vendor_attempt(
                 if !committed
                     && failure.error.code == "continuation_not_found"
                     && prepared.allow_recovery
-                    && continuation_fallback.is_some()
-                    && policy.state.try_record_recovery_failure(
-                        &selected_target_key(&target),
-                        policy.epoch,
-                        target.target_retry_budget,
-                        target.target_cooldown_ms,
-                    ) =>
+                    && target.target_retry_budget > i32::from(auth_recovered)
+                    && continuation_fallback.is_some() =>
             {
+                // 远端续接失败后的完整回放仍消耗既有恢复预算；本地连接 miss
+                // 才可免费回退。该请求级错误不能为获取预算而累计 Target 健康失败。
+                // fallback.take 限制回放一次，已执行的认证恢复也占用一次预算。
                 attempt.finish(
                     "failed",
                     failure.diagnostic.status_code,
@@ -2341,6 +2453,43 @@ async fn run_vendor_operation(
         .store(UPSTREAM_NOT_STARTED, Ordering::Release);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
     let mut context = VendorCallContext::new(operation_cancellation.clone(), deadline.clone());
+    let send_admission = crate::rpm::SendAdmission {
+        admission: gateway.rpm_admission.clone(),
+        root: prepared.root_request.clone(),
+        key: crate::rpm::PoolKey::for_target(target),
+        cancellation: operation_cancellation.clone(),
+        deadline: deadline.clone(),
+        failure: prepared.send_failure.clone(),
+        sent: prepared.sent.clone(),
+        upstream_state: Some(prepared.upstream_state.clone()),
+        eligibility: Some(crate::rpm::runtime::SendEligibility {
+            storage: gateway.storage.clone(),
+            routes: gateway.model_cache.clone(),
+            admitted_component: prepared.pinned_execution.pinned_component(),
+            admitted_provider_id: prepared.pinned_execution.descriptor().provider_id.clone(),
+            route_id: prepared.route.model_id.clone(),
+            target: target.destination.clone(),
+            principal: principal.clone(),
+            authorization: prepared.authorization,
+            health: policy.state.clone(),
+            target_key: selected_target_key(target),
+            epoch: policy.epoch,
+            single_attempt: policy.probe,
+            capability: if prepared.compact {
+                stravia_vendor_sdk::Capability::Compact
+            } else {
+                stravia_vendor_sdk::Capability::Infer
+            },
+            requires_video: request_contains_video(request),
+            requires_image: request
+                .meta
+                .media_routing
+                .as_ref()
+                .is_some_and(|plan| plan.mode == MediaRoutingMode::Native),
+        }),
+    };
+    context.send_admission = Some(send_admission.clone());
+    context.root_request = prepared.root_request.clone();
     context.events = Some(event_tx);
     context.observer = prepared.observer.clone();
     context.model_turn_id = Some(prepared.model_turn_id.clone());
@@ -2545,6 +2694,12 @@ async fn run_vendor_operation(
             &prepared.upstream_state,
         )
         .await?;
+    }
+    if let Some(error) = send_admission.failure.lock().take() {
+        let error = error.model_error();
+        let mut failure = AttemptFailure::terminal(&error.code, &error.message);
+        failure.error = Box::new(error);
+        return Err(failure);
     }
     if let Some(failure) = pending_failure {
         return Err(failure);
@@ -2753,7 +2908,7 @@ async fn process_runtime_event(
     let VendorEvent { event, publication } = vendor_event;
     match event {
         RuntimeEvent::UpstreamStarted => {
-            upstream_state.fetch_or(UPSTREAM_STARTED, Ordering::AcqRel);
+            // 插件事件可能先于 Host RPM 准入；只有宿主实际发送才能标记开始。
         }
         RuntimeEvent::Delta(mut delta) => {
             let _local_work = UpstreamLocalWork::begin(upstream_state, deadline.clone());
@@ -3022,8 +3177,11 @@ async fn finish_vendor_failure(
     let status = failure.diagnostic.status_code;
     let code = failure.error.code.clone();
     if committed {
-        if failure.is_upstream() && failure.error.code != "deadline_exceeded" {
-            policy.record_failure(target);
+        if failure.is_upstream()
+            && failure.error.code != "deadline_exceeded"
+            && !request_level_failure(&failure)
+        {
+            policy.record_failure(target, failure.retry_after);
         }
         attempt.finish("failed", status, Some(code), None);
         let error = failure.finish(observer);
@@ -3219,14 +3377,36 @@ fn record_upstream_failure(
     target: &SelectedTarget,
     failure: &AttemptFailure,
 ) {
-    if failure.is_upstream() {
-        attempts.state().record_failure(
+    if failure.is_upstream() && !request_level_failure(failure) {
+        attempts.state().record_failure_with_retry_after(
             &selected_target_key(target),
             attempts.current_epoch(),
             target.target_retry_budget,
             target.target_cooldown_ms,
+            failure.retry_after,
         );
     }
+}
+
+fn request_level_failure(failure: &AttemptFailure) -> bool {
+    if matches!(
+        failure.error.code.as_str(),
+        "protected_reasoning_rejected" | "continuation_not_found"
+    ) {
+        return true;
+    }
+    failure
+        .error
+        .upstream_error_kind
+        .as_ref()
+        .is_some_and(|kind| {
+            let diagnostic = failure.diagnostic.message.as_ref().map(|message| {
+                serde_json::from_str::<serde_json::Value>(message)
+                    .unwrap_or_else(|_| serde_json::json!({"message": message}))
+            });
+            AiError::is_request_error_evidence(kind, failure.error.upstream_body.as_deref())
+                || AiError::is_request_error_evidence(kind, diagnostic.as_ref())
+        })
 }
 
 fn is_first_output(delta: &AiStreamDelta) -> bool {

@@ -360,6 +360,7 @@ async fn create_route(
             display_name: Some("Management Lifecycle Route".into()),
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider_id.into(),
                 model: Some(MODEL_ID.into()),
                 enabled: true,
@@ -380,7 +381,7 @@ async fn api_key(gateway: &Gateway, route_id: &str) -> anyhow::Result<String> {
         .create_api_key(CreateApiKey {
             key: None,
             name: "Management lifecycle key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

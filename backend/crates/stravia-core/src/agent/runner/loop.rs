@@ -133,11 +133,12 @@ impl AgentRunner {
     ) -> AgentEventStream {
         let runner = self.clone();
         let observation = crate::interaction_observation::scope::current();
+        let root_request = crate::rpm::current_root_request();
         let (events, receiver) = mpsc::channel(32);
         use tracing::Instrument as _;
         let parent = tracing::Span::current();
         let driver = stream::once(
-            async move {
+            crate::rpm::scope_root_request(root_request, async move {
                 let terminal = match runner
                     .execute(input, commit_policy, resolved, &events, observation)
                     .await
@@ -150,7 +151,7 @@ impl AgentRunner {
                 };
                 let _ = events.send(terminal).await;
                 None::<AgentEvent>
-            }
+            })
             .instrument(parent),
         )
         .filter_map(futures::future::ready);
@@ -529,6 +530,7 @@ impl AgentRunner {
                             if let Some(observer) = observation.as_ref() {
                                 turn_input = turn_input.with_observer(observer.clone());
                             }
+                            turn_input.root_request = crate::rpm::current_root_request();
                             if capability_authorization.is_some() {
                                 turn_input = turn_input
                                     .with_authorization(ModelTurnAuthorization::CapabilityGrant);

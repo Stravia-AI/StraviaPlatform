@@ -153,6 +153,7 @@ mod tests {
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("provider-model".into()),
                 enabled: true,
@@ -184,7 +185,7 @@ mod tests {
             .create_api_key(crate::db::models::CreateApiKey {
                 key: None,
                 name: "Models list key".into(),
-                concurrency_limit: None,
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
@@ -241,7 +242,7 @@ mod tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -290,6 +291,7 @@ mod tests {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    rpm_pool_id: None,
                     thinking_level_map: map,
                 }
             })
@@ -316,7 +318,7 @@ mod tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: Some(false),
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -339,7 +341,7 @@ mod tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: Some(true),
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,

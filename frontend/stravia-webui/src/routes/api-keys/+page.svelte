@@ -150,7 +150,7 @@ function expirationLabel(expiresAt: string | null | undefined): string {
 }
 
 function limitsLabel(apiKey: ApiKey): string {
-  return m.api_keys_concurrent_executions_value({ limit: apiKey.concurrency_limit ?? m.api_key_editor_unlimited() })
+  return m.api_keys_rpm_value({ limit: apiKey.rpm_limit ?? m.api_key_editor_unlimited() })
 }
 
 function modelAccessLabel(apiKey: ApiKey): string {

@@ -762,6 +762,7 @@ mod tests {
                 balance: Some("traffic_equalization".into()),
                 targets: vec![
                     CreateTarget {
+                        rpm_pool_id: None,
                         provider_id: primary.id.clone(),
                         model: Some("primary-model".into()),
                         enabled: true,
@@ -772,6 +773,7 @@ mod tests {
                         thinking_level_map: Vec::new(),
                     },
                     CreateTarget {
+                        rpm_pool_id: None,
                         provider_id: fallback.id.clone(),
                         model: Some("fallback-model".into()),
                         enabled: true,

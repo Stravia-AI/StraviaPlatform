@@ -23,7 +23,7 @@ pub enum AiErrorKind {
     NotFoundError,
     /// 429 (rate-limit) — requests-per-minute or tokens-per-minute exceeded.
     RateLimitError,
-    /// 429 (quota) / 529 — spend or usage quota exhausted; not retryable.
+    /// Explicit spend or usage quota exhaustion; not retryable.
     QuotaExceeded,
     /// 400 — malformed request body, unsupported parameters, or schema error.
     InvalidRequest,
@@ -130,6 +130,50 @@ impl AiError {
         self.kind.is_retryable()
     }
 
+    /// 只有明确的参数、上下文或内容证据才能隔离共享健康计数。
+    pub fn is_request_error(&self) -> bool {
+        Self::is_request_error_evidence(&self.kind, self.raw.as_ref())
+    }
+
+    pub fn is_request_error_evidence(kind: &AiErrorKind, raw: Option<&Value>) -> bool {
+        if matches!(
+            kind,
+            AiErrorKind::ContextLengthExceeded | AiErrorKind::ContentFiltered
+        ) {
+            return true;
+        }
+        if *kind != AiErrorKind::InvalidRequest {
+            return false;
+        }
+        let Some(raw) = raw else { return false };
+        let error = raw.get("error").unwrap_or(raw);
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        matches!(
+            code,
+            "invalid_parameter"
+                | "unsupported_parameter"
+                | "invalid_value"
+                | "invalid_argument"
+                | "context_length_exceeded"
+                | "content_filter"
+                | "content_policy_violation"
+                | "invalid_encrypted_content"
+        ) || message.contains("unsupported parameter")
+            || message.contains("invalid parameter")
+            || message.contains("context length")
+            || message.contains("context window")
+            || message.contains("content filter")
+            || message.contains("content policy")
+    }
+
     /// Construct an `AiError` from an HTTP status code.
     ///
     pub fn from_status(status: u16, message: impl Into<String>) -> Self {
@@ -137,7 +181,7 @@ impl AiError {
     }
 
     pub fn kind_from_status(status: u16, raw: Option<&Value>) -> AiErrorKind {
-        if status == 429 {
+        if matches!(status, 400 | 429) {
             let body = raw
                 .map(Value::to_string)
                 .unwrap_or_default()
@@ -148,7 +192,12 @@ impl AiError {
             {
                 return AiErrorKind::QuotaExceeded;
             }
-            return AiErrorKind::RateLimitError;
+            if body.contains("overloaded_error") || body.contains("overloaded") {
+                return AiErrorKind::ServiceUnavailable;
+            }
+            if status == 429 {
+                return AiErrorKind::RateLimitError;
+            }
         }
 
         match status {
@@ -158,8 +207,7 @@ impl AiError {
             404 => AiErrorKind::ModelNotAvailable,
             408 | 504 => AiErrorKind::Timeout,
             500 => AiErrorKind::ServerError,
-            501..=528 => AiErrorKind::ServiceUnavailable,
-            529 => AiErrorKind::QuotaExceeded,
+            501..=529 => AiErrorKind::ServiceUnavailable,
             _ => AiErrorKind::Unknown,
         }
     }
@@ -178,10 +226,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_529_is_quota_exhaustion_not_a_transient_service_failure() {
+    fn http_529_is_provider_overload() {
         assert_eq!(
             AiError::from_status(529, "overloaded").kind,
-            AiErrorKind::QuotaExceeded
+            AiErrorKind::ServiceUnavailable
         );
     }
 

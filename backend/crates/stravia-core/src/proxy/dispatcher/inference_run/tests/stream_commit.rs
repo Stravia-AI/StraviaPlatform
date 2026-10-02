@@ -37,7 +37,11 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
                     "upstream_stream_error",
                     "private upstream quota diagnostic",
                 );
-                error.upstream_status = Some(529);
+                // Quota exhaustion needs explicit provider evidence: 529 is overload,
+                // and a bare 429 is a rate limit rather than a quota failure.
+                error.upstream_status = Some(429);
+                error.upstream_error_kind =
+                    Some(stravia_runtime_contract::protocol::ir::AiErrorKind::QuotaExceeded);
                 error
             }
         };

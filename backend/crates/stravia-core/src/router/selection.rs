@@ -20,9 +20,9 @@ use crate::storage::DynStorage;
 use super::cache_affinity::CacheAffinity;
 use super::continuation::ContinuationLookup;
 use super::selector::{
-    ConversationIdentity, PricingProbe, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
-    RouteSchedulingSnapshot, TargetPricing, TargetSchedulingSnapshot, conversation_identity,
-    selected_target_key, target_key,
+    ConversationIdentity, CooldownAttempts, PricingProbe, RouteAttemptContext, RouteAttemptPolicy,
+    RoutePolicyState, RouteSchedulingSnapshot, TargetPricing, TargetSchedulingSnapshot,
+    conversation_identity, selected_target_key, target_key,
 };
 
 /// Why selection could not produce a policy.
@@ -65,6 +65,7 @@ impl RouteSelector {
     /// Continuation and Conversation/Cache Affinity enter as hints, cooldown and
     /// health stay eligibility filters, and Target Priority + the route's
     /// scheduling strategy order the remainder.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         target = "stravia::perf",
         name = "router.select",
@@ -79,6 +80,7 @@ impl RouteSelector {
         media_plan: Option<&MediaRoutingPlan>,
         observer: Option<&RunObserver>,
         estimated_input_tokens: u64,
+        cooldown: &CooldownAttempts,
     ) -> Result<RouteAttemptPolicy, SelectionError> {
         let conversation = conversation_identity(request);
         // Continuation evidence only exists for generation-parent conversations.
@@ -95,6 +97,7 @@ impl RouteSelector {
             .await
             .map_err(SelectionError::SchedulingEvidence)?;
         let context = RouteAttemptContext {
+            cooldown: cooldown.clone(),
             principal: principal.continuation_key(),
             route_id: route.id.clone().into(),
             conversation,
@@ -140,12 +143,14 @@ impl RouteSelector {
         route: &RouteConfig,
         estimated_input_tokens: u64,
         observer: Option<&RunObserver>,
+        cooldown: &CooldownAttempts,
     ) -> Result<RouteAttemptPolicy, SelectionError> {
         let snapshot = self
             .scheduling_snapshot(&route.targets, observer)
             .await
             .map_err(SelectionError::SchedulingEvidence)?;
         let context = RouteAttemptContext {
+            cooldown: cooldown.clone(),
             principal: principal.continuation_key(),
             route_id: route.id.clone().into(),
             conversation: None,
@@ -319,6 +324,7 @@ mod tests {
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
+            rpm_pool_id: None,
             created_at: String::new(),
             thinking_level_map: Vec::new(),
         }
@@ -708,6 +714,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -732,6 +739,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("first select");
@@ -761,6 +769,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("second select");
@@ -778,6 +787,7 @@ mod tests {
         }));
         fixture.policy_state.record_success(
             &RouteAttemptContext {
+                cooldown: CooldownAttempts::default(),
                 principal: principal().continuation_key(),
                 route_id: "route-id".into(),
                 conversation: Some(ConversationIdentity::PromptCacheKey("chat-a".into())),
@@ -800,6 +810,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -828,6 +839,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&seeded),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -848,6 +860,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&identified),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select with conversation");
@@ -880,6 +893,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&cache_key_only),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -896,6 +910,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&parent),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select with parent");
@@ -917,7 +932,13 @@ mod tests {
 
         let mut policy = fixture
             .selector
-            .select_independent(&principal(), &route, 12_345, None)
+            .select_independent(
+                &principal(),
+                &route,
+                12_345,
+                None,
+                &CooldownAttempts::default(),
+            )
             .await
             .expect("independent selection");
         let selected = policy.next_healthy().expect("Provider-only Target");
@@ -946,6 +967,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -971,6 +993,7 @@ mod tests {
                 Some(&plan),
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
@@ -991,6 +1014,7 @@ mod tests {
                 Some(&empty_plan),
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .err()
@@ -1014,6 +1038,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .err()
@@ -1036,6 +1061,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .err()
@@ -1065,6 +1091,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("stale snapshot still selects");
@@ -1137,6 +1164,7 @@ mod tests {
                 None,
                 None,
                 estimate_uncached_input_tokens(&request()),
+                &CooldownAttempts::default(),
             )
             .await
             .expect("select");
