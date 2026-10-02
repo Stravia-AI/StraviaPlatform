@@ -885,6 +885,12 @@ async fn select_with_rpm(
                 crate::router::SelectionError::NoEligibleTarget => {
                     ModelTurnError::new("model_unavailable", "Model has no configured Target")
                 }
+                crate::router::SelectionError::MixedAllowanceExclusions => {
+                    super::mixed_allowance_exclusions_error()
+                }
+                crate::router::SelectionError::AllowanceSuspended => {
+                    super::allowance_suspended_error()
+                }
             })?;
         drop(routes);
         let wait = admission.filter_candidates(&mut policy, &input.root_request, excluded);

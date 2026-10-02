@@ -70,6 +70,38 @@ pub struct ProviderCredentialVersion {
     pub oauth_status_version: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllowanceSuspension {
+    pub suspended_at: String,
+    pub triggered_keys: Vec<String>,
+    /// UTC Unix milliseconds, matching Allowance Item reset timestamps.
+    pub earliest_reset_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllowanceSuspensionState {
+    pub suspended: bool,
+    pub suspended_at: Option<String>,
+    pub triggered_keys: Vec<String>,
+    /// UTC Unix milliseconds; a removed trigger can invalidate this aggregate.
+    pub earliest_reset_at: Option<i64>,
+    /// UTC Unix microseconds preserve ordering between rapid completed reads.
+    pub evidence_completed_at: i64,
+}
+
+impl AllowanceSuspensionState {
+    pub fn suspension(&self) -> Option<AllowanceSuspension> {
+        if !self.suspended {
+            return None;
+        }
+        Some(AllowanceSuspension {
+            suspended_at: self.suspended_at.clone()?,
+            triggered_keys: self.triggered_keys.clone(),
+            earliest_reset_at: self.earliest_reset_at,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq, Eq)]
 pub struct OAuthCredential {
     pub provider_id: String,

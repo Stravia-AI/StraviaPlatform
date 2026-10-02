@@ -1021,6 +1021,16 @@ impl AdminService {
         };
         drop(write_fence);
         drop(publication);
+        if updated.is_enabled
+            && let Err(error) = self.refresh_provider_allowance(provider_id).await
+        {
+            tracing::warn!(
+                provider_id,
+                error = ?error,
+                "provider authorization allowance refresh failed"
+            );
+        }
+        self.gw.provider_allowance_state.notify_changed();
         Ok(updated)
     }
 }

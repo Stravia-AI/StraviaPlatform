@@ -10,14 +10,22 @@ pub(super) async fn provider_value(
         .admin()
         .configured_provider_credential_fields(&provider)
         .await?;
+    let allowance_suspension = gw
+        .admin()
+        .get_provider_allowance_suspension(&provider.id)
+        .await?;
     let mut value = serde_json::to_value(provider)?;
-    value
+    let fields = value
         .as_object_mut()
-        .expect("Provider serialization must produce an object")
-        .insert(
-            "configured_credential_fields".into(),
-            serde_json::to_value(configured_credential_fields)?,
-        );
+        .expect("Provider serialization must produce an object");
+    fields.insert(
+        "configured_credential_fields".into(),
+        serde_json::to_value(configured_credential_fields)?,
+    );
+    fields.insert(
+        "allowance_suspension".into(),
+        serde_json::to_value(allowance_suspension)?,
+    );
     Ok(value)
 }
 

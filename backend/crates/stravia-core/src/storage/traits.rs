@@ -76,6 +76,198 @@ pub trait ProviderStore: Send + Sync {
     async fn clear_credential_invalid(&self, id: &str) -> anyhow::Result<()>;
     /// 调度快照装配用：返回凭据失效的 Provider id 集合。
     async fn credential_invalid_provider_ids(&self) -> anyhow::Result<HashSet<String>>;
+    async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>>;
+    async fn replace_guarded_allowance_keys(&self, id: &str, keys: &[String])
+    -> anyhow::Result<()>;
+    async fn write_allowance_suspension(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+        state: &crate::db::models::AllowanceSuspensionState,
+        expected_guarded_keys: &[String],
+    ) -> anyhow::Result<bool>;
+    async fn allowance_suspension(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::db::models::AllowanceSuspensionState>>;
+    async fn allowance_suspended_provider_ids(&self) -> anyhow::Result<HashSet<String>>;
+}
+
+#[cfg(test)]
+pub(crate) async fn verify_allowance_storage_contract(
+    store: &dyn ProviderStore,
+    oauth: &dyn OAuthCredentialStore,
+    provider: Provider,
+) -> anyhow::Result<()> {
+    use crate::db::models::AllowanceSuspensionState;
+    let id = &provider.id;
+    let keys = vec!["daily".to_owned(), "weekly".to_owned()];
+    let duplicate_keys = vec!["weekly".to_owned(), "daily".to_owned(), "weekly".to_owned()];
+    store
+        .replace_guarded_allowance_keys(id, &duplicate_keys)
+        .await?;
+    assert_eq!(store.guarded_allowance_keys(id).await?, keys);
+    let mut state = AllowanceSuspensionState {
+        suspended: true,
+        suspended_at: Some("2026-10-02T00:00:00Z".into()),
+        triggered_keys: keys.clone(),
+        earliest_reset_at: Some(1000),
+        evidence_completed_at: 100,
+    };
+    let mut version = ProviderCredentialVersion {
+        provider_revision: provider.revision,
+        oauth_status_version: None,
+    };
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    assert!(store.allowance_suspended_provider_ids().await?.contains(id));
+    let unchanged = store.get(id).await?.unwrap();
+    assert_eq!(unchanged.revision, provider.revision);
+    assert_eq!(unchanged.credential_status, provider.credential_status);
+    assert_eq!(
+        unchanged.credential_invalid_at,
+        provider.credential_invalid_at
+    );
+    assert_eq!(unchanged.is_enabled, provider.is_enabled);
+    state.evidence_completed_at = 99;
+    state.suspended = false;
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    state.evidence_completed_at = 100;
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    state.evidence_completed_at = 101;
+    state.suspended = true;
+    state.suspended_at = Some("2026-10-02T01:00:00Z".into());
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    assert_eq!(
+        store
+            .allowance_suspension(id)
+            .await?
+            .unwrap()
+            .suspended_at
+            .as_deref(),
+        Some("2026-10-02T00:00:00Z")
+    );
+    version.provider_revision += 1;
+    state.evidence_completed_at = 102;
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    version.provider_revision -= 1;
+    oauth
+        .upsert(
+            id,
+            UpsertOAuthCredential {
+                driver_key: "driver".into(),
+                scheme: "authorization_code".into(),
+                access_token: "token".into(),
+                refresh_token: None,
+                expires_at: None,
+                resource_url: None,
+                subject_id: None,
+                scopes: None,
+                meta: None,
+            },
+        )
+        .await?;
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    let oauth_version = oauth.get(id).await?.unwrap().status_version;
+    version.oauth_status_version = Some(oauth_version + 1);
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    version.oauth_status_version = Some(oauth_version);
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    assert!(store.mark_credential_invalid(id, version).await?);
+    version.provider_revision = store.get(id).await?.unwrap().revision;
+    let remaining = vec!["weekly".to_owned()];
+    store.replace_guarded_allowance_keys(id, &remaining).await?;
+    let saved = store.allowance_suspension(id).await?.unwrap();
+    assert!(saved.suspended);
+    assert_eq!(saved.triggered_keys, remaining);
+    assert_eq!(saved.suspended_at.as_deref(), Some("2026-10-02T00:00:00Z"));
+    assert_eq!(saved.earliest_reset_at, None);
+    state.evidence_completed_at = 103;
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    store.replace_guarded_allowance_keys(id, &[]).await?;
+    let saved = store.allowance_suspension(id).await?.unwrap();
+    assert!(!saved.suspended);
+    assert_eq!(saved.suspended_at, None);
+    assert_eq!(saved.earliest_reset_at, None);
+    assert!(saved.triggered_keys.is_empty());
+    assert!(store.get(id).await?.unwrap().credential_invalid());
+    assert!(!store.allowance_suspended_provider_ids().await?.contains(id));
+    store.replace_guarded_allowance_keys(id, &keys).await?;
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    state.evidence_completed_at = 104;
+    state.suspended = false;
+    state.suspended_at = None;
+    state.triggered_keys.clear();
+    state.earliest_reset_at = None;
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    assert!(!store.allowance_suspended_provider_ids().await?.contains(id));
+    assert!(store.get(id).await?.unwrap().credential_invalid());
+    state.evidence_completed_at = 105;
+    state.suspended = true;
+    state.suspended_at = Some("2026-10-02T02:00:00Z".into());
+    state.triggered_keys = keys.clone();
+    assert!(
+        store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    assert_eq!(
+        store.allowance_suspension(id).await?.unwrap().suspended_at,
+        state.suspended_at
+    );
+    store.delete(id).await?;
+    assert!(store.guarded_allowance_keys(id).await?.is_empty());
+    assert!(store.allowance_suspension(id).await?.is_none());
+    assert!(!store.allowance_suspended_provider_ids().await?.contains(id));
+    assert!(
+        !store
+            .write_allowance_suspension(id, version, &state, &keys)
+            .await?
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -751,6 +751,8 @@ Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提�
 
 每个错误由 `GatewayError::render(request_id)` 统一序列化为 OpenAI 兼容 JSON 错误格式。
 
+Inference Run 选路阶段的 `allowance_suspended` 是平台额度错误，返回 HTTP 429，不附 `Retry-After`，也不承诺恢复时间。只有全部已启用 Target 都仅因所属 Provider 的额度暂停而不可选时才返回该码；额度暂停与凭据失效、Provider 禁用或 Target 冷却等原因混合时，返回 `provider_unavailable`。没有额度暂停参与的不可选情形保持原有错误分类，纯冷却不会因此改为 `provider_unavailable`。OpenAI-compatible Chat Completions、Responses 与 Open Responses 使用 `error.type = insufficient_quota`、`error.code = allowance_suspended`；Anthropic Messages 使用 `rate_limit_error`，Gemini 使用 `RESOURCE_EXHAUSTED`。流式请求在开始交付前按对应协议的准入错误返回。该失败形成 Inference Run 后进入「失败的请求」，诊断码为 `allowance_suspended`，不计入 Target 连续失败或冷却。
+
 ---
 
 ## 8. Route 与访问控制
@@ -769,6 +771,14 @@ Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小�
 > `ingress_protocol` 不属于 Route 配置；它由 `RequestContext` 携带，并写入 `inference_run_observations.ingress_protocol`。Rejected Request 则写入 `rejected_request_observations.ingress_protocol`。
 
 **Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力聚合。Target 的共享连续失败计数、冷却、半开探测和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
+
+调度快照每次从存储取得凭据失效与额度暂停的 Provider 集合。额度暂停的 Target 在候选装配时排除，不参与 Target Continuation、Conversation Affinity、Cache Affinity 或冷却探测；已经执行的请求不中断。额度暂停独立于 Provider `is_enabled`、Target `enabled` 和凭据失效，不改写管理员意图，Route 的「至少一个已启用 Target」保存规则、模型发现、Supported Thinking Levels 与客户端配置导出均不受影响。管理 Target 徽标的展示优先级为凭据失效 > 额度暂停 > 冷却，Provider 页面可以同时展示两种独立证据。
+
+守护条目仅覆盖具备额度读取能力的 Provider 的账户级 Allowance Item，耗尽直接复用 Core 映射的 Allowance Condition；模型级额度和 Allowance Sample 不参与暂停判定。守护配置与暂停证据分别保存于独立表，Provider 删除时级联清理，写入不推进 Provider revision。每次成功 fresh 读取按全部守护条目重新判定：缺失任一守护条目或读取失败时保持既有暂停；只有全部守护条目在场且不耗尽才恢复。缺失条目提示仅来自成功读取的 fresh 或 stale 快照，失败且没有缓存时不把全部守护条目误报为缺失。证据条件写原子检查 Provider revision、OAuth status version、当前守护集合与严格递增的读取完成时间，拒绝旧凭据、旧配置或较旧读取的结果。取消守护立即收窄触发集合；交集为空立即解除，再发起一次强制读取。触发集合收窄时清除可能属于已移除条目的聚合重置时间，由下一次成功读取重新确定。
+
+`PUT /api/v1/provider-allowances/{provider_id}/guards` 用 `{ keys: string[] }` 替换守护集合并返回强制读取后的快照。非空且无首尾空白的 key 去重保存，允许当前缺失的账户级 key，不接受当前快照中仅存在于模型级额度的 key；Provider 不存在为 404，不支持守护或 key 不合法为 400。额度快照附加 `guard_supported`、账户条目的 `guarded`、`missing_guarded_keys` 与 `suspension`；Provider 读投影附加 `allowance_suspension`，Route Target 运行态附加 `allowance_suspended`。
+
+保存守护、连接配置变更、OAuth 账号重新绑定、Provider 重新启用、手动刷新以及 Gateway 启动时的已暂停且启用 Provider 都复用既有合并并发的刷新路径。已知最早 `reset_at` 在进程内重建单次定时读取，不直接恢复，也不在仍耗尽时追加重试；其余沿用 30 分钟采样与 180 秒成功 TTL。重建定时计划时的存储错误记录 warning，生命周期任务等待状态变更或既有采样周期后继续，不因一次错误永久退出。Provider 禁用或凭据失效期间不读取额度，持久化暂停保留。暂停决策写失败只记 warning，不改变原额度读取结果。完整领域约束见 [ADR-0078](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md)。
 
 SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 区分模型目标与合法的 Provider-only 目标。
 

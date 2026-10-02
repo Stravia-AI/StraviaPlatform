@@ -19,6 +19,7 @@ pub struct RouteTargetStatus {
     /// ADR-0073：Provider 凭据失效时置位。失效压过冷却态呈现——凭据死了
     /// 冷却无意义；与 `state` 熔断状态机正交，不新增枚举值。
     pub credential_invalid: bool,
+    pub allowance_suspended: bool,
     pub cooldown_remaining_ms: Option<u64>,
 }
 
@@ -94,6 +95,12 @@ impl RouteModule<'_> {
             .providers()
             .credential_invalid_provider_ids()
             .await?;
+        let allowance_suspended = self
+            .gw
+            .storage
+            .providers()
+            .allowance_suspended_provider_ids()
+            .await?;
         Ok(route
             .targets
             .into_iter()
@@ -106,6 +113,8 @@ impl RouteModule<'_> {
                         target.model().map(|model| model.as_str()),
                     ));
                 let credential_invalid = credential_invalid.contains(target.provider_id().as_str());
+                let allowance_suspended =
+                    allowance_suspended.contains(target.provider_id().as_str());
                 let (provider_id, model) = target.destination.into_parts();
                 RouteTargetStatus {
                     target_id: target.id.into(),
@@ -113,6 +122,7 @@ impl RouteModule<'_> {
                     model: model.map(Into::into),
                     state: status.state,
                     credential_invalid,
+                    allowance_suspended,
                     cooldown_remaining_ms: status.cooldown_remaining_ms,
                 }
             })

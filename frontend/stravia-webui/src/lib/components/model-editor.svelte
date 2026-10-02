@@ -1031,12 +1031,16 @@ async function saveModel(): Promise<void> {
                                 class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
                                 label={status.credential_invalid
                                   ? m.model_editor_target_status_credential_invalid()
-                                  : targetStateLabel(status.state, status.cooldown_remaining_ms)}
+                                  : status.allowance_suspended
+                                    ? m.allowances_suspended()
+                                    : targetStateLabel(status.state, status.cooldown_remaining_ms)}
                                 tone={status.credential_invalid
                                   ? 'error'
-                                  : status.state === 'available'
-                                    ? 'healthy'
-                                    : 'warning'} />
+                                  : status.allowance_suspended
+                                    ? 'warning'
+                                    : status.state === 'available'
+                                      ? 'healthy'
+                                      : 'warning'} />
                             {/if}
                           </div>
                           <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">

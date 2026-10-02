@@ -13,6 +13,7 @@ export interface AllowanceAmount {
 
 export interface Allowance {
   key: string
+  guarded: boolean
   label: string
   kind: AllowanceKind
   used?: AllowanceAmount
@@ -37,6 +38,8 @@ export interface ProviderAllowanceError {
 
 export interface ProviderAllowanceTarget {
   provider_id: string
+  guard_supported: boolean
+  suspension: AllowanceSuspension | null
   provider_name: string
   catalog_provider_id: string
   channel: string
@@ -46,6 +49,9 @@ export interface ProviderAllowanceTarget {
 
 export interface ProviderAllowanceSnapshot {
   provider_id: string
+  guard_supported: boolean
+  missing_guarded_keys: string[]
+  suspension: AllowanceSuspension | null
   provider_name: string
   catalog_provider_id: string
   channel: string
@@ -55,4 +61,10 @@ export interface ProviderAllowanceSnapshot {
   models: ModelAllowance[]
   fetched_at?: string
   error?: ProviderAllowanceError
+}
+
+export interface AllowanceSuspension {
+  suspended_at: string
+  triggered_keys: string[]
+  earliest_reset_at: number | null
 }

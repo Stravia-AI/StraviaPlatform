@@ -32,6 +32,10 @@ pub struct MemoryStorage {
     settings: Arc<RwLock<Vec<(String, String)>>>,
     provider_models: Arc<RwLock<Vec<ProviderModelRecord>>>,
     oauth_credentials: Arc<MemoryOAuthCredentialStore>,
+    allowance_guards:
+        Arc<RwLock<std::collections::HashMap<String, std::collections::BTreeMap<String, String>>>>,
+    allowance_suspensions:
+        Arc<RwLock<std::collections::HashMap<String, crate::db::models::AllowanceSuspensionState>>>,
     plugin_store: PluginStore,
 }
 
@@ -57,6 +61,8 @@ impl MemoryStorage {
             settings: Arc::new(RwLock::new(settings)),
             provider_models,
             oauth_credentials,
+            allowance_guards: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            allowance_suspensions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             plugin_store,
         }
     }
@@ -215,6 +221,8 @@ impl ProviderStore for MemoryStorage {
         providers.retain(|provider| provider.id != id);
         provider_models.retain(|model| model.provider_id != id);
         oauth_credentials.remove(id);
+        self.allowance_guards.write().await.remove(id);
+        self.allowance_suspensions.write().await.remove(id);
         for route in routes.iter_mut() {
             route
                 .targets
@@ -310,6 +318,117 @@ impl ProviderStore for MemoryStorage {
             .iter()
             .filter(|provider| provider.credential_invalid())
             .map(|provider| provider.id.clone())
+            .collect())
+    }
+
+    async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .allowance_guards
+            .read()
+            .await
+            .get(id)
+            .map(|keys| keys.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn replace_guarded_allowance_keys(
+        &self,
+        id: &str,
+        keys: &[String],
+    ) -> anyhow::Result<()> {
+        let providers = self.providers.read().await;
+        anyhow::ensure!(
+            providers.iter().any(|provider| provider.id == id),
+            "provider not found"
+        );
+        let mut guards = self.allowance_guards.write().await;
+        let mut states = self.allowance_suspensions.write().await;
+        let mut keys = keys.to_vec();
+        keys.sort();
+        keys.dedup();
+        if let Some(state) = states.get_mut(id) {
+            let previous_trigger_count = state.triggered_keys.len();
+            state.triggered_keys.retain(|key| keys.contains(key));
+            if state.triggered_keys.len() != previous_trigger_count {
+                state.earliest_reset_at = None;
+            }
+            if state.triggered_keys.is_empty() {
+                state.suspended = false;
+                state.suspended_at = None;
+                state.earliest_reset_at = None;
+            }
+        }
+        let records = guards.entry(id.to_owned()).or_default();
+        records.retain(|key, _| keys.contains(key));
+        for key in keys {
+            records.entry(key).or_insert_with(now_rfc3339);
+        }
+        Ok(())
+    }
+
+    async fn write_allowance_suspension(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+        state: &crate::db::models::AllowanceSuspensionState,
+        expected_guarded_keys: &[String],
+    ) -> anyhow::Result<bool> {
+        let providers = self.providers.read().await;
+        if !providers
+            .iter()
+            .any(|provider| provider.id == id && provider.revision == expected.provider_revision)
+        {
+            return Ok(false);
+        }
+        let oauth = self.oauth_credentials.credentials.read().await;
+        if oauth.get(id).map(|credential| credential.status_version)
+            != expected.oauth_status_version
+        {
+            return Ok(false);
+        }
+        let guards = self.allowance_guards.read().await;
+        let actual = guards.get(id);
+        if actual.is_some_and(|keys| keys.keys().any(|key| !expected_guarded_keys.contains(key)))
+            || expected_guarded_keys
+                .iter()
+                .any(|key| !actual.is_some_and(|keys| keys.contains_key(key)))
+        {
+            return Ok(false);
+        }
+        let mut states = self.allowance_suspensions.write().await;
+        let previous = states.get(id);
+        if previous
+            .is_some_and(|previous| previous.evidence_completed_at >= state.evidence_completed_at)
+        {
+            return Ok(false);
+        }
+        let mut state = state.clone();
+        if state.suspended
+            && let Some(previous) = previous.filter(|previous| previous.suspended)
+        {
+            state.suspended_at = previous.suspended_at.clone();
+        }
+        states.insert(id.to_owned(), state);
+        Ok(true)
+    }
+
+    async fn allowance_suspension(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::db::models::AllowanceSuspensionState>> {
+        Ok(self.allowance_suspensions.read().await.get(id).cloned())
+    }
+
+    async fn allowance_suspended_provider_ids(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        Ok(self
+            .allowance_suspensions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, state)| state.suspended)
+            .map(|(id, _)| id.clone())
             .collect())
     }
 }
@@ -1540,6 +1659,18 @@ mod tests {
                 .expect("ids")
                 .contains("p1")
         );
+    }
+
+    #[tokio::test]
+    async fn allowance_suspension_storage_contract() -> anyhow::Result<()> {
+        let storage = MemoryStorage::new(vec![provider("allowance")], vec![], vec![]);
+        let provider = storage.providers().get("allowance").await?.unwrap();
+        crate::storage::traits::verify_allowance_storage_contract(
+            storage.providers(),
+            storage.oauth_credentials(),
+            provider,
+        )
+        .await
     }
 
     #[tokio::test]

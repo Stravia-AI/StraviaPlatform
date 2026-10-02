@@ -32,6 +32,9 @@ pub(crate) enum SelectionError {
     SchedulingEvidence(anyhow::Error),
     /// Eligibility filtering left the Route without any Target to attempt.
     NoEligibleTarget,
+    /// Allowance suspension mixed with other eligibility exclusions.
+    MixedAllowanceExclusions,
+    AllowanceSuspended,
     /// A fixed Media routing plan excluded every candidate Target.
     MediaPlanExhausted,
 }
@@ -117,12 +120,18 @@ impl RouteSelector {
         );
         if let Some(plan) = media_plan {
             policy.retain(|target| plan.target_keys.contains(&selected_target_key(target)));
-            if policy.is_empty() {
-                return Err(SelectionError::MediaPlanExhausted);
-            }
         }
         if policy.is_empty() {
-            return Err(SelectionError::NoEligibleTarget);
+            let error = self
+                .empty_selection_error(route, &snapshot)
+                .await
+                .map_err(SelectionError::SchedulingEvidence)?;
+            return Err(match error {
+                SelectionError::NoEligibleTarget if media_plan.is_some() => {
+                    SelectionError::MediaPlanExhausted
+                }
+                error => error,
+            });
         }
         Ok(policy)
     }
@@ -167,9 +176,56 @@ impl RouteSelector {
             self.policy_state.clone(),
         );
         if policy.is_empty() {
-            return Err(SelectionError::NoEligibleTarget);
+            return Err(self
+                .empty_selection_error(route, &snapshot)
+                .await
+                .map_err(SelectionError::SchedulingEvidence)?);
         }
         Ok(policy)
+    }
+
+    async fn empty_selection_error(
+        &self,
+        route: &RouteConfig,
+        snapshot: &RouteSchedulingSnapshot,
+    ) -> anyhow::Result<SelectionError> {
+        let mut any_paused = false;
+        let mut any_unpaused = false;
+        for target in route.targets.iter().filter(|target| target.enabled) {
+            let provider_id = target.provider_id().as_str();
+            if !snapshot.allowance_suspended_providers.contains(provider_id) {
+                if any_paused {
+                    return Ok(SelectionError::MixedAllowanceExclusions);
+                }
+                any_unpaused = true;
+                continue;
+            }
+            any_paused = true;
+            if any_unpaused
+                || snapshot.credential_invalid_providers.contains(provider_id)
+                || self
+                    .policy_state
+                    .target_status(&target_key(
+                        provider_id,
+                        target.model().map(|model| model.as_str()),
+                    ))
+                    .cooldown_remaining_ms
+                    .is_some()
+                || !self
+                    .storage
+                    .providers()
+                    .get(provider_id)
+                    .await?
+                    .is_some_and(|provider| provider.is_enabled)
+            {
+                return Ok(SelectionError::MixedAllowanceExclusions);
+            }
+        }
+        Ok(if any_paused {
+            SelectionError::AllowanceSuspended
+        } else {
+            SelectionError::NoEligibleTarget
+        })
     }
 
     /// Usage statistics per target joined with provider-model prices, plus a
@@ -187,13 +243,15 @@ impl RouteSelector {
                 reason: "usage_stats_snapshot_stale".into(),
             });
         }
+        let providers = self.storage.providers();
+        let (credential_invalid_providers, allowance_suspended_providers) = tokio::try_join!(
+            providers.credential_invalid_provider_ids(),
+            providers.allowance_suspended_provider_ids(),
+        )?;
         let mut snapshot = RouteSchedulingSnapshot {
             targets: usage.targets,
-            credential_invalid_providers: self
-                .storage
-                .providers()
-                .credential_invalid_provider_ids()
-                .await?,
+            credential_invalid_providers,
+            allowance_suspended_providers,
         };
         for target in targets {
             let key = target_key(

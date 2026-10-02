@@ -106,7 +106,7 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    mcp_access_enabled boolean DEFAULT false NOT NULL,
+    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
     inject_web_search boolean DEFAULT false NOT NULL,
@@ -353,7 +353,7 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text NOT NULL,
+    model_id text CONSTRAINT models_name_not_null NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text NOT NULL,
     is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
@@ -423,14 +423,14 @@ CREATE SEQUENCE public.observation_event_sequence
 --
 
 CREATE TABLE public.observation_events (
-    sequence bigint DEFAULT nextval('public.observation_event_sequence'::regclass) NOT NULL,
-    occurred_at bigint NOT NULL,
+    sequence bigint DEFAULT nextval('public.observation_event_sequence'::regclass) CONSTRAINT observation_events_sequence_not_null1 NOT NULL,
+    occurred_at bigint CONSTRAINT observation_events_occurred_at_not_null1 NOT NULL,
     interaction_id text,
     run_id text,
     rejection_id text,
-    kind text NOT NULL,
-    payload bytea NOT NULL,
-    expires_at bigint NOT NULL,
+    kind text CONSTRAINT observation_events_kind_not_null1 NOT NULL,
+    payload bytea CONSTRAINT observation_events_payload_not_null1 NOT NULL,
+    expires_at bigint CONSTRAINT observation_events_expires_at_not_null1 NOT NULL,
     tool_id text,
     operation_id text
 );
@@ -465,6 +465,17 @@ CREATE TABLE public.observation_tail_sources (
 
 
 --
+-- Name: provider_allowance_guards; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.provider_allowance_guards (
+    provider_id text NOT NULL,
+    allowance_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: provider_allowance_samples; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -480,6 +491,20 @@ CREATE TABLE public.provider_allowance_samples (
     amount_unit text,
     currency text,
     reset_at bigint
+);
+
+
+--
+-- Name: provider_allowance_suspensions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.provider_allowance_suspensions (
+    provider_id text NOT NULL,
+    suspended boolean NOT NULL,
+    suspended_at text,
+    triggered_keys text NOT NULL,
+    earliest_reset_at bigint,
+    evidence_completed_at bigint NOT NULL
 );
 
 
@@ -714,9 +739,9 @@ CREATE TABLE public.target_attempt_observations (
 
 CREATE TABLE public.turn_chain_contents (
     id bigint NOT NULL,
-    principal text NOT NULL,
-    content_key text NOT NULL,
-    content bytea NOT NULL
+    principal text CONSTRAINT turn_chain_contents_principal_not_null1 NOT NULL,
+    content_key text CONSTRAINT turn_chain_contents_content_key_not_null1 NOT NULL,
+    content bytea CONSTRAINT turn_chain_contents_content_not_null1 NOT NULL
 );
 ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN content SET STORAGE EXTERNAL;
 
@@ -1073,11 +1098,27 @@ ALTER TABLE ONLY public.observation_tail_sources
 
 
 --
+-- Name: provider_allowance_guards provider_allowance_guards_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_allowance_guards
+    ADD CONSTRAINT provider_allowance_guards_pkey PRIMARY KEY (provider_id, allowance_key);
+
+
+--
 -- Name: provider_allowance_samples provider_allowance_samples_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.provider_allowance_samples
     ADD CONSTRAINT provider_allowance_samples_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: provider_allowance_suspensions provider_allowance_suspensions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_allowance_suspensions
+    ADD CONSTRAINT provider_allowance_suspensions_pkey PRIMARY KEY (provider_id);
 
 
 --
@@ -1876,11 +1917,27 @@ ALTER TABLE ONLY public.observation_tail_sources
 
 
 --
+-- Name: provider_allowance_guards provider_allowance_guards_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_allowance_guards
+    ADD CONSTRAINT provider_allowance_guards_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
+
+
+--
 -- Name: provider_allowance_samples provider_allowance_samples_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.provider_allowance_samples
     ADD CONSTRAINT provider_allowance_samples_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: provider_allowance_suspensions provider_allowance_suspensions_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_allowance_suspensions
+    ADD CONSTRAINT provider_allowance_suspensions_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
 
 
 --

@@ -7,13 +7,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::Value;
 use stravia_vendor_sdk::{
-    AiResponse, AllowanceAmount, AllowanceItem, AllowanceResponse, AuthCallback, AuthCallbackPort,
-    AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse, AuthStep,
-    CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorGuest, VendorKind,
-    read_http_body,
+    AiResponse, AiStreamDelta, AllowanceAmount, AllowanceItem, AllowanceResponse, AuthCallback,
+    AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse,
+    AuthStep, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
+    ConfigFieldKind, ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind,
+    GuestHost, HttpRequest, ModelAllowance, NetworkDeclaration, Operation, OperationInput,
+    OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor,
+    VendorGuest, VendorKind, read_http_body,
 };
 
 struct ManagementContractVendor;
@@ -89,7 +89,10 @@ struct ModelWire {
 
 #[derive(Debug, Deserialize)]
 struct AllowanceWire {
-    remaining: String,
+    remaining: Option<String>,
+    resets_at: Option<i64>,
+    second_remaining: Option<String>,
+    model_remaining: Option<String>,
 }
 
 impl VendorGuest for ManagementContractVendor {
@@ -366,14 +369,19 @@ fn allowance(
         true,
     )?;
     advance_state(host)?;
-    Ok(AllowanceResponse {
-        allowances: vec![AllowanceItem {
-            key: "requests".into(),
-            label: "Requests".into(),
+    let mut allowances = Vec::new();
+    for (key, remaining) in [
+        ("requests", wire.remaining),
+        ("credits", wire.second_remaining),
+    ] {
+        let Some(remaining) = remaining else { continue };
+        allowances.push(AllowanceItem {
+            key: key.into(),
+            label: key.into(),
             kind: "request_allowance".into(),
             used: None,
             remaining: Some(AllowanceAmount {
-                value: wire.remaining,
+                value: remaining,
                 unit: "requests".into(),
                 currency: None,
             }),
@@ -384,10 +392,36 @@ fn allowance(
             }),
             used_percent: None,
             window_seconds: Some(3600),
-            resets_at_unix_ms: None,
+            resets_at_unix_ms: wire.resets_at,
             condition: None,
-        }],
-        models: Vec::new(),
+        });
+    }
+    let models = wire
+        .model_remaining
+        .map(|remaining| ModelAllowance {
+            model: "management-model".into(),
+            allowances: vec![AllowanceItem {
+                key: "model-requests".into(),
+                label: "Model requests".into(),
+                kind: "request_allowance".into(),
+                used: None,
+                remaining: Some(AllowanceAmount {
+                    value: remaining,
+                    unit: "requests".into(),
+                    currency: None,
+                }),
+                limit: None,
+                used_percent: None,
+                window_seconds: None,
+                resets_at_unix_ms: None,
+                condition: None,
+            }],
+        })
+        .into_iter()
+        .collect();
+    Ok(AllowanceResponse {
+        allowances,
+        models,
         plan_label: Some(format!("fixture-{}", Profile::current().version())),
     })
 }
@@ -410,6 +444,11 @@ fn infer(
     }
     host.emit_started()?;
     let response: AiResponse = post_json(host, provider, "infer", "/infer", request, true)?;
+    if request.stream.enabled {
+        for text in response.output_texts() {
+            host.emit_delta(&AiStreamDelta::TextDelta(text.to_owned()))?;
+        }
+    }
     advance_state(host)?;
     host.emit_completed(&response)?;
     Ok(OperationOutput::Infer(Box::new(response)))

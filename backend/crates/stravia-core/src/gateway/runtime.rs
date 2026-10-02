@@ -1,5 +1,114 @@
 use super::*;
 
+struct SuspendedAllowanceProviders {
+    ids: std::collections::HashSet<String>,
+    refreshable: Vec<(String, Option<i64>)>,
+}
+
+async fn suspended_allowance_providers(
+    gw: &Gateway,
+) -> anyhow::Result<SuspendedAllowanceProviders> {
+    let ids = gw
+        .storage
+        .providers()
+        .allowance_suspended_provider_ids()
+        .await?;
+    let mut refreshable = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let Some(provider) = gw.storage.providers().get(id).await? else {
+            continue;
+        };
+        if !provider.is_enabled || provider.credential_invalid() {
+            continue;
+        }
+        let reset_at = gw
+            .storage
+            .providers()
+            .allowance_suspension(id)
+            .await?
+            .and_then(|state| state.earliest_reset_at);
+        refreshable.push((id.clone(), reset_at));
+    }
+    Ok(SuspendedAllowanceProviders { ids, refreshable })
+}
+
+async fn run_allowance_suspension_lifecycle(gw: Gateway) {
+    let cancellation = gw.lifecycle.cancellation.clone();
+    let admin = gw.admin();
+    let mut fired = std::collections::HashMap::<String, i64>::new();
+    let mut startup = true;
+    loop {
+        let suspended = match suspended_allowance_providers(&gw).await {
+            Ok(suspended) => suspended,
+            Err(error) => {
+                tracing::warn!(error = ?error, "allowance suspension schedule load failed");
+                // Resume on state changes or the existing sampling cadence;
+                // never spin on a failing database or shorten upstream polling.
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = gw.provider_allowance_state.changed() => {},
+                    _ = tokio::time::sleep(crate::admin::provider_allowance::SAMPLE_INTERVAL) => {},
+                }
+                continue;
+            }
+        };
+        fired.retain(|id, _| suspended.ids.contains(id));
+        if startup {
+            for (id, reset_at) in suspended.refreshable {
+                if let Some(reset_at) = reset_at
+                    && reset_at <= chrono::Utc::now().timestamp_millis()
+                {
+                    fired.insert(id.clone(), reset_at);
+                }
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    result = admin.refresh_provider_allowance(&id) => {
+                        if let Err(error) = result { tracing::warn!(provider_id = %id, error = ?error, "startup allowance refresh failed"); }
+                    }
+                }
+            }
+            startup = false;
+            continue;
+        }
+        let mut next = None::<(String, i64)>;
+        for (id, reset_at) in suspended.refreshable {
+            let Some(reset_at) = reset_at else { continue };
+            if fired.get(&id) == Some(&reset_at) {
+                continue;
+            }
+            if next.as_ref().is_none_or(|(_, time)| reset_at < *time) {
+                next = Some((id, reset_at));
+            }
+        }
+        let timer = async {
+            if let Some((_, reset_at)) = &next {
+                tokio::time::sleep(Duration::from_millis(
+                    reset_at
+                        .saturating_sub(chrono::Utc::now().timestamp_millis())
+                        .max(0) as u64,
+                ))
+                .await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = gw.provider_allowance_state.changed() => continue,
+            _ = timer => {}
+        }
+        if let Some((id, reset_at)) = next {
+            fired.insert(id.clone(), reset_at);
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                result = admin.refresh_provider_allowance(&id) => {
+                    if let Err(error) = result { tracing::warn!(provider_id = %id, error = ?error, "reset-time allowance refresh failed"); }
+                }
+            }
+        }
+    }
+}
+
 async fn run_provider_allowance_sampler<F, Fut>(
     cancellation: stravia_runtime_contract::CancellationToken,
     period: Duration,
@@ -512,6 +621,13 @@ impl Gateway {
                     },
                 )
                 .await;
+            });
+        }
+
+        {
+            let gw_suspension = gw.background_clone();
+            gw.lifecycle.spawn(async move {
+                run_allowance_suspension_lifecycle(gw_suspension).await;
             });
         }
 

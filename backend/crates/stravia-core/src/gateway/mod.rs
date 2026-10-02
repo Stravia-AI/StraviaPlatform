@@ -161,7 +161,7 @@ impl Gateway {
         }
     }
 
-    fn background_clone(&self) -> Self {
+    pub(crate) fn background_clone(&self) -> Self {
         self.clone_with_owner(false)
     }
 

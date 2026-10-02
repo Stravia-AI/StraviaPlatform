@@ -375,6 +375,10 @@ export const admin = {
       request<ProviderAllowanceSnapshot>('GET', `/provider-allowances/${encodeURIComponent(providerId)}`),
     refresh: (providerId: string) =>
       request<ProviderAllowanceSnapshot>('POST', `/provider-allowances/${providerId}/refresh`),
+    replaceGuards: (providerId: string, keys: string[]) =>
+      request<ProviderAllowanceSnapshot>('PUT', `/provider-allowances/${encodeURIComponent(providerId)}/guards`, {
+        keys,
+      }),
   },
   settings: {
     artifacts: async (): Promise<ArtifactSettings> => {

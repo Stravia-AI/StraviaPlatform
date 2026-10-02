@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 
 mod samples;
 mod service;
+mod suspension;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderAllowanceGuardError {
+    #[error("Provider does not support allowance guards")]
+    Unsupported,
+    #[error("Allowance guard keys must be nonempty and have no surrounding whitespace")]
+    InvalidKey,
+    #[error("Model-level allowance items cannot be guarded")]
+    ModelLevelKey,
+}
 
 pub(crate) use samples::AllowanceSampleStore;
 pub(crate) use service::{ProviderAllowanceState, SAMPLE_INTERVAL};
@@ -18,6 +29,8 @@ pub struct ProviderAllowanceTarget {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<ProviderAllowanceSnapshot>,
     pub refreshing: bool,
+    pub guard_supported: bool,
+    pub suspension: Option<crate::db::models::AllowanceSuspension>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,6 +48,9 @@ pub struct ProviderAllowanceSnapshot {
     pub fetched_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ProviderAllowanceError>,
+    pub guard_supported: bool,
+    pub missing_guarded_keys: Vec<String>,
+    pub suspension: Option<crate::db::models::AllowanceSuspension>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +63,7 @@ pub enum ProviderAllowanceStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Allowance {
+    pub guarded: bool,
     pub key: String,
     pub label: String,
     pub kind: AllowanceKind,

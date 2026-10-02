@@ -34,8 +34,18 @@ pub(crate) struct ProviderAllowanceState {
     inner: Arc<ProviderAllowanceStateInner>,
 }
 
+impl ProviderAllowanceState {
+    pub(crate) async fn changed(&self) {
+        self.inner.changed.notified().await;
+    }
+    pub(crate) fn notify_changed(&self) {
+        self.inner.changed.notify_one();
+    }
+}
+
 #[derive(Default)]
 struct ProviderAllowanceStateInner {
+    changed: tokio::sync::Notify,
     cache: RwLock<HashMap<String, CacheEntry>>,
     inflight: Mutex<HashMap<String, SharedFetch>>,
 }
@@ -48,6 +58,81 @@ struct CacheEntry {
 }
 
 impl AdminService {
+    pub async fn get_provider_allowance_suspension(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<Option<crate::db::models::AllowanceSuspension>> {
+        Ok(self
+            .gw
+            .storage
+            .providers()
+            .allowance_suspension(provider_id)
+            .await?
+            .and_then(|state| state.suspension()))
+    }
+
+    pub async fn replace_provider_allowance_guards(
+        &self,
+        provider_id: &str,
+        mut keys: Vec<String>,
+    ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
+        let Some(provider) = self.gw.storage.providers().get(provider_id).await? else {
+            return Ok(None);
+        };
+        if !eligible_allowance_provider(self, &provider) {
+            return Err(super::ProviderAllowanceGuardError::Unsupported.into());
+        }
+        if keys.iter().any(|key| key.is_empty() || key.trim() != key) {
+            return Err(super::ProviderAllowanceGuardError::InvalidKey.into());
+        }
+        keys.sort();
+        keys.dedup();
+        let identity = provider_identity(self, &provider).await?;
+        let previous = self
+            .gw
+            .provider_allowance_state
+            .inner
+            .cache
+            .read()
+            .await
+            .get(provider_id)
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| entry.snapshot.clone());
+        if previous.as_ref().is_some_and(|snapshot| {
+            keys.iter().any(|key| {
+                !snapshot.allowances.iter().any(|item| &item.key == key)
+                    && snapshot
+                        .models
+                        .iter()
+                        .any(|model| model.allowances.iter().any(|item| &item.key == key))
+            })
+        }) {
+            return Err(super::ProviderAllowanceGuardError::ModelLevelKey.into());
+        }
+        let was_suspended = self
+            .get_provider_allowance_suspension(provider_id)
+            .await?
+            .is_some();
+        self.gw
+            .storage
+            .providers()
+            .replace_guarded_allowance_keys(provider_id, &keys)
+            .await?;
+        self.gw.provider_allowance_state.notify_changed();
+        if was_suspended
+            && self
+                .get_provider_allowance_suspension(provider_id)
+                .await?
+                .is_none()
+        {
+            tracing::info!(
+                provider_id,
+                suspended = false,
+                "provider allowance suspension changed"
+            );
+        }
+        self.refresh_provider_allowance(provider_id).await
+    }
     pub async fn list_provider_allowances(&self) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
         list_provider_allowances(self, false).await
     }
@@ -60,7 +145,18 @@ impl AdminService {
         let providers = eligible_allowance_providers(self).await?;
         let mut targets = Vec::with_capacity(providers.len());
         for provider in providers {
+            let Some(provider) = self.gw.storage.providers().get(&provider.id).await? else {
+                continue;
+            };
+            if !eligible_allowance_provider(self, &provider) {
+                continue;
+            }
             let identity = provider_identity(self, &provider).await?;
+            if provider.credential_invalid() {
+                let snapshot = invalid_credential_snapshot(self, &provider, &identity).await;
+                targets.push(allowance_target(self, &provider, Some(snapshot), false).await?);
+                continue;
+            }
             let previous = {
                 let cache = self.gw.provider_allowance_state.inner.cache.read().await;
                 cache
@@ -73,12 +169,19 @@ impl AdminService {
                     .successful_at
                     .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
             });
-            let snapshot = previous.map(|entry| entry.snapshot);
+            let mut snapshot = previous.map(|entry| entry.snapshot);
+            if let Some(snapshot) = snapshot.as_mut() {
+                super::suspension::decorate(self, snapshot).await?;
+            }
+            if !provider.is_enabled {
+                targets.push(allowance_target(self, &provider, snapshot, false).await?);
+                continue;
+            }
             if fresh {
-                targets.push(allowance_target(&provider, snapshot, false));
+                targets.push(allowance_target(self, &provider, snapshot, false).await?);
             } else {
                 spawn_allowance_fetch(self.clone(), provider.clone());
-                targets.push(allowance_target(&provider, snapshot, true));
+                targets.push(allowance_target(self, &provider, snapshot, true).await?);
             }
         }
         Ok(targets)
@@ -123,7 +226,8 @@ async fn provider_allowance(
 
 async fn eligible_allowance_providers(admin: &AdminService) -> anyhow::Result<Vec<Provider>> {
     let mut providers = admin.gw.storage.providers().list().await?;
-    providers.retain(|provider| eligible_allowance_provider(admin, provider));
+    providers
+        .retain(|provider| provider.is_enabled && eligible_allowance_provider(admin, provider));
     providers.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -146,9 +250,6 @@ async fn eligible_allowance_providers(admin: &AdminService) -> anyhow::Result<Ve
 }
 
 fn eligible_allowance_provider(admin: &AdminService, provider: &Provider) -> bool {
-    if !provider.is_enabled {
-        return false;
-    }
     let Some(vendor_id) = provider
         .vendor
         .as_deref()
@@ -176,7 +277,9 @@ fn eligible_allowance_provider(admin: &AdminService, provider: &Provider) -> boo
 
 fn spawn_allowance_fetch(admin: AdminService, provider: Provider) {
     let provider_id = provider.id.clone();
-    tokio::spawn(async move {
+    let lifecycle = admin.gw.lifecycle.clone();
+    let admin = admin.gw.background_clone().admin();
+    lifecycle.spawn(async move {
         if let Err(error) = fetch_provider_allowance(&admin, provider, false).await {
             tracing::warn!(
                 provider_id = %provider_id,
@@ -187,19 +290,25 @@ fn spawn_allowance_fetch(admin: AdminService, provider: Provider) {
     });
 }
 
-fn allowance_target(
+async fn allowance_target(
+    admin: &AdminService,
     provider: &Provider,
     snapshot: Option<ProviderAllowanceSnapshot>,
     refreshing: bool,
-) -> ProviderAllowanceTarget {
-    ProviderAllowanceTarget {
+) -> anyhow::Result<ProviderAllowanceTarget> {
+    let suspension = admin
+        .get_provider_allowance_suspension(&provider.id)
+        .await?;
+    Ok(ProviderAllowanceTarget {
+        guard_supported: true,
+        suspension,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         snapshot,
         refreshing,
-    }
+    })
 }
 
 async fn list_provider_allowances(
@@ -219,10 +328,14 @@ async fn list_provider_allowances(
                         error = %error,
                         "failed to revalidate provider allowance state"
                     );
-                    Some(error_snapshot(
+                    let mut snapshot = error_snapshot(
                         &provider_for_error,
                         safe_error(error_category(&error)),
-                    ))
+                    );
+                    if let Err(error) = super::suspension::decorate(&admin, &mut snapshot).await {
+                        tracing::warn!(provider_id = %provider_for_error.id, error = ?error, "provider allowance suspension decoration failed");
+                    }
+                    Some(snapshot)
                 }
             }
         }
@@ -238,10 +351,47 @@ async fn fetch_provider_allowance(
     provider: Provider,
     force: bool,
 ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
+    // Background tasks may hold a provider captured before its credential was
+    // rejected. Always consult persisted health before cache or inflight reuse.
+    let Some(provider) = admin.gw.storage.providers().get(&provider.id).await? else {
+        return Ok(None);
+    };
     if !eligible_allowance_provider(admin, &provider) {
         return Ok(None);
     }
     let identity = provider_identity(admin, &provider).await?;
+    if !provider.is_enabled {
+        let mut snapshot = admin
+            .gw
+            .provider_allowance_state
+            .inner
+            .cache
+            .read()
+            .await
+            .get(&provider.id)
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| {
+                let mut snapshot = entry.snapshot.clone();
+                snapshot.status = ProviderAllowanceStatus::Stale;
+                snapshot
+            })
+            .unwrap_or_else(|| {
+                error_snapshot(
+                    &provider,
+                    ProviderAllowanceError {
+                        category: ProviderAllowanceErrorCategory::UpstreamUnavailable,
+                        message: "Provider disabled; allowance fetching is paused.".into(),
+                    },
+                )
+            });
+        super::suspension::decorate(admin, &mut snapshot).await?;
+        return Ok(Some(snapshot));
+    }
+    if provider.credential_invalid() {
+        return Ok(Some(
+            invalid_credential_snapshot(admin, &provider, &identity).await,
+        ));
+    }
     let previous = {
         let cache = admin.gw.provider_allowance_state.inner.cache.read().await;
         cache
@@ -255,7 +405,9 @@ async fn fetch_provider_allowance(
             .successful_at
             .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
     {
-        return Ok(Some(entry.snapshot.clone()));
+        let mut snapshot = entry.snapshot.clone();
+        super::suspension::decorate(admin, &mut snapshot).await?;
+        return Ok(Some(snapshot));
     }
 
     let inflight_key = format!("{}:{identity}", provider.id);
@@ -281,7 +433,15 @@ async fn fetch_provider_allowance(
                     else {
                         return Ok(None);
                     };
-                    if !eligible_allowance_provider(&admin, &current)
+                    if eligible_allowance_provider(&admin, &current) && current.credential_invalid()
+                    {
+                        let identity = provider_identity(&admin, &current).await?;
+                        return Ok(Some(
+                            invalid_credential_snapshot(&admin, &current, &identity).await,
+                        ));
+                    }
+                    if !current.is_enabled
+                        || !eligible_allowance_provider(&admin, &current)
                         || provider_identity(&admin, &current).await? != identity_for_future
                     {
                         return Ok(None);
@@ -300,9 +460,22 @@ async fn fetch_provider_allowance(
                             &context,
                         )
                         .await;
+                    let mut evidence_version = None;
                     let execution = match prepared {
                         Ok(prepared) => {
+                            let Some(latest) =
+                                admin.gw.storage.providers().get(&provider_id).await?
+                            else {
+                                return Ok(None);
+                            };
+                            if latest.credential_invalid() {
+                                let identity = provider_identity(&admin, &latest).await?;
+                                return Ok(Some(
+                                    invalid_credential_snapshot(&admin, &latest, &identity).await,
+                                ));
+                            }
                             let credential_version = prepared.credential_version();
+                            evidence_version = Some(credential_version);
                             let result = admin
                                 .gw
                                 .execute_prepared_vendor(
@@ -331,6 +504,7 @@ async fn fetch_provider_allowance(
                         Err(error) => Err(error),
                     };
 
+                    let completed_at = chrono::Utc::now().timestamp_micros();
                     let (mut snapshot, publication) = match execution {
                         Ok(execution) => {
                             let response = match execution.output {
@@ -377,7 +551,14 @@ async fn fetch_provider_allowance(
                     let Some(latest) = admin.gw.storage.providers().get(&provider_id).await? else {
                         return Ok(None);
                     };
-                    if !eligible_allowance_provider(&admin, &latest)
+                    if eligible_allowance_provider(&admin, &latest) && latest.credential_invalid() {
+                        let identity = provider_identity(&admin, &latest).await?;
+                        return Ok(Some(
+                            invalid_credential_snapshot(&admin, &latest, &identity).await,
+                        ));
+                    }
+                    if !latest.is_enabled
+                        || !eligible_allowance_provider(&admin, &latest)
                         || provider_identity(&admin, &latest).await? != identity_for_future
                     {
                         return Ok(None);
@@ -389,8 +570,24 @@ async fn fetch_provider_allowance(
                         Some(publication) => Some(publication.write_fence().await?),
                         None => None,
                     };
+                    let Some(latest) = admin.gw.storage.providers().get(&provider_id).await? else {
+                        return Ok(None);
+                    };
+                    if latest.credential_invalid() {
+                        return Ok(None);
+                    }
 
+                    if !latest.is_enabled
+                        || provider_identity(&admin, &latest).await? != identity_for_future
+                    {
+                        return Ok(None);
+                    }
                     if snapshot.status == ProviderAllowanceStatus::Fresh {
+                        if let Some(version) = evidence_version {
+                            super::suspension::submit(&admin, &snapshot, version, completed_at)
+                                .await;
+                            state.notify_changed();
+                        }
                         if let Err(error) = admin
                             .gw
                             .allowance_samples
@@ -446,9 +643,59 @@ async fn fetch_provider_allowance(
         }
     };
 
-    shared_fetch
+    let result = shared_fetch
         .await
-        .map_err(|error| anyhow::anyhow!("provider allowance revalidation failed: {error:#}"))
+        .map_err(|error| anyhow::anyhow!("provider allowance revalidation failed: {error:#}"));
+    if let Some(current) = admin.gw.storage.providers().get(&provider.id).await?
+        && eligible_allowance_provider(admin, &current)
+        && current.credential_invalid()
+    {
+        let identity = provider_identity(admin, &current).await?;
+        return Ok(Some(
+            invalid_credential_snapshot(admin, &current, &identity).await,
+        ));
+    }
+    match result {
+        Ok(Some(mut snapshot)) => {
+            super::suspension::decorate(admin, &mut snapshot).await?;
+            Ok(Some(snapshot))
+        }
+        other => other,
+    }
+}
+
+async fn invalid_credential_snapshot(
+    admin: &AdminService,
+    provider: &Provider,
+    identity: &str,
+) -> ProviderAllowanceSnapshot {
+    let mut cache = admin.gw.provider_allowance_state.inner.cache.write().await;
+    let previous = cache
+        .get(&provider.id)
+        .filter(|entry| entry.identity == identity);
+    let mut snapshot = stale_or_error_snapshot(
+        provider,
+        previous.map(|entry| &entry.snapshot),
+        ProviderAllowanceError {
+            category: ProviderAllowanceErrorCategory::Authentication,
+            message:
+                "Credential invalid; allowance fetching is paused until the credential is updated."
+                    .into(),
+        },
+    );
+    cache.insert(
+        provider.id.clone(),
+        CacheEntry {
+            identity: identity.to_owned(),
+            snapshot: snapshot.clone(),
+            successful_at: None,
+        },
+    );
+    drop(cache);
+    if let Err(error) = super::suspension::decorate(admin, &mut snapshot).await {
+        tracing::warn!(provider_id = %provider.id, error = ?error, "provider allowance suspension decoration failed");
+    }
+    snapshot
 }
 
 async fn provider_identity(admin: &AdminService, provider: &Provider) -> anyhow::Result<String> {
@@ -538,6 +785,9 @@ fn map_allowance_response(
         "allowance result is empty"
     );
     Ok(ProviderAllowanceSnapshot {
+        guard_supported: true,
+        missing_guarded_keys: Vec::new(),
+        suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
@@ -582,6 +832,7 @@ fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allo
         Some(other) => anyhow::bail!("unsupported allowance condition `{other}`"),
     };
     let mut allowance = Allowance {
+        guarded: false,
         key: key.to_owned(),
         label: label.to_owned(),
         kind,
@@ -904,6 +1155,9 @@ fn safe_error(category: ProviderAllowanceErrorCategory) -> ProviderAllowanceErro
 
 fn error_snapshot(provider: &Provider, error: ProviderAllowanceError) -> ProviderAllowanceSnapshot {
     ProviderAllowanceSnapshot {
+        guard_supported: true,
+        missing_guarded_keys: Vec::new(),
+        suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
@@ -926,6 +1180,9 @@ fn stale_or_error_snapshot(
         return error_snapshot(provider, error);
     };
     ProviderAllowanceSnapshot {
+        guard_supported: true,
+        missing_guarded_keys: Vec::new(),
+        suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),

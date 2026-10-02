@@ -80,6 +80,7 @@ pub struct RouteSchedulingSnapshot {
     /// ADR-0073：凭据失效的 Provider id 集合。失效 Provider 的全部 Target
     /// 在资格装配时被排除，与 `is_enabled` 同一层，不进入熔断状态机。
     pub(super) credential_invalid_providers: HashSet<String>,
+    pub(super) allowance_suspended_providers: HashSet<String>,
 }
 
 /// Evidence `router::selection` assembles for one selection. Fields stay
@@ -599,6 +600,9 @@ impl RouteAttemptPolicy {
             if snapshot
                 .credential_invalid_providers
                 .contains(target.provider_id().as_str())
+                || snapshot
+                    .allowance_suspended_providers
+                    .contains(target.provider_id().as_str())
             {
                 continue;
             }
@@ -1256,6 +1260,7 @@ mod tests {
         let snapshot = RouteSchedulingSnapshot {
             targets: Vec::new(),
             credential_invalid_providers: ["dead".to_string()].into_iter().collect(),
+            ..Default::default()
         };
         let mut policy = RouteAttemptPolicy::new(
             "traffic_equalization",

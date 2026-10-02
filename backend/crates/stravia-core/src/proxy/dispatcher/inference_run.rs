@@ -1091,6 +1091,7 @@ pub(super) fn execute(input: RunInput) -> impl std::future::Future<Output = Resp
 
 async fn execute_observed(input: RunInput, root: tracing::Span) -> Response {
     let extensions = input.context.extensions.clone();
+    let ingress = input.ingress;
     let protocol = input.ingress.to_string();
     if !extensions.contains::<crate::interaction_observation::IngressObserver>() {
         extensions.insert(input.gateway.observation.observe_ingress(IngressStart {
@@ -1107,6 +1108,32 @@ async fn execute_observed(input: RunInput, root: tracing::Span) -> Response {
     }
     .execute()
     .await;
+    let response = if let Some(diagnostic) = response
+        .extensions()
+        .get::<crate::interaction_observation::FailureDiagnostic>()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some("allowance_suspended"))
+    {
+        use stravia_runtime_contract::protocol::ids::Protocol;
+        let message = diagnostic.message.as_deref().unwrap_or_default();
+        let body = match ingress.protocol {
+            Protocol::AnthropicMessages => serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": message}
+            }),
+            Protocol::GoogleGemini => serde_json::json!({
+                "error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": message}
+            }),
+            _ => serde_json::json!({
+                "error": {"type": "insufficient_quota", "code": "allowance_suspended", "message": message}
+            }),
+        };
+        let (mut parts, _) = response.into_parts();
+        parts.headers.remove(axum::http::header::RETRY_AFTER);
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        Response::from_parts(parts, axum::body::Body::from(body.to_string()))
+    } else {
+        response
+    };
     if !extensions.contains::<RunObserver>() && response.status().as_u16() >= 400 {
         root.record(
             "status",

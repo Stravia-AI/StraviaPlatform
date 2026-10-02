@@ -208,6 +208,102 @@ impl ProviderStore for PostgresProviderStore {
         Ok(())
     }
 
+    async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(sqlx::query_scalar("SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = $1 ORDER BY allowance_key").bind(id).fetch_all(&self.pool).await?)
+    }
+
+    async fn replace_guarded_allowance_keys(
+        &self,
+        id: &str,
+        keys: &[String],
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let provider =
+            sqlx::query_scalar::<_, String>("SELECT id FROM providers WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        anyhow::ensure!(provider.is_some(), "provider not found");
+        sqlx::query("DELETE FROM provider_allowance_guards WHERE provider_id = $1 AND NOT (allowance_key = ANY($2))").bind(id).bind(keys).execute(&mut *tx).await?;
+        for key in keys {
+            sqlx::query("INSERT INTO provider_allowance_guards (provider_id, allowance_key) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(key).execute(&mut *tx).await?;
+        }
+        // Removed triggers may own the aggregate reset time; only fresh evidence
+        // can establish the remaining triggers' earliest reset.
+        sqlx::query("UPDATE provider_allowance_suspensions SET earliest_reset_at = CASE WHEN EXISTS (SELECT value FROM json_array_elements_text(triggered_keys::json) AS item(value) WHERE value NOT IN (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = $1)) THEN NULL ELSE earliest_reset_at END, triggered_keys = COALESCE((SELECT json_agg(value)::text FROM json_array_elements_text(triggered_keys::json) AS item(value) WHERE value IN (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = $1)), '[]') WHERE provider_id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE provider_allowance_suspensions SET suspended = FALSE, suspended_at = NULL, earliest_reset_at = NULL WHERE provider_id = $1 AND json_array_length(triggered_keys::json) = 0").bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn write_allowance_suspension(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+        state: &crate::db::models::AllowanceSuspensionState,
+        expected_guarded_keys: &[String],
+    ) -> anyhow::Result<bool> {
+        // Lock before taking the decision snapshot, so concurrent guard edits and
+        // credential changes cannot invalidate this statement's predicate.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT id FROM providers WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        sqlx::query(
+            "SELECT provider_id FROM provider_oauth_credentials WHERE provider_id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let result = sqlx::query(
+            "INSERT INTO provider_allowance_suspensions (provider_id, suspended, suspended_at, triggered_keys, earliest_reset_at, evidence_completed_at)
+             SELECT $1, $2, $3, $4, $5, $6 FROM providers WHERE id = $1 AND revision = $7
+             AND (($8::int IS NULL AND NOT EXISTS (SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
+               OR ($8::int IS NOT NULL AND EXISTS (SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id AND status_version = $8)))
+             AND NOT EXISTS (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = providers.id EXCEPT SELECT unnest($9::text[]))
+             AND NOT EXISTS (SELECT unnest($9::text[]) EXCEPT SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = providers.id)
+             ON CONFLICT (provider_id) DO UPDATE SET suspended = excluded.suspended,
+             suspended_at = CASE WHEN provider_allowance_suspensions.suspended AND excluded.suspended THEN provider_allowance_suspensions.suspended_at ELSE excluded.suspended_at END,
+             triggered_keys = excluded.triggered_keys, earliest_reset_at = excluded.earliest_reset_at, evidence_completed_at = excluded.evidence_completed_at
+             WHERE excluded.evidence_completed_at > provider_allowance_suspensions.evidence_completed_at")
+            .bind(id).bind(state.suspended).bind(&state.suspended_at).bind(serde_json::to_string(&state.triggered_keys)?).bind(state.earliest_reset_at).bind(state.evidence_completed_at)
+            .bind(expected.provider_revision).bind(expected.oauth_status_version).bind(expected_guarded_keys).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn allowance_suspension(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::db::models::AllowanceSuspensionState>> {
+        let row = sqlx::query_as::<_, (bool, Option<String>, String, Option<i64>, i64)>("SELECT suspended, suspended_at, triggered_keys, earliest_reset_at, evidence_completed_at FROM provider_allowance_suspensions WHERE provider_id = $1").bind(id).fetch_optional(&self.pool).await?;
+        row.map(
+            |(suspended, suspended_at, json, earliest_reset_at, evidence_completed_at)| {
+                Ok(crate::db::models::AllowanceSuspensionState {
+                    suspended,
+                    suspended_at,
+                    triggered_keys: serde_json::from_str(&json)?,
+                    earliest_reset_at,
+                    evidence_completed_at,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    async fn allowance_suspended_provider_ids(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT provider_id FROM provider_allowance_suspensions WHERE suspended = TRUE",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect())
+    }
+
     async fn mark_credential_invalid(
         &self,
         id: &str,
@@ -289,6 +385,25 @@ mod tests {
             .connect_with(options.options([("search_path", schema.as_str())]))
             .await?;
         Ok(Some((admin, schema, PostgresProviderStore { pool })))
+    }
+
+    #[tokio::test]
+    async fn allowance_suspension_storage_contract() -> anyhow::Result<()> {
+        let Some((admin, schema, store)) = store().await? else {
+            return Ok(());
+        };
+        let result = async {
+            crate::migrations::migrate_postgres(&store.pool, None).await?;
+            let provider = create_provider(&store, "allowance").await?;
+            let oauth = PostgresOAuthCredentialStore {
+                pool: store.pool.clone(),
+            };
+            crate::storage::traits::verify_allowance_storage_contract(&store, &oauth, provider)
+                .await
+        }
+        .await;
+        cleanup(admin, schema, &store).await?;
+        result
     }
 
     async fn cleanup(

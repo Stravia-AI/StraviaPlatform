@@ -591,7 +591,7 @@ _避免使用_：通用表单状态机、Core 草稿、把部分成功当作全�
 
 ## Provider Allowance
 
-Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不改变 Provider 的路由资格或健康状态。
+Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不是 Provider 健康状态；只有守护条目的读取结果可以经额度暂停影响路由资格，其余条目只用于展示、趋势与预计耗尽。
 _避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
 
 ## Provider Allowance Monitor
@@ -606,12 +606,22 @@ _避免使用_：Quota、把 Model Allowance 当作账户级行
 
 ## Allowance Condition
 
-Allowance Condition 是 Allowance Item 的展示态，由当前快照的剩余或已用比例派生：已用 ≥ 100% 或剩余 ≤ 0 为耗尽，剩余 < 20% 为紧张，其余可计算的为正常。它不是 Provider 健康，不落盘，也不改变路由资格。
+Allowance Condition 是 Allowance Item 的展示态，由当前快照的剩余或已用比例派生：已用 ≥ 100% 或剩余 ≤ 0 为耗尽，剩余 < 20% 为紧张，其余可计算的为正常。它不是 Provider 健康，也不落盘；它本身不改变路由资格，守护条目的耗尽判定沿用同一阈值，由额度暂停承载路由后果。
 _避免使用_：Health、Provider Status、把 fresh/stale/error 叫作成色
+
+## 守护条目（Guarded Allowance Item）
+
+守护条目是管理员为某个 Provider 选定、其耗尽会触发额度暂停的 Allowance Item。它是实例级管理员选择，对所有 Principal 与 Route 生效，不按 API Key 区分；模型级额度不能成为守护条目。取消守护立即撤销由它引起的额度暂停；某次读取结果中缺失的守护条目既不触发暂停，也不作为恢复依据。
+_避免使用_：监控条目、Monitor（当指管理员选择）、门禁条目
+
+## 额度暂停（Allowance Suspension）
+
+额度暂停是 Provider 的持久化路由资格状态：最近一次成功的 Provider Allowance 读取显示任一守护条目耗尽。暂停期间该 Provider 在所有 Route 上的 Target 不参与新选择、亲和或冷却，已开始执行的请求不中断，暂停本身也不计作 Target 失败。只有新的成功读取显示全部守护条目不再耗尽，或取消相关守护，才能解除暂停；到达 `reset_at` 只触发读取，不直接解除；读取失败时维持原状态。它与已禁用 Target、Provider `is_enabled`（管理员意图）以及凭据失效（凭据证据）正交，也不同于按失败计数自动恢复的 Target Cooldown。全部候选因额度暂停不可选时，请求以明确的额度暂停错误失败，且不承诺恢复时间。
+_避免使用_：禁用 Target、自动禁用、额度耗尽（当指路由状态）、熔断、冷却
 
 ## Allowance Sample
 
-Allowance Sample 是一次成功 Monitor 读取后，对一个 Allowance Item 在某一时刻的 used / remaining / reset 观察记录。它只服务于趋势和预计耗尽，保留 14 天；它不是 live 快照，不是 Stats Usage，也不表示 Provider 健康或路由资格。
+Allowance Sample 是一次成功 Monitor 读取后，对一个 Allowance Item 在某一时刻的 used / remaining / reset 观察记录。它只服务于趋势和预计耗尽，保留 14 天；它不是 live 快照，不是 Stats Usage，不表示 Provider 健康，也不作为额度暂停的判定依据。
 _避免使用_：Provider Allowance Snapshot、用量历史、Quota History
 
 ## Exhaustion Forecast

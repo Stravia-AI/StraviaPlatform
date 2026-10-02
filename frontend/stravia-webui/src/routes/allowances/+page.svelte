@@ -56,6 +56,8 @@ import {
 import * as InputGroup from '$lib/components/ui/input-group'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
+import { Switch } from '$lib/components/ui/switch'
+import AllowanceSuspensionBanner from '$lib/components/allowance-suspension.svelte'
 
 interface VisibleProvider {
   target: ProviderAllowanceTarget
@@ -64,6 +66,7 @@ interface VisibleProvider {
   pending: boolean
   failed: boolean
   refreshing: boolean
+  credentialInvalid: boolean
   refetch?: () => void
 }
 
@@ -78,17 +81,54 @@ interface AllowanceMatrixRow {
 }
 
 const queryClient = useQueryClient()
+const savingGuardIds = new SvelteSet<string>()
+const guardErrors = new SvelteMap<string, string>()
+const credentialInvalidMessage = 'Credential invalid; allowance fetching is paused until the credential is updated.'
+const discoveredInvalidAt = new SvelteMap<string, number>()
+const providersQuery = createQuery(() => ({
+  queryKey: ['providers'],
+  queryFn: admin.providers.list,
+  refetchInterval: 180_000,
+}))
+
+function invalidSnapshot(snapshot: ProviderAllowanceSnapshot | undefined): boolean {
+  return snapshot?.error?.category === 'authentication' && snapshot.error.message === credentialInvalidMessage
+}
+
+function credentialInvalid(target: ProviderAllowanceTarget): boolean {
+  if (providersQuery.data?.find((provider) => provider.id === target.provider_id)?.credential_status === 'invalid') {
+    return true
+  }
+  const discoveredAt = discoveredInvalidAt.get(target.provider_id) ?? 0
+  return discoveredAt > 0 && providersQuery.dataUpdatedAt <= discoveredAt
+}
+
+function rememberSnapshot(snapshot: ProviderAllowanceSnapshot): ProviderAllowanceSnapshot {
+  if (invalidSnapshot(snapshot)) discoveredInvalidAt.set(snapshot.provider_id, Date.now())
+  return snapshot
+}
+
 const targetsQuery = createQuery(() => ({
   queryKey: ['provider-allowances'],
-  queryFn: admin.allowances.list,
+  queryFn: async () => {
+    const targets = await admin.allowances.list()
+    for (const target of targets) {
+      if (invalidSnapshot(target.snapshot) && !discoveredInvalidAt.has(target.provider_id)) {
+        discoveredInvalidAt.set(target.provider_id, Date.now())
+      }
+    }
+    return targets
+  },
   refetchInterval: 180_000,
 }))
 const snapshotQueries = createQueries(() => ({
   queries: (targetsQuery.data ?? []).map((target) => ({
     queryKey: ['provider-allowance', target.provider_id],
-    queryFn: () => admin.allowances.get(target.provider_id),
+    queryFn: async () => rememberSnapshot(await admin.allowances.get(target.provider_id)),
     initialData: target.snapshot,
-    refetchInterval: 180_000,
+    enabled: !providersQuery.isPending && !credentialInvalid(target) && !savingGuardIds.has(target.provider_id),
+    refetchInterval: credentialInvalid(target) ? false : 180_000,
+    retry: (failureCount: number) => !credentialInvalid(target) && failureCount < 3,
   })),
 }))
 
@@ -98,21 +138,48 @@ let catalogFilter = $state('all')
 let conditionFilter = $state<'all' | AllowanceCondition>('all')
 let freshnessFilter = $state<'all' | ProviderAllowanceStatus>('all')
 const refreshingProviderIds = new SvelteSet<string>()
+
+async function toggleGuard(snapshot: ProviderAllowanceSnapshot, key: string, checked: boolean): Promise<void> {
+  const id = snapshot.provider_id
+  if (savingGuardIds.has(id) || refreshingProviderIds.has(id)) return
+  const keys = new SvelteSet([
+    ...snapshot.allowances.filter((item) => item.guarded).map((item) => item.key),
+    ...(snapshot.missing_guarded_keys ?? []),
+  ])
+  if (checked) keys.add(key)
+  else keys.delete(key)
+  savingGuardIds.add(id)
+  guardErrors.delete(id)
+  try {
+    await queryClient.cancelQueries({ queryKey: ['provider-allowance', id] })
+    const updated = rememberSnapshot(await admin.allowances.replaceGuards(id, [...keys]))
+    queryClient.setQueryData(['provider-allowance', id], updated)
+    await refreshMetadata()
+  } catch (error) {
+    guardErrors.set(id, localizeBackendErrorMessage(error))
+  } finally {
+    savingGuardIds.delete(id)
+  }
+}
 const collator = $derived(new Intl.Collator(localeState.current, { sensitivity: 'base', numeric: true }))
 const targets = $derived(targetsQuery.data ?? [])
 const entries = $derived.by(() =>
   targets
     .map((target, index) => {
       const result = snapshotQueries[index]
-      const snapshot = result?.data ?? target.snapshot
+      const invalid = credentialInvalid(target)
+      const cachedSnapshot = result?.data ?? target.snapshot
+      const snapshot =
+        invalid && cachedSnapshot?.status === 'fresh' ? { ...cachedSnapshot, status: 'stale' as const } : cachedSnapshot
       const failed = snapshot == null && Boolean(result?.isError)
       return {
         target,
         snapshot,
-        pending: snapshot == null && !failed,
+        pending: snapshot == null && !failed && !invalid,
         failed,
-        refreshing: Boolean(result?.isFetching),
-        refetch: result ? () => void result.refetch() : undefined,
+        credentialInvalid: invalid,
+        refreshing: !invalid && Boolean(result?.isFetching),
+        refetch: result && !invalid ? () => void result.refetch() : undefined,
       }
     })
     .sort(
@@ -160,7 +227,9 @@ const visibleProviders = $derived.by((): VisibleProvider[] => {
     return [{ ...entry, allowances }]
   })
 })
-const allResolved = $derived(visibleProviders.every((entry) => entry.snapshot != null || entry.failed))
+const allResolved = $derived(
+  visibleProviders.every((entry) => entry.snapshot != null || entry.failed || entry.credentialInvalid),
+)
 const visibleAllowances = $derived(
   visibleProviders.flatMap(({ snapshot, allowances }) =>
     snapshot == null ? [] : allowances.map((allowance) => ({ snapshot, allowance })),
@@ -263,7 +332,13 @@ function catalogValue(target: Pick<ProviderAllowanceTarget, 'catalog_provider_id
 }
 
 async function refreshAll(): Promise<void> {
-  const pending = targets.filter((target) => !refreshingProviderIds.has(target.provider_id))
+  if (providersQuery.isPending) return
+  const pending = targets.filter(
+    (target) =>
+      !credentialInvalid(target) &&
+      !refreshingProviderIds.has(target.provider_id) &&
+      !savingGuardIds.has(target.provider_id),
+  )
   if (pending.length === 0) return
   refreshingAll = true
   try {
@@ -271,13 +346,14 @@ async function refreshAll(): Promise<void> {
       pending.map(async (target) => {
         refreshingProviderIds.add(target.provider_id)
         try {
-          const snapshot = await admin.allowances.refresh(target.provider_id)
+          const snapshot = rememberSnapshot(await admin.allowances.refresh(target.provider_id))
           queryClient.setQueryData(['provider-allowance', target.provider_id], snapshot)
         } finally {
           refreshingProviderIds.delete(target.provider_id)
         }
       }),
     )
+    await refreshMetadata()
     const failure = results.find((result) => result.status === 'rejected')
     if (failure) {
       toast.error(localizeBackendErrorMessage(failure.reason))
@@ -291,16 +367,26 @@ async function refreshAll(): Promise<void> {
 
 async function refreshProvider(provider: VisibleProvider): Promise<void> {
   const providerId = provider.target.provider_id
+  if (credentialInvalid(provider.target) || refreshingProviderIds.has(providerId) || savingGuardIds.has(providerId))
+    return
   refreshingProviderIds.add(providerId)
   try {
-    const snapshot = await admin.allowances.refresh(providerId)
+    const snapshot = rememberSnapshot(await admin.allowances.refresh(providerId))
     queryClient.setQueryData(['provider-allowance', providerId], snapshot)
+    await refreshMetadata()
     toast.success(m.allowances_refreshed_provider({ provider: provider.target.provider_name }))
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
     refreshingProviderIds.delete(providerId)
   }
+}
+
+async function refreshMetadata(): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['providers'] }),
+    queryClient.invalidateQueries({ queryKey: ['provider-allowances'], exact: true }),
+  ])
 }
 
 function statusPresentation(status: ProviderAllowanceStatus): { label: string; variant: BadgeVariant } {
@@ -457,6 +543,11 @@ function allowanceRowId(item: AllowanceMatrixRow): string {
 
 function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
   if (row.getIsGrouped()) return 'bg-muted/35 hover:bg-muted/35'
+  if (
+    row.original.allowance &&
+    row.original.provider.snapshot?.suspension?.triggered_keys.includes(row.original.allowance.key)
+  )
+    return 'bg-warning/10 hover:bg-warning/15'
   return row.original.allowance ? 'hover:bg-muted/20' : 'hidden'
 }
 </script>
@@ -465,6 +556,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
 {#snippet allowanceProviderSummary(provider: VisibleProvider, allowances: Allowance[])}
   {@const snapshot = provider.snapshot}
+  {@const suspension = snapshot ? snapshot.suspension : provider.target.suspension}
   {@const presentation = snapshot ? statusPresentation(snapshot.status) : undefined}
   {@const providerCondition = worstAllowanceCondition(allowances.map(effectiveAllowanceCondition))}
   {@const emptyHint = providerEmptyHint(allowances)}
@@ -482,13 +574,55 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     <p class="font-technical mt-1 text-xs text-muted-foreground">
       {provider.target.catalog_provider_id} / {provider.target.channel}
     </p>
-    {#if snapshot?.error}
+    {#if provider.credentialInvalid}
+      <Alert.Root
+        class="mt-1.5"
+        variant={snapshot?.status === 'stale' ? 'warning' : 'destructive'}
+        role="status"
+        data-testid={`allowance-credential-invalid-${provider.target.provider_id}`}>
+        <Alert.Description>
+          {#if snapshot?.status === 'stale'}{m.allowances_stale_message()}
+          {/if}
+          {m.allowances_credential_invalid()}
+          <Button
+            variant="link"
+            size="sm"
+            href={`/providers/${encodeURIComponent(provider.target.provider_id)}?view=connection`}>
+            {m.allowances_manage_providers()}
+          </Button>
+        </Alert.Description>
+      </Alert.Root>
+    {:else if snapshot?.error}
       <Alert.Root class="mt-1.5" variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
         ><Alert.Description
           >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
             snapshot.error.category,
           )}</Alert.Description
         ></Alert.Root>
+    {/if}
+    {#if suspension}
+      <div class="mt-2"><AllowanceSuspensionBanner {suspension} /></div>
+    {/if}
+    {#if snapshot?.missing_guarded_keys?.length}
+      <Alert.Root class="mt-2" variant="warning">
+        <Alert.Title>{m.allowances_missing_guards()}</Alert.Title>
+        <Alert.Description>
+          {#each snapshot.missing_guarded_keys as key (key)}
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-technical break-all">{key}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
+                onclick={() => toggleGuard(snapshot, key, false)}>{m.allowances_remove_guard({ key })}</Button>
+            </div>
+          {/each}
+        </Alert.Description>
+      </Alert.Root>
+    {/if}
+    {#if guardErrors.has(provider.target.provider_id)}
+      <Alert.Root class="mt-2" variant="destructive"
+        ><Alert.Description>{guardErrors.get(provider.target.provider_id)}</Alert.Description></Alert.Root>
     {/if}
     {#if snapshot && snapshot.models.length > 0}
       <Collapsible.Root class="mt-1.5">
@@ -506,7 +640,11 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     class="size-10"
     variant="ghost"
     onclick={() => refreshProvider(provider)}
-    disabled={refreshingProvider || refreshingAll}
+    disabled={provider.credentialInvalid ||
+      providersQuery.isPending ||
+      refreshingProvider ||
+      refreshingAll ||
+      savingGuardIds.has(provider.target.provider_id)}
     aria-label={m.allowances_refresh_provider({ provider: provider.target.provider_name })}>
     {#if refreshingProvider}<Spinner
         data-icon="inline-start"
@@ -557,6 +695,10 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     <div class="flex min-w-0 items-center gap-2">
       <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"></span>
       <span class="truncate font-medium">{allowanceLabel(allowance)}</span>
+      {#if context.row.original.provider.snapshot?.suspension?.triggered_keys.includes(allowance.key)}
+        <Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>
+      {/if}
+      {@render guardControl(context.row.original.provider.snapshot, allowance)}
     </div>
   {/if}
 {/snippet}
@@ -598,14 +740,36 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
   {/if}
 {/snippet}
 
-{#snippet mobileAllowanceRow(allowance: Allowance)}
+{#snippet guardControl(snapshot: ProviderAllowanceSnapshot | undefined, allowance: Allowance)}
+  {#if snapshot?.guard_supported}
+    <Switch
+      bind:checked={
+        () => allowance.guarded,
+        (checked: boolean) => {
+          void toggleGuard(snapshot, allowance.key, checked)
+        }
+      }
+      disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
+      aria-label={m.allowances_guard_item({ item: allowanceLabel(allowance) })} />
+  {/if}
+{/snippet}
+
+{#snippet mobileAllowanceRow(allowance: Allowance, snapshot: ProviderAllowanceSnapshot | undefined)}
   {@const condition = effectiveAllowanceCondition(allowance)}
   {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
-  <div class="border-t ps-6 pe-3 py-2.5">
+  <div
+    class={[
+      'border-t ps-6 pe-3 py-2.5',
+      snapshot?.suspension?.triggered_keys.includes(allowance.key) && 'bg-warning/10',
+    ]}>
     <div class="flex min-w-0 items-start justify-between gap-3">
-      <div class="flex min-w-0 items-center gap-2">
+      <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"></span>
-        <span class="truncate font-medium">{allowanceLabel(allowance)}</span>
+        <span class="min-w-0 break-words font-medium">{allowanceLabel(allowance)}</span>
+        {#if snapshot?.suspension?.triggered_keys.includes(allowance.key)}
+          <Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>
+        {/if}
+        {@render guardControl(snapshot, allowance)}
       </div>
       <div class="flex shrink-0 items-center gap-2">
         {#if condition}<span
@@ -668,7 +832,12 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
             ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })
             : m.allowances_never_updated()}
         </span>
-        <Button onclick={refreshAll} disabled={refreshingAll || targetsQuery.isPending}>
+        <Button
+          onclick={refreshAll}
+          disabled={refreshingAll ||
+            targetsQuery.isPending ||
+            providersQuery.isPending ||
+            !targets.some((target) => !credentialInvalid(target))}>
           {#if refreshingAll}<Spinner
               data-icon="inline-start"
               aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
@@ -838,7 +1007,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
                     {@render providerFailedBlock(provider, `allowance-failed-mobile-${provider.target.provider_id}`)}
                   {:else}
                     {#each provider.allowances as allowance (allowance.key)}
-                      {@render mobileAllowanceRow(allowance)}
+                      {@render mobileAllowanceRow(allowance, provider.snapshot)}
                     {/each}
                   {/if}
                 </section>

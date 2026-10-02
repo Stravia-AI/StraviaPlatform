@@ -338,12 +338,9 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
 
   await page.goto('/models')
   await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
-  await page
-    .locator('main')
-    .getByRole('link')
-    .filter({ hasText: 'gpt-5.4' })
-    .getByText('gpt-5.4', { exact: true })
-    .click()
+  const modelLink = page.locator('main').getByRole('link', { name: 'Team GPT', exact: true })
+  await expect(modelLink).toHaveAttribute('href', '/models/gpt-5.4')
+  await modelLink.click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
   const editModelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
   const editDisplayName = page.getByLabel('Display name', { exact: true })
@@ -654,7 +651,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
               limit: available.specification.limit,
               modalities: available.specification.modalities,
               reasoning_efforts: available.specification.reasoning_efforts,
-              cost: { input: 0.25, output: 1 },
+              cost: { input: 0.25, output: 1, tiers: [] },
             },
             extensions: {},
             created_at: '2026-08-17T00:00:00Z',
@@ -772,11 +769,11 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   const detailDialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'GPT Available' }) })
   const detailSpecification = detailDialog.getByRole('region', { name: 'Model specification' })
   await expect(detailSpecification).toContainText('1,050,000 tokens')
-  await expect(detailSpecification).toContainText(/Input modalities.*Image.*PDF/)
-  await expect(detailSpecification).toContainText(/Output modalities.*Text/)
+  await expect(detailSpecification.locator('dd').filter({ hasText: /^Image,\s*PDF$/ })).toBeVisible()
+  await expect(detailSpecification.locator('dd').filter({ hasText: /^Text$/ })).toBeVisible()
   await expect(detailSpecification).toContainText('high')
-  await expect(detailDialog).toContainText('Pricing')
   await expect(detailDialog).toContainText('$0.25')
+  await expect(detailDialog.getByText('$1', { exact: true })).toBeVisible()
   await detailDialog.getByRole('button', { name: 'Close' }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()
   const savedDestination = page.getByRole('button', { name: 'Edit destination 1' })
@@ -1135,7 +1132,7 @@ test('Destination status reflects runtime state without overwriting the editor d
       },
     ],
   }
-  let statusMode: 'cooling' | 'available' | 'error' = 'cooling'
+  let statusMode: 'cooling' | 'available' | 'error' | 'paused' | 'invalid' = 'cooling'
 
   await page.route('**/api/v1/providers', async (route) => {
     await route.fulfill({
@@ -1172,7 +1169,9 @@ test('Destination status reflects runtime state without overwriting the editor d
             target_id: 'target-one',
             provider_id: 'provider',
             model: 'upstream-model',
-            state: statusMode === 'cooling' ? 'cooling_down' : 'available',
+            state: statusMode === 'available' ? 'available' : 'cooling_down',
+            allowance_suspended: statusMode === 'paused' || statusMode === 'invalid',
+            credential_invalid: statusMode === 'invalid',
             cooldown_remaining_ms: statusMode === 'cooling' ? 42_000 : null,
           },
         ],
@@ -1187,6 +1186,10 @@ test('Destination status reflects runtime state without overwriting the editor d
   await expect(card.getByRole('status')).toContainText('left')
 
   await page.locator('#route-display-name').fill('My unsaved label')
+  statusMode = 'paused'
+  await expect(card.getByRole('status')).toHaveText('Allowance paused')
+  statusMode = 'invalid'
+  await expect(card.getByRole('status')).toHaveText('Invalid')
   statusMode = 'available'
   await expect(card.getByRole('status')).toHaveText('Available')
   await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')

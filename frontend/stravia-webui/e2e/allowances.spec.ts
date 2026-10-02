@@ -8,6 +8,9 @@ interface AllowanceFixture {
 }
 
 const freshSnapshot = {
+  guard_supported: true,
+  missing_guarded_keys: [],
+  suspension: null,
   provider_id: 'provider-alpha',
   provider_name: 'Alpha account',
   catalog_provider_id: 'openai-codex',
@@ -18,6 +21,7 @@ const freshSnapshot = {
   allowances: [
     {
       key: 'weekly',
+      guarded: false,
       label: 'Weekly',
       kind: 'quota_window',
       used: { value: 55.625, unit: 'tokens' },
@@ -30,6 +34,7 @@ const freshSnapshot = {
     },
     {
       key: 'credits_balance',
+      guarded: false,
       label: 'Credit balance',
       kind: 'balance',
       remaining: { value: 0, unit: 'currency', currency: 'USD' },
@@ -38,6 +43,7 @@ const freshSnapshot = {
     },
     {
       key: 'credits_balance_cny',
+      guarded: false,
       label: 'Credit balance',
       kind: 'balance',
       remaining: { value: 9.99, unit: 'currency', currency: 'CNY' },
@@ -51,6 +57,7 @@ const freshSnapshot = {
       allowances: [
         {
           key: 'weekly_model',
+          guarded: false,
           label: 'Weekly',
           kind: 'quota_window',
           remaining: { value: 25, unit: 'tokens' },
@@ -64,6 +71,9 @@ const freshSnapshot = {
 }
 
 const staleSnapshot = {
+  guard_supported: true,
+  missing_guarded_keys: [],
+  suspension: null,
   provider_id: 'provider-beta',
   provider_name: 'Beta account',
   catalog_provider_id: 'openai',
@@ -73,6 +83,7 @@ const staleSnapshot = {
   allowances: [
     {
       key: 'weekly',
+      guarded: false,
       label: 'Weekly',
       kind: 'quota_window',
       used_percent: 111.25,
@@ -88,6 +99,9 @@ const staleSnapshot = {
 }
 
 const errorSnapshot = {
+  guard_supported: false,
+  missing_guarded_keys: [],
+  suspension: null,
   provider_id: 'provider-gamma',
   provider_name: 'Gamma account',
   catalog_provider_id: 'github-copilot',
@@ -117,6 +131,8 @@ async function mockAllowances(page: Page, snapshots: AllowanceFixture[]) {
       json: {
         data: snapshots.map((snapshot) => ({
           provider_id: snapshot.provider_id,
+          guard_supported: snapshot.guard_supported,
+          suspension: snapshot.suspension,
           provider_name: snapshot.provider_name,
           catalog_provider_id: snapshot.catalog_provider_id,
           channel: snapshot.channel,
@@ -133,6 +149,194 @@ async function selectFilter(page: Page, label: string, option: string): Promise<
   await page.getByRole('button', { name: label, exact: true }).click()
   await page.getByRole('option', { name: option, exact: true }).click()
 }
+
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`guards preserve missing keys and confirmed values (${locale})`, async ({ page }) => {
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    const submissions: string[][] = []
+    let fail = false
+    let snapshot = {
+      ...freshSnapshot,
+      missing_guarded_keys: ['old-window'],
+      suspension: {
+        suspended_at: '2026-09-01T12:00:00Z',
+        triggered_keys: ['credits_balance'],
+        earliest_reset_at: 1788883200000,
+      },
+    }
+    await page.route('**/api/v1/provider-allowances**', async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (route.request().method() === 'PUT') {
+        const { keys } = route.request().postDataJSON() as { keys: string[] }
+        submissions.push(keys)
+        if (fail) {
+          await route.fulfill({ status: 400, json: { error: 'Guard update rejected' } })
+          return
+        }
+        snapshot = {
+          ...snapshot,
+          missing_guarded_keys: keys.includes('old-window') ? ['old-window'] : [],
+          allowances: snapshot.allowances.map((item) => ({ ...item, guarded: keys.includes(item.key) })),
+        }
+      }
+      await route.fulfill({
+        json: {
+          data: path.endsWith('/provider-allowances')
+            ? [
+                { ...snapshot, snapshot, refreshing: false },
+                { ...errorSnapshot, snapshot: errorSnapshot, refreshing: false },
+              ]
+            : path.includes('provider-gamma')
+              ? errorSnapshot
+              : snapshot,
+        },
+      })
+    })
+    await page.goto('/allowances')
+    const matrix = page.getByRole('table')
+    const weekly = matrix.getByRole('switch', { name: locale === 'en-US' ? 'Guard Weekly window' : '守护 每周窗口' })
+    await expect(page.getByTestId('allowance-suspension').first()).toBeVisible()
+    await expect(matrix.getByText(locale === 'en-US' ? 'Pause trigger' : '暂停触发条目', { exact: true })).toBeVisible()
+    await page
+      .getByRole('button', {
+        name: locale === 'en-US' ? 'Show model allowances for Alpha account' : '展开 Alpha account 的模型额度',
+      })
+      .first()
+      .click()
+    const model = page.getByRole('button', { name: 'gpt-5.3-codex-spark' }).first()
+    await model.click()
+    await expect(model.locator('..').getByRole('switch')).toHaveCount(0)
+    await expect(page.getByTestId('allowance-provider-provider-gamma').getByRole('switch')).toHaveCount(0)
+    await weekly.click()
+    await expect.poll(() => submissions[0]).toEqual(['old-window', 'weekly'])
+    await expect(weekly).toBeChecked()
+    fail = true
+    await weekly.click()
+    await expect(page.getByText('Guard update rejected').first()).toBeVisible()
+    await expect(weekly).toBeChecked()
+    fail = false
+    await page
+      .getByRole('button', { name: locale === 'en-US' ? 'Remove guard for old-window' : '取消 old-window 的守护' })
+      .first()
+      .click()
+    await expect.poll(() => submissions.at(-1)).toEqual(['weekly'])
+    await expect(page.getByRole('button', { name: /old-window/ })).toHaveCount(0)
+  })
+}
+
+test('pauses invalid credentials without blocking healthy providers and resumes after repair', async ({ page }) => {
+  await page.clock.install()
+  let credentialStatus = 'invalid'
+  let providerReads = 0
+  let targetReads = 0
+  const requests: string[] = []
+  await page.route('**/api/v1/providers', async (route) => {
+    providerReads++
+    await route.fulfill({
+      json: {
+        data: [
+          { id: freshSnapshot.provider_id, credential_status: credentialStatus },
+          { id: staleSnapshot.provider_id, credential_status: 'ok' },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/provider-allowances**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const providerId = path.match(/provider-allowances\/([^/]+?)(?:\/refresh)?$/)?.[1]
+    if (providerId) {
+      requests.push(`${request.method()} ${providerId}`)
+      await route.fulfill({ json: { data: providerId === freshSnapshot.provider_id ? freshSnapshot : staleSnapshot } })
+      return
+    }
+    targetReads++
+    await route.fulfill({
+      json: {
+        data: [freshSnapshot, staleSnapshot].map((snapshot) => ({
+          provider_id: snapshot.provider_id,
+          provider_name: snapshot.provider_name,
+          catalog_provider_id: snapshot.catalog_provider_id,
+          channel: snapshot.channel,
+          snapshot: snapshot.provider_id === freshSnapshot.provider_id ? undefined : snapshot,
+          refreshing: false,
+        })),
+      },
+    })
+  })
+  await page.goto('/allowances')
+  const invalid = page.getByTestId(`allowance-provider-${freshSnapshot.provider_id}`)
+  const healthy = page.getByTestId(`allowance-provider-${staleSnapshot.provider_id}`)
+  const invalidRefresh = invalid.getByRole('button', { name: 'Refresh Alpha account' })
+  await expect(invalidRefresh).toBeDisabled()
+  await expect(invalid.getByTestId(`allowance-credential-invalid-${freshSnapshot.provider_id}`)).toBeVisible()
+  await expect(invalid.getByRole('link')).toHaveAttribute(
+    'href',
+    `/providers/${freshSnapshot.provider_id}?view=connection`,
+  )
+  await expect(page.getByTestId(`allowance-loading-${freshSnapshot.provider_id}`)).toHaveCount(0)
+  await healthy.getByRole('button', { name: 'Refresh Beta account' }).click()
+  await expect.poll(() => requests).toContain(`POST ${staleSnapshot.provider_id}`)
+  await page.getByRole('button', { name: 'Refresh all' }).click()
+  await expect.poll(() => requests.filter((request) => request === `POST ${staleSnapshot.provider_id}`).length).toBe(2)
+  const readsBeforePoll = { providers: providerReads, targets: targetReads }
+  await page.clock.fastForward(180_001)
+  await expect.poll(() => providerReads).toBeGreaterThan(readsBeforePoll.providers)
+  await expect.poll(() => targetReads).toBeGreaterThan(readsBeforePoll.targets)
+  expect(requests.filter((request) => request.endsWith(freshSnapshot.provider_id))).toEqual([])
+
+  credentialStatus = 'ok'
+  await page.clock.fastForward(180_001)
+  await expect(invalidRefresh).toBeEnabled()
+  await expect.poll(() => requests).toContain(`GET ${freshSnapshot.provider_id}`)
+  await invalidRefresh.click()
+  await expect.poll(() => requests).toContain(`POST ${freshSnapshot.provider_id}`)
+  await expect(invalid.getByTestId(`allowance-credential-invalid-${freshSnapshot.provider_id}`)).toHaveCount(0)
+})
+
+test('pauses immediately when a snapshot reports persisted credential invalidation', async ({ page }) => {
+  await page.clock.install()
+  let credentialStatus = 'ok'
+  const invalidSnapshot = {
+    ...freshSnapshot,
+    status: 'stale',
+    error: {
+      category: 'authentication',
+      message: 'Credential invalid; allowance fetching is paused until the credential is updated.',
+    },
+  }
+  const snapshots: AllowanceFixture[] = [freshSnapshot, staleSnapshot]
+  const posts = await mockAllowances(page, snapshots)
+  await page.route('**/api/v1/providers', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          { id: freshSnapshot.provider_id, credential_status: credentialStatus },
+          { id: staleSnapshot.provider_id, credential_status: 'ok' },
+        ],
+      },
+    })
+  })
+  await page.goto('/allowances')
+  const provider = page.getByTestId(`allowance-provider-${freshSnapshot.provider_id}`)
+  const refresh = provider.getByRole('button', { name: 'Refresh Alpha account' })
+  await expect(refresh).toBeEnabled()
+  snapshots[0] = invalidSnapshot
+  credentialStatus = 'invalid'
+  await refresh.click()
+  await expect(refresh).toBeDisabled()
+  await expect(provider.getByTestId(`allowance-credential-invalid-${freshSnapshot.provider_id}`)).toBeVisible()
+  await expect(page.getByRole('table').getByText(/44[.,]3/)).toBeVisible()
+  await page.getByRole('button', { name: 'Refresh all' }).click()
+  await expect.poll(() => posts.filter((path) => path.includes(staleSnapshot.provider_id)).length).toBe(1)
+  expect(posts.filter((path) => path.includes(freshSnapshot.provider_id))).toHaveLength(1)
+  snapshots[0] = freshSnapshot
+  credentialStatus = 'ok'
+  await page.clock.fastForward(180_001)
+  await expect(refresh).toBeEnabled()
+  await refresh.click()
+  await expect.poll(() => posts.filter((path) => path.includes(freshSnapshot.provider_id)).length).toBe(2)
+})
 
 test('renders the matrix, shared summary, timeline, forecast, model details, and refresh actions', async ({ page }) => {
   const posts = await mockAllowances(page, [errorSnapshot, staleSnapshot, freshSnapshot])

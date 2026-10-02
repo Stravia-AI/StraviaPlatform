@@ -238,6 +238,7 @@ mod tests {
 
     fn allowance(key: &str) -> Allowance {
         Allowance {
+            guarded: false,
             key: key.into(),
             label: key.into(),
             kind: AllowanceKind::QuotaWindow,
@@ -254,6 +255,9 @@ mod tests {
 
     fn snapshot(status: ProviderAllowanceStatus) -> ProviderAllowanceSnapshot {
         ProviderAllowanceSnapshot {
+            guard_supported: true,
+            missing_guarded_keys: Vec::new(),
+            suspension: None,
             provider_id: "provider-1".into(),
             provider_name: "Provider 1".into(),
             catalog_provider_id: "catalog".into(),

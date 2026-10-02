@@ -29,6 +29,7 @@ mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
     get_provider_allowance, list_provider_allowances, refresh_provider_allowance,
+    replace_provider_allowance_guards,
 };
 
 #[cfg(test)]
@@ -295,6 +296,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route(
             "/provider-allowances/{provider_id}/refresh",
             post(refresh_provider_allowance),
+        )
+        .route(
+            "/provider-allowances/{provider_id}/guards",
+            put(replace_provider_allowance_guards),
         )
         .route("/updates", get(get_updates))
         .route("/updates/check", post(check_updates))

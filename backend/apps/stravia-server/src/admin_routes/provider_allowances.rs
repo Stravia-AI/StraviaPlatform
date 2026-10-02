@@ -2,7 +2,57 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use serde::Deserialize;
 use stravia_core::Gateway;
+use stravia_core::admin::provider_allowance::ProviderAllowanceGuardError;
+
+#[derive(Deserialize)]
+pub(super) struct ReplaceProviderAllowanceGuards {
+    keys: Vec<String>,
+}
+
+pub(super) async fn replace_provider_allowance_guards(
+    State(gateway): State<Gateway>,
+    Path(provider_id): Path<String>,
+    Json(input): Json<ReplaceProviderAllowanceGuards>,
+) -> impl IntoResponse {
+    match gateway
+        .admin()
+        .replace_provider_allowance_guards(&provider_id, input.keys)
+        .await
+    {
+        Ok(Some(snapshot)) => Json(serde_json::json!({ "data": snapshot })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "provider not found",
+                "code": "PROVIDER_NOT_FOUND",
+            })),
+        )
+            .into_response(),
+        Err(error)
+            if error
+                .downcast_ref::<ProviderAllowanceGuardError>()
+                .is_some() =>
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": error.to_string(),
+                    "code": "PROVIDER_ALLOWANCE_GUARDS_INVALID",
+                })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(provider_id, %error, "Failed to replace provider allowance guards");
+            internal_error(
+                "PROVIDER_ALLOWANCE_GUARDS_SAVE_FAILED",
+                "failed to save provider allowance guards",
+            )
+        }
+    }
+}
 
 pub(super) async fn list_provider_allowances(State(gateway): State<Gateway>) -> impl IntoResponse {
     match gateway.admin().list_provider_allowance_targets().await {

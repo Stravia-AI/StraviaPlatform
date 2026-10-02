@@ -23,6 +23,7 @@ export interface Provider {
   /** ADR-0073: `ok` | `invalid` — upstream confirmed rejection of the current credentials. */
   credential_status?: string
   credential_invalid_at?: string | null
+  allowance_suspension?: import('./provider-allowance').AllowanceSuspension | null
   created_at: string
   updated_at: string
 }

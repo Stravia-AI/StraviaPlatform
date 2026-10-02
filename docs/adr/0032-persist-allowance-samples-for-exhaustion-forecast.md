@@ -4,6 +4,8 @@ status: accepted
 
 # 落盘 Allowance Sample 以支持预计耗尽
 
+> “不改变路由资格”一项由 ADR 0078 部分修正：守护条目耗尽可经额度暂停影响路由资格；Allowance Sample 仍不作为暂停判定依据。
+
 本决策修正 ADR 0029 中“不持久化快照”的部分。Monitor registry、凭据边界、官方额度端点、`use_proxy`、以及 Provider Allowance 不改变健康状态或路由资格，保持不变。
 
 额度总览需要在重置前判断 Allowance Item 会不会耗尽。进程内快照重启即没，无法形成斜率；Stravia 的请求日志只覆盖本机流量，同一上游账户在其它客户端的消耗看不见，也不能把百分比窗口和 token 计数当成同一种量。

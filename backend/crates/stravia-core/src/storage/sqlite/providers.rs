@@ -202,6 +202,89 @@ impl ProviderStore for SqliteProviderStore {
         Ok(())
     }
 
+    async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(sqlx::query_scalar("SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = ? ORDER BY allowance_key").bind(id).fetch_all(&self.pool).await?)
+    }
+
+    async fn replace_guarded_allowance_keys(
+        &self,
+        id: &str,
+        keys: &[String],
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        // Acquire the SQLite writer lock before reading the suspension.
+        sqlx::query("DELETE FROM provider_allowance_guards WHERE provider_id = ? AND allowance_key NOT IN (SELECT value FROM json_each(?))").bind(id).bind(serde_json::to_string(keys)?).execute(&mut *tx).await?;
+        let provider = sqlx::query_scalar::<_, String>("SELECT id FROM providers WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        anyhow::ensure!(provider.is_some(), "provider not found");
+        for key in keys {
+            sqlx::query("INSERT INTO provider_allowance_guards (provider_id, allowance_key) VALUES (?, ?) ON CONFLICT DO NOTHING").bind(id).bind(key).execute(&mut *tx).await?;
+        }
+        // Removed triggers may own the aggregate reset time; a fresh read must
+        // establish the remaining triggers' earliest reset rather than guessing.
+        sqlx::query("UPDATE provider_allowance_suspensions SET earliest_reset_at = CASE WHEN EXISTS (SELECT value FROM json_each(triggered_keys) WHERE value NOT IN (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = ?)) THEN NULL ELSE earliest_reset_at END, triggered_keys = (SELECT json_group_array(value) FROM json_each(triggered_keys) WHERE value IN (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = ?)) WHERE provider_id = ?").bind(id).bind(id).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE provider_allowance_suspensions SET suspended = FALSE, suspended_at = NULL, earliest_reset_at = NULL WHERE provider_id = ? AND json_array_length(triggered_keys) = 0").bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn write_allowance_suspension(
+        &self,
+        id: &str,
+        expected: ProviderCredentialVersion,
+        state: &crate::db::models::AllowanceSuspensionState,
+        expected_guarded_keys: &[String],
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "INSERT INTO provider_allowance_suspensions (provider_id, suspended, suspended_at, triggered_keys, earliest_reset_at, evidence_completed_at)
+             SELECT ?, ?, ?, ?, ?, ? FROM providers WHERE id = ? AND revision = ?
+             AND ((? IS NULL AND NOT EXISTS (SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
+               OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id AND status_version = ?)))
+             AND NOT EXISTS (SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = providers.id EXCEPT SELECT value FROM json_each(?))
+             AND NOT EXISTS (SELECT value FROM json_each(?) EXCEPT SELECT allowance_key FROM provider_allowance_guards WHERE provider_id = providers.id)
+             ON CONFLICT (provider_id) DO UPDATE SET suspended = excluded.suspended,
+             suspended_at = CASE WHEN provider_allowance_suspensions.suspended AND excluded.suspended THEN provider_allowance_suspensions.suspended_at ELSE excluded.suspended_at END,
+             triggered_keys = excluded.triggered_keys, earliest_reset_at = excluded.earliest_reset_at, evidence_completed_at = excluded.evidence_completed_at
+             WHERE excluded.evidence_completed_at > provider_allowance_suspensions.evidence_completed_at")
+            .bind(id).bind(state.suspended).bind(&state.suspended_at).bind(serde_json::to_string(&state.triggered_keys)?).bind(state.earliest_reset_at).bind(state.evidence_completed_at)
+            .bind(id).bind(expected.provider_revision).bind(expected.oauth_status_version).bind(expected.oauth_status_version).bind(expected.oauth_status_version.unwrap_or(0))
+            .bind(serde_json::to_string(expected_guarded_keys)?).bind(serde_json::to_string(expected_guarded_keys)?).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn allowance_suspension(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::db::models::AllowanceSuspensionState>> {
+        let row = sqlx::query_as::<_, (bool, Option<String>, String, Option<i64>, i64)>("SELECT suspended, suspended_at, triggered_keys, earliest_reset_at, evidence_completed_at FROM provider_allowance_suspensions WHERE provider_id = ?").bind(id).fetch_optional(&self.pool).await?;
+        row.map(
+            |(suspended, suspended_at, json, earliest_reset_at, evidence_completed_at)| {
+                Ok(crate::db::models::AllowanceSuspensionState {
+                    suspended,
+                    suspended_at,
+                    triggered_keys: serde_json::from_str(&json)?,
+                    earliest_reset_at,
+                    evidence_completed_at,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    async fn allowance_suspended_provider_ids(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT provider_id FROM provider_allowance_suspensions WHERE suspended = TRUE",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect())
+    }
+
     async fn mark_credential_invalid(
         &self,
         id: &str,
@@ -287,6 +370,16 @@ mod tests {
             .await
             .expect("migrations");
         SqliteProviderStore { pool }
+    }
+
+    #[tokio::test]
+    async fn allowance_suspension_storage_contract() -> anyhow::Result<()> {
+        let store = store().await;
+        let provider = create_provider(&store, "allowance").await;
+        let oauth = SqliteOAuthCredentialStore {
+            pool: store.pool.clone(),
+        };
+        crate::storage::traits::verify_allowance_storage_contract(&store, &oauth, provider).await
     }
 
     async fn create_provider(store: &SqliteProviderStore, name: &str) -> Provider {

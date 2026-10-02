@@ -182,6 +182,17 @@ impl TurnInput {
 
 use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
 
+fn allowance_suspended_error() -> ModelTurnError {
+    ModelTurnError::new(
+        "allowance_suspended",
+        "All Targets for this model are paused because their upstream allowance is exhausted.",
+    )
+}
+
+fn mixed_allowance_exclusions_error() -> ModelTurnError {
+    ModelTurnError::new("provider_unavailable", "No eligible Target remains")
+}
+
 #[derive(Clone)]
 pub(crate) struct UpstreamErrorResponse;
 

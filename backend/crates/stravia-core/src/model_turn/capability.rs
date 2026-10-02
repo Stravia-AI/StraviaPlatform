@@ -193,7 +193,9 @@ impl Gateway {
                 drop(routes);
                 let mut policy = match selection {
                     Ok(policy) => policy,
-                    Err(SelectionError::NoEligibleTarget) if last_error.is_some() => break 'targets,
+                    Err(
+                        SelectionError::NoEligibleTarget | SelectionError::MixedAllowanceExclusions,
+                    ) if last_error.is_some() => break 'targets,
                     Err(error) => return Err(selection_error(error)),
                 };
                 let wait = self.rpm_admission.filter_candidates(
@@ -702,6 +704,12 @@ fn selection_error(error: SelectionError) -> anyhow::Error {
             source.context("Route scheduling is unavailable")
         }
         SelectionError::NoEligibleTarget => anyhow::anyhow!("Route has no eligible Target"),
+        SelectionError::MixedAllowanceExclusions => {
+            anyhow::Error::new(super::mixed_allowance_exclusions_error())
+        }
+        SelectionError::AllowanceSuspended => {
+            anyhow::Error::new(super::allowance_suspended_error())
+        }
         SelectionError::MediaPlanExhausted => anyhow::anyhow!("Route has no eligible Target"),
     }
 }

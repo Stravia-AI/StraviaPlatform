@@ -19,6 +19,7 @@ import ProviderEditor from '$lib/components/provider-editor.svelte'
 import RpmManagement from '$lib/components/rpm-management.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
+import AllowanceSuspensionBanner from '$lib/components/allowance-suspension.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
@@ -335,10 +336,19 @@ async function copyProvider(): Promise<void> {
     compact
     label={credentialInvalid && provider.is_enabled
       ? m.providers_credential_invalid()
-      : provider.is_enabled
-        ? m.common_enabled_status()
-        : m.common_disabled_status()}
-    tone={credentialInvalid && provider.is_enabled ? 'error' : provider.is_enabled ? 'healthy' : 'neutral'} />
+      : provider.allowance_suspension && provider.is_enabled
+        ? m.allowances_suspended()
+        : provider.is_enabled
+          ? m.common_enabled_status()
+          : m.common_disabled_status()}
+    tone={credentialInvalid && provider.is_enabled
+      ? 'error'
+      : provider.allowance_suspension && provider.is_enabled
+        ? 'warning'
+        : provider.is_enabled
+          ? 'healthy'
+          : 'neutral'} />
+  {#if provider.allowance_suspension}<AllowanceSuspensionBanner suspension={provider.allowance_suspension} />{/if}
   {#if credentialInvalid && !provider.is_enabled}
     <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
   {/if}
@@ -445,17 +455,23 @@ async function copyProvider(): Promise<void> {
                 compact
                 label={credentialInvalid && provider.is_enabled
                   ? m.providers_credential_invalid()
-                  : provider.is_enabled
-                    ? m.common_enabled_status()
-                    : m.common_disabled_status()}
+                  : provider.allowance_suspension && provider.is_enabled
+                    ? m.allowances_suspended()
+                    : provider.is_enabled
+                      ? m.common_enabled_status()
+                      : m.common_disabled_status()}
                 tone={credentialInvalid && provider.is_enabled
                   ? 'error'
-                  : provider.is_enabled
-                    ? 'healthy'
-                    : 'neutral'} />
+                  : provider.allowance_suspension && provider.is_enabled
+                    ? 'warning'
+                    : provider.is_enabled
+                      ? 'healthy'
+                      : 'neutral'} />
               {#if credentialInvalid && !provider.is_enabled}
                 <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
               {/if}
+              {#if provider.allowance_suspension}<AllowanceSuspensionBanner
+                  suspension={provider.allowance_suspension} />{/if}
               {#if drifts.length > 0}
                 <Badge
                   class="mt-2"

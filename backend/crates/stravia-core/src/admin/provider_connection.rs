@@ -927,6 +927,8 @@ impl AdminService {
         // ADR-0073：黑名单按 API 输入判定——下方写入总是全字段重写，
         // 不能把"回填现值"误判成凭据变更。
         let preserve_credential_status = !input.resets_credential_status();
+        let refresh_allowance =
+            !preserve_credential_status || (!current.is_enabled && input.is_enabled == Some(true));
         let changes_options = input.vendor_options.is_some();
         let credential_updates = input.adapter_credentials.clone().unwrap_or_default();
         let changes_credentials = credential_updates.values().any(configured_secret_value)
@@ -1060,6 +1062,15 @@ impl AdminService {
                 .await?;
         }
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
+        if refresh_allowance && provider.is_enabled {
+            // Release plugin write guards before starting the normal allowance read.
+            drop(_permit);
+            drop(_configuration);
+            if let Err(error) = self.refresh_provider_allowance(id).await {
+                tracing::warn!(provider_id = id, error = ?error, "provider configuration allowance refresh failed");
+            }
+        }
+        self.gw.provider_allowance_state.notify_changed();
         Ok(provider)
     }
 
@@ -1099,6 +1110,7 @@ impl AdminService {
         // ProviderStore owns the backend transaction that removes this
         // Provider, prunes its Targets, and deletes Routes left empty.
         self.gw.storage.providers().delete(id).await?;
+        self.gw.provider_allowance_state.notify_changed();
         super::routes::RouteModule::new(&self.gw)
             .reload_cache()
             .await?;

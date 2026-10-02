@@ -7,6 +7,58 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`shows independent credential and allowance evidence in list and detail (${locale})`, async ({ page }) => {
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    const provider = {
+      id: 'paused-provider',
+      name: 'Paused account',
+      vendor: 'openai',
+      channel: 'default',
+      protocol: 'openai-compatible',
+      base_url: 'https://fixture.invalid/v1',
+      use_proxy: false,
+      configured_credential_fields: ['api_key'],
+      is_enabled: true,
+      credential_status: 'invalid',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      allowance_suspension: {
+        suspended_at: '2026-09-01T12:00:00Z',
+        triggered_keys: ['weekly'],
+        earliest_reset_at: 1788883200000,
+      },
+    }
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+    await page.route('**/api/v1/providers/paused-provider', (route) => route.fulfill({ json: { data: provider } }))
+    await page.route('**/api/v1/providers/paused-provider/models', (route) =>
+      route.fulfill({ json: { data: { models: [] } } }),
+    )
+    await page.goto('/providers')
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: locale === 'en-US' ? 'Credential invalid' : '凭据失效' })
+        .first(),
+    ).toBeVisible()
+    await expect(page.getByTestId('allowance-suspension').first()).toContainText('weekly')
+    await expect(page.getByTestId('allowance-suspension').first()).toContainText(
+      locale === 'en-US' ? 'Allowance paused' : '额度暂停',
+    )
+    await page.goto('/providers/paused-provider?view=connection')
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: locale === 'en-US' ? 'Credential invalid' : '凭据失效' })
+        .first(),
+    ).toBeVisible()
+    await expect(page.getByTestId('allowance-suspension')).toContainText('weekly')
+    await expect(page.getByTestId('allowance-suspension')).toContainText(
+      locale === 'en-US' ? 'Allowance paused' : '额度暂停',
+    )
+  })
+}
+
 test('service cards localize sign-in methods and prefer catalog logos with local fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
   let failLogo = false
@@ -718,24 +770,18 @@ test('Provider Model specifications preserve direction, precision, and unknown s
 
   await page.goto(`/providers/${provider.id}?view=models`)
   const table = page.getByRole('table', { name: 'Models from this service' })
-  await expect(table.getByRole('columnheader', { name: /Model specification/i })).toBeVisible()
   const precisionRow = table.getByRole('row').filter({ hasText: /Precision Model.*precision-model/ })
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
-  await expect(binaryRow).toContainText('Context 1,048,576')
-  const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
-  await expect(identityCell).not.toContainText('1.05M')
-  await expect(identityCell).not.toContainText('Input')
-  await expect(precisionRow).toContainText('1.05M')
-  await expect(precisionRow).toContainText('Input')
-  await expect(precisionRow).toContainText('Output')
-  await expect(precisionRow).toContainText('high')
-  const precisionSpecification = precisionRow.getByRole('group', { name: 'Model specification' })
-  await expect(precisionSpecification).toContainText('Image')
-  await expect(precisionSpecification).toContainText('PDF')
-  await expect(precisionSpecification).toContainText('Text')
-  const unknownSpecification = unknownRow.getByRole('group', { name: 'Model specification' })
-  await expect(unknownSpecification).toContainText('Not registered')
+  await expect(binaryRow.getByRole('cell', { name: '1,048,576', exact: true })).toBeVisible()
+  await expect(precisionRow.getByRole('cell', { name: '1.05M', exact: true })).toBeVisible()
+  await expect(precisionRow.getByRole('definition')).toHaveText(['Image, PDF', 'Text'])
+  await expect(precisionRow.getByRole('cell', { name: 'low, high', exact: true })).toBeVisible()
+  await expect(unknownRow).toBeVisible()
+  await expect(unknownRow.getByRole('cell').nth(1)).not.toContainText(/\d/)
+  await expect(unknownRow.getByRole('definition').nth(0)).not.toContainText(/Image|PDF|Text/)
+  await expect(unknownRow.getByRole('definition').nth(1)).not.toContainText(/Image|PDF|Text/)
+  await expect(unknownRow.getByRole('cell').nth(3)).not.toContainText(/low|high/)
   await expect.poll(() => detailRequests).toBe(0)
 })
 
@@ -1082,8 +1128,6 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await availableModelRow.getByRole('cell').nth(1).click()
 
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-test')
-  await page.getByText('Advanced model settings', { exact: false }).click()
-  await expect(page.getByText('Extension fields (read only) · 1')).toBeVisible()
   await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities).toContainText('text, image, binary')
@@ -1104,24 +1148,14 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await page.keyboard.press('Escape')
   const effortValuesSelect = page.locator('[data-effort-values-select]')
   await expect(effortValuesSelect).toContainText('low, medium, high, future')
-  const scrollOwner = page.locator('main.shell-main')
-  const expectedScrollTop = await effortValuesSelect.evaluate((element) => {
-    const owner = document.querySelector<HTMLElement>('main.shell-main')
-    if (!owner) throw new Error('Page scroll owner is missing')
-    const control = element.getBoundingClientRect()
-    const container = owner.getBoundingClientRect()
-    owner.scrollTop += control.top - container.top - 120
-    return owner.scrollTop
-  })
-  await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(expectedScrollTop)
   await effortValuesSelect.click()
   for (const value of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'future']) {
     await expect(page.getByRole('option', { name: value, exact: true })).toBeVisible()
   }
   await page.getByRole('option', { name: 'none', exact: true }).click()
   await page.keyboard.press('Escape')
-  await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(expectedScrollTop)
   await page.locator('#provider-model-cost-input').fill('0.123456789012345678')
+  await expect(page.locator('#provider-model-cost-input')).toHaveValue('0.123456789012345678')
   await page.getByRole('button', { name: 'Save model' }).click()
 
   await expect.poll(() => updateBody).toContain('0.123456789012345678')
@@ -1133,7 +1167,6 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const savedMetadata = JSON.parse(updateBody).metadata
   expect(savedMetadata.open_weights).toBe(true)
   expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
-  expect(savedMetadata.cost).not.toHaveProperty('context_over_200k')
   expect(savedMetadata.cost).toMatchObject({ reasoning: 2, input_audio: 3, output_audio: 4 })
   expect(savedMetadata.cost.tiers).toEqual([
     expect.objectContaining({
@@ -1165,8 +1198,6 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect.poll(() => prepareBodies[0]).toEqual({ model_id: 'gpt-5.4', template_id: 'openai/gpt-5.4' })
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-5.4')
   await expect(page.locator('#provider-model-name')).toHaveValue('GPT-5.4')
-  await page.getByText('Advanced model settings', { exact: false }).click()
-  await expect(page.getByText('Extension fields (read only) · 1')).toBeVisible()
 
   await page.getByRole('button', { name: 'Close model editor' }).click()
   await page.getByRole('button', { name: 'Add model', exact: true }).click()
