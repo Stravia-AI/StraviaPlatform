@@ -2702,13 +2702,6 @@ mod tests {
             unknown_cache_usage.payload["usage"]["input_tokens"],
             Value::Null
         );
-        let bundle = crate::interaction_observation::project_bundle_summary(
-            &detail,
-            events,
-            detail.snapshot_sequence,
-            "completed",
-        );
-        assert_eq!(bundle["usage"], serde_json::to_value(&expected)?);
         Ok(())
     }
 

@@ -35,7 +35,7 @@ use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
-use bundle::{BundleRunSnapshot, BundleService, BundleSnapshot};
+use bundle::BundleExport;
 use store::ObservationStore;
 use trace::{TRACE_SCHEMA_VERSION, TraceHandle, TraceManager, TraceRecord};
 use writer::WriterCommand;
@@ -107,7 +107,7 @@ struct Inner {
     metrics_upkeep: Mutex<Option<tokio::task::JoinHandle<()>>>,
     retention_days: Arc<AtomicU32>,
     traces: TraceManager,
-    bundles: BundleService,
+    bundles: BundleExport,
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
     unpersisted_gaps: Arc<Mutex<UnpersistedGaps>>,
@@ -233,6 +233,12 @@ impl InteractionObservation {
         });
         let debug = Arc::new(AtomicBool::new(false));
         crate::performance::bind_debug(&debug);
+        let bundles = BundleExport::new(
+            store.clone(),
+            writer.clone(),
+            traces.clone(),
+            Arc::clone(&active_traces),
+        );
         Self {
             inner: Arc::new(Inner {
                 store,
@@ -246,7 +252,7 @@ impl InteractionObservation {
                 metrics_upkeep: Mutex::new(crate::performance::spawn_upkeep()),
                 retention_days,
                 traces,
-                bundles: BundleService::default(),
+                bundles,
                 active_traces,
                 partial_trace_count,
                 unpersisted_gaps,
@@ -547,193 +553,13 @@ impl InteractionObservation {
         &self,
         request: BundleRequest,
     ) -> anyhow::Result<DownloadTicket> {
-        if matches!(request.kind, BundleResourceKind::Interaction) {
-            let (done, receive) = oneshot::channel();
-            self.inner
-                .writer
-                .send(WriterCommand::FlushInteraction {
-                    interaction_id: request.resource_id.clone(),
-                    done,
-                })
-                .await
-                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
-            receive
-                .await
-                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
-        }
-        let max = self.inner.store.max_sequence().await?;
-        let through = request.through_sequence.unwrap_or(max).min(max);
-        let exported_at = chrono::Utc::now().timestamp_millis();
-        let snapshot = match request.kind {
-            BundleResourceKind::Interaction => {
-                let detail = self
-                    .inner
-                    .store
-                    .get_interaction_for_bundle(&request.resource_id, through)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("interaction not found"))?;
-                let mut snapshot_events: Vec<ObservationEvent> = detail
-                    .runs
-                    .iter()
-                    .flat_map(|run| run.events.iter())
-                    .filter(|event| event.sequence <= through)
-                    .cloned()
-                    .collect();
-                snapshot_events.sort_unstable_by_key(|event| event.sequence);
-                let admitted: std::collections::HashSet<String> = snapshot_events
-                    .iter()
-                    .filter(|event| event.kind == "run_admitted")
-                    .filter_map(|event| event.run_id.clone())
-                    .collect();
-                if admitted.is_empty() {
-                    anyhow::bail!("bundle snapshot unavailable");
-                }
-                let projected_status = project_bundle_status(&snapshot_events);
-                let summary =
-                    project_bundle_summary(&detail, &snapshot_events, through, &projected_status);
-                let mut runs = Vec::with_capacity(admitted.len());
-                for run in detail.runs.iter().filter(|run| admitted.contains(&run.id)) {
-                    let active = { self.inner.active_traces.lock().get(&run.id).cloned() };
-                    let (status, bytes, reasons, trace) = if let Some(handle) = active {
-                        let manifest = handle.manifest();
-                        let snap = handle.snapshot(through).await.ok();
-                        (
-                            manifest.status,
-                            snap.as_ref().map_or(0, |snapshot| snapshot.bytes),
-                            manifest.reasons,
-                            snap,
-                        )
-                    } else if let Some(manifest) = &run.trace {
-                        let snap = self
-                            .inner
-                            .traces
-                            .snapshot(&manifest.trace_id, through)
-                            .await
-                            .ok();
-                        (
-                            manifest.status.clone(),
-                            snap.as_ref().map_or(0, |snapshot| snapshot.bytes),
-                            manifest.reasons.clone(),
-                            snap,
-                        )
-                    } else {
-                        ("none".to_owned(), 0, Vec::new(), None)
-                    };
-                    runs.push(BundleRunSnapshot {
-                        run_id: run.id.clone(),
-                        debug_enabled: run.debug_enabled,
-                        trace_status: status,
-                        bytes_written: bytes,
-                        reasons,
-                        trace,
-                    });
-                }
-                BundleSnapshot {
-                    kind: BundleResourceKind::Interaction,
-                    resource_id: request.resource_id,
-                    exported_at,
-                    through_sequence: through,
-                    resource_status: projected_status,
-                    summary,
-                    runs,
-                }
-            }
-            BundleResourceKind::RejectedRequest => {
-                let detail = self
-                    .inner
-                    .store
-                    .get_rejection(&request.resource_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("rejected request not found"))?;
-                let snapshot_events: Vec<_> = detail
-                    .events
-                    .iter()
-                    .filter(|event| event.sequence <= through)
-                    .cloned()
-                    .collect();
-                if snapshot_events.is_empty() {
-                    anyhow::bail!("bundle snapshot unavailable");
-                }
-                let summary = serde_json::json!({"schema_version":1,"rejection_id":request.resource_id.clone(),"through_event_sequence":through,"events":snapshot_events});
-                let mut runs = Vec::new();
-                if let Some(manifest) = &detail.trace {
-                    let trace = self
-                        .inner
-                        .traces
-                        .snapshot(&manifest.trace_id, through)
-                        .await
-                        .ok();
-                    runs.push(BundleRunSnapshot {
-                        run_id: detail.rejection.id.clone(),
-                        debug_enabled: detail.rejection.debug_enabled,
-                        trace_status: manifest.status.clone(),
-                        bytes_written: trace.as_ref().map_or(0, |snapshot| snapshot.bytes),
-                        reasons: manifest.reasons.clone(),
-                        trace,
-                    });
-                } else {
-                    runs.push(BundleRunSnapshot {
-                        run_id: detail.rejection.id.clone(),
-                        debug_enabled: detail.rejection.debug_enabled,
-                        trace_status: "none".into(),
-                        bytes_written: 0,
-                        reasons: if detail.rejection.debug_enabled {
-                            vec!["trace_missing".into()]
-                        } else {
-                            Vec::new()
-                        },
-                        trace: None,
-                    });
-                }
-                BundleSnapshot {
-                    kind: BundleResourceKind::RejectedRequest,
-                    resource_id: request.resource_id,
-                    exported_at,
-                    through_sequence: through,
-                    resource_status: "rejected".into(),
-                    summary,
-                    runs,
-                }
-            }
-        };
-        let mut snapshot = snapshot;
-        let mut references = std::collections::BTreeSet::new();
-        for run in &snapshot.runs {
-            if let Some(trace) = &run.trace {
-                for value in load_trace_values(trace.clone()).await? {
-                    collect_captured_artifacts(&value, &mut references);
-                }
-            }
-        }
-        if !references.is_empty() {
-            let mut media = Vec::with_capacity(references.len());
-            for reference in references {
-                let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(&reference)
-                    .map_err(anyhow::Error::new)?;
-                let available = self
-                    .inner
-                    .store
-                    .artifact_available(id.as_str(), exported_at)
-                    .await?;
-                media.push(serde_json::json!({
-                    "artifact_reference": reference,
-                    "media_externalized": true,
-                    "content_capture": if available { "reference_only" } else { "unrecoverable" },
-                    "reason": if available { "media_not_embedded_in_bundle" } else { "artifact_expired_or_unavailable" },
-                    "checked_at": exported_at
-                }));
-            }
-            snapshot.summary["externalized_media"] = serde_json::Value::Array(media);
-        }
-        Ok(self.inner.bundles.issue(snapshot))
+        self.inner.bundles.issue(request).await
     }
     pub(crate) async fn consume_bundle_ticket(&self, ticket: &str) -> anyhow::Result<BundleStream> {
-        Ok(self
-            .inner
+        self.inner
             .bundles
             .consume(ticket)
-            .map_err(anyhow::Error::new)?
-            .stream)
+            .map_err(anyhow::Error::new)
     }
     async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<()> {
         let (done, receiver) = oneshot::channel();
@@ -1761,241 +1587,7 @@ impl Drop for RunObserverInner {
         }
     }
 }
-fn project_bundle_status(events: &[ObservationEvent]) -> String {
-    let mut runs: HashMap<&str, &str> = HashMap::new();
-    let mut parents = std::collections::HashSet::new();
-    let mut active = std::collections::HashSet::new();
-    for event in events {
-        let Some(run) = event.run_id.as_deref() else {
-            continue;
-        };
-        match event.kind.as_str() {
-            "run_admitted" => {
-                runs.insert(run, "running");
-                if let Some(parent) = event
-                    .payload
-                    .get("parent_run_id")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    parents.insert(parent);
-                }
-            }
-            "client_tool_handoff" => {
-                runs.insert(run, "waiting_client");
-            }
-            "run_finished" | "run_state_changed" => {
-                let status = event
-                    .payload
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("interrupted");
-                runs.insert(run, status);
-                if event.kind == "run_state_changed"
-                    && event
-                        .payload
-                        .get("reason")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("process_restarted")
-                {
-                    active.retain(|(owner, _, _)| *owner != run);
-                }
-            }
-            "model_turn_started" | "target_attempt_started" | "platform_tool_started" => {
-                let (kind, field) = match event.kind.as_str() {
-                    "model_turn_started" => ("turn", "model_turn_id"),
-                    "target_attempt_started" => ("attempt", "attempt_id"),
-                    _ => ("tool", "tool_id"),
-                };
-                if let Some(id) = event.payload.get(field).and_then(serde_json::Value::as_str) {
-                    active.insert((run, kind, id));
-                }
-            }
-            "model_turn_finished" | "target_attempt_finished" | "platform_tool_finished" => {
-                let (kind, field) = match event.kind.as_str() {
-                    "model_turn_finished" => ("turn", "model_turn_id"),
-                    "target_attempt_finished" => ("attempt", "attempt_id"),
-                    _ => ("tool", "tool_id"),
-                };
-                if let Some(id) = event.payload.get(field).and_then(serde_json::Value::as_str) {
-                    active.remove(&(run, kind, id));
-                }
-            }
-            _ => {}
-        }
-    }
-    if !active.is_empty() {
-        return "running".into();
-    }
-    let resolved = grouping::resolved_client_tool_runs(events.iter().filter_map(|event| {
-        let is_handoff = match event.kind.as_str() {
-            "client_tool_handoff" => true,
-            "client_tool_result" => false,
-            _ => return None,
-        };
-        Some(grouping::ClientToolEvidence {
-            sequence: event.sequence,
-            run_id: event.run_id.as_deref()?,
-            tool_id: event
-                .payload
-                .get("tool_id")
-                .and_then(serde_json::Value::as_str),
-            is_handoff,
-        })
-    }));
-    grouping::rollup_status(runs.into_iter().map(|(run, status)| {
-        (
-            status,
-            !parents.contains(run) && !(status == "waiting_client" && resolved.contains(run)),
-        )
-    }))
-    .into()
-}
 
-fn project_bundle_summary(
-    detail: &InteractionDetail,
-    events: &[ObservationEvent],
-    through: i64,
-    status: &str,
-) -> serde_json::Value {
-    let mut attempts = HashMap::<&str, Option<ConfirmedUsage>>::new();
-    let mut visible_tail = String::new();
-    let mut observation_gap = false;
-    for event in events {
-        match event.kind.as_str() {
-            "target_attempt_started" => {
-                if let Some(id) = event
-                    .payload
-                    .get("attempt_id")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    attempts.entry(id).or_default();
-                }
-            }
-            "target_attempt_finished" => {
-                if let Some(id) = event
-                    .payload
-                    .get("attempt_id")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    if event
-                        .payload
-                        .get("usage")
-                        .is_none_or(serde_json::Value::is_null)
-                    {
-                        continue;
-                    }
-                    let recorded = attempts.entry(id).or_default();
-                    match serde_json::from_value(
-                        event.payload.get("usage").cloned().unwrap_or_default(),
-                    ) {
-                        Ok(usage) => {
-                            *recorded = Some(usage);
-                        }
-                        Err(_) => {
-                            *recorded = Some(ConfirmedUsage::default());
-                            observation_gap = true;
-                        }
-                    }
-                }
-            }
-            "client_visible_content" => {
-                if let Some(text) = event
-                    .payload
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    visible_tail.push_str(text);
-                    if let Some((offset, _)) = visible_tail.char_indices().rev().nth(4095) {
-                        visible_tail.drain(..offset);
-                    }
-                }
-            }
-            "model_turn_started"
-                if !visible_tail.is_empty() && !visible_tail.ends_with(store::TURN_SEPARATOR) =>
-            {
-                visible_tail.push_str(store::TURN_SEPARATOR);
-            }
-            "observation_gap" => observation_gap = true,
-            _ => {}
-        }
-    }
-    let unknown = ConfirmedUsage::default();
-    let usage = ConfirmedUsage::aggregate(
-        attempts
-            .values()
-            .map(|usage| usage.as_ref().unwrap_or(&unknown)),
-    );
-    let admission = events.iter().find(|event| event.kind == "run_admitted");
-    let run_ids: Vec<_> = events
-        .iter()
-        .filter(|event| event.kind == "run_admitted")
-        .filter_map(|event| event.run_id.as_deref())
-        .collect();
-    serde_json::json!({
-        "schema_version": 1, "interaction_id": detail.interaction.id,
-        "root_id": detail.interaction.root_id,
-        "parent_interaction_id": admission.and_then(|event| event.payload.get("parent_interaction_id")),
-        "first_route_id": admission.and_then(|event| event.payload.get("route_id")),
-        "first_model_display_name": admission.and_then(|event| event.payload.get("model_display_name")),
-        "started_at": admission.map(|event| event.occurred_at),
-        "last_active_at": events.last().map(|event| event.occurred_at),
-        "through_event_sequence": through, "status": status, "usage": usage,
-        "visible_tail": visible_tail, "observation_gap": observation_gap, "run_ids": run_ids,
-        "events": events,
-    })
-}
-fn collect_captured_artifacts(
-    value: &serde_json::Value,
-    references: &mut std::collections::BTreeSet<String>,
-) {
-    match value {
-        serde_json::Value::Object(object) => {
-            if object
-                .get("media_externalized")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-                && let Some(reference) = object
-                    .get("artifact_reference")
-                    .and_then(serde_json::Value::as_str)
-            {
-                references.insert(reference.to_owned());
-            }
-            for value in object.values() {
-                collect_captured_artifacts(value, references);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_captured_artifacts(value, references);
-            }
-        }
-        serde_json::Value::String(text) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
-                && !value.is_string()
-            {
-                collect_captured_artifacts(&value, references);
-            }
-        }
-        _ => {}
-    }
-}
-
-async fn load_trace_values(
-    snapshot: trace::TraceSnapshot,
-) -> anyhow::Result<Vec<serde_json::Value>> {
-    tokio::task::spawn_blocking(move || {
-        let mut values = Vec::new();
-        for segment in snapshot.segments {
-            trace_storage::visit(&segment.path, segment.bytes, |record| {
-                values.push(record);
-                Ok(())
-            })?;
-        }
-        Ok::<_, std::io::Error>(values)
-    })
-    .await?
-    .map_err(Into::into)
-}
 fn record_trace(trace: &TraceHandle, run: Option<&str>, rejection: Option<&str>, event: RunEvent) {
     record_trace_at(trace, run, rejection, event, 0)
 }
@@ -2095,6 +1687,21 @@ mod snapshot_tests {
         Ok(serde_json::from_slice(&crate::storage_codec::decode(
             bytes,
         )?)?)
+    }
+
+    async fn load_trace_values(snapshot: trace::TraceSnapshot) -> anyhow::Result<Vec<Value>> {
+        tokio::task::spawn_blocking(move || {
+            let mut values = Vec::new();
+            for segment in snapshot.segments {
+                trace_storage::visit(&segment.path, segment.bytes, |record| {
+                    values.push(record);
+                    Ok(())
+                })?;
+            }
+            Ok::<_, std::io::Error>(values)
+        })
+        .await?
+        .map_err(Into::into)
     }
 
     use super::*;
@@ -3758,122 +3365,5 @@ mod snapshot_tests {
         observation.shutdown().await;
         pool.close().await;
         Ok(())
-    }
-
-    #[test]
-    fn snapshot_tool_results_release_only_fully_returned_waiting_branches() {
-        let records = [
-            ("p", "run_admitted", serde_json::json!({})),
-            ("p", "run_finished", serde_json::json!({"status":"failed"})),
-            (
-                "w",
-                "run_admitted",
-                serde_json::json!({"parent_run_id":"p"}),
-            ),
-            (
-                "w",
-                "client_tool_handoff",
-                serde_json::json!({"tool_id":"a"}),
-            ),
-            (
-                "w",
-                "client_tool_handoff",
-                serde_json::json!({"tool_id":"b"}),
-            ),
-            (
-                "w",
-                "run_finished",
-                serde_json::json!({"status":"waiting_client"}),
-            ),
-            (
-                "r",
-                "run_admitted",
-                serde_json::json!({"parent_run_id":"p"}),
-            ),
-            (
-                "r",
-                "client_tool_result",
-                serde_json::json!({"tool_id":"a"}),
-            ),
-            (
-                "r",
-                "run_finished",
-                serde_json::json!({"status":"completed"}),
-            ),
-            (
-                "r",
-                "client_tool_result",
-                serde_json::json!({"tool_id":"b","is_error":true}),
-            ),
-        ];
-        let mut events: Vec<_> = records
-            .into_iter()
-            .enumerate()
-            .map(|(index, (run, kind, payload))| ObservationEvent {
-                sequence: index as i64 + 1,
-                occurred_at: index as i64,
-                interaction_id: Some("interaction".into()),
-                run_id: Some(run.into()),
-                rejection_id: None,
-                kind: kind.into(),
-                payload,
-            })
-            .collect();
-        assert_eq!(project_bundle_status(&events[..9]), "waiting_client");
-        assert_eq!(project_bundle_status(&events), "completed");
-        events[8].payload["status"] = "failed".into();
-        assert_eq!(project_bundle_status(&events), "interrupted");
-    }
-
-    #[test]
-    fn snapshot_status_keeps_detached_work_active_and_consumes_parent_handoff() {
-        let records = [
-            ("parent", "run_admitted", serde_json::json!({})),
-            (
-                "parent",
-                "platform_tool_started",
-                serde_json::json!({"tool_id":"background"}),
-            ),
-            (
-                "parent",
-                "client_tool_handoff",
-                serde_json::json!({"tool_id":"client"}),
-            ),
-            (
-                "parent",
-                "run_finished",
-                serde_json::json!({"status":"waiting_client"}),
-            ),
-            (
-                "child",
-                "run_admitted",
-                serde_json::json!({"parent_run_id":"parent"}),
-            ),
-            (
-                "child",
-                "run_finished",
-                serde_json::json!({"status":"completed"}),
-            ),
-            (
-                "parent",
-                "platform_tool_finished",
-                serde_json::json!({"tool_id":"background","status":"completed"}),
-            ),
-        ];
-        let events: Vec<_> = records
-            .into_iter()
-            .enumerate()
-            .map(|(index, (run, kind, payload))| ObservationEvent {
-                sequence: index as i64 + 1,
-                occurred_at: index as i64,
-                interaction_id: Some("interaction".into()),
-                run_id: Some(run.into()),
-                rejection_id: None,
-                kind: kind.into(),
-                payload,
-            })
-            .collect();
-        assert_eq!(project_bundle_status(&events[..6]), "running");
-        assert_eq!(project_bundle_status(&events), "completed");
     }
 }

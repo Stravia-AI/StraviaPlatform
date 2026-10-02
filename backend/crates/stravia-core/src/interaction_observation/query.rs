@@ -5,6 +5,25 @@ use sqlx::{FromRow, QueryBuilder, Row};
 
 use super::{store::ObservationStore, types::*};
 
+pub(super) struct BundleRunRecord {
+    pub id: String,
+    pub debug_enabled: bool,
+    pub trace: Option<TraceManifest>,
+}
+
+pub(super) struct BundleInteractionRecords {
+    pub root_id: String,
+    pub runs: Vec<BundleRunRecord>,
+    pub events: Vec<ObservationEvent>,
+}
+
+pub(super) struct BundleRejectionRecords {
+    pub id: String,
+    pub debug_enabled: bool,
+    pub trace: Option<TraceManifest>,
+    pub events: Vec<ObservationEvent>,
+}
+
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
@@ -734,301 +753,102 @@ impl ObservationStore {
         Ok((events, next_cursor))
     }
 
-    pub async fn get_interaction_for_bundle(
+    pub(super) async fn bundle_interaction_records(
         &self,
         id: &str,
         through: i64,
-    ) -> anyhow::Result<Option<InteractionDetail>> {
-        self.bounded_interaction_for_bundle(id, through, true).await
-    }
-
-    async fn bounded_interaction_for_bundle(
-        &self,
-        id: &str,
-        through: i64,
-        include_root: bool,
-    ) -> anyhow::Result<Option<InteractionDetail>> {
-        // 与 get_interaction 相同：run 行先于快照读取，避免终态事件被分页截掉。
-        let runs = self.runs(id).await?;
-        let Some(mut snapshot) = self
-            .get_interaction_summary(id, ForestQuery::default())
-            .await?
-        else {
+    ) -> anyhow::Result<Option<BundleInteractionRecords>> {
+        let root_id: Option<String> = match self {
+            Self::Sqlite(pool, _, _) => {
+                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=?")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Self::Postgres(pool, _) => {
+                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=$1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        let Some(root_id) = root_id else {
             return Ok(None);
         };
-        let snapshot_sequence = through.min(snapshot.snapshot_sequence);
-        snapshot
-            .interaction
-            .context_events
-            .retain(|event| event.sequence <= snapshot_sequence);
-        for interaction in &mut snapshot.root.interactions {
-            interaction
-                .context_events
-                .retain(|event| event.sequence <= snapshot_sequence);
-        }
-        let mut events = Vec::new();
-        let mut after = 0;
-        loop {
-            let query = InteractionEventsQuery {
-                after_sequence: Some(after),
-                limit: Some(500),
-                ..Default::default()
-            };
-            let (page, next) = self.event_page(id, &query, snapshot_sequence).await?;
-            events.extend(page);
-            let Some(next) = next else {
-                break;
-            };
-            after = next;
-        }
-        let mut details = self.run_details(runs, events).await?;
-        details.retain(|run| run.events.iter().any(|event| event.kind == "run_admitted"));
-        for run in &mut details {
-            let terminal = run
-                .events
-                .iter()
-                .rev()
-                .find(|event| event.kind == "run_finished");
-            if let Some(event) = terminal {
-                let outcome: RunOutcome = serde_json::from_value(event.payload.clone())?;
-                run.status = outcome.status;
-                run.terminal_reason = outcome.terminal_reason;
-                run.user_interrupted = run.status == "user_interrupted";
-                run.finished_at = Some(
-                    event
-                        .payload
-                        .get("finished_at")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(event.occurred_at),
-                );
-                run.generation_node_id = outcome.generation_node_id;
-                run.generation_parent_id = event
-                    .payload
-                    .get("generation_parent_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned);
-                run.client_output_committed = event
-                    .payload
-                    .get("client_output_committed")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-            } else {
-                run.status = "running".into();
-                run.terminal_reason = None;
-                run.user_interrupted = false;
-                run.finished_at = None;
-                run.generation_node_id = None;
-            }
-            for state in run.events.iter().filter(|event| {
-                event.kind == "run_state_changed"
-                    && terminal.is_none_or(|finished| event.sequence > finished.sequence)
-            }) {
-                if let Some(status) = state
-                    .payload
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    run.status = status.into();
-                }
-                run.user_interrupted = state
-                    .payload
-                    .get("user_interrupted")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(run.user_interrupted);
-                if let Some(reason) = state
-                    .payload
-                    .get("reason")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    run.terminal_reason = Some(reason.into());
-                }
-                if run.status != "running" && run.finished_at.is_none() {
-                    run.finished_at = Some(state.occurred_at);
-                }
-            }
-            let mut attempts = std::collections::HashMap::<&str, ConfirmedUsage>::new();
-            for event in &run.events {
-                if matches!(
-                    event.kind.as_str(),
-                    "target_attempt_started" | "target_attempt_finished"
-                ) && let Some(id) = event
-                    .payload
-                    .get("attempt_id")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    let usage = event
-                        .payload
-                        .get("usage")
-                        .filter(|value| !value.is_null())
-                        .map(|value| serde_json::from_value(value.clone()))
-                        .transpose()?
-                        .unwrap_or_default();
-                    attempts.insert(id, usage);
-                }
-            }
-            run.usage = ConfirmedUsage::aggregate(attempts.values());
-            let admission = run.events.iter().find(|event| event.kind == "run_admitted");
-            run.client_output_committed = terminal
-                .and_then(|event| event.payload.get("client_output_committed"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                || run.events.iter().any(|event| {
-                    event.kind == "run_admitted"
-                        && event.payload["client_output_committed_sequence"]
-                            .as_i64()
-                            .is_some_and(|sequence| sequence <= through)
-                });
-            run.generation_node_id = terminal
-                .and_then(|event| event.payload.get("generation_node_id"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            run.generation_parent_id = terminal
-                .and_then(|event| event.payload.get("generation_parent_id"))
-                .or_else(|| admission.and_then(|event| event.payload.get("generation_parent_id")))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-        }
-        let parents: HashSet<_> = details
-            .iter()
-            .filter_map(|run| run.parent_run_id.as_deref())
-            .collect();
-        snapshot.interaction.status = super::grouping::rollup_status(
-            details
-                .iter()
-                .map(|run| (run.status.as_str(), !parents.contains(run.id.as_str()))),
-        )
-        .into();
-        snapshot.interaction.usage =
-            ConfirmedUsage::aggregate(details.iter().map(|run| &run.usage));
-        // Run aggregates already carry per-attempt coverage, rather than one attempt per run.
-        snapshot.interaction.usage.coverage = Some(
-            details
-                .iter()
-                .filter_map(|run| run.usage.coverage.as_ref())
-                .fold(UsageCoverage::default(), |mut sum, coverage| {
-                    sum.attempt_count += coverage.attempt_count;
-                    sum.missing_input_tokens += coverage.missing_input_tokens;
-                    sum.missing_output_tokens += coverage.missing_output_tokens;
-                    sum.missing_cache_read_tokens += coverage.missing_cache_read_tokens;
-                    sum.missing_cache_write_tokens += coverage.missing_cache_write_tokens;
-                    sum.missing_reasoning_tokens += coverage.missing_reasoning_tokens;
-                    sum
-                }),
-        );
-        snapshot.interaction.last_event_sequence = details
-            .iter()
-            .flat_map(|run| &run.events)
-            .map(|event| event.sequence)
-            .max()
-            .unwrap_or(0);
-        let mut ordered_events: Vec<_> = details.iter().flat_map(|run| &run.events).collect();
-        ordered_events.sort_unstable_by_key(|event| event.sequence);
-        snapshot.interaction.generation_root_id = ordered_events
-            .iter()
-            .rev()
-            .filter(|event| matches!(event.kind.as_str(), "run_admitted" | "run_finished"))
-            .find_map(|event| event.payload.get("generation_root_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let mut blocks = Vec::<(String, String)>::new();
-        for event in &ordered_events {
-            if event.kind == "client_visible_content"
-                && let Some(text) = event
-                    .payload
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-            {
-                let canonical = event
-                    .payload
-                    .get("block_id")
-                    .and_then(serde_json::Value::as_str);
-                let id = canonical.map(str::to_owned).unwrap_or_else(|| {
-                    format!(
-                        "legacy:{:?}:{}:{}",
-                        event.run_id, event.payload["model_turn_id"], event.payload["attempt_id"]
-                    )
-                });
-                if let Some((_, previous)) = blocks.iter_mut().find(|(block, _)| *block == id) {
-                    if canonical.is_some() {
-                        *previous = text.into();
-                    } else {
-                        previous.push_str(text);
-                    }
-                } else {
-                    blocks.push((id, text.into()));
-                }
-            }
-        }
-        snapshot.interaction.visible_tail = blocks
+        // 准入只决定截止水位前有哪些 Run；生命周期、用量和正文解释由导出模块拥有。
+        let runs: Vec<(String, bool)> = match self {
+            Self::Sqlite(pool, _, _) => sqlx::query_as(
+                "SELECT r.id,r.debug_enabled FROM inference_run_observations r WHERE r.interaction_id=? AND EXISTS (SELECT 1 FROM observation_events e WHERE e.run_id=r.id AND e.kind='run_admitted' AND e.sequence<=?) ORDER BY r.started_at,r.id",
+            )
+            .bind(id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT r.id,r.debug_enabled FROM inference_run_observations r WHERE r.interaction_id=$1 AND EXISTS (SELECT 1 FROM observation_events e WHERE e.run_id=r.id AND e.kind='run_admitted' AND e.sequence<=$2) ORDER BY r.started_at,r.id",
+            )
+            .bind(id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+        };
+        let events = match self {
+            Self::Sqlite(pool, _, _) => map_sqlite_events(
+                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence")
+                    .bind(id).bind(through).fetch_all(pool).await?,
+            )?,
+            Self::Postgres(pool, _) => map_postgres_events(
+                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=$1 AND sequence<=$2 ORDER BY sequence")
+                    .bind(id).bind(through).fetch_all(pool).await?,
+            )?,
+        };
+        let runs = runs
             .into_iter()
-            .map(|(_, text)| text)
-            .collect::<Vec<_>>()
-            .join(super::store::TURN_SEPARATOR);
-        snapshot.interaction.last_active_at = ordered_events
-            .iter()
-            .filter(|event| {
-                !matches!(
-                    event.kind.as_str(),
-                    "run_finished" | "run_interrupted" | "run_superseded" | "run_state_changed"
-                )
+            .map(|(id, debug_enabled)| BundleRunRecord {
+                trace: self.debug_trace_index().for_run(&id),
+                id,
+                debug_enabled,
             })
-            .map(|event| event.occurred_at)
-            .max()
-            .unwrap_or(snapshot.interaction.started_at);
-        snapshot.interaction.failed_request = details.iter().any(|run| {
-            run.status == "failed"
-                && run.finished_at.is_some()
-                && !matches!(
-                    run.terminal_reason.as_deref(),
-                    Some(
-                        "cancelled"
-                            | "client_disconnected"
-                            | "websocket_delivery_dropped"
-                            | "request_aborted"
-                    )
+            .collect();
+        Ok(Some(BundleInteractionRecords {
+            root_id,
+            runs,
+            events,
+        }))
+    }
+
+    pub(super) async fn bundle_rejection_records(
+        &self,
+        id: &str,
+        through: i64,
+    ) -> anyhow::Result<Option<BundleRejectionRecords>> {
+        let row: Option<(String, bool)> = match self {
+            Self::Sqlite(pool, _, _) => {
+                sqlx::query_as(
+                    "SELECT id,debug_enabled FROM rejected_request_observations WHERE id=?",
                 )
-        });
-        snapshot.interaction.client_output_delivered =
-            details.iter().any(|run| run.client_output_committed);
-        if details.is_empty() {
-            return Ok(None);
-        }
-        for interaction in &mut snapshot.root.interactions {
-            if interaction.id == snapshot.interaction.id {
-                *interaction = snapshot.interaction.clone();
-            } else if include_root {
-                if let Some(detail) = Box::pin(self.bounded_interaction_for_bundle(
-                    &interaction.id,
-                    snapshot_sequence,
-                    false,
-                ))
+                .bind(id)
+                .fetch_optional(pool)
                 .await?
-                {
-                    *interaction = detail.interaction;
-                } else {
-                    interaction.last_event_sequence = 0;
-                }
             }
-        }
-        if include_root {
-            snapshot
-                .root
-                .interactions
-                .retain(|interaction| interaction.last_event_sequence != 0);
-            snapshot.root.last_active_at = snapshot
-                .root
-                .interactions
-                .iter()
-                .map(|interaction| interaction.last_active_at)
-                .max()
-                .unwrap_or(snapshot.interaction.last_active_at);
-        }
-        Ok(Some(InteractionDetail {
-            interaction: snapshot.interaction,
-            root: snapshot.root,
-            runs: details,
-            snapshot_sequence,
-            older_events_cursor: None,
+            Self::Postgres(pool, _) => {
+                sqlx::query_as(
+                    "SELECT id,debug_enabled FROM rejected_request_observations WHERE id=$1",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+            }
+        };
+        let Some((id, debug_enabled)) = row else {
+            return Ok(None);
+        };
+        let events = self.rejection_events(&id, through).await?;
+        Ok(Some(BundleRejectionRecords {
+            trace: self.debug_trace_index().for_rejection(&id),
+            id,
+            debug_enabled,
+            events,
         }))
     }
 
@@ -1775,33 +1595,6 @@ mod tests {
                 .bind(id)
                 .execute(&pool)
                 .await?;
-                let sequence = store.max_sequence().await? + 1;
-                let admission = sqlx::query("SELECT sequence,payload FROM observation_events WHERE run_id=? AND kind='run_admitted'").bind(id).fetch_one(&pool).await?;
-                let mut payload: serde_json::Value = serde_json::from_slice(
-                    &crate::storage_codec::decode(&admission.try_get::<Vec<u8>, _>("payload")?)?,
-                )?;
-                payload["client_output_committed_sequence"] = sequence.into();
-                sqlx::query("UPDATE observation_events SET payload=? WHERE sequence=?")
-                    .bind(crate::storage_codec::encode(&serde_json::to_vec(
-                        &payload,
-                    )?)?)
-                    .bind(admission.try_get::<i64, _>("sequence")?)
-                    .execute(&pool)
-                    .await?;
-                sqlx::query("UPDATE observation_sequence SET next_sequence=? WHERE singleton_id=1")
-                    .bind(sequence + 1)
-                    .execute(&pool)
-                    .await?;
-                let committed_bundle = store
-                    .get_interaction_for_bundle(id, sequence)
-                    .await?
-                    .unwrap();
-                assert!(committed_bundle.interaction.client_output_delivered);
-                let before_commit = store
-                    .get_interaction_for_bundle(id, sequence - 1)
-                    .await?
-                    .unwrap();
-                assert!(!before_commit.interaction.client_output_delivered);
             }
             store
                 .finish_run(
@@ -1835,28 +1628,6 @@ mod tests {
             assert_eq!(
                 snapshot.interaction.client_output_delivered, delivered,
                 "{id}"
-            );
-            let through = store.max_sequence().await?;
-            let bundle = store
-                .get_interaction_for_bundle(id, through)
-                .await?
-                .unwrap();
-            assert_eq!(
-                bundle.interaction.client_output_delivered, delivered,
-                "bundle {id}"
-            );
-            let admission_sequence: i64 =
-                sqlx::query_scalar("SELECT MIN(sequence) FROM observation_events WHERE run_id=?")
-                    .bind(id)
-                    .fetch_one(&pool)
-                    .await?;
-            let historical = store
-                .get_interaction_for_bundle(id, admission_sequence)
-                .await?
-                .unwrap();
-            assert!(
-                !historical.interaction.client_output_delivered,
-                "historical {id}"
             );
         }
         Ok(())

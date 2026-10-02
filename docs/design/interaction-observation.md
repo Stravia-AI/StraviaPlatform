@@ -465,6 +465,14 @@ Interaction 结束后可以重新导出新的终态 Bundle。不得把运行中�
 
 Trace writer 在 snapshot 屏障处 flush，并固定最后分段及其已落盘字节水位。后台读取不得越过该物理前缀；屏障后的记录即使使用相同 event sequence，也不能进入既有快照。
 
+#### 8.1.1 导出职责与事实读取
+
+`interaction_observation::bundle::BundleExport` 拥有完整导出过程：先等待 Interaction writer 屏障，再固定水位、读取导出事实、派生摘要、获取 Trace 物理前缀、判断完整性、签发票据并流式生成 ZIP。`InteractionObservation::issue_bundle_ticket` 与 `consume_bundle_ticket` 保留原有接口，只委托给该模块；下载阶段使用票据保存的快照，不重新查询当前状态。
+
+Storage 的专用读取只返回根身份、截止水位前准入的 Run、按 sequence 排序的管理事件和所属 Trace manifest；不构造 `InteractionDetail`，不加载根下其他 Interaction，也不派生导出状态、用量或输出预览。普通 detail、forest 和 SSE 继续使用各自既有读取路径。SQLite 与 PostgreSQL 遵循同一读取契约。
+
+Bundle 的状态、用量与输出预览在同一轮事件消费中派生，工具交付分支复用既有 `grouping` 证据规则。每个 Target Attempt 最多计入一次用量：迟到终态修订仅替换新报告的字段，未报告字段保留此前已确认值，显式零值仍有效；不同 attempt 的用量才相加。事件中的管理用量已经完成 cache-read 拆分，导出不得再次扣除。未完成的后台活动、尚未返回的工具分支与 observation gap 不得被后续实时状态掩盖。
+
 ### 8.2 ZIP 结构
 
 ```text

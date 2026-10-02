@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -6,16 +6,21 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::redaction::redact_value;
-use super::trace::TraceSnapshot;
-use super::types::{BundleResourceKind, BundleStream, DownloadTicket};
+use super::store::ObservationStore;
+use super::trace::{TraceHandle, TraceManager, TraceSnapshot};
+use super::types::{
+    BundleRequest, BundleResourceKind, BundleStream, ConfirmedUsage, DownloadTicket,
+    ObservationEvent, TraceManifest,
+};
+use super::writer::WriterCommand;
 
 const BUNDLE_SCHEMA_VERSION: u32 = 1;
 const TICKET_TTL: Duration = Duration::from_secs(60);
@@ -23,29 +28,23 @@ const STREAM_CHANNEL_CAPACITY: usize = 8;
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TICKET_UNAVAILABLE: &str = "download ticket unavailable";
 
-#[derive(Debug, Clone)]
-pub(crate) struct BundleSnapshot {
-    pub kind: BundleResourceKind,
-    pub resource_id: String,
-    pub exported_at: i64,
-    pub through_sequence: i64,
-    pub resource_status: String,
-    pub summary: Value,
-    pub runs: Vec<BundleRunSnapshot>,
+struct BundleSnapshot {
+    kind: BundleResourceKind,
+    resource_id: String,
+    exported_at: i64,
+    through_sequence: i64,
+    resource_status: String,
+    summary: Value,
+    runs: Vec<BundleRunSnapshot>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct BundleRunSnapshot {
-    pub run_id: String,
-    pub debug_enabled: bool,
-    pub trace_status: String,
-    pub bytes_written: u64,
-    pub reasons: Vec<String>,
-    pub trace: Option<TraceSnapshot>,
-}
-
-pub(crate) struct ConsumedBundle {
-    pub stream: BundleStream,
+struct BundleRunSnapshot {
+    run_id: String,
+    debug_enabled: bool,
+    trace_status: String,
+    bytes_written: u64,
+    reasons: Vec<String>,
+    trace: Option<TraceSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +58,12 @@ impl std::fmt::Display for TicketUnavailable {
 
 impl std::error::Error for TicketUnavailable {}
 
-#[derive(Clone, Default)]
-pub(crate) struct BundleService {
+#[derive(Clone)]
+pub(super) struct BundleExport {
+    store: ObservationStore,
+    writer: mpsc::Sender<WriterCommand>,
+    traces: TraceManager,
+    active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     tickets: Arc<Mutex<HashMap<String, TicketEntry>>>,
 }
 
@@ -69,11 +72,116 @@ struct TicketEntry {
     snapshot: BundleSnapshot,
 }
 
-impl BundleService {
-    pub(crate) fn issue(&self, mut snapshot: BundleSnapshot) -> DownloadTicket {
+impl BundleExport {
+    pub(super) fn new(
+        store: ObservationStore,
+        writer: mpsc::Sender<WriterCommand>,
+        traces: TraceManager,
+        active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
+    ) -> Self {
+        Self {
+            store,
+            writer,
+            traces,
+            active_traces,
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(super) async fn issue(&self, request: BundleRequest) -> anyhow::Result<DownloadTicket> {
+        if matches!(request.kind, BundleResourceKind::Interaction) {
+            let (done, receive) = oneshot::channel();
+            self.writer
+                .send(WriterCommand::FlushInteraction {
+                    interaction_id: request.resource_id.clone(),
+                    done,
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+            receive
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+        }
+        // 固定水位在 writer 屏障之后；票据保存物理前缀，下载不再读取当前状态。
+        let max = self.store.max_sequence().await?;
+        let through = request.through_sequence.unwrap_or(max).min(max);
+        let exported_at = chrono::Utc::now().timestamp_millis();
+        let mut snapshot = match request.kind {
+            BundleResourceKind::Interaction => {
+                let records = self
+                    .store
+                    .bundle_interaction_records(&request.resource_id, through)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("interaction not found"))?;
+                if !records
+                    .events
+                    .iter()
+                    .any(|event| event.kind == "run_admitted")
+                {
+                    anyhow::bail!("bundle snapshot unavailable");
+                }
+                let projection = BundleProjection::replay(&records.events);
+                let mut runs = Vec::with_capacity(records.runs.len());
+                for run in records.runs {
+                    runs.push(
+                        self.capture(run.id, run.debug_enabled, run.trace, through, true)
+                            .await,
+                    );
+                }
+                let summary = projection.summary(
+                    &request.resource_id,
+                    &records.root_id,
+                    through,
+                    records.events,
+                );
+                BundleSnapshot {
+                    kind: BundleResourceKind::Interaction,
+                    resource_id: request.resource_id,
+                    exported_at,
+                    through_sequence: through,
+                    resource_status: projection.status,
+                    summary,
+                    runs,
+                }
+            }
+            BundleResourceKind::RejectedRequest => {
+                let records = self
+                    .store
+                    .bundle_rejection_records(&request.resource_id, through)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("rejected request not found"))?;
+                if records.events.is_empty() {
+                    anyhow::bail!("bundle snapshot unavailable");
+                }
+                let capture = self
+                    .capture(
+                        records.id,
+                        records.debug_enabled,
+                        records.trace,
+                        through,
+                        false,
+                    )
+                    .await;
+                let summary = serde_json::json!({
+                    "schema_version": 1,
+                    "rejection_id": request.resource_id,
+                    "through_event_sequence": through,
+                    "events": records.events,
+                });
+                BundleSnapshot {
+                    kind: BundleResourceKind::RejectedRequest,
+                    resource_id: request.resource_id,
+                    exported_at,
+                    through_sequence: through,
+                    resource_status: "rejected".into(),
+                    summary,
+                    runs: vec![capture],
+                }
+            }
+        };
+        self.describe_legacy_media(&mut snapshot).await?;
         self.remove_expired();
         redact_value(&mut snapshot.summary);
-        snapshot.exported_at = chrono::Utc::now().timestamp_millis();
         let expires_at = snapshot
             .exported_at
             .saturating_add(TICKET_TTL.as_millis() as i64);
@@ -95,14 +203,14 @@ impl BundleService {
             },
         );
         drop(tickets);
-        DownloadTicket {
+        Ok(DownloadTicket {
             download_url: format!("/api/v1/observations/debug-bundles/{ticket}"),
             expires_at,
             through_sequence,
-        }
+        })
     }
 
-    pub(crate) fn consume(&self, ticket: &str) -> Result<ConsumedBundle, TicketUnavailable> {
+    pub(super) fn consume(&self, ticket: &str) -> Result<BundleStream, TicketUnavailable> {
         if ticket.len() != 64 || !ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(TicketUnavailable);
         }
@@ -112,14 +220,323 @@ impl BundleService {
             .remove(ticket)
             .filter(|entry| Instant::now() < entry.expires)
             .ok_or(TicketUnavailable)?;
-        Ok(ConsumedBundle {
-            stream: stream_bundle(entry.snapshot),
+        Ok(stream_bundle(entry.snapshot))
+    }
+
+    async fn capture(
+        &self,
+        run_id: String,
+        debug_enabled: bool,
+        manifest: Option<TraceManifest>,
+        through: i64,
+        active_run: bool,
+    ) -> BundleRunSnapshot {
+        let active = if active_run {
+            self.active_traces.lock().get(&run_id).cloned()
+        } else {
+            None
+        };
+        let (manifest, trace) = if let Some(handle) = active {
+            let manifest = handle.manifest();
+            let trace = handle.snapshot(through).await;
+            (Some(manifest), Some(trace))
+        } else if let Some(manifest) = manifest {
+            let trace = self.traces.snapshot(&manifest.trace_id, through).await;
+            (Some(manifest), Some(trace))
+        } else {
+            (None, None)
+        };
+        let trace = trace.and_then(|result| match result {
+            Ok(snapshot) => Some(snapshot),
+            Err(_) => {
+                tracing::debug!("bundle trace snapshot unavailable");
+                None
+            }
+        });
+        let (trace_status, reasons) = manifest.map_or_else(
+            || {
+                (
+                    "none".into(),
+                    if !active_run && debug_enabled {
+                        vec!["trace_missing".into()]
+                    } else {
+                        Vec::new()
+                    },
+                )
+            },
+            |manifest| (manifest.status, manifest.reasons),
+        );
+        BundleRunSnapshot {
+            run_id,
+            debug_enabled,
+            trace_status,
+            bytes_written: trace.as_ref().map_or(0, |snapshot| snapshot.bytes),
+            reasons,
+            trace,
+        }
+    }
+
+    async fn describe_legacy_media(&self, snapshot: &mut BundleSnapshot) -> anyhow::Result<()> {
+        let traces: Vec<_> = snapshot
+            .runs
+            .iter()
+            .filter_map(|run| run.trace.clone())
+            .collect();
+        if traces.is_empty() {
+            return Ok(());
+        }
+        let references = tokio::task::spawn_blocking(move || {
+            let mut references = BTreeSet::new();
+            for trace in traces {
+                for segment in trace.segments {
+                    super::trace_storage::visit(&segment.path, segment.bytes, |record| {
+                        collect_captured_artifacts(&record, &mut references);
+                        Ok(())
+                    })?;
+                }
+            }
+            Ok::<_, io::Error>(references)
         })
+        .await??;
+        if !references.is_empty() {
+            let mut media = Vec::with_capacity(references.len());
+            for reference in references {
+                let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(&reference)
+                    .map_err(anyhow::Error::new)?;
+                let available = self
+                    .store
+                    .artifact_available(id.as_str(), snapshot.exported_at)
+                    .await?;
+                media.push(serde_json::json!({
+                    "artifact_reference": reference,
+                    "media_externalized": true,
+                    "content_capture": if available { "reference_only" } else { "unrecoverable" },
+                    "reason": if available { "media_not_embedded_in_bundle" } else { "artifact_expired_or_unavailable" },
+                    "checked_at": snapshot.exported_at,
+                }));
+            }
+            snapshot.summary["externalized_media"] = Value::Array(media);
+        }
+        Ok(())
     }
 
     fn remove_expired(&self) {
         let now = Instant::now();
         self.tickets.lock().retain(|_, entry| entry.expires > now);
+    }
+}
+
+struct BundleProjection {
+    status: String,
+    usage: ConfirmedUsage,
+    visible_tail: String,
+    observation_gap: bool,
+}
+
+impl BundleProjection {
+    fn replay(events: &[ObservationEvent]) -> Self {
+        let mut runs = HashMap::new();
+        let mut parents = HashSet::new();
+        let mut active = HashSet::new();
+        let mut attempts = HashMap::<&str, Option<ConfirmedUsage>>::new();
+        let mut visible_tail = String::new();
+        let mut observation_gap = false;
+        let resolved =
+            super::grouping::resolved_client_tool_runs(events.iter().filter_map(|event| {
+                match event.kind.as_str() {
+                    "target_attempt_started" => {
+                        if let Some(id) = event.payload["attempt_id"].as_str() {
+                            attempts.entry(id).or_default();
+                        }
+                    }
+                    "target_attempt_finished" => {
+                        if let Some(id) = event.payload["attempt_id"].as_str()
+                            && let Some(usage) =
+                                event.payload.get("usage").filter(|value| !value.is_null())
+                        {
+                            let recorded = attempts.entry(id).or_default();
+                            match ConfirmedUsage::deserialize(usage) {
+                                Ok(usage) => {
+                                    // 修订只更新新报告的字段；未知不能撤销已确认值，也不累加快照。
+                                    let previous =
+                                        recorded.get_or_insert_with(ConfirmedUsage::default);
+                                    previous.input_tokens =
+                                        usage.input_tokens.or(previous.input_tokens);
+                                    previous.output_tokens =
+                                        usage.output_tokens.or(previous.output_tokens);
+                                    previous.cache_read_tokens =
+                                        usage.cache_read_tokens.or(previous.cache_read_tokens);
+                                    previous.cache_write_tokens =
+                                        usage.cache_write_tokens.or(previous.cache_write_tokens);
+                                    previous.reasoning_tokens =
+                                        usage.reasoning_tokens.or(previous.reasoning_tokens);
+                                }
+                                Err(_) => {
+                                    *recorded = Some(ConfirmedUsage::default());
+                                    observation_gap = true;
+                                }
+                            }
+                        }
+                    }
+                    "client_visible_content" => {
+                        if let Some(text) = event.payload["text"].as_str() {
+                            visible_tail.push_str(text);
+                            if let Some((offset, _)) = visible_tail.char_indices().rev().nth(4095) {
+                                visible_tail.drain(..offset);
+                            }
+                        }
+                    }
+                    "model_turn_started"
+                        if !visible_tail.is_empty()
+                            && !visible_tail.ends_with(super::store::TURN_SEPARATOR) =>
+                    {
+                        visible_tail.push_str(super::store::TURN_SEPARATOR);
+                    }
+                    "observation_gap" => observation_gap = true,
+                    _ => {}
+                }
+                let Some(run) = event.run_id.as_deref() else {
+                    return None;
+                };
+                match event.kind.as_str() {
+                    "run_admitted" => {
+                        runs.insert(run, "running");
+                        if let Some(parent) = event.payload["parent_run_id"].as_str() {
+                            parents.insert(parent);
+                        }
+                    }
+                    "client_tool_handoff" => {
+                        runs.insert(run, "waiting_client");
+                    }
+                    "run_finished" | "run_state_changed" => {
+                        runs.insert(
+                            run,
+                            event.payload["status"].as_str().unwrap_or("interrupted"),
+                        );
+                        if event.kind == "run_state_changed"
+                            && event.payload["reason"].as_str() == Some("process_restarted")
+                        {
+                            active.retain(|(owner, _, _)| *owner != run);
+                        }
+                    }
+                    "model_turn_started" | "target_attempt_started" | "platform_tool_started" => {
+                        let (kind, field) = match event.kind.as_str() {
+                            "model_turn_started" => ("turn", "model_turn_id"),
+                            "target_attempt_started" => ("attempt", "attempt_id"),
+                            _ => ("tool", "tool_id"),
+                        };
+                        if let Some(id) = event.payload[field].as_str() {
+                            active.insert((run, kind, id));
+                        }
+                    }
+                    "model_turn_finished"
+                    | "target_attempt_finished"
+                    | "platform_tool_finished" => {
+                        let (kind, field) = match event.kind.as_str() {
+                            "model_turn_finished" => ("turn", "model_turn_id"),
+                            "target_attempt_finished" => ("attempt", "attempt_id"),
+                            _ => ("tool", "tool_id"),
+                        };
+                        if let Some(id) = event.payload[field].as_str() {
+                            active.remove(&(run, kind, id));
+                        }
+                    }
+                    _ => {}
+                }
+                let is_handoff = match event.kind.as_str() {
+                    "client_tool_handoff" => true,
+                    "client_tool_result" => false,
+                    _ => return None,
+                };
+                Some(super::grouping::ClientToolEvidence {
+                    sequence: event.sequence,
+                    run_id: run,
+                    tool_id: event.payload["tool_id"].as_str(),
+                    is_handoff,
+                })
+            }));
+        let status = if active.is_empty() {
+            super::grouping::rollup_status(runs.into_iter().map(|(run, status)| {
+                (
+                    status,
+                    !parents.contains(run)
+                        && !(status == "waiting_client" && resolved.contains(run)),
+                )
+            }))
+        } else {
+            "running"
+        };
+        let unknown = ConfirmedUsage::default();
+        Self {
+            status: status.into(),
+            usage: ConfirmedUsage::aggregate(
+                attempts
+                    .values()
+                    .map(|usage| usage.as_ref().unwrap_or(&unknown)),
+            ),
+            visible_tail,
+            observation_gap,
+        }
+    }
+
+    fn summary(
+        &self,
+        interaction_id: &str,
+        root_id: &str,
+        through: i64,
+        events: Vec<ObservationEvent>,
+    ) -> Value {
+        let admission = events.iter().find(|event| event.kind == "run_admitted");
+        let run_ids: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "run_admitted")
+            .filter_map(|event| event.run_id.as_deref())
+            .collect();
+        serde_json::json!({
+            "schema_version": 1,
+            "interaction_id": interaction_id,
+            "root_id": root_id,
+            "parent_interaction_id": admission.and_then(|event| event.payload.get("parent_interaction_id")),
+            "first_route_id": admission.and_then(|event| event.payload.get("route_id")),
+            "first_model_display_name": admission.and_then(|event| event.payload.get("model_display_name")),
+            "started_at": admission.map(|event| event.occurred_at),
+            "last_active_at": events.last().map(|event| event.occurred_at),
+            "through_event_sequence": through,
+            "status": self.status,
+            "usage": self.usage,
+            "visible_tail": self.visible_tail,
+            "observation_gap": self.observation_gap,
+            "run_ids": run_ids,
+            "events": events,
+        })
+    }
+}
+
+fn collect_captured_artifacts(value: &Value, references: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if object.get("media_externalized").and_then(Value::as_bool) == Some(true)
+                && let Some(reference) = object.get("artifact_reference").and_then(Value::as_str)
+            {
+                references.insert(reference.to_owned());
+            }
+            for value in object.values() {
+                collect_captured_artifacts(value, references);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_captured_artifacts(value, references);
+            }
+        }
+        Value::String(text) => {
+            if let Ok(value) = serde_json::from_str::<Value>(text)
+                && !value.is_string()
+            {
+                collect_captured_artifacts(&value, references);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -415,55 +832,4 @@ impl Write for ChunkWriter {
 const README: &str = "Stravia Interaction Debug Bundle\n\nSchema version: 1\n\nThis archive contains application-protocol observations captured at Stravia transport boundaries. It is not a packet capture and does not preserve TLS records, TCP packets, HTTP/2 frames, or operating-system network framing. HTTP headers, body chunks, SSE bytes, WebSocket handshake metadata, and application messages reflect observed application boundaries.\n\nOnly HTTP Authorization header values (case-insensitive header name) are permanently replaced with *** before any queue or storage. Other headers, URL and query values, prompts, tool content, credentials in other locations, and media remain as captured. For current captures, binary and media payloads remain raw wire bytes; they are not decoded, scanned, reassembled, or externalized as Artifact references. Ping and Pong payloads are metadata-only. Legacy records are exported unchanged: their per-record redaction and media metadata remain authoritative, and prior redaction or externalization cannot be reversed. Treat this bundle as sensitive diagnostic data that may contain credentials.\n\nCompleteness is declared in manifest.json. complete means every applicable Debug trace for a terminal resource is present. partial includes running point-in-time snapshots, mixed Debug enablement, writer/capacity/storage gaps, and missing applicable records. none means no applicable Debug trace is available. Each run entry gives its own capture status, byte counts, and stable reasons. The export is fixed through through_event_sequence; later activity is not included.\n";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn run(debug_enabled: bool, status: &str, captured: bool) -> BundleRunSnapshot {
-        BundleRunSnapshot {
-            run_id: "run".to_owned(),
-            debug_enabled,
-            trace_status: status.to_owned(),
-            bytes_written: if captured { 1 } else { 0 },
-            reasons: Vec::new(),
-            trace: captured.then(|| TraceSnapshot {
-                segments: Vec::new(),
-                bytes: 1,
-            }),
-        }
-    }
-
-    fn snapshot(status: &str, runs: Vec<BundleRunSnapshot>) -> BundleSnapshot {
-        BundleSnapshot {
-            kind: BundleResourceKind::Interaction,
-            resource_id: "interaction".to_owned(),
-            exported_at: 0,
-            through_sequence: 1,
-            resource_status: status.to_owned(),
-            summary: Value::Null,
-            runs,
-        }
-    }
-
-    #[test]
-    fn bundle_completeness_distinguishes_final_running_mixed_and_absent_capture() {
-        assert_eq!(
-            bundle_completeness(&snapshot("completed", vec![run(true, "complete", true)])),
-            "complete"
-        );
-        assert_eq!(
-            bundle_completeness(&snapshot("running", vec![run(true, "running", true)])),
-            "partial"
-        );
-        assert_eq!(
-            bundle_completeness(&snapshot(
-                "completed",
-                vec![run(true, "complete", true), run(false, "complete", false)]
-            )),
-            "partial"
-        );
-        assert_eq!(
-            bundle_completeness(&snapshot("completed", vec![run(false, "complete", false)])),
-            "none"
-        );
-    }
-}
+mod tests;
