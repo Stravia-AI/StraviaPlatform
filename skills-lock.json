@@ -5,7 +5,7 @@
       "source": "huntabyte/shadcn-svelte",
       "sourceType": "github",
       "skillPath": "skills/shadcn-svelte/SKILL.md",
-      "computedHash": "f54ebcafcd4b80e64935671f6b096abcdb03d841a7736b32cea766a0824169ed"
+      "computedHash": "5f1ba8c333ac739aa6046c963c282fea41cd130d875f10724a25d36db6b20c21"
     },
     "svelte-code-writer": {
       "source": "sveltejs/ai-tools",
