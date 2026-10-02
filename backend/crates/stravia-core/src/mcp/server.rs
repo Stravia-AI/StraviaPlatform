@@ -1,8 +1,6 @@
 use std::borrow::{Cow, Cow::Owned};
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -10,7 +8,6 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use futures::Stream;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     DiscoverResult, Implementation, InitializeResult, JsonObject, ListToolsResult, MetaObject,
@@ -39,32 +36,6 @@ static SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 3] = [
 #[derive(Clone)]
 struct AuthenticatedApiKey {
     id: String,
-}
-
-struct McpAdmissionLeaseStream {
-    inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
-    admission: Option<crate::admission::PrincipalAdmissionLease>,
-}
-
-impl Stream for McpAdmissionLeaseStream {
-    type Item = Result<bytes::Bytes, axum::Error>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        context: &mut TaskContext<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        match self.inner.as_mut().poll_next(context) {
-            Poll::Ready(None) => {
-                self.admission.take();
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Err(error))) => {
-                self.admission.take();
-                Poll::Ready(Some(Err(error)))
-            }
-            other => other,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -174,11 +145,13 @@ impl ServerHandler for StraviaMcpServer {
     ) -> Result<CallToolResponse, McpError> {
         let context = mcp_context(&context)?;
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        match self
-            .gateway
-            .mcp_registry
-            .call(request.name.as_ref(), arguments, &context)
-            .await
+        match crate::rpm::scope_root_request(
+            crate::rpm::RootRequest::default(),
+            self.gateway
+                .mcp_registry
+                .call(request.name.as_ref(), arguments, &context),
+        )
+        .await
         {
             Ok(output) => {
                 let mut result = if output.is_error {
@@ -318,18 +291,6 @@ fn result_metadata(error_code: Option<&str>) -> MetaObject {
     meta
 }
 
-fn wrap_mcp_delivery(
-    response: Response,
-    admission: crate::admission::PrincipalAdmissionLease,
-) -> Response {
-    let (parts, body) = response.into_parts();
-    let stream = McpAdmissionLeaseStream {
-        inner: Box::pin(body.into_data_stream()),
-        admission: Some(admission),
-    };
-    Response::from_parts(parts, Body::from_stream(stream))
-}
-
 fn is_mcp_tool_call(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body)
         .is_ok_and(|request| request.get("method").and_then(Value::as_str) == Some("tools/call"))
@@ -364,12 +325,11 @@ async fn authenticate_request(
             .then(|| {
                 gateway
                     .principal_admission
-                    .acquire(&authenticated.principal, authenticated.concurrency_limit)
+                    .acquire(&authenticated.principal, authenticated.rpm_limit)
             })
             .transpose();
         return match admission {
-            Ok(Some(admission)) => wrap_mcp_delivery(next.run(request).await, admission),
-            Ok(None) => next.run(request).await,
+            Ok(_) => next.run(request).await,
             Err(error) => error.render(None),
         };
     }

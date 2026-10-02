@@ -124,7 +124,7 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Expired lifecycle key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: Some("2000-01-01T00:00:00Z".into()),
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -234,7 +234,7 @@ async fn hook_rewrite_checks_the_final_model_binding() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Final binding key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

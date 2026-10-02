@@ -13,6 +13,7 @@ import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
+import { loadRpm, rpmQueryKey } from '$lib/rpm'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '$lib/backend-error'
 import { formatList } from '$lib/format'
@@ -82,6 +83,7 @@ const UNSPECIFIED_THINKING_LEVEL = 'unspecified'
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
+const rpmQuery = createQuery(() => ({ queryKey: rpmQueryKey, queryFn: loadRpm }))
 let form = $state({
   modelId: initialModel?.model_id ?? '',
   displayName: initialModel?.display_name ?? '',
@@ -107,6 +109,7 @@ function draftTarget(target: RouteTargetForm) {
     key: target.key,
     id: target.id,
     providerId: target.providerId,
+    rpmPoolId: target.rpmPoolId,
     model: target.model,
     enabled: target.enabled,
     priority: target.priority,
@@ -1285,6 +1288,48 @@ async function saveModel(): Promise<void> {
                   {/if}
                 </Field.Field>
               </Field.Group>
+
+              <Field.Field class="mt-4" size="select">
+                <Field.Label for={`target-rpm-pool-${target.key}`}>{m.rpm_pool_binding()}</Field.Label>
+                <Select.Root
+                  type="single"
+                  value={target.rpmPoolId ?? '__default__'}
+                  onValueChange={(value: string) => {
+                    target.rpmPoolId = value === '__default__' ? null : value
+                  }}>
+                  <Select.Trigger id={`target-rpm-pool-${target.key}`} disabled={!rpmQuery.data}>
+                    {target.rpmPoolId
+                      ? (rpmQuery.data?.pools.find((pool) => pool.id === target.rpmPoolId)?.name ?? target.rpmPoolId)
+                      : m.rpm_default_destination()}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="__default__">{m.rpm_default_destination()}</Select.Item>
+                    {#each rpmQuery.data?.pools ?? [] as pool (pool.id)}
+                      <Select.Item value={pool.id}
+                        >{pool.name} · {m.rpm_effective_quota({
+                          limit: pool.rpm_limit ?? m.api_key_editor_unlimited(),
+                        })}</Select.Item>
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
+                {#if rpmQuery.error}<RequestFailure
+                    message={localizeBackendErrorMessage(rpmQuery.error)}
+                    retry={() => rpmQuery.refetch()} />{/if}
+                {#if rpmQuery.data}
+                  {@const quota = target.rpmPoolId
+                    ? rpmQuery.data.pools.find((pool) => pool.id === target.rpmPoolId)?.rpm_limit
+                    : rpmQuery.data.destinations.find(
+                        (item) => item.provider_id === target.providerId && item.model === target.model,
+                      )?.rpm_limit}
+                  <Field.Description
+                    >{m.rpm_effective_quota({ limit: quota ?? m.api_key_editor_unlimited() })}</Field.Description>
+                {/if}
+                {#if target.providerId}<a
+                    class="text-sm underline"
+                    href={resolve(`/providers/${encodeURIComponent(target.providerId)}?view=connection`)}
+                    >{m.rpm_manage_provider()}</a
+                  >{/if}
+              </Field.Field>
 
               <Field.Group class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
                 <Field.Field size="number">

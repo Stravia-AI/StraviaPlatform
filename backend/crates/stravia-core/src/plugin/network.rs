@@ -209,6 +209,7 @@ pub(crate) struct VendorNetwork {
     websocket_scope_key: Option<String>,
     websocket_affinity: Option<String>,
     response_continuation_available: Arc<AtomicBool>,
+    send_admission: Option<crate::rpm::SendAdmission>,
 }
 
 struct WireDiagnostic<'a> {
@@ -250,12 +251,29 @@ impl VendorNetwork {
             websocket_scope_key: None,
             websocket_affinity: None,
             response_continuation_available: Arc::new(AtomicBool::new(false)),
+            send_admission: None,
         }
     }
 
     pub(crate) fn with_observer(mut self, observer: Option<RunObserver>) -> Self {
         self.observer = observer;
         self
+    }
+
+    pub(crate) fn with_send_admission(
+        mut self,
+        admission: Option<crate::rpm::SendAdmission>,
+    ) -> Self {
+        self.send_admission = admission;
+        self
+    }
+
+    async fn admit_send(&self) -> Result<(), HostFailure> {
+        self.ensure_current()?;
+        if let Some(admission) = &self.send_admission {
+            admission.acquire().await?;
+        }
+        Ok(())
     }
 
     pub(crate) fn with_observation_scope(
@@ -411,6 +429,7 @@ impl VendorNetwork {
     ) -> Result<Response, HostFailure> {
         for redirects in 0..=MAX_REDIRECTS {
             self.ensure_current()?;
+            self.admit_send().await?;
             self.wire(
                 WireDiagnostic {
                     direction: "upstream_request",
@@ -526,6 +545,7 @@ impl VendorNetwork {
                     }),
                     connected_at: entry.connected_at,
                     reused: true,
+                    first_send_admitted: AtomicBool::new(false),
                     application_message_seen: AtomicBool::new(false),
                     reusable: AtomicBool::new(true),
                     explicitly_released: AtomicBool::new(false),
@@ -542,6 +562,7 @@ impl VendorNetwork {
 
         for redirects in 0..=MAX_REDIRECTS {
             self.ensure_current()?;
+            self.admit_send().await?;
             self.wire(
                 WireDiagnostic {
                     direction: "upstream_request",
@@ -691,6 +712,7 @@ impl VendorNetwork {
                 pool_identity,
                 connected_at,
                 reused: false,
+                first_send_admitted: AtomicBool::new(true),
                 application_message_seen: AtomicBool::new(false),
                 reusable: AtomicBool::new(true),
                 explicitly_released: AtomicBool::new(false),
@@ -943,6 +965,7 @@ struct ScopedWebSocket {
     pool_identity: Option<WebSocketPoolIdentity>,
     connected_at: tokio::time::Instant,
     reused: bool,
+    first_send_admitted: AtomicBool,
     application_message_seen: AtomicBool,
     reusable: AtomicBool,
     explicitly_released: AtomicBool,
@@ -1024,6 +1047,13 @@ impl HostWebSocket for ScopedWebSocket {
         let socket = guard
             .as_mut()
             .ok_or_else(|| invalid("WebSocket is closed"))?;
+        if matches!(
+            &message,
+            WebSocketMessage::Text(_) | WebSocketMessage::Binary(_)
+        ) && !self.first_send_admitted.swap(false, Ordering::AcqRel)
+        {
+            self.network.admit_send().await?;
+        }
         if matches!(message, WebSocketMessage::Close(_)) {
             self.invalidate();
         }

@@ -9,7 +9,7 @@ pub(super) struct SqliteApiKeyStore {
 impl ApiKeyStore for SqliteApiKeyStore {
     async fn list(&self) -> anyhow::Result<Vec<ApiKeyWithBindings>> {
         let rows = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
+            "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -21,7 +21,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
                 id: row.id,
                 token: row.token,
                 name: row.name,
-                concurrency_limit: row.concurrency_limit,
+                rpm_limit: row.rpm_limit,
                 is_enabled: row.is_enabled,
                 mcp_access_enabled: row.mcp_access_enabled,
                 transparent_injection_enabled: row.transparent_injection_enabled,
@@ -39,7 +39,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<ApiKeyWithBindings>> {
         let row = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+            "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -53,7 +53,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             id: row.id,
             token: row.token,
             name: row.name,
-            concurrency_limit: row.concurrency_limit,
+            rpm_limit: row.rpm_limit,
             is_enabled: row.is_enabled,
             mcp_access_enabled: row.mcp_access_enabled,
             transparent_injection_enabled: row.transparent_injection_enabled,
@@ -73,12 +73,12 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         sqlx::query(
-            "INSERT INTO api_keys (id, token, name, concurrency_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys (id, token, name, rpm_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&key)
         .bind(input.name.trim())
-        .bind(input.concurrency_limit)
+        .bind(input.rpm_limit)
         .bind(input.mcp_access_enabled)
         .bind(input.transparent_injection_enabled)
         .bind(input.inject_media_understanding)
@@ -94,7 +94,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
         let current = sqlx::query_as::<_, ApiKey>(
-            "SELECT id, token, name, concurrency_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+            "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -103,7 +103,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
         let name = input.name.unwrap_or(current.name);
         let key = input.key.unwrap_or(current.token);
-        let concurrency_limit = input.concurrency_limit.unwrap_or(current.concurrency_limit);
+        let rpm_limit = input.rpm_limit.unwrap_or(current.rpm_limit);
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
         let mcp_access_enabled = input
             .mcp_access_enabled
@@ -121,11 +121,11 @@ impl ApiKeyStore for SqliteApiKeyStore {
         let expires_at = input.expires_at.or(current.expires_at);
 
         sqlx::query(
-            "UPDATE api_keys SET token=?, name=?, concurrency_limit=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
+            "UPDATE api_keys SET token=?, name=?, rpm_limit=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
         )
         .bind(key)
         .bind(name.trim())
-        .bind(concurrency_limit)
+        .bind(rpm_limit)
         .bind(is_enabled)
         .bind(mcp_access_enabled)
         .bind(transparent_injection_enabled)
@@ -214,7 +214,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 bool,
                 bool,
             ),
-        >("SELECT id, name, is_enabled, expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
+        >("SELECT id, name, is_enabled, expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
         .bind(raw_key)
         .fetch_optional(&self.pool)
         .await?;
@@ -225,7 +225,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -235,7 +235,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -258,7 +258,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 bool,
                 bool,
             ),
-        >("SELECT id, name, is_enabled, expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
+        >("SELECT id, name, is_enabled, expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -268,7 +268,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -278,7 +278,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,

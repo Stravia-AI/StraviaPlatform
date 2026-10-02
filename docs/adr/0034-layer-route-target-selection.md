@@ -10,9 +10,19 @@ Conversation Affinity 使用已有身份，不新建 Session：Generation Chain 
 
 Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；取消 1|2 上限（合法范围由 ADR-0036 扩展）。旧数据全部迁成 0，不反转旧序号。同组由 Route Scheduling Strategy 二选一，缺省 Traffic Equalization：把下一个请求给 24h 加权 token 流量最低的 Target。权重组内共用——全组无价时为缓存输入 0.1、未命中输入 1、输出 5、缓存输出 6；有计价（`cost_input > 0` 且有 `cost_output`）时用价格比平均，缺维回退缺省；忽略 reasoning、audio 与 200k 分层。流量按 `provider_id` + upstream model 跨 Route 累计；每个真实 Target attempt 明确上报的 usage（包括失败、重试与 failover）只计一次，未知维度保持未知，进行中另加占位，上游失败另按下述统一规则计数。Latency Preference 用 1h 成功率 × 输出 tok/s；成功样本 < 20 视为无数据，组内有效 Target < 2 则回退 Traffic Equalization。
 
-普通状态下，同一 `provider_id:model` 的内部重试与跨请求终态上游失败共用连续失败计数；完整成功清零。Target Retry Budget 为 N 时，第 N+1 次连续失败才进入 Target Cooldown，缺省 5 即第 6 次失败后冷却 120s。瞬时失败（含 First Token Timeout）仍可按错误分类在同一 Target 重试，间隔 0.5s 起、×2、封顶 8s、full jitter；429 `Retry-After` 优先。显式 `Retry-After` 等待若大于或等于当前请求剩余 deadline 窗口，Executor 跳过当前 Target 并尝试其余合格 Target；无备用时立即返回原上游错误，不把等待截短后提前重发，也不让等待耗尽窗口后变成 504。QuotaExceeded 计数但不在同 Target 空转，直接换 Target；Auth、InvalidRequest、ContextLength、ContentFiltered 等终态上游错误也计数，但仍立刻失败整次请求。取消、本地准备、Hook 与存储错误不计数。First Token 是上游第一个 canonical 输出，包含 Thinking，缺省 60s。Client Output Commit 之后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的真实上游失败照常计数。Affinity 让位冷却；Continuation 目标在冷却中则放弃续接、完整重放。删除 Target.weight。旧 `weighted` / `priority` / `cooldown` 映射为 Traffic Equalization，`latency` 映射为 Latency Preference。
+普通状态下，同一 `provider_id:model` 的内部重试与跨请求终态上游失败共用连续失败计数；完整成功清零。Target Retry Budget 为 N 时，第 N+1 次连续失败才进入 Target Cooldown，缺省 5 即第 6 次失败后冷却 120s。瞬时失败（含 First Token Timeout）仍可按错误分类在同一 Target 重试，间隔 0.5s 起、×2、封顶 8s、full jitter；429 `Retry-After` 优先。显式 `Retry-After` 等待若大于或等于当前请求剩余 deadline 窗口，Executor 跳过当前 Target 并尝试其余合格 Target；无备用时立即返回原上游错误，不把等待截短后提前重发，也不让等待耗尽窗口后变成 504。QuotaExceeded 计数但不在同 Target 空转，直接换 Target；Auth 等健康相关终态上游错误仍计数并按分类结束请求。确认为请求参数、上下文或内容过滤问题的错误不增加或清零共享失败数，不触发、延长冷却，也不证明恢复；不能仅凭 HTTP 400 或通用 InvalidRequest 判断请求级错误，须保留 Provider 明确的消费上限／过载证据，Claude 529 为过载而非消费额度耗尽。取消、本地准备、Hook 与存储错误不计数。First Token 是上游第一个 canonical 输出，包含 Thinking，缺省 60s。Client Output Commit 之后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的健康相关真实上游失败照常计数。Affinity 与 Continuation 遇冷却按下述受控额外尝试规则处理，不再无条件让位冷却。删除 Target.weight。旧 `weighted` / `priority` / `cooldown` 映射为 Traffic Equalization，`latency` 映射为 Latency Preference。
 
 本段明确替换本 ADR 此前的「重试预算用尽、QuotaExceeded 或请求放弃当前 Target 即立即冷却」规则：普通 Target 只在共享连续失败数达到统一阈值时冷却，单次流式失败、QuotaExceeded 或已提交输出均不会仅凭自身触发冷却。Target Cooldown 到期后进入半开，而不是全量恢复；下一个实际符合选路条件的请求独占一次探测机会。探测关闭同 Target 预算重试和 ProviderCall 内部回退，完整成功清零并恢复正常；任何上游探测失败（含已经发出上游请求后的超时）立即重新等待完整冷却。用户取消、本地准备失败和消费者断开仅释放名额。半开失败后的请求是否切换 Target，仍遵守错误分类与 Client Output Commit。冷却为 0 时仅关闭冷却调度门禁；失败仍计数并在达到阈值后按错误分类更换或停止 Target，完整成功仍清零。恢复状态、共享计数与进行中占位统一由 `RoutePolicyState` 拥有，以世代隔离迟到结果，不再叠加独立的固定失败次数健康过滤。已经开始执行的请求不因其他请求触发冷却而被取消。
+
+## Root-scoped cooldown attempts
+
+本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一次额外实际上游尝试。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，必须经过实际发送 RPM Pool、明确 Retry-After、授权、能力、禁用、Credential Invalid、deadline 和取消门禁；不放宽 Continuation 的执行状态不确定性或 Client Output Commit。
+
+额外尝试只有完整成功且冷却世代仍匹配才能清零并恢复；HTTP 200、首 token 或部分输出不算恢复，旧世代迟到成功不得覆盖新冷却。健康相关上游失败沿既有分类和冷却规则处理，请求级错误与取消不改变健康状态也不遗留探测占用。普通冷却到期的独占半开探测继续有效，已在执行的流不因别根触发冷却被取消。RPM Pool 只共享容量，不合并成员健康身份；根累计等待及额度配置见[架构 §8.4](../design/architecture.md#84-rpm-pool-发送门禁与配置)。
+
+远端 Continuation 不存在属于请求级错误，不为取得恢复预算而增加共享健康失败。完整历史回放仍受原 Target Retry Budget 限制；预算为 0 时不回放，已执行的认证恢复占用同一预算，完整回放最多一次。宿主尚未发送请求的本地连接 miss 仍可免费回退；半开探测与冷却额外尝试不获得内部回放许可。
+
+上述请求级隔离也适用于半开探测：此前「任何上游探测失败即重新冷却」现仅指健康相关失败；明确请求级错误只释放探测占用，不改变既有冷却世代或失败数。
 
 ## Considered options
 

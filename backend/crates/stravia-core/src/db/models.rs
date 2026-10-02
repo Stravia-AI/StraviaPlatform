@@ -225,6 +225,7 @@ const fn default_target_enabled() -> bool {
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
+    pub rpm_pool_id: Option<String>,
     pub id: super::identity::TargetId,
     pub model_id: super::identity::RouteKey,
     pub destination: super::identity::TargetDestination,
@@ -249,6 +250,7 @@ impl TargetConfig {
 
 #[derive(Serialize)]
 pub struct TargetView<'a> {
+    pub rpm_pool_id: Option<&'a str>,
     pub id: &'a str,
     pub model_id: &'a str,
     pub provider_id: &'a str,
@@ -266,6 +268,7 @@ impl<'a> From<&'a TargetConfig> for TargetView<'a> {
     fn from(target: &'a TargetConfig) -> Self {
         Self {
             id: &target.id,
+            rpm_pool_id: target.rpm_pool_id.as_deref(),
             model_id: &target.model_id,
             provider_id: target.provider_id().as_str(),
             model: target.model().map(|model| model.as_str()),
@@ -324,7 +327,7 @@ pub struct ApiKey {
     #[serde(rename = "key")]
     pub token: String,
     pub name: String,
-    pub concurrency_limit: Option<i32>,
+    pub rpm_limit: Option<i32>,
     pub is_enabled: bool,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -347,7 +350,7 @@ pub struct ApiKeyWithBindings {
     #[serde(rename = "key")]
     pub token: String,
     pub name: String,
-    pub concurrency_limit: Option<i32>,
+    pub rpm_limit: Option<i32>,
     pub is_enabled: bool,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -537,6 +540,8 @@ pub struct CreateRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTarget {
+    #[serde(default)]
+    pub rpm_pool_id: Option<String>,
     pub provider_id: String,
     /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
     pub model: Option<String>,
@@ -569,7 +574,7 @@ pub struct CreateApiKey {
     pub key: Option<String>,
     pub name: String,
     #[serde(default)]
-    pub concurrency_limit: Option<i32>,
+    pub rpm_limit: Option<i32>,
     pub expires_at: Option<String>,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -590,7 +595,7 @@ pub struct UpdateApiKey {
     pub key: Option<String>,
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub concurrency_limit: Option<Option<i32>>,
+    pub rpm_limit: Option<Option<i32>>,
     pub is_enabled: Option<bool>,
     pub mcp_access_enabled: Option<bool>,
     pub transparent_injection_enabled: Option<bool>,
@@ -606,26 +611,26 @@ mod api_key_tests {
     use super::{CreateApiKey, UpdateApiKey};
 
     #[test]
-    fn api_key_update_distinguishes_omitted_and_null_concurrency_limit() {
+    fn api_key_update_distinguishes_omitted_and_null_rpm_limit() {
         let omitted: UpdateApiKey =
-            serde_json::from_value(serde_json::json!({})).expect("omitted concurrency limit");
-        assert_eq!(omitted.concurrency_limit, None);
+            serde_json::from_value(serde_json::json!({})).expect("omitted RPM limit");
+        assert_eq!(omitted.rpm_limit, None);
 
         let cleared: UpdateApiKey = serde_json::from_value(serde_json::json!({
-            "concurrency_limit": null
+            "rpm_limit": null
         }))
-        .expect("null concurrency limit");
-        assert_eq!(cleared.concurrency_limit, Some(None));
+        .expect("null RPM limit");
+        assert_eq!(cleared.rpm_limit, Some(None));
 
         let set: UpdateApiKey = serde_json::from_value(serde_json::json!({
-            "concurrency_limit": 2
+            "rpm_limit": 2
         }))
-        .expect("numeric concurrency limit");
-        assert_eq!(set.concurrency_limit, Some(Some(2)));
+        .expect("numeric RPM limit");
+        assert_eq!(set.rpm_limit, Some(Some(2)));
     }
     #[test]
     fn api_key_dtos_reject_legacy_quota_fields() {
-        for field in ["rpm", "rpd", "tpm", "tpd"] {
+        for field in ["concurrency_limit", "rpm", "rpd", "tpm", "tpd"] {
             let mut create = serde_json::json!({ "name": "legacy" });
             create[field] = serde_json::json!(1);
             assert!(

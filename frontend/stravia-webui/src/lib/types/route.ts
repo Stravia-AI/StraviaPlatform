@@ -17,6 +17,7 @@ export interface Route {
 export type RouteSelectionStrategy = 'traffic_equalization' | 'latency_preference'
 
 export interface Target {
+  rpm_pool_id?: string | null
   id: string
   model_id: string
   provider_id: string
@@ -80,6 +81,7 @@ export interface UpdateRoute {
 }
 
 export interface CreateTarget {
+  rpm_pool_id?: string | null
   provider_id: string
   model: string | null
   enabled?: boolean

@@ -10,6 +10,64 @@ mod live;
 mod provider;
 pub(crate) mod support;
 
+/// Static capability eligibility shared by route validation and the final send gate.
+pub(crate) fn validate_target_capability(
+    channel: &stravia_vendor_sdk::ChannelDescriptor,
+    model_id: Option<&str>,
+    model: Option<&crate::provider_models::ProviderModelRecord>,
+    capability: stravia_vendor_sdk::Capability,
+) -> anyhow::Result<()> {
+    use stravia_vendor_sdk::Capability;
+    anyhow::ensure!(
+        channel.capabilities.contains(&capability),
+        "Target Provider channel does not support {}",
+        capability.as_str()
+    );
+    let Some(model_id) = model_id else {
+        anyhow::ensure!(
+            !matches!(capability, Capability::Search | Capability::MediaImage)
+                || (capability == Capability::Search && !channel.search_model_required),
+            "Target requires a Provider Model for {}",
+            capability.as_str()
+        );
+        return Ok(());
+    };
+    if !matches!(capability, Capability::Search | Capability::MediaImage) {
+        anyhow::ensure!(
+            model.is_none_or(|model| model.effective_available()),
+            "Target Provider Model is unavailable"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        !model_id.trim().is_empty()
+            && (capability != Capability::MediaImage || model_id.trim() != "*"),
+        "Target Provider Model is invalid"
+    );
+    let model = model.ok_or_else(|| anyhow::anyhow!("Target Provider Model is unavailable"))?;
+    anyhow::ensure!(
+        model.effective_available(),
+        "Target Provider Model is unavailable"
+    );
+    let capabilities = model
+        .metadata
+        .extensions
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array);
+    if capability == Capability::MediaImage || capabilities.is_some() {
+        anyhow::ensure!(
+            capabilities.is_some_and(|values| values.iter().any(|value| {
+                value.as_str() == Some(capability.as_str())
+                    || (capability == Capability::MediaImage
+                        && value.as_str() == Some("image_output"))
+            })),
+            "Target Provider Model does not support {}",
+            capability.as_str()
+        );
+    }
+    Ok(())
+}
+
 pub(crate) use live::LiveModelTurnExecutor;
 
 use std::sync::{Arc, atomic::AtomicBool};
@@ -77,6 +135,7 @@ pub struct TurnInput {
     /// 派生 `session_affinity` 交给插件，同一链路各轮与压缩共享上游会话键；
     /// 与客户端自报的 session 无关。
     pub(crate) generation_root_id: Option<String>,
+    pub(crate) root_request: crate::rpm::RootRequest,
 }
 
 impl TurnInput {
@@ -95,6 +154,7 @@ impl TurnInput {
             compaction_records: Arc::default(),
             compaction_source_generation_id: None,
             generation_root_id: None,
+            root_request: crate::rpm::RootRequest::default(),
         }
     }
 

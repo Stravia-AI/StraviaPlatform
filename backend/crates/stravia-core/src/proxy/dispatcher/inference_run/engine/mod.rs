@@ -10,7 +10,6 @@
 //!   3. Execute one shared Model Turn after hooks stabilize the effective request.
 //!   4. Run response/tool/client-output hooks and deliver the committed result.
 
-mod claim;
 mod completion;
 mod delivery;
 mod errors;
@@ -21,7 +20,6 @@ mod projection;
 mod settlement;
 mod stream;
 mod util;
-use self::claim::*;
 use self::completion::*;
 use self::delivery::{
     BufferedDeliveryProgress, DeliveryAdapter, DeliveryProgress, after_body_delivery,
@@ -395,7 +393,7 @@ pub(super) async fn orchestrate(
             );
         }
     };
-    let concurrency_limit = authenticated_principal.concurrency_limit;
+    let rpm_limit = authenticated_principal.rpm_limit;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
     ingress_observer.set_authenticated_source(principal.api_key_id(), &api_key_name);
@@ -561,14 +559,14 @@ pub(super) async fn orchestrate(
         None
     };
     let execution_window = ctx.deadline.remaining();
-    let marker_resolution = match crate::history_marker::resolve_request_markers(
+    match crate::history_marker::resolve_request_markers(
         gw.history_markers.as_ref(),
         &principal,
         &mut request,
     )
     .await
     {
-        Ok(resolution) => resolution,
+        Ok(_) => (),
         Err(error) => {
             let response = coded_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -596,35 +594,16 @@ pub(super) async fn orchestrate(
     }
     ctx.deadline
         .reset(std::time::Instant::now() + execution_window);
-    let admission = if marker_resolution.restored_platform_segments > 0 {
-        tokio::select! {
-            admission = gw.principal_admission.acquire_wait(&principal, concurrency_limit) => admission,
-            _ = ctx.cancellation.cancelled() => {
-                let response = error_response(499, "request cancelled");
-                return reject_before_admission(
-                    &mut Some(ingress_observer),
-                    "admission",
-                    "cancelled",
-                    response,
-                );
-            }
-        }
-    } else {
-        gw.principal_admission
-            .acquire(&principal, concurrency_limit)
-    };
-    let admission = match admission {
-        Ok(admission) => admission,
-        Err(error) => {
-            let response = inference_access_error_response(error);
-            return reject_before_admission(
-                &mut Some(ingress_observer),
-                "admission",
-                "concurrency_limit",
-                response,
-            );
-        }
-    };
+    if let Err(error) = gw.principal_admission.acquire(&principal, rpm_limit) {
+        let response = inference_access_error_response(error);
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "admission",
+            "rpm_limit",
+            response,
+        );
+    }
+    ctx.extensions.insert(crate::rpm::current_root_request());
     let inherited_media_turns = generation_chain_write
         .as_ref()
         .map(|write| write.inherited_media_turns().to_vec())
@@ -766,6 +745,10 @@ pub(super) async fn orchestrate(
             .with_observer(observer.clone())
             .with_extra_headers(forwarded_client_headers(&headers));
         turn_input.purpose = crate::model_turn::ModelTurnPurpose::Compact;
+        turn_input.root_request = ctx
+            .extensions
+            .get::<crate::rpm::RootRequest>()
+            .expect("admitted root RPM context");
         turn_input.compaction_records = compaction_records.clone();
         turn_input.compaction_source_generation_id = compaction_source_generation_id;
         turn_input.generation_root_id = generation_root_id;
@@ -791,9 +774,7 @@ pub(super) async fn orchestrate(
             }
         };
         phase.finish();
-        let (delivery_admission, background_admission) = split_admission(admission);
-        drop(background_admission);
-        return wrap_delivery(response, delivery_admission);
+        return response;
     }
     let mut generation = GenerationChainRun {
         principal: principal.clone(),
@@ -850,15 +831,12 @@ pub(super) async fn orchestrate(
     .await;
     phase.finish();
     if response.status().is_success() {
-        let (delivery_admission, background_admission) = split_admission(admission);
-        let response = wrap_delivery(response, delivery_admission);
         let store = Arc::clone(&gw.history_markers);
         let principal = generation.principal.clone();
         let lifecycle = gw.lifecycle.clone();
         after_body_delivery(response, async move {
             let references = ledger.published_executions();
             if references.is_empty() {
-                drop(background_admission);
                 return;
             }
             lifecycle.spawn(async move {
@@ -867,7 +845,6 @@ pub(super) async fn orchestrate(
                         tracing::debug!(%reference, %error, "background execution wait failed");
                     }
                 }
-                drop(background_admission);
             });
         })
     } else {
@@ -1097,6 +1074,10 @@ async fn acquire_turn(
             )
             .with_extra_headers(forwarded_client_headers(headers));
         input.compaction_records = ledger.compaction_records.clone();
+        input.root_request = request_context
+            .extensions
+            .get::<crate::rpm::RootRequest>()
+            .expect("admitted root RPM context");
         input.compaction_source_generation_id = generation.compaction_source_generation_id.clone();
         input.generation_root_id = generation
             .write

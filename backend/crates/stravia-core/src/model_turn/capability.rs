@@ -120,56 +120,21 @@ impl Gateway {
                 .iter()
                 .find(|channel| channel.id == channel_id)
                 .ok_or_else(|| anyhow::anyhow!("Target Provider channel is unavailable"))?;
-            anyhow::ensure!(
-                channel.capabilities.contains(&capability),
-                "Target Provider channel does not support {}",
-                capability.as_str()
-            );
-
-            match target.model().map(|model| model.as_str()) {
+            let model = match target.model() {
                 Some(model) => {
-                    anyhow::ensure!(
-                        !model.trim().is_empty()
-                            && (capability != Capability::MediaImage || model.trim() != "*"),
-                        "Target Provider Model is invalid"
-                    );
-                    let model = self
-                        .storage
+                    self.storage
                         .provider_models()
-                        .find(target.provider_id().as_str(), model)
+                        .find(target.provider_id().as_str(), model.as_str())
                         .await?
-                        .ok_or_else(|| anyhow::anyhow!("Target Provider Model is unavailable"))?;
-                    anyhow::ensure!(
-                        model.effective_available(),
-                        "Target Provider Model is unavailable"
-                    );
-                    let model_capabilities = model
-                        .metadata
-                        .extensions
-                        .get("capabilities")
-                        .and_then(serde_json::Value::as_array);
-                    if capability == Capability::MediaImage || model_capabilities.is_some() {
-                        anyhow::ensure!(
-                            model_capabilities.is_some_and(|capabilities| {
-                                capabilities.iter().any(|value| {
-                                    value.as_str() == Some(capability.as_str())
-                                        || (capability == Capability::MediaImage
-                                            && value.as_str() == Some("image_output"))
-                                })
-                            }),
-                            "Target Provider Model does not support {}",
-                            capability.as_str()
-                        );
-                    }
                 }
-                None => {
-                    anyhow::ensure!(
-                        capability == Capability::Search && !channel.search_model_required,
-                        "Target requires a Provider Model for {}",
-                        capability.as_str()
-                    );
-                }
-            }
+                None => None,
+            };
+            super::validate_target_capability(
+                channel,
+                target.model().map(|model| model.as_str()),
+                model.as_ref(),
+                capability,
+            )?;
         }
         Ok(())
     }
@@ -202,22 +167,76 @@ impl Gateway {
             self.generation_chains.continuation_lookup(),
             self.route_policy_state.clone(),
         );
-        let mut policy = selector
-            .select_independent(
-                principal,
-                route,
-                estimated_input_tokens,
-                context.observer.as_ref(),
-            )
-            .await
-            .map_err(selection_error)?;
-        let mut last_error = None;
-        // A Route owns one admission lease per Vendor it has actually reached.
-        // Later Targets for that Vendor freeze new connection snapshots under
-        // the same component and cancellation boundary; untouched Vendors stay lazy.
+        let mut last_error: Option<RouteFailure> = None;
         let mut vendor_leases: BTreeMap<String, PreparedVendorExecution> = BTreeMap::new();
-
-        while let Some(target) = policy.next_healthy() {
+        let mut excluded = std::collections::HashSet::new();
+        'targets: loop {
+            let mut policy = loop {
+                let version = self.rpm_admission.version();
+                let routes = self.model_cache.read().await;
+                let Some(current_route) = routes
+                    .models
+                    .iter()
+                    .find(|current| current.id == route.id && current.is_enabled)
+                else {
+                    break 'targets;
+                };
+                let selection = selector
+                    .select_independent(
+                        principal,
+                        current_route,
+                        estimated_input_tokens,
+                        context.observer.as_ref(),
+                        &context.root_request.cooldown,
+                    )
+                    .await;
+                drop(routes);
+                let mut policy = match selection {
+                    Ok(policy) => policy,
+                    Err(SelectionError::NoEligibleTarget) if last_error.is_some() => break 'targets,
+                    Err(error) => return Err(selection_error(error)),
+                };
+                let wait = self.rpm_admission.filter_candidates(
+                    &mut policy,
+                    &context.root_request,
+                    &excluded,
+                );
+                let Some((next, preferred)) = wait else {
+                    if !policy.is_empty() {
+                        break policy;
+                    }
+                    break 'targets;
+                };
+                if let Err(error) = self
+                    .rpm_admission
+                    .wait(
+                        &context.root_request,
+                        next,
+                        preferred,
+                        &context.cancellation,
+                        &context.deadline,
+                        version,
+                    )
+                    .await
+                {
+                    if matches!(
+                        error,
+                        crate::rpm::runtime::AdmissionError::Exhausted { .. }
+                            | crate::rpm::runtime::AdmissionError::Deadline
+                    ) && last_error.as_ref().is_some_and(|failure| {
+                        failure.retry_kind == Some(AiErrorKind::QuotaExceeded)
+                    }) {
+                        break 'targets;
+                    }
+                    return Err(error.model_error().into());
+                }
+            };
+            // A Route owns one admission lease per Vendor it has actually reached.
+            // Later Targets for that Vendor freeze new connection snapshots under
+            // the same component and cancellation boundary; untouched Vendors stay lazy.
+            let Some(target) = policy.next_healthy() else {
+                break;
+            };
             let mut prepared: Option<PreparedVendorExecution> = None;
             loop {
                 if !policy.retry_current() {
@@ -292,10 +311,49 @@ impl Gateway {
                 } else {
                     None
                 };
+                if !policy.retry_current() {
+                    break;
+                }
+                let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let result = if let Some(failure) = preparation_failure {
                     Err(failure)
                 } else {
                     let mut attempt_context = clone_context(&context);
+                    attempt_context.send_admission = Some(crate::rpm::SendAdmission {
+                        admission: self.rpm_admission.clone(),
+                        root: context.root_request.clone(),
+                        key: crate::rpm::PoolKey::for_target(&target),
+                        cancellation: context.cancellation.clone(),
+                        deadline: context.deadline.clone(),
+                        failure: std::sync::Arc::default(),
+                        sent: sent.clone(),
+                        upstream_state: None,
+                        eligibility: Some(crate::rpm::runtime::SendEligibility {
+                            storage: self.storage.clone(),
+                            routes: self.model_cache.clone(),
+                            admitted_component: prepared
+                                .as_ref()
+                                .expect("prepared execution exists after admission")
+                                .pinned_component(),
+                            admitted_provider_id: prepared
+                                .as_ref()
+                                .expect("prepared execution exists after admission")
+                                .descriptor()
+                                .provider_id
+                                .clone(),
+                            route_id: route.id.to_string(),
+                            target: target.destination.clone(),
+                            principal: principal.clone(),
+                            authorization: super::ModelTurnAuthorization::CapabilityGrant,
+                            health: policy.state().clone(),
+                            target_key: selected_target_key(&target),
+                            epoch: policy.current_epoch(),
+                            single_attempt: policy.current_is_probe(),
+                            capability,
+                            requires_video: false,
+                            requires_image: false,
+                        }),
+                    });
                     if let Some(attempt) = &attempt {
                         attempt_context.model_turn_id = Some(capability_observation.id.clone());
                         attempt_context.attempt_id = Some(attempt.id.clone());
@@ -355,6 +413,22 @@ impl Gateway {
                         });
                     }
                     Err(failure) => {
+                        if let Some(error) = failure.error.downcast_ref::<super::ModelTurnError>()
+                            && matches!(
+                                error.code.as_str(),
+                                "target_rpm_busy" | "target_ineligible"
+                            )
+                        {
+                            if !sent.load(std::sync::atomic::Ordering::Acquire) {
+                                policy.release_unsent_exception();
+                            }
+                            policy.skip_current();
+                            if error.code == "target_ineligible" {
+                                excluded.insert(selected_target_key(&target));
+                                last_error = Some(failure);
+                            }
+                            continue 'targets;
+                        }
                         // ADR-0073：上游确认的凭据拒绝按执行快照的凭据代际
                         // 条件写 Provider 失效；失败只记 warn，不影响重试决策。
                         if let Some(execution) = &prepared
@@ -377,7 +451,7 @@ impl Gateway {
                                 None,
                             );
                         }
-                        let Some(kind) = failure.retry_kind else {
+                        let Some(kind) = failure.retry_kind.clone() else {
                             return Err(failure.error);
                         };
                         let disposition = policy.record_failure(
@@ -390,14 +464,13 @@ impl Gateway {
                                 jitter_sample: rand::random(),
                             },
                         );
-                        last_error = Some(failure.error);
+                        let retry_after = failure.retry_after;
+                        last_error = Some(failure);
                         match disposition {
                             AttemptFailureDisposition::RetrySame { delay } => {
                                 // Preserve the upstream error when its required wait
                                 // cannot fit; failover must not retry this Target early.
-                                if failure.retry_after.is_some()
-                                    && delay >= context.deadline.remaining()
-                                {
+                                if retry_after.is_some() && delay >= context.deadline.remaining() {
                                     policy.skip_current();
                                     break;
                                 }
@@ -405,15 +478,18 @@ impl Gateway {
                             }
                             AttemptFailureDisposition::TryNextTarget => break,
                             AttemptFailureDisposition::Stop => {
-                                return Err(last_error.expect("failed attempt"));
+                                return Err(last_error.expect("failed attempt").error);
                             }
                         }
                     }
                 }
             }
+            excluded.insert(selected_target_key(&target));
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Route has no eligible Target")))
+        Err(last_error
+            .map(|failure| failure.error)
+            .unwrap_or_else(|| anyhow::anyhow!("Route has no eligible Target")))
     }
 
     async fn execute_independent_attempt(
@@ -424,6 +500,10 @@ impl Gateway {
         route_leases: &BTreeMap<String, PreparedVendorExecution>,
     ) -> Result<crate::plugin::VendorExecution, RouteFailure> {
         let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+        let admission_failure = context
+            .send_admission
+            .as_ref()
+            .map(|admission| admission.failure.clone());
         context.events = Some(events);
         let execution = self.execute_prepared_vendor(prepared, request, context);
         tokio::pin!(execution);
@@ -467,6 +547,9 @@ impl Gateway {
                     Ok(execution)
                 }
             });
+        if let Some(failure) = admission_failure.and_then(|failure| failure.lock().take()) {
+            return Err(RouteFailure::new(failure.model_error().into(), false));
+        }
         result.map_err(|error| RouteFailure::new(error, upstream_started))
     }
 }
@@ -567,6 +650,8 @@ fn clone_context(context: &VendorCallContext) -> VendorCallContext {
     cloned.response_continuation_available = context.response_continuation_available.clone();
     cloned.client_headers = context.client_headers.clone();
     cloned.metadata = context.metadata.clone();
+    cloned.root_request = context.root_request.clone();
+    cloned.send_admission = context.send_admission.clone();
     cloned
 }
 

@@ -160,6 +160,7 @@ impl GenerationRouteFixture {
                 balance: Some("latency_preference".into()),
                 targets: vec![
                     CreateTarget {
+                        rpm_pool_id: None,
                         provider_id: self.compatible_provider.id.clone(),
                         model: Some(CODEX_MODEL.into()),
                         enabled: true,
@@ -170,6 +171,7 @@ impl GenerationRouteFixture {
                         thinking_level_map: Vec::new(),
                     },
                     CreateTarget {
+                        rpm_pool_id: None,
                         provider_id: self.incompatible_provider.id.clone(),
                         model: Some(CODEX_MODEL.into()),
                         enabled: incompatible_enabled,
@@ -207,6 +209,7 @@ impl GenerationRouteFixture {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                rpm_pool_id: None,
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect()

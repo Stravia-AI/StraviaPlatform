@@ -5,6 +5,7 @@ import tempfile
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ import pytest
 from tests.common.helpers import (
     find_free_port,
     http_request,
+    http_bytes,
     start_stravia_server,
     stop_stravia_server,
     wait_until_ready,
@@ -435,6 +437,68 @@ def _create_api_key(env: dict[str, str], model_id: str, name: str) -> dict[str, 
     )
     assert status == 200, f"create api-key failed: {status} {resp}"
     return resp["data"]
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_rpm_burst_rejection_and_shared_upstream_pool(admin_env: dict[str, Any]) -> None:
+    with _model_probe_endpoint() as (origin, received):
+        provider = _create_probe_provider(
+            admin_env, "RPM admission", None, base_url=origin, use_proxy=False,
+        )
+        status, body = http_request(
+            "POST", f"{admin_env['admin']}/api/v1/providers/{provider}/models",
+            payload={"model_id": "probe-model", "metadata": {"id": "probe-model"}},
+            headers=admin_env["auth"],
+        )
+        assert status == 201, body
+        route = _create_model(admin_env, provider, "rpm-http", target_model="probe-model")
+        key = _create_api_key(admin_env, route, "RPM burst")
+        other = _create_api_key(admin_env, route, "RPM independent")
+        key_url = f"{admin_env['admin']}/api/v1/api-keys/{key['id']}"
+        status, body = http_request("PUT", key_url, {"rpm_limit": 2}, admin_env["auth"])
+        assert status == 200 and body["data"]["rpm_limit"] == 2, body
+
+        def infer(token: str) -> tuple[int, dict[str, str], bytes]:
+            return http_bytes(
+                "POST", f"{admin_env['proxy']}/v1/chat/completions",
+                {"model": "rpm-http", "stream": False, "messages": [{"role": "user", "content": "local RPM probe"}]},
+                {"authorization": f"Bearer {token}"},
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(infer, [key["key"]] * 3))
+        assert sorted(result[0] for result in results) == [200, 200, 429], results
+        rejection = next(result for result in results if result[0] == 429)
+        assert 1 <= int(rejection[1]["retry-after"]) <= 60, rejection
+        assert len(received) == 2, received
+        assert infer(key["key"])[0] == 429
+        assert len(received) == 2, "rejected entrance reached upstream"
+        assert infer(other["key"])[0] == 200
+        assert len(received) == 3
+
+        # 新启用上游池只记录启用后的发送，入口清除限额不返还已经受限的窗口。
+        status, body = http_request("PUT", key_url, {"rpm_limit": None}, admin_env["auth"])
+        assert status == 200, body
+        config_url = f"{admin_env['admin']}/api/v1/settings/rpm_admission"
+        status, previous = http_request("GET", config_url, headers=admin_env["auth"])
+        assert status == 200, previous
+        config = {
+            "preferred_wait_ms": 0, "total_wait_ms": 0, "queue_capacity": 128,
+            "destinations": [{"provider_id": provider, "model": "probe-model", "rpm_limit": 1}],
+            "pools": [],
+        }
+        try:
+            status, body = http_request("PUT", config_url, {"value": json.dumps(config)}, admin_env["auth"])
+            assert status == 200, body
+            assert infer(key["key"])[0] == 200
+            limited = infer(other["key"])
+            assert limited[0] == 429, limited
+            assert 1 <= int(limited[1]["retry-after"]) <= 60, limited
+            assert json.loads(limited[2])["error"]["code"] == "target_rpm_exceeded", limited
+            assert len(received) == 4, "Target RPM rejection reached upstream"
+        finally:
+            status, body = http_request("PUT", config_url, {"value": previous["data"]}, admin_env["auth"])
+            assert status == 200, body
 
 
 @pytest.mark.e2e

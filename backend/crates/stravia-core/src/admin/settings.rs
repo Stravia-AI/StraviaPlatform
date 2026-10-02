@@ -8,6 +8,10 @@ impl AdminService {
             anyhow::bail!("reserved internal setting");
         }
         let value = self.gw.storage.settings().get(key).await?;
+        if key == crate::rpm::SETTINGS_KEY {
+            let config = crate::rpm::RpmConfig::from_setting(value.as_deref())?;
+            return Ok(Some(serde_json::to_string(&config)?));
+        }
         if key == "artifact_settings" {
             return value
                 .map(|value| {
@@ -28,6 +32,23 @@ impl AdminService {
         if key == crate::media_generation::config::SETTINGS_KEY {
             self.update_media_generation_config(serde_json::from_str(value)?)
                 .await?;
+            return Ok(());
+        }
+        if key == crate::rpm::SETTINGS_KEY {
+            let _save = crate::rpm::CONFIG_WRITE.lock().await;
+            let config = crate::rpm::RpmConfig::from_setting(Some(value))?;
+            for route in self.gw.storage.routes().list().await? {
+                for target in route.targets {
+                    config.validate_binding(target.rpm_pool_id.as_deref())?;
+                }
+            }
+            self.gw
+                .storage
+                .settings()
+                .set(key, &serde_json::to_string(&config)?)
+                .await?;
+            self.gw.rpm_admission.configure(config);
+            crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
             return Ok(());
         }
         if key == "artifact_settings" {

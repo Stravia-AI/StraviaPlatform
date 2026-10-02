@@ -15,20 +15,21 @@ impl AdminService {
     }
 
     pub async fn create_api_key(&self, input: CreateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
+        let _save = crate::rpm::CONFIG_WRITE.lock().await;
         let name = normalize_name(&input.name, "api key name")?;
         self.ensure_api_key_name_unique(None, &name).await?;
         let key = normalize_api_key(input.key)?;
         if let Some(key) = key.as_deref() {
             self.ensure_api_key_unique(None, key).await?;
         }
-        let concurrency_limit = validate_concurrency_limit(input.concurrency_limit)?;
+        let rpm_limit = validate_rpm_limit(input.rpm_limit)?;
         let expires_at = normalize_api_key_expiry(input.expires_at)?;
         let result = self
             .api_keys_store()?
             .create(crate::db::models::CreateApiKey {
                 key,
                 name,
-                concurrency_limit,
+                rpm_limit,
                 mcp_access_enabled: input.mcp_access_enabled,
                 transparent_injection_enabled: input.transparent_injection_enabled,
                 inject_media_understanding: input.inject_media_understanding,
@@ -38,9 +39,7 @@ impl AdminService {
                 model_ids: input.model_ids,
             })
             .await?;
-        self.gw
-            .principal_admission
-            .set_limit(&result.id, concurrency_limit);
+        self.gw.principal_admission.set_limit(&result.id, rpm_limit);
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(result)
     }
@@ -50,6 +49,7 @@ impl AdminService {
         id: &str,
         input: UpdateApiKey,
     ) -> anyhow::Result<ApiKeyWithBindings> {
+        let _save = crate::rpm::CONFIG_WRITE.lock().await;
         let current = self
             .api_keys_store()?
             .get(id)
@@ -66,9 +66,9 @@ impl AdminService {
             }
             None => None,
         };
-        let concurrency_limit = match input.concurrency_limit {
-            Some(value) => validate_concurrency_limit(value)?,
-            None => current.concurrency_limit,
+        let rpm_limit = match input.rpm_limit {
+            Some(value) => validate_rpm_limit(value)?,
+            None => current.rpm_limit,
         };
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
         let mcp_access_enabled = input
@@ -96,7 +96,7 @@ impl AdminService {
                 UpdateApiKey {
                     key,
                     name: Some(name),
-                    concurrency_limit: Some(concurrency_limit),
+                    rpm_limit: Some(rpm_limit),
                     is_enabled: Some(is_enabled),
                     mcp_access_enabled: Some(mcp_access_enabled),
                     transparent_injection_enabled: Some(transparent_injection_enabled),
@@ -108,12 +108,13 @@ impl AdminService {
                 },
             )
             .await?;
-        self.gw.principal_admission.set_limit(id, concurrency_limit);
+        self.gw.principal_admission.set_limit(id, rpm_limit);
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(result)
     }
 
     pub async fn delete_api_key(&self, id: &str) -> anyhow::Result<()> {
+        let _save = crate::rpm::CONFIG_WRITE.lock().await;
         self.api_keys_store()?.delete(id).await?;
         self.gw.principal_admission.remove_principal(id);
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
@@ -160,9 +161,9 @@ impl AdminService {
     }
 }
 
-fn validate_concurrency_limit(value: Option<i32>) -> anyhow::Result<Option<i32>> {
+fn validate_rpm_limit(value: Option<i32>) -> anyhow::Result<Option<i32>> {
     if value.is_some_and(|limit| limit <= 0) {
-        anyhow::bail!("concurrency limit must be a positive integer");
+        anyhow::bail!("RPM limit must be a positive integer");
     }
     Ok(value)
 }
@@ -214,7 +215,7 @@ mod expiry_tests {
     }
 
     #[tokio::test]
-    async fn api_key_concurrency_limit_crud_uses_nullable_tri_state() {
+    async fn api_key_rpm_limit_crud_uses_nullable_tri_state() {
         let data_dir = tempfile::tempdir().expect("temporary data dir");
         let gateway = Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
@@ -226,8 +227,8 @@ mod expiry_tests {
         let created = admin
             .create_api_key(crate::db::models::CreateApiKey {
                 key: None,
-                name: "Concurrency test".into(),
-                concurrency_limit: None,
+                name: "RPM test".into(),
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
@@ -238,7 +239,7 @@ mod expiry_tests {
             })
             .await
             .expect("API key");
-        assert_eq!(created.concurrency_limit, None);
+        assert_eq!(created.rpm_limit, None);
 
         let set = admin
             .update_api_key(
@@ -246,7 +247,7 @@ mod expiry_tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: Some(Some(3)),
+                    rpm_limit: Some(Some(3)),
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -258,8 +259,8 @@ mod expiry_tests {
                 },
             )
             .await
-            .expect("set concurrency limit");
-        assert_eq!(set.concurrency_limit, Some(3));
+            .expect("set RPM limit");
+        assert_eq!(set.rpm_limit, Some(3));
 
         let preserved = admin
             .update_api_key(
@@ -267,7 +268,7 @@ mod expiry_tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -279,8 +280,8 @@ mod expiry_tests {
                 },
             )
             .await
-            .expect("preserve concurrency limit");
-        assert_eq!(preserved.concurrency_limit, Some(3));
+            .expect("preserve RPM limit");
+        assert_eq!(preserved.rpm_limit, Some(3));
 
         let cleared = admin
             .update_api_key(
@@ -288,7 +289,7 @@ mod expiry_tests {
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: Some(None),
+                    rpm_limit: Some(None),
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -300,19 +301,19 @@ mod expiry_tests {
                 },
             )
             .await
-            .expect("clear concurrency limit");
-        assert_eq!(cleared.concurrency_limit, None);
+            .expect("clear RPM limit");
+        assert_eq!(cleared.rpm_limit, None);
 
-        for (name, concurrency_limit) in [
-            ("Invalid zero concurrency", Some(0)),
-            ("Invalid negative concurrency", Some(-1)),
+        for (name, rpm_limit) in [
+            ("Invalid zero RPM", Some(0)),
+            ("Invalid negative RPM", Some(-1)),
         ] {
             assert!(
                 admin
                     .create_api_key(crate::db::models::CreateApiKey {
                         key: None,
                         name: name.into(),
-                        concurrency_limit,
+                        rpm_limit,
                         expires_at: None,
                         mcp_access_enabled: false,
                         transparent_injection_enabled: false,

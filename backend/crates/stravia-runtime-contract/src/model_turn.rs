@@ -18,6 +18,7 @@ pub struct ModelTurnError {
     /// 保留规范分类，避免把同为 HTTP 429 的额度耗尽重新解释为速率限制。
     pub upstream_error_kind: Option<AiErrorKind>,
     pub upstream_body: Option<Box<serde_json::Value>>,
+    pub retry_after_secs: Option<u64>,
 }
 
 impl ModelTurnError {
@@ -28,6 +29,7 @@ impl ModelTurnError {
             upstream_status: None,
             upstream_error_kind: None,
             upstream_body: None,
+            retry_after_secs: None,
         }
     }
 }

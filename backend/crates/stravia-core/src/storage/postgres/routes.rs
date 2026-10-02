@@ -37,6 +37,7 @@ struct TargetRow {
     model_id: String,
     provider_id: String,
     model: Option<String>,
+    rpm_pool_id: Option<String>,
     enabled: bool,
     priority: i32,
     first_token_timeout_ms: i64,
@@ -60,6 +61,7 @@ impl TargetRow {
             first_token_timeout_ms: self.first_token_timeout_ms,
             target_retry_budget: self.target_retry_budget,
             target_cooldown_ms: self.target_cooldown_ms,
+            rpm_pool_id: self.rpm_pool_id,
             created_at: self.created_at,
             thinking_level_map: self.thinking_level_map.0,
         }
@@ -114,7 +116,7 @@ async fn load_targets(
     route_storage_id: &str,
 ) -> anyhow::Result<Vec<TargetConfig>> {
     Ok(sqlx::query_as::<_, TargetRow>(
-        "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority DESC, created_at ASC",
+        "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority DESC, created_at ASC",
     )
     .bind(route_storage_id)
     .fetch_all(&mut *conn)
@@ -258,7 +260,7 @@ impl RouteStore for PostgresRouteStore {
 
         if let Some(targets) = route.targets.as_ref() {
             let existing = sqlx::query_as::<_, TargetRow>(
-                "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1",
+                "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1",
             )
             .bind(&route_storage_id)
             .fetch_all(&mut *tx)
@@ -285,7 +287,7 @@ impl RouteStore for PostgresRouteStore {
                     .map(|row| row.id.clone())
                     .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                 sqlx::query(
-                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT(id) DO UPDATE SET provider_id = EXCLUDED.provider_id, model = EXCLUDED.model, enabled = EXCLUDED.enabled, priority = EXCLUDED.priority, first_token_timeout_ms = EXCLUDED.first_token_timeout_ms, target_retry_budget = EXCLUDED.target_retry_budget, target_cooldown_ms = EXCLUDED.target_cooldown_ms, thinking_level_map = EXCLUDED.thinking_level_map",
+                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map, rpm_pool_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT(id) DO UPDATE SET provider_id = EXCLUDED.provider_id, model = EXCLUDED.model, enabled = EXCLUDED.enabled, priority = EXCLUDED.priority, first_token_timeout_ms = EXCLUDED.first_token_timeout_ms, target_retry_budget = EXCLUDED.target_retry_budget, target_cooldown_ms = EXCLUDED.target_cooldown_ms, thinking_level_map = EXCLUDED.thinking_level_map, rpm_pool_id = EXCLUDED.rpm_pool_id",
                 )
                 .bind(id)
                 .bind(&route_storage_id)
@@ -309,6 +311,7 @@ impl RouteStore for PostgresRouteStore {
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
                 )
                 .bind(sqlx::types::Json(&target.thinking_level_map))
+                .bind(target.rpm_pool_id.as_deref())
                 .execute(&mut *tx)
                 .await?;
             }

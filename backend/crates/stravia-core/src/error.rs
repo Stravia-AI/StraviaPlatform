@@ -90,8 +90,8 @@ pub enum GatewayError {
     /// action.
     Forbidden { reason: AccessDenial },
 
-    /// The Principal has reached its active root-request limit.
-    ConcurrencyLimitExceeded,
+    /// Principal 的严格滑动窗口已满，客户端应等待后重新提交根请求。
+    PrincipalRpmExceeded { retry_after_secs: u64 },
 
     /// No model matched the requested model / path.
     ModelNotFound { model: String },
@@ -135,7 +135,7 @@ impl GatewayError {
             GatewayError::BadRequest { .. } => StatusCode::BAD_REQUEST,
             GatewayError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             GatewayError::Forbidden { .. } => StatusCode::FORBIDDEN,
-            GatewayError::ConcurrencyLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            GatewayError::PrincipalRpmExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             GatewayError::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             GatewayError::ProtocolUnsupported { .. } => StatusCode::BAD_REQUEST,
             GatewayError::ProtocolLossyRejected { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -158,7 +158,7 @@ impl GatewayError {
             GatewayError::BadRequest { .. } => "STRAVIA_BAD_REQUEST",
             GatewayError::Unauthorized { .. } => "STRAVIA_AUTH_ERROR",
             GatewayError::Forbidden { .. } => "STRAVIA_FORBIDDEN",
-            GatewayError::ConcurrencyLimitExceeded => "STRAVIA_CONCURRENCY_LIMIT",
+            GatewayError::PrincipalRpmExceeded { .. } => "STRAVIA_RPM_LIMIT",
             GatewayError::ModelNotFound { .. } => "STRAVIA_NOT_FOUND",
             GatewayError::ProtocolUnsupported { .. } => "STRAVIA_PROTOCOL_UNSUPPORTED",
             GatewayError::ProtocolLossyRejected { .. } => "STRAVIA_PROTOCOL_LOSSY_REJECTED",
@@ -183,7 +183,7 @@ impl GatewayError {
                 AccessDenial::IpDenied => "request origin is blocked".into(),
                 AccessDenial::Custom(msg) => msg.clone(),
             },
-            GatewayError::ConcurrencyLimitExceeded => "Principal Concurrency Limit is full.".into(),
+            GatewayError::PrincipalRpmExceeded { .. } => "Principal RPM limit exceeded.".into(),
             GatewayError::ModelNotFound { model } => {
                 format!("no model found for model: {model}")
             }
@@ -267,6 +267,15 @@ impl GatewayError {
         }
         let mut response =
             (status, Json(serde_json::json!({ "error": error_obj }))).into_response();
+        if let Self::PrincipalRpmExceeded { retry_after_secs } = self {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                retry_after_secs
+                    .to_string()
+                    .parse()
+                    .expect("integer Retry-After"),
+            );
+        }
         response
             .extensions_mut()
             .insert(crate::interaction_observation::FailureDiagnostic {
@@ -474,18 +483,5 @@ mod tests {
             .stable_code(),
             "STRAVIA_INTERNAL_ERROR"
         );
-    }
-
-    #[test]
-    fn concurrency_limit_exceeded_is_a_non_retryable_429_with_a_stable_code() {
-        let response = GatewayError::ConcurrencyLimitExceeded.render(None);
-
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            GatewayError::ConcurrencyLimitExceeded.stable_code(),
-            "STRAVIA_CONCURRENCY_LIMIT"
-        );
-        assert!(!GatewayError::ConcurrencyLimitExceeded.retryable());
-        assert!(response.headers().get("retry-after").is_none());
     }
 }

@@ -293,6 +293,7 @@ async fn generation_http_fixture(
             display_name: Some("Local image generation".into()),
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: generation_provider.id,
                 model: Some("gpt-5.4".into()),
                 enabled: true,
@@ -322,7 +323,7 @@ async fn generation_http_fixture(
         .create_api_key(CreateApiKey {
             key: None,
             name: "media-generation-http-key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled,
@@ -383,7 +384,7 @@ async fn set_generation_injection(
             UpdateApiKey {
                 key: None,
                 name: None,
-                concurrency_limit: None,
+                rpm_limit: None,
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: Some(transparent_injection_enabled),

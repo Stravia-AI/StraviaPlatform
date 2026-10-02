@@ -12,7 +12,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     id: 'key-advanced',
     key: 'sk-advanced',
     name: 'Advanced client',
-    concurrency_limit: null,
+    rpm_limit: null,
     is_enabled: true,
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
@@ -109,18 +109,18 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
 })
 
-test('API Key editor persists concurrency and Model Route selections', async ({ page }) => {
+test('API Key editor groups and filters allowed model selections', async ({ page }) => {
   const modelId = '4d93a8ac-0d1f-4891-8780-55c2f566c084'
   const secondModelId = 'd414f418-547e-4269-b917-fec9a10c39bb'
   const modelName = 'gpt-5.6-sol'
   const secondModelName = 'gpt-5.6-luna'
   let modelIds: string[] = []
-  let concurrencyLimit: number | null = null
+  let rpmLimit: number | null = null
   const apiKey = {
     id: 'key-test',
     key: 'sk-test-secret',
     name: 'test',
-    concurrency_limit: null,
+    rpm_limit: null,
     is_enabled: true,
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
@@ -159,13 +159,13 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
     })
   })
   await page.route('**/api/v1/api-keys', async (route) => {
-    await route.fulfill({ json: { data: [{ ...apiKey, concurrency_limit: concurrencyLimit, model_ids: modelIds }] } })
+    await route.fulfill({ json: { data: [{ ...apiKey, rpm_limit: rpmLimit, model_ids: modelIds }] } })
   })
   await page.route('**/api/v1/api-keys/key-test', async (route) => {
     const input = route.request().postDataJSON()
     modelIds = input.model_ids
-    concurrencyLimit = input.concurrency_limit
-    await route.fulfill({ json: { data: { ...apiKey, concurrency_limit: concurrencyLimit, model_ids: modelIds } } })
+    rpmLimit = input.rpm_limit
+    await route.fulfill({ json: { data: { ...apiKey, rpm_limit: rpmLimit, model_ids: modelIds } } })
   })
 
   await page.goto('/api-keys')
@@ -209,15 +209,13 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 493, height: 832 })
 
-  await expect(page.getByLabel('Maximum concurrent executions')).toHaveValue('')
-  await page.getByLabel('Maximum concurrent executions').fill('2')
+  await expect(page.getByLabel('Requests per minute (RPM)')).toHaveValue('')
+  await page.getByLabel('Requests per minute (RPM)').fill('2')
   await page.getByRole('button', { name: 'Save API Key' }).click()
   await expect(page.getByText('API key saved.')).toBeVisible()
   await expect.poll(() => modelIds).toEqual([modelId])
-  await expect.poll(() => concurrencyLimit).toBe(2)
   await expect(editor).toBeHidden()
   await page.setViewportSize({ width: 1280, height: 720 })
-  await expect(page.getByRole('cell', { name: 'Concurrent executions 2' })).toBeVisible()
 
   await page.getByRole('row').filter({ hasText: 'test' }).getByRole('cell').nth(3).click()
   const reopenedAllowAllModels = page.getByRole('switch', { name: 'Allow all models' })

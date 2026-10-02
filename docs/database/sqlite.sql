@@ -57,7 +57,7 @@ CREATE TABLE api_keys (
     expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, concurrency_limit INTEGER CHECK (concurrency_limit > 0), transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0);
+, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0, rpm_limit INTEGER CHECK (rpm_limit IS NULL OR rpm_limit > 0));
 
 CREATE TABLE artifact_download_grants (
     token_hash TEXT PRIMARY KEY,
@@ -197,7 +197,7 @@ CREATE TABLE "model_backends" (
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
     target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000,
     enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
-);
+, rpm_pool_id TEXT);
 
 CREATE TABLE model_turn_observations (
     id TEXT PRIMARY KEY,

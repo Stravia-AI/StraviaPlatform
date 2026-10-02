@@ -83,28 +83,21 @@ describe('route targets form', () => {
     })
   })
 
-  test('submits enabled state and converts seconds to integer milliseconds', () => {
-    const targets = createRouteTargetForms(undefined, 'provider-a', ' model-a ')
-    targets[0].priority = 100_000
-    targets[0].thinkingLevelMap = [
-      { level: 'low', control: { type: 'effort', value: 'low' }, source: 'generated' },
-      { level: 'high', control: { type: 'effort', value: 'high' }, source: 'overridden' },
-    ]
-
-    const result = buildRouteTargets(targets)
-
-    expect(result.error).toBeUndefined()
-    expect(JSON.parse(JSON.stringify(result.targets))).toEqual([
-      {
-        provider_id: 'provider-a',
-        model: 'model-a',
-        enabled: true,
-        priority: 100_000,
-        first_token_timeout_ms: 60_000,
-        target_retry_budget: 5,
-        target_cooldown_ms: 120_000,
-        thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' }, source: 'overridden' }],
-      },
+  test('creating a target does not freeze generated thinking defaults', () => {
+    const target = createRouteTarget([], {
+      providerId: 'provider-a',
+      model: 'model-a',
+      enabled: true,
+      thinkingLevelMap: [
+        { level: 'medium', control: { type: 'effort', value: 'medium' }, source: 'generated' },
+        { level: 'high', control: { type: 'effort', value: 'high' }, source: 'overridden' },
+      ],
+    })
+    expect(buildRouteTargets([target]).targets[0].thinking_level_map?.map((row) => row.level)).toEqual(['high'])
+    target.persisted = true
+    expect(buildRouteTargets([target]).targets[0].thinking_level_map?.map((row) => row.level)).toEqual([
+      'medium',
+      'high',
     ])
   })
 

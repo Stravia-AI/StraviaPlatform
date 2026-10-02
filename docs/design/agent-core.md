@@ -593,7 +593,7 @@ Run 期间管理员修改 Definition config 不改变当前执行。Definition d
 
 ### 9.2 动态 Principal 检查
 
-每个隐藏 ModelTurn 动态检查 API key 状态、根逻辑 Model 当前可用性与固定 authorization policy。generic Agent 使用 `ClientModelBinding`；Media/Local Web Search 等产品能力使用 code-owned `CapabilityOwned` policy，不要求 key 的 `model_ids` 包含 hidden Model。每个 PlatformTool side effect 前继续复查适用授权；MCP 的 `mcp_access_enabled` 在 invocation 入口检查。隐藏 ModelTurn 复用外层根请求的 Principal Concurrency Limit 名额。
+每个隐藏 ModelTurn 动态检查 API key 状态、根逻辑 Model 当前可用性与固定 authorization policy。generic Agent 使用 `ClientModelBinding`；Media/Local Web Search 等产品能力使用 code-owned `CapabilityOwned` policy，不要求 key 的 `model_ids` 包含 hidden Model。每个 PlatformTool side effect 前继续复查适用授权；MCP 的 `mcp_access_enabled` 在 invocation 入口检查。隐藏 ModelTurn 复用外层 RootRequest，不重复计 API Key Root RPM；每次实际上游发送仍独立经过 RPM Pool。
 
 任何检查失败立即终止 Run，不提交 Turn。这保持 `docs/adr/0005-client-credential-security-seam.md` 的现有不变量。
 
@@ -605,7 +605,7 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 - Definition 必须全局 enabled；
 - MCP 仍要求既有 `mcp_access_enabled`；
 - generic Agent Definition Model 继续要求 principal 的现有 model binding；
-- Media/Web Search 分别由平台 Gate 授权有效 API key 间接使用 hidden Model，不创建额外并发名额；Transparent Injection 只控制自动暴露；
+- Media/Web Search 分别由平台 Gate 授权有效 API key 间接使用 hidden Model，不创建额外入口 RPM 记录；Transparent Injection 只控制自动暴露；
 - Definition allowlist 即内部工具授权。
 
 未授权或 unavailable Definitions 从 discovery 中过滤；显式请求未授权 tool 返回 typed forbidden。Turn lookup 则统一返回 `TurnUnavailable`，避免 ID existence oracle。
@@ -806,7 +806,7 @@ Hook 不获得 provider credential、Artifact backend key、原始 API key 或�
 - 最终 Model 绑定授权；
 - 每个隐藏 ModelTurn 重读 key/model authorization；
 - 普通 Target retry 不重复改变该 ModelTurn 的授权快照；
-- usage 按真实 ModelTurn 计入 request log；并发准入由外层根请求统一持有。
+- usage 按真实 ModelTurn 计入 request log；入口 RPM 由外层根请求计一次，所有轮次共享 RootRequest 的累计等待和每 Target 冷却额外尝试预算，上游 RPM 按真实发送计数。
 
 外层 capability tool invocation 不重复计算模型 token，但 AgentRun aggregate 关联全部 child request logs。
 
@@ -945,7 +945,7 @@ Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-on
 
 | 风险 | 已确认决策 | 影响 |
 |---|---|---|
-| Agent 并发无额外上限 | 不增加 instance/Definition semaphore 或 bounded queue | 认证 key 可并发耗尽内存、连接池、provider/tool 资源；上线前建议重新审视 |
+| Agent 活跃并发无上限 | API Key 与上游仅限制请求频率；RPM 等待队列默认 128 个根请求，不限制活跃流 | 长流仍可累积内存、连接池、provider/tool 资源；未设置池 RPM 时没有本地发送速率保护 |
 | 无显式删除 | Turn/Artifact 只能等待 TTL/GC | 敏感媒体误上传后无法立即清除；默认暴露窗口 7 天 |
 | 无 idempotency | tool/HTTP/MCP 重试不去重 | 重复 provider 成本与重复分支 |
 | Response TTL 从 1h 变 7d | 所有 Responses chain 默认 7 天 | SQL 存储、隐私与 GC 压力扩大 |

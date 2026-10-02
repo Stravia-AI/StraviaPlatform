@@ -200,6 +200,7 @@ async fn protected_responses_router_with_base_url(
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("auth-model".into()),
                 enabled: true,
@@ -217,7 +218,7 @@ async fn protected_responses_router_with_base_url(
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Responses auth key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -235,7 +236,7 @@ async fn protected_responses_router_with_base_url(
                 crate::db::models::UpdateApiKey {
                     key: None,
                     name: None,
-                    concurrency_limit: None,
+                    rpm_limit: None,
                     is_enabled: Some(false),
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
@@ -785,6 +786,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("no-tools".into()),
                 enabled: true,
@@ -802,7 +804,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Web key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -846,7 +848,7 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Artifact key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -937,7 +939,7 @@ async fn artifact_create_upload_response_hides_the_artifact_identity() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Artifact create key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -996,7 +998,7 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Artifact identity key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

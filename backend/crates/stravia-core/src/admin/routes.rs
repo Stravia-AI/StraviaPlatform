@@ -96,6 +96,8 @@ impl<'a> RouteModule<'a> {
     }
 
     pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<RouteConfig> {
+        let _rpm_write = crate::rpm::CONFIG_WRITE.lock().await;
+        self.ensure_rpm_bindings(&input.targets).await?;
         ensure_route_targets_valid(&input.targets)?;
         self.ensure_new_targets_available(&[], &input.targets)
             .await?;
@@ -110,8 +112,10 @@ impl<'a> RouteModule<'a> {
         route_id: &str,
         mut input: UpdateRoute,
     ) -> anyhow::Result<RouteConfig> {
+        let _rpm_write = crate::rpm::CONFIG_WRITE.lock().await;
         let current = self.get(route_id).await?;
         if let Some(targets) = input.targets.as_mut() {
+            self.ensure_rpm_bindings(targets).await?;
             ensure_route_targets_valid(targets)?;
             self.ensure_new_targets_available(&current.targets, targets)
                 .await?;
@@ -120,6 +124,20 @@ impl<'a> RouteModule<'a> {
             self.ensure_thinking_controls_representable(targets).await?;
         }
         self.change_record(route_id, input).await
+    }
+
+    async fn ensure_rpm_bindings(&self, targets: &[CreateTarget]) -> anyhow::Result<()> {
+        let value = self
+            .gw
+            .storage
+            .settings()
+            .get(crate::rpm::SETTINGS_KEY)
+            .await?;
+        let config = crate::rpm::RpmConfig::from_setting(value.as_deref())?;
+        for target in targets {
+            config.validate_binding(target.rpm_pool_id.as_deref())?;
+        }
+        Ok(())
     }
 
     async fn ensure_new_targets_available(
@@ -270,6 +288,7 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -283,6 +302,7 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map: Vec::new(),
                 }
             }));
@@ -394,6 +414,7 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(first_token_timeout_ms),
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(target_cooldown_ms),
+                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 };
                 ensure_route_targets_valid(std::slice::from_ref(&target))?;
@@ -465,6 +486,7 @@ impl<'a> RouteModule<'a> {
                     balance: Some("traffic_equalization".into()),
                     default_thinking_level: None,
                     targets: vec![CreateTarget {
+                        rpm_pool_id: None,
                         provider_id,
                         model: Some(provider_model_id),
                         enabled: true,
@@ -495,6 +517,7 @@ impl<'a> RouteModule<'a> {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                rpm_pool_id: target.rpm_pool_id.clone(),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
@@ -506,6 +529,7 @@ impl<'a> RouteModule<'a> {
             first_token_timeout_ms: Some(first_token_timeout_ms),
             target_retry_budget: Some(target_retry_budget),
             target_cooldown_ms: Some(target_cooldown_ms),
+            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         });
         self.change(
@@ -544,6 +568,7 @@ impl<'a> RouteModule<'a> {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                rpm_pool_id: target.rpm_pool_id.clone(),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
@@ -647,6 +672,7 @@ fn route_targets_for_update(route: &RouteConfig) -> Vec<CreateTarget> {
             first_token_timeout_ms: Some(target.first_token_timeout_ms),
             target_retry_budget: Some(target.target_retry_budget),
             target_cooldown_ms: Some(target.target_cooldown_ms),
+            rpm_pool_id: target.rpm_pool_id.clone(),
             thinking_level_map: target.thinking_level_map.clone(),
         })
         .collect()

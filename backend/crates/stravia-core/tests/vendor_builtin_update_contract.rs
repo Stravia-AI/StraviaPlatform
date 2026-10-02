@@ -291,6 +291,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("fixture-model".into()),
                 enabled: true,
@@ -308,7 +309,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
         .create_api_key(CreateApiKey {
             key: None,
             name: "Builtin update regression".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

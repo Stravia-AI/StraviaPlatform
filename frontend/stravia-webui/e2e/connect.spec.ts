@@ -19,7 +19,7 @@ function key(id: string, overrides: Partial<ApiKey> = {}): ApiKey {
     id,
     name: id,
     key: `sk-isolated-${id}`,
-    concurrency_limit: null,
+    rpm_limit: null,
     is_enabled: true,
     mcp_access_enabled: false,
     transparent_injection_enabled: false,

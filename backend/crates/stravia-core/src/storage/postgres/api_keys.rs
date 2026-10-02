@@ -38,12 +38,12 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         sqlx::query(
-            "INSERT INTO api_keys (id, token, name, concurrency_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::timestamptz)",
+            "INSERT INTO api_keys (id, token, name, rpm_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::timestamptz)",
         )
         .bind(&id)
         .bind(&key)
         .bind(input.name.trim())
-        .bind(input.concurrency_limit)
+        .bind(input.rpm_limit)
         .bind(input.mcp_access_enabled)
         .bind(input.transparent_injection_enabled)
         .bind(input.inject_media_understanding)
@@ -65,7 +65,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
                 .context("api key not found for update")?;
         let name = input.name.unwrap_or(current.name);
         let key = input.key.unwrap_or(current.token);
-        let concurrency_limit = input.concurrency_limit.unwrap_or(current.concurrency_limit);
+        let rpm_limit = input.rpm_limit.unwrap_or(current.rpm_limit);
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
         let mcp_access_enabled = input
             .mcp_access_enabled
@@ -83,11 +83,11 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let expires_at = input.expires_at.or(current.expires_at);
 
         sqlx::query(
-            "UPDATE api_keys SET token=$1, name=$2, concurrency_limit=$3, is_enabled=$4, mcp_access_enabled=$5, transparent_injection_enabled=$6, inject_media_understanding=$7, inject_web_search=$8, inject_media_generation=$9, expires_at=NULLIF($10, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$11",
+            "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, is_enabled=$4, mcp_access_enabled=$5, transparent_injection_enabled=$6, inject_media_understanding=$7, inject_web_search=$8, inject_media_generation=$9, expires_at=NULLIF($10, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$11",
         )
         .bind(key)
         .bind(name.trim())
-        .bind(concurrency_limit)
+        .bind(rpm_limit)
         .bind(is_enabled)
         .bind(mcp_access_enabled)
         .bind(transparent_injection_enabled)
@@ -174,7 +174,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
             ),
         >(
-            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1",
         )
         .bind(raw_key)
         .fetch_optional(&self.pool)
@@ -186,7 +186,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -196,7 +196,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -220,7 +220,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
             ),
         >(
-            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, concurrency_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -231,7 +231,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -241,7 +241,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 name,
                 is_enabled,
                 expires_at,
-                concurrency_limit,
+                rpm_limit,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,

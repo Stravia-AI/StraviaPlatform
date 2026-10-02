@@ -202,6 +202,7 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("upstream-model".into()),
                 enabled: true,
@@ -291,6 +292,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
     let route = admin
@@ -372,6 +374,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -528,6 +531,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -577,6 +581,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
     let input = |target: CreateTarget| CreateRoute {
@@ -703,6 +708,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
         targets: vec![CreateTarget {
+            rpm_pool_id: None,
             provider_id: provider.id.clone(),
             model: Some("upstream-model".into()),
             enabled: true,
@@ -785,6 +791,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             balance: None,
 
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("upstream-model".into()),
                 enabled: true,
@@ -814,6 +821,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("missing-model".into()),
                 enabled: true,
@@ -881,6 +889,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("effort-model".into()),
                 enabled: true,
@@ -987,6 +996,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("max-effort-model".into()),
                 enabled: true,
@@ -1070,6 +1080,7 @@ async fn create_toggle_route(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some(model.into()),
                 enabled: true,
@@ -1247,6 +1258,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             balance: None,
 
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("custom-toggle-model".into()),
                 enabled: true,
@@ -1341,6 +1353,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("gemini-effort-model".into()),
                 enabled: true,
@@ -1409,6 +1422,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
 
             targets: vec![
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: provider.id.clone(),
                     model: Some("wide-effort-model".into()),
                     enabled: true,
@@ -1419,6 +1433,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: provider.id,
                     model: Some("narrow-effort-model".into()),
                     enabled: true,
@@ -1486,6 +1501,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some("toggle-model".into()),
                 enabled: true,

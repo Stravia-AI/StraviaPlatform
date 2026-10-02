@@ -77,7 +77,7 @@ impl TestHarness {
             .create_api_key(CreateApiKey {
                 key: None,
                 name: "Capability contract owner".into(),
-                concurrency_limit: None,
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
@@ -120,7 +120,7 @@ impl TestHarness {
             .create_api_key(CreateApiKey {
                 key: None,
                 name: name.into(),
-                concurrency_limit: None,
+                rpm_limit: None,
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
@@ -491,6 +491,7 @@ async fn create_route(
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(0),
+                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -538,13 +539,16 @@ async fn terminal_search(
     previous_turn_id: Option<SearchTurnId>,
     cancellation: CancellationToken,
 ) -> WebSearchEvent {
+    // Keep absolute deadlines on the Tokio clock used by the cooldown test.
+    // After virtual advancement, a wall-clock deadline is already behind Tokio's
+    // timer clock and Deadline::wait can repeatedly wake without yielding.
     terminal_search_with_deadline(
         gateway,
         principal,
         query,
         previous_turn_id,
         cancellation,
-        Instant::now() + Duration::from_secs(30),
+        (tokio::time::Instant::now() + Duration::from_secs(30)).into_std(),
     )
     .await
 }
@@ -860,6 +864,116 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
     assert!(eligible.iter().any(|route| {
         route.model_id == ineligible_model_route.model_id.as_str() && !route.available
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_search_half_open_probe_sends_once_and_recovers_the_target() -> anyhow::Result<()>
+{
+    let harness = TestHarness::new().await?;
+    install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;
+    let upstream = LocalUpstream::start().await?;
+    let provider = create_provider(
+        &harness.gateway,
+        "Half-open search",
+        "fixture.capability-search",
+        &upstream.url,
+        "fixture-search",
+    )
+    .await?;
+    let route = harness
+        .gateway
+        .admin()
+        .create_model(CreateRoute {
+            model_id: "half-open-search".into(),
+            display_name: None,
+            balance: None,
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: None,
+                enabled: true,
+                priority: Some(0),
+                first_token_timeout_ms: None,
+                target_retry_budget: Some(0),
+                target_cooldown_ms: Some(60_000),
+                rpm_pool_id: None,
+                thinking_level_map: Vec::new(),
+            }],
+            default_thinking_level: None,
+        })
+        .await?;
+    configure_external_search(&harness.gateway, &route.model_id).await?;
+    upstream
+        .push_json(
+            "/search",
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":{"message":"controlled outage"}}),
+        )
+        .await;
+    upstream
+        .push_json(
+            "/search",
+            StatusCode::OK,
+            search_response("Probe recovered [sc:fixture-source]"),
+        )
+        .await;
+    upstream
+        .push_json(
+            "/search",
+            StatusCode::OK,
+            search_response("Healthy again [sc:fixture-source]"),
+        )
+        .await;
+    let principal = Principal::new(harness.key_id.clone());
+    failed_search(
+        terminal_search(
+            &harness.gateway,
+            principal.clone(),
+            "outage",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    failed_search(
+        terminal_search(
+            &harness.gateway,
+            principal.clone(),
+            "still cooling",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    assert_eq!(upstream.call_count("/search").await, 1);
+    // Search revalidation and real HTTP need live timers. Pause only to move
+    // the cooldown clock, not while awaiting those operations.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    tokio::time::resume();
+    let probe = completed_search(
+        terminal_search(
+            &harness.gateway,
+            principal.clone(),
+            "probe",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    assert!(probe.report.answer.contains("Probe recovered"));
+    let healthy = completed_search(
+        terminal_search(
+            &harness.gateway,
+            principal,
+            "normal",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    assert!(healthy.report.answer.contains("Healthy again"));
+    assert_eq!(upstream.call_count("/search").await, 3);
     Ok(())
 }
 
@@ -2274,7 +2388,7 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
         .create_api_key(CreateApiKey {
             key: None,
             name: "Previous builtin capability owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -2478,7 +2592,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
         .create_api_key(CreateApiKey {
             key: None,
             name: "Dedicated takeover owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -2663,7 +2777,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
         .create_api_key(CreateApiKey {
             key: None,
             name: "Unaffected base inference owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

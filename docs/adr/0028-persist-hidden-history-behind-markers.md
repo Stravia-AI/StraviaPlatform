@@ -28,7 +28,7 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 - Platform Tool Execution 使用数据库条件更新原子 claim和持久 owner lease；其他实例只等待。进程崩溃或 owner lease 失联时，`running` 转为失败 tool result，向模型说明执行中断并允许模型重新请求；Stravia 不自动接管或重放可能已产生副作用的调用。
 - 每个 Platform Tool 在注册元数据声明既有执行上限，未声明时使用全局默认；execution record持久化绝对 deadline。Marker 发布后 execution 独立于原请求和后续 waiter cancellation。后台执行沿用创建时授权，不新增运行中权限复查。
 - 后续请求等待 Platform execution时不消耗模型执行的 300 秒期限；rendezvous 完成后重新开始正常执行期限。等待连接被外部关闭只移除该 waiter，不取消共享 execution。
-- 后台 execution继承 R1 的 Principal Concurrency Limit名额直到 terminal。匹配 Marker 的后续请求可以先认证并等待；execution terminal释放名额后，后续请求再正常竞争执行名额。
+- 后台 execution 保留创建请求 R1 的 RootRequest 上下文，而非继承并发 lease；内部模型发送仍经过上游 RPM Pool，累计等待与冷却额外尝试不因后台化重置。匹配 Marker 的后续客户端请求是独立根请求，按 API Key Root RPM 准入后等待 rendezvous；execution terminal 不释放任何入口额度。此项替换原有继承 Principal Concurrency Limit 名额的约定，见 [ADR-0015 的替代决定](0015-replace-api-key-rate-limits-with-principal-concurrency-admission.md)。
 - 只有 Platform Tool、没有 client tool 时，在同一客户端 stream输出 Marker，等待 execution完成后继续下一 Model Turn；不强制客户端创建额外请求。
 
 ## Streaming

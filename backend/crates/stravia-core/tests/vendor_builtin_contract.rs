@@ -242,6 +242,7 @@ async fn provider_route_and_key(
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
                 model: Some(upstream_model.to_string()),
                 enabled: true,
@@ -259,7 +260,7 @@ async fn provider_route_and_key(
         .create_api_key(CreateApiKey {
             key: None,
             name: format!("{name} key"),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
@@ -2083,6 +2084,7 @@ async fn deepseek_builtin_applies_thinking_and_tool_history_on_the_real_wire() -
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map,
                 }]),
                 ..Default::default()
@@ -2643,6 +2645,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
+                rpm_pool_id: None,
                 provider_id: provider.id,
                 model: Some("claude-opus-4.8".into()),
                 enabled: true,
@@ -2660,7 +2663,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
         .create_api_key(CreateApiKey {
             key: None,
             name: "Devin contract key".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,

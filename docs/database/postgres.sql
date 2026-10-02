@@ -13,6 +13,7 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -106,12 +107,12 @@ CREATE TABLE public.api_keys (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     mcp_access_enabled boolean DEFAULT false NOT NULL,
-    concurrency_limit integer,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
     inject_web_search boolean DEFAULT false NOT NULL,
     inject_media_generation boolean DEFAULT false NOT NULL,
-    CONSTRAINT api_keys_concurrency_limit_check CHECK ((concurrency_limit > 0))
+    rpm_limit integer,
+    CONSTRAINT api_keys_rpm_limit_check CHECK (((rpm_limit IS NULL) OR (rpm_limit > 0)))
 );
 
 
@@ -310,6 +311,7 @@ CREATE TABLE public.model_backends (
     target_retry_budget integer DEFAULT 5 NOT NULL,
     target_cooldown_ms bigint DEFAULT 120000 NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
+    rpm_pool_id text,
     CONSTRAINT model_backends_cooldown_contract CHECK ((target_cooldown_ms >= 0)),
     CONSTRAINT model_backends_first_token_timeout_contract CHECK ((first_token_timeout_ms >= 0)),
     CONSTRAINT model_backends_model_nonblank CHECK (((model IS NULL) OR (btrim(model) <> ''::text))),

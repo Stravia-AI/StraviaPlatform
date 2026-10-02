@@ -38,6 +38,7 @@ struct TargetRow {
     model_id: String,
     provider_id: String,
     model: Option<String>,
+    rpm_pool_id: Option<String>,
     enabled: bool,
     priority: i32,
     first_token_timeout_ms: i64,
@@ -61,6 +62,7 @@ impl TargetRow {
             first_token_timeout_ms: self.first_token_timeout_ms,
             target_retry_budget: self.target_retry_budget,
             target_cooldown_ms: self.target_cooldown_ms,
+            rpm_pool_id: self.rpm_pool_id,
             created_at: self.created_at,
             thinking_level_map: self.thinking_level_map.0,
         }
@@ -113,7 +115,7 @@ impl SqliteRouteStore {
         route_storage_id: &str,
     ) -> anyhow::Result<Vec<TargetConfig>> {
         Ok(sqlx::query_as::<_, TargetRow>(
-            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&mut *connection)
@@ -262,7 +264,7 @@ impl RouteStore for SqliteRouteStore {
 
         if let Some(targets) = route.targets.as_ref() {
             let existing = sqlx::query_as::<_, TargetRow>(
-                "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
+                "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
             )
             .bind(&route_storage_id)
             .fetch_all(&mut *tx)
@@ -289,7 +291,7 @@ impl RouteStore for SqliteRouteStore {
                     .map(|row| row.id.clone())
                     .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                 sqlx::query(
-                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider_id = excluded.provider_id, model = excluded.model, enabled = excluded.enabled, priority = excluded.priority, first_token_timeout_ms = excluded.first_token_timeout_ms, target_retry_budget = excluded.target_retry_budget, target_cooldown_ms = excluded.target_cooldown_ms, thinking_level_map = excluded.thinking_level_map",
+                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map, rpm_pool_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider_id = excluded.provider_id, model = excluded.model, enabled = excluded.enabled, priority = excluded.priority, first_token_timeout_ms = excluded.first_token_timeout_ms, target_retry_budget = excluded.target_retry_budget, target_cooldown_ms = excluded.target_cooldown_ms, thinking_level_map = excluded.thinking_level_map, rpm_pool_id = excluded.rpm_pool_id",
                 )
                 .bind(id)
                 .bind(&route_storage_id)
@@ -313,6 +315,7 @@ impl RouteStore for SqliteRouteStore {
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
                 )
                 .bind(sqlx::types::Json(&target.thinking_level_map))
+                .bind(target.rpm_pool_id.as_deref())
                 .execute(&mut *tx)
                 .await?;
             }
@@ -351,6 +354,7 @@ mod tests {
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
+            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         }
     }
@@ -473,6 +477,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: Some(vec![crate::db::models::CreateTarget {
+                    rpm_pool_id: None,
                     provider_id: "research-provider".into(),
                     model: None,
                     enabled: true,

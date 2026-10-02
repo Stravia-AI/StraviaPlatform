@@ -239,7 +239,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
             name: "Snapshot other owner".into(),
-            concurrency_limit: None,
+            rpm_limit: None,
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,

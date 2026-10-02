@@ -146,16 +146,30 @@ impl Gateway {
                 let parallel_safe = job.execution.parallel_safe();
                 let (raw_tx, raw_result) = tokio::sync::oneshot::channel();
                 let (transformed_result, transformed_rx) = tokio::sync::oneshot::channel();
-                self.lifecycle.spawn(async move {
-                    let raw = if parallel_safe {
-                        let _permit = execution_gate.read().await;
-                        Self::execute_history_marker_job(job).await
-                    } else {
-                        let _permit = execution_gate.write().await;
-                        Self::execute_history_marker_job(job).await
-                    };
-                    if raw_tx.send(raw.clone()).is_err() {
-                        let result = raw.result.clone();
+                let root_request = crate::rpm::current_root_request();
+                self.lifecycle
+                    .spawn(crate::rpm::scope_root_request(root_request, async move {
+                        let raw = if parallel_safe {
+                            let _permit = execution_gate.read().await;
+                            Self::execute_history_marker_job(job).await
+                        } else {
+                            let _permit = execution_gate.write().await;
+                            Self::execute_history_marker_job(job).await
+                        };
+                        if raw_tx.send(raw.clone()).is_err() {
+                            let result = raw.result.clone();
+                            Self::persist_history_marker_result(
+                                store.as_ref(),
+                                &principal,
+                                &task_marker_reference,
+                                &owner_id,
+                                raw,
+                                result,
+                            )
+                            .await;
+                            return;
+                        }
+                        let result = transformed_rx.await.unwrap_or_else(|_| raw.result.clone());
                         Self::persist_history_marker_result(
                             store.as_ref(),
                             &principal,
@@ -165,19 +179,7 @@ impl Gateway {
                             result,
                         )
                         .await;
-                        return;
-                    }
-                    let result = transformed_rx.await.unwrap_or_else(|_| raw.result.clone());
-                    Self::persist_history_marker_result(
-                        store.as_ref(),
-                        &principal,
-                        &task_marker_reference,
-                        &owner_id,
-                        raw,
-                        result,
-                    )
-                    .await;
-                });
+                    }));
                 StartedHistoryMarkerExecution {
                     marker_reference,
                     raw_result,
@@ -242,8 +244,10 @@ impl Gateway {
         executions: Vec<StartedHistoryMarkerExecution>,
         mut run: hook::InferenceRun,
     ) {
-        self.lifecycle.spawn(async move {
-            Self::finish_history_marker_executions(executions, &mut run).await;
-        });
+        let root_request = crate::rpm::current_root_request();
+        self.lifecycle
+            .spawn(crate::rpm::scope_root_request(root_request, async move {
+                Self::finish_history_marker_executions(executions, &mut run).await;
+            }));
     }
 }

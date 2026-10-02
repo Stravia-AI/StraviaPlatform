@@ -201,12 +201,12 @@ impl RouteModule<'_> {
     pub(crate) async fn reload_cache(&self) -> anyhow::Result<()> {
         // Provider 删除会级联移除价格；路由重载失败也不能保留旧定价。
         self.gw.route_policy_state.clear_pricing();
-        self.gw
-            .model_cache
-            .write()
-            .await
-            .reload(self.gw.storage.routes())
-            .await
+        let mut cache = self.gw.model_cache.write().await;
+        cache.reload(self.gw.storage.routes()).await?;
+        // Publish the new route snapshot and its admission version under the same
+        // write guard. Send admission holds a read guard through the quota debit.
+        self.gw.rpm_admission.targets_changed();
+        Ok(())
     }
 
     pub(super) async fn refresh_route_client_capabilities(

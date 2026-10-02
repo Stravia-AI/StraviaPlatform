@@ -209,7 +209,11 @@ pub(super) fn model_turn_error_status(
         "cancelled" => StatusCode::from_u16(499).expect("valid cancellation status"),
         "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
         "model_not_found" | "STRAVIA_NOT_FOUND" => StatusCode::NOT_FOUND,
-        "model_unavailable" | "provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        "model_unavailable" | "provider_unavailable" | "target_ineligible" => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        "target_rpm_exceeded" => StatusCode::TOO_MANY_REQUESTS,
+        "target_rpm_queue_full" => StatusCode::SERVICE_UNAVAILABLE,
         "input_modality_unsupported"
         | "thinking_level_unsupported"
         | "compaction_unsupported"
@@ -232,6 +236,20 @@ pub(super) fn model_turn_error_response(
     error: stravia_runtime_contract::model_turn::ModelTurnError,
 ) -> Response {
     let status = model_turn_error_status(&error);
+    if matches!(
+        error.code.as_str(),
+        "target_rpm_exceeded" | "target_rpm_queue_full"
+    ) {
+        let mut response = coded_error_response(status, &error.code, &error.message);
+        if let Some(seconds) = error.retry_after_secs {
+            response.headers_mut().insert(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_str(&seconds.to_string())
+                    .expect("valid seconds"),
+            );
+        }
+        return response;
+    }
     if let Some(body) = error.upstream_body {
         let mut response = (status, axum::Json(body)).into_response();
         response

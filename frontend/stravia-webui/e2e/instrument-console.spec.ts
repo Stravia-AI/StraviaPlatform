@@ -331,25 +331,16 @@ test('API Key editor keeps compact controls and help inside the editor', async (
   expect(nameBox?.width ?? 0).toBeGreaterThan(8)
   expect(nameBox?.width ?? 0).toBeGreaterThan((overlayBox?.width ?? 0) * 0.8)
 
-  const concurrency = page.locator('#api-key-concurrency-limit')
+  const rpm = page.locator('#api-key-rpm-limit')
   const expiresAt = page.getByLabel('Expires at')
-  await expect(concurrency).toBeVisible()
+  await expect(rpm).toBeVisible()
   await expect(expiresAt).toBeVisible()
-  const concurrencyBox = await concurrency.boundingBox()
+  const rpmBox = await rpm.boundingBox()
   const expiresAtBox = await expiresAt.boundingBox()
-  expect(concurrencyBox?.width ?? 0).toBeLessThan(nameBox?.width ?? 0)
-  expect(Math.abs((concurrencyBox?.width ?? 0) - (expiresAtBox?.width ?? 0))).toBeLessThan(1)
-  expect(Math.abs((concurrencyBox?.y ?? 0) - (expiresAtBox?.y ?? 0))).toBeLessThan(1)
-
-  await expect(
-    page.getByText(
-      'Leave empty for unlimited. Each Proxy request and MCP tools/call uses one slot; nested work reuses it.',
-    ),
-  ).toBeHidden()
-  const help = overlay
-    .getByRole('group')
-    .filter({ has: concurrency })
-    .getByRole('button', { name: 'More about this field' })
+  expect(rpmBox?.width ?? 0).toBeLessThan(nameBox?.width ?? 0)
+  expect(Math.abs((rpmBox?.width ?? 0) - (expiresAtBox?.width ?? 0))).toBeLessThan(1)
+  expect(Math.abs((rpmBox?.y ?? 0) - (expiresAtBox?.y ?? 0))).toBeLessThan(1)
+  const help = overlay.getByRole('group').filter({ has: rpm }).getByRole('button', { name: 'More about this field' })
   await help.hover()
   await expect(page.locator('[data-slot="tooltip-content"]')).toBeVisible()
 
@@ -371,7 +362,7 @@ test('deleting an API Key quotes the name on a solid destructive confirm', async
             id: 'key-gpt',
             key: 'sk-****abcd',
             name: 'GPT key',
-            concurrency_limit: null,
+            rpm_limit: null,
             is_enabled: true,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
@@ -459,7 +450,7 @@ async function stubConnectableConfiguration(page: Page): Promise<void> {
             id: 'key-client',
             key: 'sk-overview-client',
             name: 'Client key',
-            concurrency_limit: null,
+            rpm_limit: null,
             is_enabled: true,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,

@@ -417,6 +417,7 @@ impl RouteStore for MemoryStorage {
                     target_cooldown_ms: target
                         .target_cooldown_ms
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
+                    rpm_pool_id: target.rpm_pool_id,
                     created_at: previous
                         .map(|current| current.created_at.clone())
                         .unwrap_or_else(now_rfc3339),
@@ -1044,6 +1045,7 @@ mod tests {
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
+            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         }
     }
