@@ -21,5 +21,5 @@ tracing = { workspace = true }
 chrono = { workspace = true, features = ["clock", "std"] }
 
 [dev-dependencies]
-jsonschema = { version = "0.58.1", default-features = false }
+jsonschema = { workspace = true }
 sha2 = { workspace = true }

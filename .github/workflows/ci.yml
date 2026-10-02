@@ -180,7 +180,7 @@ jobs:
 
       - name: Compile Rust unit tests
         if: steps.unit-lane.outputs.run_expensive == 'true'
-        run: cargo test --locked --workspace --exclude stravia-desktop --no-run
+        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --no-run
 
       # The cache action reads this at job teardown, even if later tests fail.
       - name: Preserve successfully compiled dependencies
@@ -194,7 +194,7 @@ jobs:
 
       - name: Run Rust compatibility tests
         if: matrix.toolchain != env.RUST_VERSION && steps.unit-lane.outputs.run_expensive == 'true' && steps.unit-lane.outputs.stable_differs == 'true'
-        run: cargo test --locked --workspace --exclude stravia-desktop
+        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture
 
   web-access-browser:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none' }}

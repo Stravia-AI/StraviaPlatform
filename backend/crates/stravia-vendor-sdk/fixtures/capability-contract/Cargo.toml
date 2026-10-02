@@ -1,20 +1,18 @@
 [package]
 name = "stravia-vendor-capability-contract-fixture"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-semver = "1"
-serde = "1"
-serde_json = "1"
-stravia-vendor-sdk = { path = "../.." }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stravia-vendor-sdk.workspace = true
 
 [build-dependencies]
-serde = "1"
-serde_json = "1"
-
-[workspace]
+serde.workspace = true
+serde_json.workspace = true

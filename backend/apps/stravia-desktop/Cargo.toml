@@ -38,20 +38,24 @@ tauri-plugin-process = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 tempfile = { workspace = true }
 url = { workspace = true }
-tauri-plugin-wdio = { version = "1", optional = true }
-tauri-plugin-wdio-webdriver = { version = "1", optional = true }
+# 只复用共享嵌入库的压缩特性；不会启用 stravia-server 的 embed-webui。
+rust-embed = { workspace = true }
+tauri-plugin-wdio = { workspace = true, optional = true }
+tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { workspace = true, features = ["macos-private-api"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 # The WebDriver plugin imports CreateStreamOnHGlobal without enabling its windows feature.
-windows = { version = "0.61", optional = true, features = ["Win32_System_Com_StructuredStorage"] }
+windows = { workspace = true, optional = true, features = ["Win32_System_Com_StructuredStorage"] }
 
 [build-dependencies]
 tauri-build = { workspace = true }
+# 与 Server 的共享宿主依赖取并集，避免反向切换重新编译过程宏依赖。
+time = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
 reqwest = { workspace = true }

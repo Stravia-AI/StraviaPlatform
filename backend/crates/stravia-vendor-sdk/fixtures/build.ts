@@ -6,6 +6,11 @@ const fixtures = dirname(fileURLToPath(import.meta.url))
 const root = resolve(fixtures, '../../../..')
 const target = resolve(root, 'target/vendor-fixture-build')
 const output = resolve(root, 'target/vendor-test-fixtures')
+const fixturePackages = {
+  'capability-contract': 'stravia-vendor-capability-contract-fixture',
+  'lifecycle-contract': 'stravia-vendor-lifecycle-contract-fixture',
+  'management-contract': 'stravia-vendor-management-contract-fixture',
+} as const
 const bundled = await Bun.file(resolve(root, 'target/vendor-plugins/manifest.json')).json() as Array<{
   vendor_id: string
   version: string
@@ -24,10 +29,11 @@ const lifecycle = [
   ['lifecycle-base-incompatible', 'base', 'openai', 'fallback', '0.0.0', '2', '1', 'Stravia Builtin Team', 'openai-compatible'],
 ] as const
 
-async function buildFixture(directory: string, library: string, name: string, env: Record<string, string>) {
+async function buildFixture(directory: keyof typeof fixturePackages, library: string, name: string, env: Record<string, string>) {
   const child = Bun.spawn([
     'cargo', 'build', '--locked', '--release', '--target', 'wasm32-wasip2',
-    '--target-dir', target, '--manifest-path', resolve(fixtures, directory, 'Cargo.toml'),
+    '--target-dir', target, '--manifest-path', resolve(root, 'Cargo.toml'),
+    '--package', fixturePackages[directory],
   ], {
     cwd: root,
     env: { ...process.env, ...env },

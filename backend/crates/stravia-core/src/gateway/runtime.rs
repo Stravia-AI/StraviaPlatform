@@ -123,15 +123,19 @@ impl Gateway {
             0,
             None,
         );
+        // 直连路径不继承环境或系统代理；显式代理使用独立客户端。
         let http_client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
         // 供应商操作的共享可续期 deadline 管理整个操作；reqwest 总超时
         // 不随流式活动续期，会截断仍持续输出的长响应。
         let vendor_http_client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let vendor_websocket_client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .http1_only()
             .build()?;
@@ -877,6 +881,111 @@ fn to_sql_backend_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_and_explicit_vendor_clients_ignore_ambient_proxy() -> anyhow::Result<()> {
+        const CHILD_ENV: &str = "STRAVIA_TEST_DIRECT_PROXY_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // 环境代理在子进程中固定，避免修改全局环境污染并行测试。
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let proxy_url = format!("http://{}", listener.local_addr()?);
+            let app = axum::Router::new().fallback(|| async { "ambient proxy" });
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let test_name = std::thread::current()
+                .name()
+                .context("test thread has no name")?
+                .to_owned();
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .env("NO_PROXY", "")
+                .env("no_proxy", "");
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                command.env(key, &proxy_url);
+            }
+            let output = command.output().await;
+            server.abort();
+            let output = output?;
+            anyhow::ensure!(
+                output.status.success(),
+                "isolated proxy regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+
+        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin = format!("http://{}", origin_listener.local_addr()?);
+        let origin_server = tokio::spawn(async move {
+            axum::serve(
+                origin_listener,
+                axum::Router::new().fallback(|| async { "direct origin" }),
+            )
+            .await
+        });
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let explicit = format!("http://{}", proxy_listener.local_addr()?);
+        let explicit_server = tokio::spawn(async move {
+            axum::serve(
+                proxy_listener,
+                axum::Router::new().fallback(|| async { "explicit proxy" }),
+            )
+            .await
+        });
+        let directory = tempfile::tempdir()?;
+        let gateway = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                catalog_base_url: None,
+                ..Default::default()
+            },
+            Arc::new(crate::storage::MemoryStorage::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        )
+        .await?;
+        let result = async {
+            for http1 in [false, true] {
+                let direct = gateway
+                    .client_for_vendor(&EffectiveVendorProxy::Direct { use_proxy: false }, http1)
+                    .await?;
+                assert_eq!(
+                    direct.get(&origin).send().await?.text().await?,
+                    "direct origin"
+                );
+                let selected = gateway
+                    .client_for_vendor(
+                        &EffectiveVendorProxy::Explicit {
+                            proxy_url: explicit.clone(),
+                            force_http1: http1,
+                        },
+                        http1,
+                    )
+                    .await?;
+                assert_eq!(
+                    selected.get(&origin).send().await?.text().await?,
+                    "explicit proxy"
+                );
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        gateway.shutdown().await;
+        origin_server.abort();
+        explicit_server.abort();
+        result
+    }
 
     #[tokio::test]
     async fn vendor_stream_continues_past_three_hundred_seconds() -> anyhow::Result<()> {

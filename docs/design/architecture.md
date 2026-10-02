@@ -196,6 +196,18 @@ stravia/
 ```
 
 
+**开发构建与调试：**
+
+所有 Rust crate（包括三个 Wasm 测试夹具）的包版本和依赖版本统一声明在根 `Cargo.toml` 的 `workspace.package` 与 `workspace.dependencies`，crate 清单通过 `workspace = true` 继承，只补充自身的特性、可选依赖与目标平台条件。全工作区使用根 `Cargo.lock`；上游仍要求不同不兼容版本时，在根使用明确的多版本依赖键，不在 crate 内另写版本，也不强制覆盖第三方的版本约束。Wasm 夹具通过 `task build:vendor-fixtures` 定向构建，常规 host 检查和单元测试不编译这些 Wasm 专用包。
+
+根 `Cargo.toml` 的开发配置保留工作区 crate 的完整调试信息与增量编译；常规测试继承这一配置。第三方依赖默认使用 `debug = 1`，保留文件、行号与模块级信息，但不生成完整的类型与局部变量信息，以减少 PDB 大小和增量构建成本。依赖的 `opt-level = 3` 与 release 配置保持不变；原生构建所需的个别符号例外以根配置为准。
+
+需要调试某个依赖内部的变量时，可使用包级覆盖，例如 `cargo build -p stravia-server --config 'profile.dev.package.tokio.debug=2'`；依赖仍处于优化构建，部分变量可能被优化掉。工具链、`CARGO_HOME`、profile、features 或符号配置变化会使部分编译产物失效，首次重新构建不代表之后的增量耗时。日常反馈应保持构建环境与配置一致，不通过清空 `target` 提速。
+
+Desktop 与独立 Server 的清单对齐共享依赖的运行期、宿主构建与过程宏特性，以及各平台已共享的底层系统绑定，减少切换入口时的依赖变体。Server 的 `embed-webui` 仍是独立特性：Desktop 不启用 Server 的 WebUI 嵌入，也不会把 Tauri、WebView 或桌面插件引入独立 Server。Desktop 独有的构建路径可以保留自己的依赖变体；这些不是双方都需要编译的单元。首次特性对齐需要重编扩大特性的依赖，之后的复用仍要求 profile、目标平台和编译环境一致。修改共享 Core 源码仍会更新两端的相关工作区产物，不会因此反向重编未变化的第三方依赖。
+
+共享 `reqwest` 启用与 Desktop 相同的 TLS 和系统代理编译特性，但默认 Gateway、Provider Catalog 与 S3 客户端显式直连，不继承环境变量或操作系统代理。Provider 关闭 `use_proxy` 时保持直连；开启时仍由应用配置选择显式代理客户端。编译特性对齐不改变这个出站选择，也不移除现有 TLS provider 或 JSON 默认递归深度保护。
+
 **依赖关系：**
 
 ```mermaid

@@ -27,6 +27,7 @@ pub struct HttpCatalogSource {
 impl HttpCatalogSource {
     pub fn new(base_url: Option<String>) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(FETCH_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;

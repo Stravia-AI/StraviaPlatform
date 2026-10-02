@@ -64,6 +64,7 @@ impl LocalArtifactStore {
 
     fn s3_client() -> Result<reqwest::Client, ArtifactError> {
         reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))

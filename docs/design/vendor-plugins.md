@@ -134,6 +134,8 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 
 ### 实现与验证入口
 
+- 所有 crate（包括 Wasm 契约 fixture）的 package 版本与依赖统一由根 `Cargo.toml` 的 workspace 声明，依赖解析由唯一的根 `Cargo.lock` 管理；子清单继承 workspace，不维护独立版本、依赖版本或锁文件。
+- `stravia-vendor-capability-contract-fixture`、`stravia-vendor-lifecycle-contract-fixture`、`stravia-vendor-management-contract-fixture` 是根 workspace 中的 Wasm 专用工作负载，通过 `task build:vendor-fixtures` 构建，并由既有真实 Component 契约、生命周期及管理回归覆盖。常规 host clippy 与 unit lane（包括测试预编译）显式排除这三个 crate，不在 host 上编译 fixture；unit lane 仍排除 `stravia-desktop`。
 - `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.4.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/`、`stravia-vendor-claudecode/` 等 crate 是 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。

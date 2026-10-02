@@ -41,6 +41,29 @@ url = { workspace = true }
 uuid = { workspace = true }
 rust-embed = { workspace = true, optional = true }
 
+# 仅对齐桌面已启用的共享依赖特性，避免切换入口重编译；不引入桌面运行时。
+bitflags = { workspace = true, features = ["serde"] }
+byteorder = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows 绑定为共享依赖的特性并集，不引入 Tauri 或 WebView。
+windows-sys = { workspace = true, features = ["Win32_Graphics_Gdi", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_System_LibraryLoader", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows = { workspace = true, features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WindowsProgramming", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_Shell_Common", "Win32_UI_TextServices", "Win32_UI_WindowsAndMessaging"] }
+winapi = { workspace = true, features = ["handleapi", "impl-debug", "impl-default", "inaddr", "minwindef", "timezoneapi", "winerror", "winnt", "winreg"] }
+windows-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# GTK 桌面依赖扩大这些已有共享库的目标特性；仅复用底层库，不引入 GTK。
+rustix = { workspace = true, features = ["pipe"] }
+toml_datetime = { workspace = true }
+toml_parser = { workspace = true }
+winnow = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 与桌面复用已有系统绑定的特性并集，不引入 Cocoa/WebView 桌面运行时。
+objc2-core-foundation = { workspace = true, features = ["CFAttributedString", "CFCGTypes", "CFCalendar", "CFCharacterSet", "CFDate", "CFError", "CFFileSecurity", "CFLocale", "CFMachPort", "CFMessagePort", "CFSet", "CFStream", "CFUserNotification", "objc2"] }
+objc2 = { workspace = true, features = ["disable-encoding-assertions", "exception"] }
+
 [dev-dependencies]
 reqwest = { workspace = true }
 tower = { workspace = true }

@@ -7594,25 +7594,32 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "axum",
+ "base64 0.22.1",
  "base64 0.23.1",
+ "byteorder",
  "bytes",
  "chrono",
+ "crc32fast",
  "dashmap",
  "dirs 6.0.0",
+ "foldhash",
  "futures",
  "http-body-util",
  "image",
  "json5",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "log",
  "metrics",
  "metrics-exporter-prometheus",
  "office_oxide",
  "parking_lot",
+ "proc-macro2",
  "rand 0.10.3",
  "rcgen",
  "regex",
+ "regex-automata",
  "reqwest",
  "reqwest-websocket",
  "rmcp",
@@ -7620,9 +7627,11 @@ dependencies = [
  "semver",
  "serde",
  "serde-saphyr",
+ "serde_core",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "stable_deref_trait",
  "stravia-credential-protection",
  "stravia-media",
  "stravia-protocol-codec",
@@ -7647,6 +7656,7 @@ dependencies = [
  "tungstenite 0.28.0",
  "url",
  "uuid",
+ "windows-sys 0.52.0",
  "zip 8.6.0",
  "zstd 0.13.3",
 ]
@@ -7683,6 +7693,7 @@ dependencies = [
  "local-ip-address",
  "parking_lot",
  "reqwest",
+ "rust-embed",
  "serde",
  "serde_json",
  "stravia-core",
@@ -7702,6 +7713,7 @@ dependencies = [
  "tauri-plugin-wdio",
  "tauri-plugin-wdio-webdriver",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7800,13 +7812,18 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
+ "bitflags 2.13.2",
+ "byteorder",
  "chrono",
  "clap",
  "dotenvy",
  "futures",
+ "objc2",
+ "objc2-core-foundation",
  "reqwest",
  "rpassword",
  "rust-embed",
+ "rustix",
  "serde",
  "serde_json",
  "shellexpand",
@@ -7819,12 +7836,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "winapi",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "windows-sys 0.61.2",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -7849,6 +7873,16 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "stravia-vendor-capability-contract-fixture"
+version = "0.3.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "stravia-vendor-sdk",
 ]
 
 [[package]]
@@ -7963,6 +7997,26 @@ dependencies = [
  "stravia-vendor-sdk",
  "url",
  "urlencoding",
+]
+
+[[package]]
+name = "stravia-vendor-lifecycle-contract-fixture"
+version = "0.3.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "stravia-vendor-sdk",
+]
+
+[[package]]
+name = "stravia-vendor-management-contract-fixture"
+version = "0.3.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "stravia-vendor-sdk",
 ]
 
 [[package]]
