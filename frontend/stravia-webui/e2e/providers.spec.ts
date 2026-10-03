@@ -546,6 +546,79 @@ test('OAuth Provider connection view reconnects the saved vendor channel', async
   await expect(page.getByRole('button', { name: 'Sign in again' })).toBeVisible()
 })
 
+test('OAuth service menu reauthorizes without updating the saved connection', async ({ page }) => {
+  const provider = {
+    id: 'menu-oauth-provider',
+    name: 'Expired Codex account',
+    vendor: 'openai-codex',
+    protocol: 'open-responses',
+    base_url: 'https://fixture.invalid/codex',
+    use_proxy: true,
+    channel: 'codex',
+    vendor_options: { workspace: 'keep-existing' },
+    configured_credential_fields: [],
+    credential_status: 'invalid',
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  const providerWrites: string[] = []
+  let bindings = 0
+  let cancellations = 0
+  await page.route('**/api/v1/providers**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (request.method() !== 'GET') providerWrites.push(`${request.method()} ${path}`)
+    if (path === '/providers') {
+      await route.fulfill({ json: { data: [provider] } })
+    } else if (path === `/providers/${provider.id}/oauth/bind`) {
+      bindings += 1
+      if (bindings === 1) {
+        await route.fulfill({ status: 400, json: { error: 'Fixture binding rejected' } })
+        return
+      }
+      provider.credential_status = 'ok'
+      await route.fulfill({ json: { data: null } })
+    } else {
+      await route.fallback()
+    }
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', async (route) => {
+    await route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/cancel', async (route) => {
+    cancellations += 1
+    await route.fulfill({ json: { data: null } })
+  })
+  await page.goto('/providers')
+  await page.getByRole('button', { name: `More actions for ${provider.name}` }).click()
+  const initRequest = page.waitForRequest((request) => request.url().endsWith('/oauth/sessions/init'))
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('menuitem', { name: 'Reauthorize', exact: true }).click()
+  await (await popup).close()
+  expect((await initRequest).postDataJSON()).toMatchObject({
+    provider_id: provider.id,
+    vendor_id: provider.vendor,
+    channel: provider.channel,
+    base_url: provider.base_url,
+    use_proxy: true,
+    options: provider.vendor_options,
+  })
+  await expect.poll(() => bindings).toBe(1)
+  const authorization = page.getByRole('dialog')
+  await expect(authorization.getByRole('alert')).toContainText('Fixture binding rejected')
+  expect(provider.credential_status).toBe('invalid')
+  await authorization.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect.poll(() => bindings).toBe(2)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByRole('status').filter({ hasText: 'Credential invalid' })).toHaveCount(0)
+  expect(providerWrites).toEqual([
+    `POST /providers/${provider.id}/oauth/bind`,
+    `POST /providers/${provider.id}/oauth/bind`,
+  ])
+  expect(cancellations).toBe(0)
+})
+
 test('OAuth Provider connection view saves and binds automatically when authorization completes', async ({ page }) => {
   const provider = {
     id: 'oauth-provider',

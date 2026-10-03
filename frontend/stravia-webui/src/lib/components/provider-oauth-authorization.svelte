@@ -138,7 +138,7 @@ export async function cancel(): Promise<void> {
   }
 }
 
-async function begin(): Promise<void> {
+export async function begin(): Promise<void> {
   if (disabled || starting) return
   if (!vendorId || !channel) {
     toast.error(m.provider_oauth_authorization_unavailable())

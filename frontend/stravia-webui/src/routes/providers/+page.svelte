@@ -6,6 +6,7 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
+import { tick } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
@@ -16,6 +17,7 @@ import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical
 import type { ImageCapabilityDrift, Provider, ProviderDescriptor, Route, VendorChannelDescriptor } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderEditor from '$lib/components/provider-editor.svelte'
+import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
 import RpmManagement from '$lib/components/rpm-management.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -32,6 +34,7 @@ import {
   type DataTableRowPointerEvent,
 } from '$lib/components/ui/data-table'
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
+import * as Dialog from '$lib/components/ui/dialog'
 import * as Empty from '$lib/components/ui/empty'
 import * as Field from '$lib/components/ui/field'
 import { Skeleton } from '$lib/components/ui/skeleton'
@@ -56,6 +59,12 @@ let copyTarget = $state<Provider>()
 let copyOpen = $state(false)
 let appendTargets = $state(false)
 let actingProviderId = $state<string>()
+let reauthorizationTarget = $state<Provider>()
+let reauthorizationOpen = $state(false)
+let reauthorizationSessionId = $state<string>()
+let reauthorizationBinding = $state(false)
+let reauthorizationError = $state('')
+let reauthorization = $state<{ begin: () => Promise<void>; consume: () => void }>()
 
 const providers = $derived(providersQuery.data ?? [])
 const models = $derived(modelsQuery.data ?? [])
@@ -178,6 +187,46 @@ function askCopy(provider: Provider): void {
   copyOpen = true
 }
 
+async function reauthorizeProvider(provider: Provider): Promise<void> {
+  reauthorizationTarget = provider
+  reauthorizationSessionId = undefined
+  reauthorizationError = ''
+  reauthorizationOpen = true
+  await tick()
+  await reauthorization?.begin()
+}
+
+function authorizationChanged(sessionId: string | undefined, ready: boolean): void {
+  reauthorizationSessionId = ready ? sessionId : undefined
+  reauthorizationError = ''
+  if (ready) void bindAuthorization()
+}
+
+async function bindAuthorization(): Promise<void> {
+  const provider = reauthorizationTarget
+  const sessionId = reauthorizationSessionId
+  if (!provider || !sessionId || reauthorizationBinding) return
+  reauthorizationBinding = true
+  reauthorizationError = ''
+  try {
+    await admin.providers.bindOAuth(provider.id, sessionId)
+    reauthorization?.consume()
+    // 先刷新子组件会话状态，避免关闭浮层时把已绑定的会话当作未完成授权取消。
+    await tick()
+    reauthorizationOpen = false
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['providers'] }),
+      queryClient.invalidateQueries({ queryKey: ['provider-allowances'] }),
+      queryClient.invalidateQueries({ queryKey: ['provider-allowance', provider.id] }),
+    ])
+    toast.success(m.providers_reauthorization_complete())
+  } catch (error) {
+    reauthorizationError = localizeBackendErrorMessage(error)
+  } finally {
+    reauthorizationBinding = false
+  }
+}
+
 async function toggleProvider(provider: Provider): Promise<void> {
   actingProviderId = provider.id
   try {
@@ -269,6 +318,13 @@ async function copyProvider(): Promise<void> {
     </DropdownMenu.Trigger>
     <DropdownMenu.Content class="w-52" align="end">
       <DropdownMenu.Group>
+        {#if channel?.auth}
+          <DropdownMenu.Item
+            onSelect={() => void reauthorizeProvider(provider)}
+            disabled={actingProviderId === provider.id || reauthorizationBinding}>
+            {m.providers_reauthorize()}
+          </DropdownMenu.Item>
+        {/if}
         {#if channel?.capabilities.includes('infer')}
           <DropdownMenu.Item onSelect={() => void testProvider(provider)} disabled={actingProviderId === provider.id}>
             {m.providers_test_connection()}
@@ -495,6 +551,46 @@ async function copyProvider(): Promise<void> {
 </div>
 
 <ProviderEditor bind:open={editorOpen} onSaved={providerSaved} />
+
+<Dialog.Root
+  open={reauthorizationOpen}
+  onOpenChange={(open: boolean) => {
+    if (!reauthorizationBinding) reauthorizationOpen = open
+  }}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <Dialog.Title>{m.providers_reauthorize()}</Dialog.Title>
+      <Dialog.Description>{reauthorizationTarget?.name}</Dialog.Description>
+    </Dialog.Header>
+    {#if reauthorizationOpen && reauthorizationTarget}
+      {@const channel = providerChannel(reauthorizationTarget)}
+      {#if channel?.auth && reauthorizationTarget.vendor}
+        <ProviderOAuthAuthorization
+          bind:this={reauthorization}
+          vendorId={reauthorizationTarget.vendor}
+          channel={channel.id}
+          flow={channel.auth.flow}
+          configuration={{
+            provider_id: reauthorizationTarget.id,
+            base_url: reauthorizationTarget.base_url,
+            protocol: reauthorizationTarget.protocol,
+            options: reauthorizationTarget.vendor_options ?? {},
+            credentials: {},
+          }}
+          useProxy={reauthorizationTarget.use_proxy}
+          mode="reconnect"
+          disabled={reauthorizationBinding}
+          onStateChange={authorizationChanged} />
+      {/if}
+      {#if reauthorizationError}
+        <p class="text-sm text-destructive" role="alert">{reauthorizationError}</p>
+        <Button disabled={reauthorizationBinding} onclick={() => void bindAuthorization()}>
+          {m.common_retry()}
+        </Button>
+      {/if}
+    {/if}
+  </Dialog.Content>
+</Dialog.Root>
 
 <AlertDialog.Root bind:open={deleteOpen}>
   {@const references = deleteTarget ? providerReferences(deleteTarget) : []}

@@ -1039,6 +1039,8 @@
   "providers_connect_ai_services_handle_requests_models": "连接用于处理模型请求的 AI 服务。",
   "providers_connected_services": "已连接的服务",
   "providers_credential_invalid": "凭据失效",
+  "providers_reauthorize": "重新授权",
+  "providers_reauthorization_complete": "模型服务已重新授权",
   "providers_connection_saved_but_models_couldn_t_synced": "连接已保存，但无法同步模型",
   "providers_create_disabled_copy_value_so_review_use": "创建 {name} 的禁用副本，确认后再启用。",
   "providers_delete_service": "删除服务…",
