@@ -125,9 +125,17 @@ test('Connect config preview fills the available page height', async ({ page }) 
   await page.goto('/connect')
   const cliPreview = page.getByRole('tabpanel').locator('pre.route-code-plane')
   await expect(cliPreview).toBeVisible()
-  const cliBox = await cliPreview.boundingBox()
-  // 短配置也应撑满输出列：底部贴近页面下缘，而不是停在固定高度上限。
-  expect(cliBox!.y + cliBox!.height).toBeGreaterThan(853 - 80)
+  // 高窗口必须越过旧的 32rem 上限，短配置也应填满剩余空间。
+  for (const height of [853, 1384]) {
+    await page.setViewportSize({ width: 1568, height })
+    await expect
+      .poll(async () => {
+        const mainBox = (await page.getByRole('main').boundingBox())!
+        const previewBox = (await cliPreview.boundingBox())!
+        return mainBox.y + mainBox.height - previewBox.y - previewBox.height
+      })
+      .toBeLessThanOrEqual(24)
+  }
 
   await page.getByRole('tab', { name: 'Code', exact: true }).click()
   await page.locator('#code-model').click()
@@ -135,7 +143,14 @@ test('Connect config preview fills the available page height', async ({ page }) 
   const codePreview = page.getByRole('tabpanel').locator('pre.route-code-plane')
   await expect(codePreview).toBeVisible()
   const codeBox = await codePreview.boundingBox()
-  expect(codeBox!.y + codeBox!.height).toBeGreaterThan(853 - 80)
+  expect(codeBox!.y + codeBox!.height).toBeGreaterThan(1384 - 80)
+
+  await page.setViewportSize({ width: 800, height: 900 })
+  await expect.poll(async () => (await codePreview.boundingBox())!.height).toBeGreaterThanOrEqual(384)
+  await page.getByRole('tab', { name: 'Clients', exact: true }).click()
+  await expect.poll(async () => (await cliPreview.boundingBox())!.height).toBeGreaterThanOrEqual(384)
+  await cliPreview.scrollIntoViewIfNeeded()
+  await expect(cliPreview).toBeInViewport()
 })
 
 test('Connect shrinks the config preview on short windows instead of scrolling the page', async ({ page }) => {

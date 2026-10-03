@@ -426,14 +426,14 @@ async function copyProvider(): Promise<void> {
   </div>
 {/snippet}
 
-<div class="route-page">
+<div class="route-page providers-page">
   <PageHeader
     eyebrow={m.common_setup()}
     title={m.common_model_services()}
     description={m.providers_connect_ai_services_handle_requests_models()}
     actions={providers.length > 0 ? providerPageActions : undefined} />
 
-  <section class="route-section" aria-labelledby="provider-table-title">
+  <section class="route-section providers-workspace" aria-labelledby="provider-table-title">
     <h2 id="provider-table-title" class="sr-only">{m.providers_connected_services()}</h2>
 
     {#if providersQuery.isPending}
@@ -463,8 +463,9 @@ async function copyProvider(): Promise<void> {
         <Empty.Content><Button onclick={openCreate}>{m.common_connect_first_service()}</Button></Empty.Content>
       </Empty.Root>
     {:else}
-      <div class="route-desktop-table">
+      <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
+          class="h-full min-h-0 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0"
           data={providers}
           columns={providerColumns}
           labels={providerTableLabels}
@@ -476,7 +477,7 @@ async function copyProvider(): Promise<void> {
           exportable
           exportFilename="stravia-model-services.csv"
           stripedRows
-          scrollHeight="32rem"
+          scrollHeight="100%"
           stickyHeader
           sortMode="multiple"
           resizableColumns
@@ -660,3 +661,27 @@ async function copyProvider(): Promise<void> {
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<style>
+.providers-page {
+  /* 与壳层一致，标题与工具栏按内容占位，其余高度留给服务列表。 */
+  height: calc(100svh - 5rem);
+}
+.providers-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 24rem;
+  flex-direction: column;
+}
+@container route-page (max-width: 52rem) {
+  .providers-workspace {
+    flex: none;
+    min-height: 0;
+  }
+}
+@media (max-width: 767px) {
+  .providers-page {
+    height: calc(100svh - 4.5rem);
+  }
+}
+</style>

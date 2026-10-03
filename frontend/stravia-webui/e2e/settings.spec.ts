@@ -1068,6 +1068,13 @@ test('credential protection table keeps its header above the draggable body scro
   await expect(thumb).toBeVisible()
   const headerBefore = (await header.boundingBox())!
   await expect.poll(async () => (await bar.boundingBox())!.y).toBeCloseTo(headerBefore.y + headerBefore.height, 0)
+  await expect
+    .poll(async () => {
+      const viewportBox = (await viewport.boundingBox())!
+      const barBox = (await bar.boundingBox())!
+      return barBox.x - viewportBox.x - viewportBox.width
+    })
+    .toBeGreaterThanOrEqual(0)
   const thumbBox = (await thumb.boundingBox())!
   await page.mouse.move(thumbBox.x + thumbBox.width / 2, thumbBox.y + thumbBox.height / 2)
   await page.mouse.down()

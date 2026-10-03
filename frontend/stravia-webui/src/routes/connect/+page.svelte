@@ -261,15 +261,18 @@ function cliModelName(modelId: string): string | undefined {
     {/if}
 
     <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
-      <Tabs.List aria-label={m.connect_setup_format()}>
+      <Tabs.List class="shrink-0" aria-label={m.connect_setup_format()}>
         <Tabs.Trigger value="cli"
           ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
         <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
       </Tabs.List>
 
-      <Tabs.Content value="cli" class="mt-5 min-h-0">
-        <div class="grid h-full gap-6 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
-          <section class="route-section min-[1100px]:col-span-5" aria-labelledby="cli-controls-title">
+      <Tabs.Content value="cli" class="mt-5 min-h-0 data-active:flex data-active:flex-col">
+        <div
+          class="grid gap-6 min-[1100px]:min-h-0 min-[1100px]:flex-1 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
+          <section
+            class="route-section min-[1100px]:min-h-0 min-[1100px]:overflow-y-auto min-[1100px]:col-span-5"
+            aria-labelledby="cli-controls-title">
             <div class="route-section-header">
               <div>
                 <h2 id="cli-controls-title" class="route-section-title">
@@ -373,7 +376,7 @@ function cliModelName(modelId: string): string | undefined {
           <section
             class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
             aria-labelledby="cli-output-title">
-            <div class="route-section-header">
+            <div class="route-section-header shrink-0">
               <div>
                 <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
                 <p class="route-section-description">
@@ -408,7 +411,7 @@ function cliModelName(modelId: string): string | undefined {
             {#if connectPlanQuery.isError}
               {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
               <RequestFailure
-                class="mb-3"
+                class="mb-3 shrink-0"
                 title={m.connect_apply_plan_failed()}
                 message={planError.message}
                 retry={() => connectPlanQuery.refetch()}
@@ -417,7 +420,7 @@ function cliModelName(modelId: string): string | undefined {
               </RequestFailure>
             {/if}
             {#if generatedCliConfig}
-              <pre class="route-code-plane min-h-24 flex-1 min-[1100px]:max-h-none">{generatedCliConfig}</pre>
+              <pre class="route-code-plane min-h-96 flex-1">{generatedCliConfig}</pre>
             {:else}
               <Empty.Root class="min-h-72 border-y"
                 ><Empty.Header
@@ -451,9 +454,12 @@ function cliModelName(modelId: string): string | undefined {
         </div>
       </Tabs.Content>
 
-      <Tabs.Content value="code" class="mt-5 min-h-0">
-        <div class="grid h-full gap-6 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
-          <section class="route-section min-[1100px]:col-span-5" aria-labelledby="code-controls-title">
+      <Tabs.Content value="code" class="mt-5 min-h-0 data-active:flex data-active:flex-col">
+        <div
+          class="grid gap-6 min-[1100px]:min-h-0 min-[1100px]:flex-1 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
+          <section
+            class="route-section min-[1100px]:min-h-0 min-[1100px]:overflow-y-auto min-[1100px]:col-span-5"
+            aria-labelledby="code-controls-title">
             <div class="route-section-header">
               <div>
                 <h2 id="code-controls-title" class="route-section-title">
@@ -527,7 +533,7 @@ function cliModelName(modelId: string): string | undefined {
           <section
             class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
             aria-labelledby="code-output-title">
-            <div class="route-section-header">
+            <div class="route-section-header shrink-0">
               <div>
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}
@@ -540,7 +546,7 @@ function cliModelName(modelId: string): string | undefined {
                 ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
             </div>
             <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">
-              <Tabs.List aria-label={m.connect_code_language()}>
+              <Tabs.List class="shrink-0" aria-label={m.connect_code_language()}>
                 {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
                     >{language === 'typescript'
                       ? 'TypeScript'
@@ -551,7 +557,7 @@ function cliModelName(modelId: string): string | undefined {
               </Tabs.List>
               <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
                 {#if codeModel}
-                  <pre class="route-code-plane min-h-24 flex-1 min-[1100px]:max-h-none">{generatedCode}</pre>
+                  <pre class="route-code-plane min-h-96 flex-1">{generatedCode}</pre>
                   {#if !selectedCodeKey}<Alert.Root class="mt-3 shrink-0" variant="warning" role="status"
                       ><Alert.Description
                         >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description
@@ -580,13 +586,22 @@ function cliModelName(modelId: string): string | undefined {
 </div>
 
 <style>
-/* 与壳层保持一致：扣除标题栏、内容内边距和桌面底部沟槽。高度有界后，输出列的代码平面收缩自滚动，而不是撑出页面滚动。 */
+/* 单栏由主页面滚动；分栏限定高度，让预览填满余量、代码与过高的控件列分别滚动。 */
 .connect-page {
-  height: calc(100svh - 5rem);
+  min-height: calc(100svh - 5rem);
+}
+@media (min-width: 1100px) {
+  .connect-page {
+    height: calc(100svh - 5rem);
+  }
+  .route-code-plane {
+    min-height: 0;
+    max-height: none;
+  }
 }
 @media (max-width: 767px) {
   .connect-page {
-    height: calc(100svh - 4.5rem);
+    min-height: calc(100svh - 4.5rem);
   }
 }
 </style>

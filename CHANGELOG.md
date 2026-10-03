@@ -42,6 +42,7 @@
 
 ### Fixed
 
+- Data-table scrollbars now sit outside the data viewport instead of covering cells. The Model services table fills the remaining page height, while Connect client and code previews fill wide split layouts and retain a 24rem minimum height in stacked layouts.
 - OAuth model services now offer **Reauthorize** in their action menu, restarting the existing sign-in flow and binding the new credential without changing saved connection settings. Allowance monitoring shows when an invalid credential prevents fetching and pauses automatic and manual upstream reads for that service until the credential is repaired; other services continue refreshing, and any last successful result is marked stale.
 - Fixed stale protocol/UI fixtures, terminal-observation races, and Windows desktop-driver setup and teardown in the test suite. Deadline interruption now expires the actual shared deadline instead of advancing an unrelated fake clock, removing an unintended five-minute wait without changing product timeouts. Renewal tests no longer depend on millisecond-scale scheduling; layout checks use one geometry snapshot, and test clients send complete buffered HTTP requests to preserve early authorization responses on Windows.
 - Interaction Debug Bundles now preserve confirmed token fields when late usage revisions omit them, without counting the same attempt twice. Bundle snapshots are derived directly from events at the ticket watermark; ordinary request-history queries, archive layout, and download-ticket behavior are unchanged.

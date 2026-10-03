@@ -1430,7 +1430,7 @@ $effect(() => {
 
   <ScrollArea.Root
     type="auto"
-    class="relative min-w-0 overflow-hidden rounded-md border border-border/60"
+    class="relative min-w-0 rounded-md border border-border/60"
     data-slot="data-table-viewport">
     <ScrollArea.Viewport
       bind:ref={viewportElement}
@@ -1722,14 +1722,16 @@ $effect(() => {
     </ScrollArea.Viewport>
     <ScrollArea.Scrollbar
       orientation="vertical"
-      class="z-30 flex w-2.5 touch-none select-none p-0.5"
+      class="z-30 flex w-2.5 translate-x-full touch-none select-none p-0.5"
       style={stickyHeader ? `margin-top:${headerBlockHeight}px` : undefined}>
       <ScrollArea.Thumb class="relative flex-1 rounded-full bg-muted-foreground/40 hover:bg-muted-foreground/70" />
     </ScrollArea.Scrollbar>
-    <ScrollArea.Scrollbar orientation="horizontal" class="z-30 flex h-2.5 touch-none select-none p-0.5">
+    <ScrollArea.Scrollbar
+      orientation="horizontal"
+      class="z-30 flex h-2.5 translate-y-full touch-none select-none p-0.5">
       <ScrollArea.Thumb class="relative flex-1 rounded-full bg-muted-foreground/40 hover:bg-muted-foreground/70" />
     </ScrollArea.Scrollbar>
-    <ScrollArea.Corner />
+    <ScrollArea.Corner class="translate-x-full translate-y-full" />
     {#if loading}
       <div
         class="absolute inset-0 z-40 grid place-items-center bg-background/70"
