@@ -910,19 +910,23 @@ test.describe('Interaction Observation canvas', () => {
   test('diagnostics follow the latest run and reveal earlier runs as history loads without moving the reading position', async ({
     page,
   }) => {
+    // Run 默认折叠，每个只占一行摘要：最新事件页需要覆盖足够多的 Run 才能超出视口，否则会立即补齐全部历史。
+    const runCount = 40
+    const eventsPerRun = 15
+    const lastSequence = runCount * eventsPerRun
     const fixture = await installObservationFixture(page, false, false, false, (detail) => {
       if (detail.interaction.id !== 'interaction-cinder') return
       const base = detail.runs[0]
-      const live = base.events.filter((event) => event.sequence > 360)
-      detail.runs = Array.from({ length: 6 }, (_, runIndex) => ({
+      const live = base.events.filter((event) => event.sequence > lastSequence)
+      detail.runs = Array.from({ length: runCount }, (_, runIndex) => ({
         ...base,
         id: `run-page-${runIndex + 1}`,
         parent_run_id: runIndex === 0 ? null : `run-page-${runIndex}`,
         started_at: startedAt + runIndex * 1_000,
         events: [
           // 交替写入可见输出，让对话足够高，不会在对话页签里为填满视口而提前加载全部历史。
-          ...Array.from({ length: 60 }, (_, index) => {
-            const sequence = runIndex * 60 + index + 1
+          ...Array.from({ length: eventsPerRun }, (_, index) => {
+            const sequence = runIndex * eventsPerRun + index + 1
             return {
               sequence,
               occurred_at: startedAt + runIndex * 1_000 + index,
@@ -943,7 +947,7 @@ test.describe('Interaction Observation canvas', () => {
                 : { kind: 'fixture_note', payload: { index: sequence } }),
             }
           }),
-          ...(runIndex === 5 ? live : []),
+          ...(runIndex === runCount - 1 ? live : []),
         ],
       }))
     })
@@ -952,45 +956,65 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('log', { name: 'Diagnostics' })
-    const row = (sequence: number) => diagnostics.locator(`.stream-row[data-sequence="${sequence}"]`)
     const runRow = (index: number) => diagnostics.locator(`button[data-run="run-page-${index}"]`)
-    await expect(row(360)).toBeInViewport()
+    await expect(runRow(runCount)).toBeInViewport()
+    await expect(runRow(runCount)).toHaveAttribute('aria-expanded', 'false')
+    await expect(diagnostics.locator('.stream-row[data-sequence]:visible')).toHaveCount(0)
     await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
-    // 最新事件页之前的 Run 尚未加载：不显示成空 Run，续接关系只保留编号。
-    await expect(row(161)).toHaveCount(1)
-    await expect(row(160)).toHaveCount(0)
-    await expect(runRow(2)).toHaveCount(0)
-    await expect(runRow(3)).toHaveCount(1)
-    await expect(diagnostics.getByRole('button', { name: 'Continued from R2', exact: true })).toHaveCount(0)
-    await expect(diagnostics.getByText('Continued from R2', { exact: true })).toHaveCount(1)
+    // 最新事件页（401–600）之前的 Run 尚未加载：不显示成空 Run，续接关系只保留编号。
+    await expect(runRow(26)).toHaveCount(0)
+    await expect(runRow(27)).toHaveCount(1)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(0)
+    await expect(diagnostics.getByText('Continued from R26', { exact: true })).toHaveCount(1)
 
-    fixture.emit({
-      sequence: 361,
-      occurred_at: startedAt + 5_100,
-      interaction_id: 'interaction-cinder',
-      run_id: 'run-page-6',
-      rejection_id: null,
-      kind: 'fixture_note',
-      payload: { index: 361 },
+    // 实时到达的上游尝试只更新折叠的 Run 摘要，阅读位置仍跟随最新内容。
+    const liveEvent = (sequence: number, kind: string, payload: Record<string, unknown>) =>
+      fixture.emit({
+        sequence,
+        occurred_at: startedAt + (runCount - 1) * 1_000 + 100 + sequence - lastSequence,
+        interaction_id: 'interaction-cinder',
+        run_id: `run-page-${runCount}`,
+        rejection_id: null,
+        kind,
+        payload,
+      })
+    liveEvent(lastSequence + 1, 'target_attempt_started', {
+      model_turn_id: 'live-turn',
+      attempt_id: 'live-attempt',
+      upstream_model: 'live-upstream-model',
+      provider_name: 'Live Service',
+      protocol: 'openai-responses',
     })
-    await expect(row(361)).toBeInViewport()
+    liveEvent(lastSequence + 2, 'target_attempt_finished', {
+      model_turn_id: 'live-turn',
+      attempt_id: 'live-attempt',
+      status: 'completed',
+      duration_ms: 2_800,
+      first_token_ms: 800,
+      usage: { input_tokens: 920, output_tokens: 100, cache_read_tokens: 320, cache_write_tokens: null },
+    })
+    await expect(runRow(runCount)).toContainText('live-upstream-model · Live Service')
+    await expect(runRow(runCount)).toContainText('First token 800 ms')
+    await expect(runRow(runCount)).toContainText('50 tok/s')
+    await expect(runRow(runCount)).toBeInViewport()
     await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
 
     const loader = diagnostics.getByRole('status', { name: 'Loading earlier events', exact: true })
     const release = fixture.holdNextRead('interaction-cinder')
-    await revealLoaderTrackingAnchor(diagnostics, '.stream-row[data-sequence="161"]')
+    await revealLoaderTrackingAnchor(diagnostics, 'button[data-run="run-page-27"]')
     await expect(loader).toBeInViewport()
     release()
-    await expect(runRow(1)).toHaveCount(1)
-    await expect(row(1)).toHaveCount(1)
+    await expect(runRow(14)).toHaveCount(1)
     expectAnchorHeld(await stopAnchorTracking(page))
-    await expect(loader).toHaveCount(0)
-    await expect(diagnostics.getByRole('button', { name: 'Continued from R2', exact: true })).toHaveCount(1)
+    await expect(loader).not.toBeInViewport()
+    await expect(runRow(13)).toHaveCount(0)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(1)
+    await expect(diagnostics.getByText('Continued from R13', { exact: true })).toHaveCount(1)
     expect(
       fixture.eventRequests
         .filter((url) => url.searchParams.has('before_sequence'))
         .map((url) => url.searchParams.get('before_sequence')),
-    ).toEqual(['161'])
+    ).toEqual(['401'])
   })
 
   test('refreshes unopened previews and new interactions through summaries without fetching details', async ({
@@ -2195,13 +2219,14 @@ test.describe('Interaction Observation canvas', () => {
     const runRow = diagnostics.locator('button[data-run="run-interaction-atlas"]')
     await expect(runRow).toContainText('Input 920')
     await expect(runRow).toContainText('Output 86')
+    await expect(runRow).toContainText('Cache read 320')
+    // 未报告的用量保持中性，不显示成 0。
+    await expect(runRow.getByTitle('Not reported', { exact: true })).toHaveText('Cache write –')
+    await expect(runRow).toHaveAttribute('aria-expanded', 'false')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     await runRow.click()
     await expect(runRow).toHaveAttribute('aria-expanded', 'true')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeVisible()
-    await expect(diagnostics.getByText('Cache read tokens', { exact: true })).toBeVisible()
-    await expect(diagnostics.getByText('Cache write tokens', { exact: true })).toBeVisible()
-    await expect(diagnostics.getByText('Not reported', { exact: true })).toBeVisible()
     await expect(diagnostics.getByText(/Reasoning/)).toHaveCount(0)
     await inspector.getByRole('tab', { name: 'Conversation', exact: true }).click()
     await expect(conversation.getByRole('article', { name: 'Atlas', exact: true })).toContainText(
@@ -2280,6 +2305,16 @@ test.describe('Interaction Observation canvas', () => {
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
     const rows = diagnostics.locator('.stream-row[data-sequence]:visible')
     const rowFor = (sequence: number) => diagnostics.locator(`.stream-row[data-sequence="${sequence}"]`)
+    const runRow = diagnostics.locator('button[data-run="run-interaction-cinder"]')
+    // Run 默认折叠：事件流与 Run 标识都按需展开。
+    await expect(runRow).toHaveAttribute('aria-expanded', 'false')
+    await expect(rows).toHaveCount(0)
+    await expect(diagnostics.getByText('run-interaction-cinder', { exact: true })).toBeHidden()
+    await expect(diagnostics.getByText(routeIds.cinder, { exact: true })).toBeHidden()
+    await runRow.click()
+    await expect(runRow).toHaveAttribute('aria-expanded', 'true')
+    await expect(diagnostics.getByText('run-interaction-cinder', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText(routeIds.cinder, { exact: true })).toBeVisible()
     // 两条 fixture 原始事件加 run_admitted 与未识别事件构成主干；两条关联诊断收进过程事件组。
     await expect(rows).toHaveCount(4)
     const processGroup = diagnostics.locator('button[data-group="process"]')
@@ -2287,12 +2322,10 @@ test.describe('Interaction Observation canvas', () => {
     await expect(diagnostics.locator('pre:visible')).toHaveCount(0)
     await expect(diagnostics.getByText('interaction-cinder', { exact: true })).toBeVisible()
     for (const value of [
-      'run-interaction-cinder',
       'generation-root-cinder',
       'generation-parent-atlas',
       'run-interaction-atlas',
       'interaction-atlas',
-      routeIds.cinder,
       'uninterpreted payload',
     ]) {
       await expect(diagnostics.getByText(value, { exact: true })).toBeHidden()
@@ -2322,9 +2355,6 @@ test.describe('Interaction Observation canvas', () => {
       await expect(payload).toHaveCount(0)
     }
 
-    await diagnostics.locator('button[data-run="run-interaction-cinder"]').click()
-    await expect(diagnostics.getByText('run-interaction-cinder', { exact: true })).toBeVisible()
-    await expect(diagnostics.getByText(routeIds.cinder, { exact: true })).toBeVisible()
     await inspector.getByRole('tab', { name: 'Conversation', exact: true }).click()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Cinder client-visible answer')
     await expect(inspector.getByRole('tab')).toHaveText(['Conversation', 'Diagnostics'])
@@ -2360,6 +2390,7 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
+    await diagnostics.locator('button[data-run="run-interaction-cinder"]').click()
     const reason = 'settlement_generation_commit:database busy'
     fixture.emit({
       sequence: 15,
@@ -2400,6 +2431,7 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
+    await diagnostics.locator('button[data-run="run-interaction-cinder"]').click()
     const groups = diagnostics.locator('button[data-group="process"]')
     const group = groups.first()
     await expect(groups).toHaveCount(1)
@@ -2482,6 +2514,7 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
+    await diagnostics.locator('button[data-run="run-interaction-cinder"]').click()
     // 连续内容记录合并，完成事件仍是独立边界；展开后保留时间与 sequence 顺序。
     const processGroup = diagnostics.locator('button[data-group="process"]')
     await expect(processGroup).toHaveAccessibleName(/^4 process events/)
@@ -2538,7 +2571,11 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    await expect(diagnostics.getByText('100 tok/s', { exact: true })).toBeVisible()
+    // Run 摘要只用有有效耗时的完成尝试计算速度；另一尝试缺少耗时，其输出不计入。
+    const runRow = diagnostics.locator('button[data-run="run-interaction-cinder"]')
+    await expect(runRow.getByTitle('Token speed', { exact: true })).toHaveText('100 tok/s')
+    await runRow.click()
+    await expect(diagnostics.locator('.stream-row[data-sequence="12"]')).toContainText('100 tok/s')
     const groups = diagnostics.locator('button[data-group="tools"]')
     await expect(groups).toHaveCount(2)
     await expect(groups.first()).toHaveAccessibleName(/^Bash × 4 · Sent to client/)

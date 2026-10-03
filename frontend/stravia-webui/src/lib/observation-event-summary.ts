@@ -1,4 +1,4 @@
-import { computeTps, formatDuration, formatNumber, formatTps } from '$lib/format'
+import { computeTps, formatDuration, formatNumber, formatTps, type TpsInput } from '$lib/format'
 import { failureOriginLabel, observationContextStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { payloadCount, payloadRecord } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
@@ -70,6 +70,18 @@ function statusLabel(status: string): string {
       return observationStatusLabel(status)
     default:
       return status
+  }
+}
+
+/** `target_attempt_finished` 载荷到净生成速度输入：有首字耗时即按流式扣除等待首字的时间。 */
+export function attemptTpsInput(payload: Record<string, unknown>): TpsInput {
+  const usage = record(payload.usage)
+  const firstToken = count(payload.first_token_ms) ? payload.first_token_ms : null
+  return {
+    output_tokens: count(usage.output_tokens) ? usage.output_tokens : null,
+    is_stream: firstToken !== null,
+    latency_upstream_ms: count(payload.duration_ms) ? payload.duration_ms : null,
+    stream_first_chunk_ms: firstToken,
   }
 }
 
@@ -158,14 +170,7 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
         for (const [key, label] of usageFields) {
           if (count(usage[key])) add(label(), formatNumber(usage[key]))
         }
-        const firstToken = count(payload.first_token_ms) ? payload.first_token_ms : null
-        const speed = computeTps({
-          output_tokens: count(usage.output_tokens) ? usage.output_tokens : null,
-          is_stream: firstToken !== null,
-          latency_upstream_ms: count(payload.duration_ms) ? payload.duration_ms : null,
-          stream_first_chunk_ms: firstToken,
-        })
-        add(m.logs_token_speed(), formatTps(speed))
+        add(m.logs_token_speed(), formatTps(computeTps(attemptTpsInput(payload))))
       }
       if (event.kind === 'platform_tool_finished') {
         duration('duration_ms', m.observation_duration())

@@ -1,6 +1,6 @@
-import { formatDuration, formatList, formatNumber, formatTime } from '$lib/format'
-import { observationEventSummary } from '$lib/observation-event-summary'
-import { payloadRecord, payloadString } from '$lib/observation-payload'
+import { formatDuration, formatList, formatTime, generationMsOf } from '$lib/format'
+import { attemptTpsInput, observationEventSummary } from '$lib/observation-event-summary'
+import { payloadCount, payloadRecord, payloadString } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 import type { FailedRequestDetail, InteractionDetail, ObservationEvent, RunDetail } from '$lib/types/observation'
 
@@ -17,6 +17,7 @@ export interface ObservationTimeline {
   runIndex: Map<string, number>
   timelines: Map<string, ObservationEvent[]>
   streams: Map<string, StreamItem[]>
+  metrics: Map<string, RunMetrics>
   failureItems: StreamItem[]
   offsetLabel(at: number): string
   gapLabel(previous: RunDetail, next: RunDetail): string | null
@@ -87,17 +88,63 @@ export function processGroup(events: readonly ObservationEvent[]): { label: stri
   }
 }
 
-export function usageText(value: number | null): string {
-  return value == null ? m.observation_usage_unknown() : formatNumber(value)
+export interface RunUpstream {
+  model: string
+  provider: string | null
 }
 
-export function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | null]> {
-  return [
-    [m.observation_event_tokens_input(), run.usage.input_tokens],
-    [m.observation_event_tokens_output(), run.usage.output_tokens],
-    [m.observation_event_tokens_cache_read(), run.usage.cache_read_tokens],
-    [m.observation_event_tokens_cache_write(), run.usage.cache_write_tokens],
-  ]
+export interface RunMetrics {
+  upstream: RunUpstream[]
+  firstTokenMs: number | null
+  tps: number | null
+}
+
+/**
+ * Run 摘要描述实际产出结果的上游尝试：有已完成尝试时取全部已完成尝试（平台工具循环会有多个模型轮次），
+ * 否则取最近一次开始的尝试，避免回退前失败的尝试冒充服务方。同一尝试的修订完成事件以最后一条为准。
+ * 首字取第一个服务尝试；速度为服务尝试的输出合计除以净生成耗时合计。
+ */
+export function runMetrics(events: readonly ObservationEvent[]): RunMetrics {
+  const started = new Map<string, RunUpstream>()
+  const finished = new Map<string, Record<string, unknown>>()
+  let lastStarted: string | null = null
+  for (const event of events) {
+    const payload = payloadRecord(event.payload)
+    const id = payloadString(payload.attempt_id)
+    if (!id) continue
+    if (event.kind === 'target_attempt_started') {
+      const model = payloadString(payload.upstream_model)?.trim()
+      if (model) started.set(id, { model, provider: payloadString(payload.provider_name)?.trim() || null })
+      lastStarted = id
+    } else if (event.kind === 'target_attempt_finished') {
+      finished.set(id, payload)
+    }
+  }
+  const completed = [...finished].filter(([, payload]) => payload.status === 'completed').map(([id]) => id)
+  const serving = completed.length ? completed : lastStarted ? [lastStarted] : [...finished.keys()].slice(-1)
+
+  const upstream = new Map<string, RunUpstream>()
+  let firstTokenMs: number | null = null
+  let outputTokens = 0
+  let generationMs = 0
+  for (const id of serving) {
+    const target = started.get(id)
+    if (target) upstream.set(`${target.model}\u0000${target.provider ?? ''}`, target)
+    const payload = finished.get(id)
+    if (!payload) continue
+    if (firstTokenMs === null && payloadCount(payload.first_token_ms)) firstTokenMs = payload.first_token_ms
+    const input = attemptTpsInput(payload)
+    const generation = generationMsOf(input)
+    if (input.output_tokens && generation && generation > 0) {
+      outputTokens += input.output_tokens
+      generationMs += generation
+    }
+  }
+  return {
+    upstream: [...upstream.values()],
+    firstTokenMs,
+    tps: generationMs > 0 ? outputTokens / (generationMs / 1000) : null,
+  }
 }
 
 export function deriveTimeline(
@@ -123,6 +170,7 @@ export function deriveTimeline(
 
   const timelines = new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)]))
   const streams = new Map(orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [])]))
+  const metrics = new Map(orderedRuns.map((run) => [run.id, runMetrics(timelines.get(run.id) ?? [])]))
   const failureItems = failure ? streamItems(orderedEvents(failure.events)) : []
 
   const baseTime = interaction?.interaction.started_at ?? failure?.request.started_at ?? null
@@ -157,5 +205,5 @@ export function deriveTimeline(
     return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
   }
 
-  return { title, orderedRuns, visibleRuns, runIndex, timelines, streams, failureItems, offsetLabel, gapLabel }
+  return { title, orderedRuns, visibleRuns, runIndex, timelines, streams, metrics, failureItems, offsetLabel, gapLabel }
 }

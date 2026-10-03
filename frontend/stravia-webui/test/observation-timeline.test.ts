@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { formatDuration, formatTime } from '../src/lib/format'
-import { deriveTimeline, itemEvents, itemKey, usageRows, usageText } from '../src/lib/observation-timeline'
+import { deriveTimeline, itemEvents, itemKey, runMetrics } from '../src/lib/observation-timeline'
 import { observationEventSummary } from '../src/lib/observation-event-summary'
 import * as m from '../src/lib/paraglide/messages.js'
 import type {
@@ -132,9 +132,8 @@ describe('terminal lifecycle revisions', () => {
     const current = run('r1', 0, [initial, delivery, revised, delivered])
     const view = deriveTimeline(detail([current]), undefined)
     expect(view.timelines.get('r1')!.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4])
-    expect(usageRows(view.orderedRuns[0]).find(([label]) => label === m.observation_event_tokens_output())?.[1]).toBe(
-      20,
-    )
+    // 修订只替换同一尝试的完成载荷：速度来自最后一次修订（20 tok/s），而不是两次输出累加。
+    expect(view.metrics.get('r1')!.tps).toBe(20)
     expect(observationEventSummary(revised).facts).toContainEqual({ label: m.logs_token_speed(), value: '20 tok/s' })
     expect(observationEventSummary(delivered).facts).toContainEqual({
       label: m.observation_event_delivery_reason(),
@@ -292,9 +291,67 @@ describe('failure items', () => {
   })
 })
 
-describe('usageText', () => {
-  test('renders unknown for null and numbers otherwise', () => {
-    expect(usageText(null)).toBe(m.observation_usage_unknown())
-    expect(usageText(12)).toBe('12')
+describe('run metrics', () => {
+  const started = (sequence: number, attempt: string, model: string, provider = 'Service') =>
+    event(sequence, 'target_attempt_started', { attempt_id: attempt, upstream_model: model, provider_name: provider })
+  const finished = (sequence: number, attempt: string, status: string, extra: Record<string, unknown> = {}) =>
+    event(sequence, 'target_attempt_finished', { attempt_id: attempt, status, ...extra })
+
+  test('a failed attempt before fallback does not describe the serving upstream', () => {
+    const metrics = runMetrics([
+      started(1, 'a1', 'primary-model', 'Primary'),
+      finished(2, 'a1', 'failed', { duration_ms: 4, first_token_ms: 3 }),
+      started(3, 'a2', 'fallback-model', 'Fallback'),
+      finished(4, 'a2', 'completed', {
+        duration_ms: 3000,
+        first_token_ms: 1000,
+        usage: { ...usage, output_tokens: 100 },
+      }),
+    ])
+    expect(metrics).toEqual({
+      upstream: [{ model: 'fallback-model', provider: 'Fallback' }],
+      firstTokenMs: 1000,
+      tps: 50,
+    })
+  })
+
+  test('an attempt still in progress replaces the failed one before it', () => {
+    const metrics = runMetrics([
+      started(1, 'a1', 'primary-model'),
+      finished(2, 'a1', 'failed', { duration_ms: 400, first_token_ms: 300, usage: { ...usage, output_tokens: 5 } }),
+      started(3, 'a2', 'retry-model'),
+    ])
+    expect(metrics).toEqual({
+      upstream: [{ model: 'retry-model', provider: 'Service' }],
+      firstTokenMs: null,
+      tps: null,
+    })
+  })
+
+  test('several completed model turns report the first token wait and combined generation speed', () => {
+    const metrics = runMetrics([
+      started(1, 'a1', 'shared-model'),
+      finished(2, 'a1', 'completed', {
+        duration_ms: 2000,
+        first_token_ms: 1000,
+        usage: { ...usage, output_tokens: 10 },
+      }),
+      started(3, 'a2', 'shared-model'),
+      finished(4, 'a2', 'completed', {
+        duration_ms: 4000,
+        first_token_ms: 500,
+        usage: { ...usage, output_tokens: 80 },
+      }),
+    ])
+    // (10 + 80) tok / ((2000 − 1000) + (4000 − 500)) ms
+    expect(metrics).toEqual({ upstream: [{ model: 'shared-model', provider: 'Service' }], firstTokenMs: 1000, tps: 20 })
+  })
+
+  test('a run without attempts reports nothing instead of zeros', () => {
+    expect(runMetrics([event(1, 'run_admitted', { route_id: 'route' })])).toEqual({
+      upstream: [],
+      firstTokenMs: null,
+      tps: null,
+    })
   })
 })

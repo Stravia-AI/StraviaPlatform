@@ -5,7 +5,7 @@ import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
-import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
+import { formatDuration, formatLogTime, formatNumber, formatTps } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import ObservationLogViewport from '$lib/components/observation-log-viewport.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
@@ -13,17 +13,8 @@ import TechnicalValue from '$lib/components/technical-value.svelte'
 import { failureOriginLabel, observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationEventSummary, observationStatusTone } from '$lib/observation-event-summary'
-import {
-  deriveTimeline,
-  itemEvents,
-  itemKey,
-  processGroup,
-  usageRows,
-  usageText,
-  type StreamItem,
-} from '$lib/observation-timeline'
+import { deriveTimeline, itemEvents, itemKey, processGroup, type StreamItem } from '$lib/observation-timeline'
 import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
-import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
 import * as Tabs from '$lib/components/ui/tabs'
@@ -164,6 +155,7 @@ function jumpToRun(runId: string | null) {
   {@const parentIndex = run.parent_run_id ? (timeline.runIndex.get(run.parent_run_id) ?? null) : null}
   <!-- 父 Run 仍在未加载的更早区间时只显示编号，不提供跳转。 -->
   {@const parentShown = parentIndex !== null && parentIndex > timeline.orderedRuns.length - timeline.visibleRuns.length}
+  {@const metrics = timeline.metrics.get(run.id)}
   <li class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
     <Collapsible.Root>
       <div class="run-band">
@@ -171,23 +163,42 @@ function jumpToRun(runId: string | null) {
           class="stream-row run-head"
           data-tone={observationStatusTone(run.status)}
           data-run={run.id}>
-          <span class="stream-text">
-            <span class="run-idx font-technical">R{ordinal}</span>
-            <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
-            <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
-            {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge>{/if}
-            {#if run.debug_enabled}
-              <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
-                >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
-            {/if}
-            <span class="run-stats"
-              >{#if duration != null}{formatDuration(duration)} ·
-              {/if}{m.observation_usage_input()}
-              {formatTokenCount(run.usage.input_tokens)} · {m.observation_usage_output()}
-              {formatTokenCount(run.usage.output_tokens)}</span>
+          <span class="run-summary">
+            <span class="run-title">
+              <span class="stream-text">
+                <span class="run-idx font-technical">R{ordinal}</span>
+                <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
+                <!-- 标题行不放标签：状态由主干圆点形状与颜色表达，文字只留给读屏；中断与记录不完整在事件流和告警中呈现。 -->
+                <span class="sr-only">{observationStatusLabel(run.status)}</span>
+              </span>
+              <time class="stream-time" title={formatLogTime(run.started_at)}
+                >{timeline.offsetLabel(run.started_at)}</time>
+              <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
+            </span>
+            <!-- 首行回答「谁在服务、多快」，次行回答「用了多少」；未报告的值显示中性破折号。 -->
+            <span class="run-metrics">
+              <span class="run-metric-line">
+                {#each metrics?.upstream ?? [] as target (`${target.model}\u0000${target.provider ?? ''}`)}
+                  <span class="run-metric">
+                    <span class="run-metric-value">{target.model}</span>
+                    {#if target.provider}<span class="run-metric-label">· {target.provider}</span>{/if}
+                  </span>
+                {/each}
+                {@render runMetric(m.logs_duration_short(), formatDuration(duration))}
+                {@render runMetric(m.logs_first_token_short(), formatDuration(metrics?.firstTokenMs))}
+                <!-- 单位 tok/s 已说明含义，省去标签让首行在窄检查器中少换行。 -->
+                <span class="run-metric" title={m.logs_token_speed()}
+                  ><span class="run-metric-value">{metrics?.tps == null ? '– tok/s' : formatTps(metrics.tps)}</span
+                  ></span>
+              </span>
+              <span class="run-metric-line">
+                {@render tokenMetric(m.observation_usage_input(), run.usage.input_tokens)}
+                {@render tokenMetric(m.observation_usage_output(), run.usage.output_tokens)}
+                {@render tokenMetric(m.observation_usage_cache_read(), run.usage.cache_read_tokens)}
+                {@render tokenMetric(m.observation_usage_cache_write(), run.usage.cache_write_tokens)}
+              </span>
+            </span>
           </span>
-          <time class="stream-time" title={formatLogTime(run.started_at)}>{timeline.offsetLabel(run.started_at)}</time>
-          <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         {#if run.parent_run_id}
           {#if parentShown}
@@ -204,6 +215,13 @@ function jumpToRun(runId: string | null) {
           {/if}
         {/if}
       </div>
+      <!-- 记录不完整是判断依据，不随事件流一起折叠。 -->
+      {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
+        <Alert.Root variant="warning" role="status" class="stream-alert"
+          ><Alert.Description>
+            {m.observation_partial_trace({ reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing() })}
+          </Alert.Description></Alert.Root>
+      {/if}
       <Collapsible.Content>
         <dl class="row-detail detail-grid">
           <div>
@@ -219,10 +237,6 @@ function jumpToRun(runId: string | null) {
             <dd>{formatLogTime(run.started_at)}</dd>
           </div>
           <div>
-            <dt>{m.observation_duration()}</dt>
-            <dd>{formatDuration(duration)}</dd>
-          </div>
-          <div>
             <dt>{m.observation_protocol()}</dt>
             <dd class="font-technical">{run.ingress_protocol}</dd>
           </div>
@@ -230,12 +244,6 @@ function jumpToRun(runId: string | null) {
             <dt>{m.observation_delivery()}</dt>
             <dd>{run.client_output_committed ? m.observation_committed() : m.observation_not_committed()}</dd>
           </div>
-          {#each usageRows(run) as row (row[0])}
-            <div>
-              <dt>{row[0]}</dt>
-              <dd class="font-technical">{usageText(row[1])}</dd>
-            </div>
-          {/each}
           {#if run.parent_run_id}
             <div>
               <dt>{m.observation_parent_run()}</dt>
@@ -243,22 +251,27 @@ function jumpToRun(runId: string | null) {
             </div>
           {/if}
         </dl>
+        {#if items.length}
+          <ol class="branch">
+            {#each items as item (itemKey(item))}
+              {@render streamItem(item)}
+            {/each}
+          </ol>
+        {/if}
       </Collapsible.Content>
     </Collapsible.Root>
-    {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
-      <Alert.Root variant="warning" role="status" class="stream-alert"
-        ><Alert.Description>
-          {m.observation_partial_trace({ reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing() })}
-        </Alert.Description></Alert.Root>
-    {/if}
-    {#if items.length}
-      <ol class="branch">
-        {#each items as item (itemKey(item))}
-          {@render streamItem(item)}
-        {/each}
-      </ol>
-    {/if}
   </li>
+{/snippet}
+
+{#snippet runMetric(label: string, value: string)}
+  <span class="run-metric"
+    ><span class="run-metric-label">{label}</span> <span class="run-metric-value">{value}</span></span>
+{/snippet}
+
+{#snippet tokenMetric(label: string, value: number | null)}
+  <span class="run-metric" title={value == null ? m.observation_usage_unknown() : undefined}
+    ><span class="run-metric-label">{label}</span>
+    <span class="run-metric-value">{value == null ? '–' : formatNumber(value)}</span></span>
 {/snippet}
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
@@ -587,6 +600,8 @@ button.run-parent:focus-visible {
   background: var(--destructive);
 }
 :global(.run-head)::before {
+  /* 与标题行垂直居中：行内边距 0.3rem + 标题行最小高度的一半。 */
+  top: calc(0.3rem + 0.875rem);
   inset-inline-start: calc(-1rem - 1px - 0.3rem);
   width: 0.6rem;
   height: 0.6rem;
@@ -622,10 +637,43 @@ button.run-parent:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.run-stats {
-  color: var(--muted-foreground);
-  font-family: var(--font-technical);
+/* Run 摘要：标题行与两行小字指标；时间与展开箭头只跟随标题行。 */
+.run-summary {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.run-title {
+  display: flex;
+  min-width: 0;
+  min-height: 1.75rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+.run-metrics {
+  display: flex;
+  flex-direction: column;
+  padding-block-end: 0.1rem;
   font-size: 0.72rem;
+  line-height: 1.5;
+}
+.run-metric-line {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 0 0.9rem;
+}
+.run-metric {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.run-metric-label {
+  color: var(--muted-foreground);
+}
+.run-metric-value {
+  font-family: var(--font-technical);
   font-variant-numeric: tabular-nums;
 }
 .stream-time {
