@@ -4,7 +4,8 @@ import PlusIcon from '@lucide/svelte/icons/plus'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack } from 'svelte'
 
-import { specificationReasoningEfforts } from '$lib/model-specification'
+import { specificationModalities, specificationModality, specificationReasoningEfforts } from '$lib/model-specification'
+import ModalityIcons from '$lib/components/modality-icons.svelte'
 import { localeState } from '$lib/localization.svelte'
 import { providerModelSelectionPolicyLabel } from '$lib/provider-model-labels'
 import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelSelectionPolicy } from '$lib/types'
@@ -37,7 +38,7 @@ interface Props {
 
 type StringField = 'name' | 'description'
 type PriceField = keyof ProviderModelPriceForm
-const knownModalities = ['text', 'image', 'audio', 'video', 'pdf']
+const knownModalities: string[] = specificationModalities.map(({ key }) => key)
 const modalityTargets = ['input', 'output'] as const
 
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
@@ -266,16 +267,23 @@ export function submit(): void {
                   id={`provider-model-${target}-modalities`}
                   class="w-full min-w-0"
                   data-modality-select={target}>
-                  <span class="truncate">
-                    {metadata.modalities[target].length > 0
-                      ? metadata.modalities[target].join(', ')
-                      : m.provider_model_editor_select_content_types()}
-                  </span>
+                  {#if metadata.modalities[target].length > 0}
+                    <ModalityIcons
+                      values={metadata.modalities[target]}
+                      tooltip={false}
+                      class="flex-nowrap overflow-hidden" />
+                  {:else}
+                    <span class="truncate">{m.provider_model_editor_select_content_types()}</span>
+                  {/if}
                 </Select.Trigger>
                 <Select.Content>
                   <Select.Group>
                     {#each modalityOptions(target) as value (value)}
-                      <Select.Item {value}>{value}</Select.Item>
+                      {@const modality = specificationModality(value)}
+                      <Select.Item {value} label={modality.label()}
+                        ><modality.icon
+                          class="size-3.5 text-muted-foreground"
+                          aria-hidden="true" />{modality.label()}</Select.Item>
                     {/each}
                   </Select.Group>
                 </Select.Content>

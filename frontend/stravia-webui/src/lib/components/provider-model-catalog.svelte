@@ -19,7 +19,8 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatTime } from '$lib/format'
-import { formatSpecificationTokens, specificationModality } from '$lib/model-specification'
+import { formatSpecificationTokens } from '$lib/model-specification'
+import ModalityIcons from '$lib/components/modality-icons.svelte'
 import { localeState } from '$lib/localization.svelte'
 import {
   emptySpecificationFilter,
@@ -616,22 +617,14 @@ async function deleteManualModel(): Promise<void> {
 
 {#snippet providerModelModalitiesCell(context: DataTableCellContext<ProviderModelSummary>)}
   {@const modalities = context.row.original.specification.modalities}
-  <dl class="space-y-1 text-xs">
-    <div>
-      <dt class="inline text-muted-foreground">{m.model_specification_input()}</dt>
-      <dd class="inline">
-        {modalities?.input.length
-          ? modalities.input.map((value) => specificationModality(value).label()).join(', ')
-          : m.model_specification_not_registered()}
-      </dd>
+  <dl class="space-y-0.5 text-xs">
+    <div class="flex items-center gap-1.5">
+      <dt class="text-muted-foreground">{m.model_specification_input()}</dt>
+      <dd><ModalityIcons values={modalities?.input} /></dd>
     </div>
-    <div>
-      <dt class="inline text-muted-foreground">{m.model_specification_output()}</dt>
-      <dd class="inline">
-        {modalities?.output.length
-          ? modalities.output.map((value) => specificationModality(value).label()).join(', ')
-          : m.model_specification_not_registered()}
-      </dd>
+    <div class="flex items-center gap-1.5">
+      <dt class="text-muted-foreground">{m.model_specification_output()}</dt>
+      <dd><ModalityIcons values={modalities?.output} /></dd>
     </div>
   </dl>
 {/snippet}
