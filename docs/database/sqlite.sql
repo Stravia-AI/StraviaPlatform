@@ -326,11 +326,8 @@ CREATE TABLE provider_model_cost_rules (
     threshold_tokens INTEGER NOT NULL CHECK (threshold_tokens >= 0),
     cost_input TEXT,
     cost_output TEXT,
-    cost_reasoning TEXT,
     cost_cache_read TEXT,
     cost_cache_write TEXT,
-    cost_input_audio TEXT,
-    cost_output_audio TEXT,
     PRIMARY KEY (provider_id, model_id, rule_index),
     FOREIGN KEY (provider_id, model_id)
         REFERENCES provider_models(provider_id, model_id)
@@ -352,11 +349,8 @@ CREATE TABLE provider_models (
     limit_context INTEGER CHECK (limit_context IS NULL OR limit_context >= 0),
     cost_input TEXT,
     cost_output TEXT,
-    cost_reasoning TEXT,
     cost_cache_read TEXT,
     cost_cache_write TEXT,
-    cost_input_audio TEXT,
-    cost_output_audio TEXT,
     metadata_json TEXT NOT NULL
         CHECK (json_valid(metadata_json) AND json_type(metadata_json) = 'object'),
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),

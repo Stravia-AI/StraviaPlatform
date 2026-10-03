@@ -20,11 +20,8 @@ type PriceKey = keyof ProviderModelPrices
 const priceFields: Array<{ key: PriceKey; label: () => string }> = [
   { key: 'input', label: m.provider_model_field_input },
   { key: 'output', label: m.provider_model_field_output },
-  { key: 'reasoning', label: m.provider_model_field_reasoning },
   { key: 'cache_read', label: m.provider_model_field_cache_read },
   { key: 'cache_write', label: m.provider_model_field_cache_write },
-  { key: 'input_audio', label: m.provider_model_field_audio_input },
-  { key: 'output_audio', label: m.provider_model_field_audio_output },
 ]
 let { providerId, modelId, triggerLabel }: Props = $props()
 let open = $state(false)

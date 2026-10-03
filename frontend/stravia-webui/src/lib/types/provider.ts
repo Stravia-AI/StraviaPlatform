@@ -93,11 +93,8 @@ export interface ModelSpecification {
 export interface ProviderModelPrices {
   input?: number
   output?: number
-  reasoning?: number
   cache_read?: number
   cache_write?: number
-  input_audio?: number
-  output_audio?: number
 }
 
 export interface ProviderModelCostTier extends ProviderModelPrices {

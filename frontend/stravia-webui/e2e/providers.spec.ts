@@ -1112,20 +1112,10 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
       cost: {
         input: 0.25,
         output: 1,
-        reasoning: 2,
-        input_audio: 3,
-        output_audio: 4,
+        cache_read: 0.025,
+        cache_write: 0.5,
         context_over_200k: { input: 5, output: 22.5 },
-        tiers: [
-          {
-            tier: { type: 'context', size: 272000 },
-            input: 6,
-            output: 24,
-            reasoning: 7,
-            input_audio: 8,
-            output_audio: 9,
-          },
-        ],
+        tiers: [{ tier: { type: 'context', size: 272000 }, input: 6, output: 24, cache_read: 0.6, cache_write: 12 }],
       },
       reasoning_efforts: ['low', 'medium', 'high', 'future'],
       vendor_extension: { mode: 'private' },
@@ -1254,18 +1244,14 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const savedMetadata = JSON.parse(updateBody).metadata
   expect(savedMetadata.open_weights).toBe(true)
   expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
-  expect(savedMetadata.cost.context_over_200k).toEqual(detail.metadata.cost.context_over_200k)
-  expect(savedMetadata.cost).toMatchObject({ reasoning: 2, input_audio: 3, output_audio: 4 })
-  expect(savedMetadata.cost.tiers).toEqual([
-    expect.objectContaining({
-      tier: { type: 'context', size: 272000 },
-      input: 6,
-      output: 24,
-      reasoning: 7,
-      input_audio: 8,
-      output_audio: 9,
-    }),
-  ])
+  expect(savedMetadata.cost).toEqual({
+    input: Number('0.123456789012345678'),
+    output: 1,
+    cache_read: 0.025,
+    cache_write: 0.5,
+    context_over_200k: detail.metadata.cost.context_over_200k,
+    tiers: detail.metadata.cost.tiers,
+  })
   expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future'])
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()

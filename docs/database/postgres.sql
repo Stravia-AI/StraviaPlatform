@@ -13,7 +13,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -106,7 +105,7 @@ CREATE TABLE public.api_keys (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    mcp_access_enabled boolean DEFAULT false CONSTRAINT api_keys_web_access_enabled_not_null NOT NULL,
+    mcp_access_enabled boolean DEFAULT false NOT NULL,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
     inject_media_understanding boolean DEFAULT false NOT NULL,
     inject_web_search boolean DEFAULT false NOT NULL,
@@ -352,7 +351,7 @@ CREATE TABLE public.model_turn_observations (
 
 CREATE TABLE public.models (
     id text NOT NULL,
-    model_id text CONSTRAINT models_name_not_null NOT NULL,
+    model_id text NOT NULL,
     balance text DEFAULT 'traffic_equalization'::text NOT NULL,
     is_enabled boolean DEFAULT true NOT NULL,
     priority integer DEFAULT 0,
@@ -422,14 +421,14 @@ CREATE SEQUENCE public.observation_event_sequence
 --
 
 CREATE TABLE public.observation_events (
-    sequence bigint DEFAULT nextval('public.observation_event_sequence'::regclass) CONSTRAINT observation_events_sequence_not_null1 NOT NULL,
-    occurred_at bigint CONSTRAINT observation_events_occurred_at_not_null1 NOT NULL,
+    sequence bigint DEFAULT nextval('public.observation_event_sequence'::regclass) NOT NULL,
+    occurred_at bigint NOT NULL,
     interaction_id text,
     run_id text,
     rejection_id text,
-    kind text CONSTRAINT observation_events_kind_not_null1 NOT NULL,
-    payload bytea CONSTRAINT observation_events_payload_not_null1 NOT NULL,
-    expires_at bigint CONSTRAINT observation_events_expires_at_not_null1 NOT NULL,
+    kind text NOT NULL,
+    payload bytea NOT NULL,
+    expires_at bigint NOT NULL,
     tool_id text,
     operation_id text
 );
@@ -519,11 +518,8 @@ CREATE TABLE public.provider_model_cost_rules (
     threshold_tokens bigint NOT NULL,
     cost_input numeric,
     cost_output numeric,
-    cost_reasoning numeric,
     cost_cache_read numeric,
     cost_cache_write numeric,
-    cost_input_audio numeric,
-    cost_output_audio numeric,
     CONSTRAINT provider_model_cost_rules_rule_index_check CHECK ((rule_index >= 0)),
     CONSTRAINT provider_model_cost_rules_rule_kind_check CHECK ((rule_kind = ANY (ARRAY['context_over_200k'::text, 'tier'::text]))),
     CONSTRAINT provider_model_cost_rules_threshold_tokens_check CHECK ((threshold_tokens >= 0))
@@ -548,11 +544,8 @@ CREATE TABLE public.provider_models (
     limit_context bigint,
     cost_input numeric,
     cost_output numeric,
-    cost_reasoning numeric,
     cost_cache_read numeric,
     cost_cache_write numeric,
-    cost_input_audio numeric,
-    cost_output_audio numeric,
     metadata_json jsonb NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -738,9 +731,9 @@ CREATE TABLE public.target_attempt_observations (
 
 CREATE TABLE public.turn_chain_contents (
     id bigint NOT NULL,
-    principal text CONSTRAINT turn_chain_contents_principal_not_null1 NOT NULL,
-    content_key text CONSTRAINT turn_chain_contents_content_key_not_null1 NOT NULL,
-    content bytea CONSTRAINT turn_chain_contents_content_not_null1 NOT NULL
+    principal text NOT NULL,
+    content_key text NOT NULL,
+    content bytea NOT NULL
 );
 ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN content SET STORAGE EXTERNAL;
 

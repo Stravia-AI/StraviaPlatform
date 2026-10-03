@@ -697,6 +697,14 @@ def test_provider_crud(admin_env: dict[str, str]) -> None:
 def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider-model-specification")
     model_id = "saved-specification-model"
+    retained_prices = {"input": 0.125, "output": 2.5, "cache_read": 0.0625, "cache_write": 0.25}
+    obsolete_prices = {"reasoning": 7, "input_audio": 8, "output_audio": 9}
+    tier_threshold = {"type": "context", "size": 300_000}
+    expected_cost = {
+        **retained_prices,
+        "context_over_200k": retained_prices,
+        "tiers": [{"tier": tier_threshold, **retained_prices}],
+    }
     metadata = {
         "id": model_id,
         "name": "Saved specification model",
@@ -707,6 +715,12 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
         },
         "limit": {
             "context": 1_050_000,
+        },
+        "cost": {
+            **retained_prices,
+            **obsolete_prices,
+            "context_over_200k": {**retained_prices, **obsolete_prices},
+            "tiers": [{"tier": tier_threshold, **retained_prices, **obsolete_prices}],
         },
     }
 
@@ -756,6 +770,7 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     )
     assert status == 200
     saved = detail["data"]
+    assert saved["metadata"]["cost"] == expected_cost
     assert {
         key: saved["metadata"][key] for key in expected_specification
     } == expected_specification
@@ -784,6 +799,7 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
         "reasoning_efforts": revised_metadata["reasoning_efforts"],
     }
     assert updated["data"]["revision"] > saved["revision"]
+    assert updated["data"]["metadata"]["cost"] == expected_cost
     assert {
         key: updated["data"]["metadata"][key] for key in revised_specification
     } == revised_specification

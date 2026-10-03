@@ -67,12 +67,23 @@ describe('provider model form', () => {
     })
   })
 
-  test('preserves auxiliary prices when editing base and tier prices', () => {
+  test('serializes only supported prices across base, extended context, and tiers', () => {
     const metadata = {
       cost: {
         input: 2,
-        context_over_200k: { input: 4, output: 8 },
-        tiers: [{ tier: { type: 'context', size: 200000 }, input: 4 }],
+        reasoning: 1,
+        input_audio: 2,
+        output_audio: 3,
+        context_over_200k: {
+          input: 4,
+          output: 8,
+          cache_read: 0,
+          cache_write: 2,
+          reasoning: 4,
+          input_audio: 5,
+          output_audio: 6,
+        },
+        tiers: [{ tier: { type: 'context', size: 200000 }, input: 4, reasoning: 7, input_audio: 8, output_audio: 9 }],
       },
     }
     const cost = providerModelCostFromMetadata(metadata)
@@ -81,10 +92,11 @@ describe('provider model form', () => {
     const result = buildProviderModelMetadataJson('model-id', metadata, cost)
 
     expect(result.errors).toEqual([])
-    expect(JSON.parse(result.json!)).toMatchObject({
+    expect(JSON.parse(result.json!)).toEqual({
+      id: 'model-id',
       cost: {
         input: 3,
-        context_over_200k: { input: 4, output: 8 },
+        context_over_200k: { input: 4, output: 8, cache_read: 0, cache_write: 2 },
         tiers: [{ tier: { type: 'context', size: 200000 }, input: 4, output: 9 }],
       },
     })

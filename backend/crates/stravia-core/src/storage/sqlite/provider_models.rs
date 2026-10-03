@@ -42,11 +42,8 @@ struct CostRuleRow {
     threshold_tokens: i64,
     cost_input: Option<String>,
     cost_output: Option<String>,
-    cost_reasoning: Option<String>,
     cost_cache_read: Option<String>,
     cost_cache_write: Option<String>,
-    cost_input_audio: Option<String>,
-    cost_output_audio: Option<String>,
 }
 
 #[async_trait]
@@ -373,8 +370,8 @@ async fn load_rules_for_provider(
 ) -> anyhow::Result<BTreeMap<String, Vec<ProviderModelCostRule>>> {
     let rows = sqlx::query_as::<_, CostRuleRow>(
         r#"SELECT provider_id, model_id, rule_index, rule_kind, threshold_tokens,
-                  cost_input, cost_output, cost_reasoning, cost_cache_read,
-                  cost_cache_write, cost_input_audio, cost_output_audio
+                  cost_input, cost_output, cost_cache_read,
+                  cost_cache_write
            FROM provider_model_cost_rules
            WHERE provider_id = ?
            ORDER BY model_id, rule_index"#,
@@ -397,8 +394,8 @@ async fn load_rules_for_model(
 ) -> anyhow::Result<Vec<ProviderModelCostRule>> {
     sqlx::query_as::<_, CostRuleRow>(
         r#"SELECT provider_id, model_id, rule_index, rule_kind, threshold_tokens,
-                  cost_input, cost_output, cost_reasoning, cost_cache_read,
-                  cost_cache_write, cost_input_audio, cost_output_audio
+                  cost_input, cost_output, cost_cache_read,
+                  cost_cache_write
            FROM provider_model_cost_rules
            WHERE provider_id = ? AND model_id = ?
            ORDER BY rule_index"#,
@@ -444,11 +441,8 @@ fn decode_rule(row: CostRuleRow) -> anyhow::Result<ProviderModelCostRule> {
         prices: PriceComponents {
             input: parse_decimal(row.cost_input)?,
             output: parse_decimal(row.cost_output)?,
-            reasoning: parse_decimal(row.cost_reasoning)?,
             cache_read: parse_decimal(row.cost_cache_read)?,
             cache_write: parse_decimal(row.cost_cache_write)?,
-            input_audio: parse_decimal(row.cost_input_audio)?,
-            output_audio: parse_decimal(row.cost_output_audio)?,
         },
     })
 }
@@ -465,9 +459,8 @@ async fn apply_discovered_metadata_update(
     let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
     let result = sqlx::query(
         r#"UPDATE provider_models SET
-               presence = ?, lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
-               cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
-               metadata_json = ?, snapshot_state = COALESCE(?, snapshot_state), metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
+               presence = ?, lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_cache_read = ?,
+               cost_cache_write = ?, metadata_json = ?, snapshot_state = COALESCE(?, snapshot_state), metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
     )
     .bind(update.presence.as_str())
@@ -478,11 +471,8 @@ async fn apply_discovered_metadata_update(
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
-    .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_read)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_write)))
-    .bind(decimal_text(prices.and_then(|prices| prices.input_audio)))
-    .bind(decimal_text(prices.and_then(|prices| prices.output_audio)))
     .bind(serde_json::to_string(metadata)?)
     .bind(update.snapshot_state.as_ref().map(serde_json::to_string).transpose()?)
     .bind(&update.metadata_source_provider_id)
@@ -509,9 +499,9 @@ async fn insert_record(
         r#"INSERT INTO provider_models (
                provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
                presence, lifecycle_status, selection_policy, name, family,
-               open_weights, limit_context, cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
-               cost_input_audio, cost_output_audio, metadata_json
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+               open_weights, limit_context, cost_input, cost_output, cost_cache_read, cost_cache_write,
+               metadata_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&input.provider_id)
     .bind(&input.model_id)
@@ -527,11 +517,8 @@ async fn insert_record(
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
-    .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_read)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_write)))
-    .bind(decimal_text(prices.and_then(|prices| prices.input_audio)))
-    .bind(decimal_text(prices.and_then(|prices| prices.output_audio)))
     .bind(metadata_json)
     .execute(&mut **tx)
     .await?;
@@ -556,9 +543,8 @@ async fn update_record_metadata(
     let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
     let result = sqlx::query(
         r#"UPDATE provider_models SET
-               lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_reasoning = ?, cost_cache_read = ?,
-               cost_cache_write = ?, cost_input_audio = ?, cost_output_audio = ?,
-               metadata_json = ?, snapshot_state = ?, revision = revision + 1, updated_at = datetime('now')
+               lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_cache_read = ?,
+               cost_cache_write = ?, metadata_json = ?, snapshot_state = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND revision = ?"#,
     )
     .bind(&metadata.status)
@@ -568,11 +554,8 @@ async fn update_record_metadata(
     .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
     .bind(decimal_text(prices.and_then(|prices| prices.input)))
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
-    .bind(decimal_text(prices.and_then(|prices| prices.reasoning)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_read)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_write)))
-    .bind(decimal_text(prices.and_then(|prices| prices.input_audio)))
-    .bind(decimal_text(prices.and_then(|prices| prices.output_audio)))
     .bind(serde_json::to_string(metadata)?)
     .bind(serde_json::to_string(snapshot_state)?)
     .bind(provider_id)
@@ -598,9 +581,8 @@ async fn replace_cost_rules(
         sqlx::query(
             r#"INSERT INTO provider_model_cost_rules (
                    provider_id, model_id, rule_index, rule_kind, threshold_tokens,
-                   cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
-                   cost_input_audio, cost_output_audio
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                   cost_input, cost_output, cost_cache_read, cost_cache_write
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(provider_id)
         .bind(model_id)
@@ -612,11 +594,8 @@ async fn replace_cost_rules(
         )
         .bind(decimal_text(rule.prices.input))
         .bind(decimal_text(rule.prices.output))
-        .bind(decimal_text(rule.prices.reasoning))
         .bind(decimal_text(rule.prices.cache_read))
         .bind(decimal_text(rule.prices.cache_write))
-        .bind(decimal_text(rule.prices.input_audio))
-        .bind(decimal_text(rule.prices.output_audio))
         .execute(&mut **tx)
         .await?;
     }
@@ -683,6 +662,94 @@ mod tests {
     use std::time::Duration;
 
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    #[tokio::test]
+    async fn retired_price_upgrade_preserves_snapshot_and_decimal_precision() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/0001_baseline.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0002_data_contracts.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(r#"INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key');
+            INSERT INTO provider_models (provider_id, model_id, source_kind, presence, revision, cost_input, metadata_json)
+            VALUES ('provider', 'model', 'manual', 'present', 7, '0.1234567890123456789012345678',
+            '{"id":"model","reasoning_efforts":["high","custom"],"modalities":{"input":["text","audio"],"output":["audio"]},"custom":"keep","cost":{"input":0.1234567890123456789012345678,"output":2,"cache_read":3,"cache_write":4,"reasoning":5,"input_audio":6,"output_audio":7,"context_over_200k":{"input":0.1234567890123456789012345678,"reasoning":5,"input_audio":6,"output_audio":7},"tiers":[{"tier":{"type":"context","size":100},"input":0.1234567890123456789012345678,"reasoning":5,"input_audio":6,"output_audio":7},{"tier":{"type":"context","size":200},"output":2,"reasoning":8}]}}');
+            INSERT INTO provider_model_cost_rules (provider_id, model_id, rule_index, rule_kind, threshold_tokens, cost_input, cost_reasoning)
+            VALUES ('provider','model',0,'tier',100,'0.1234567890123456789012345678','5');"#)
+            .execute(&pool).await.unwrap();
+        let before: String = sqlx::query_scalar("SELECT metadata_json FROM provider_models")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let identity_before: (String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT provider_id, model_id, snapshot_state, metadata_source_provider_id FROM provider_models")
+            .fetch_one(&pool).await.unwrap();
+        let mut expected: serde_json::Value = serde_json::from_str(&before).unwrap();
+        let cost = expected["cost"].as_object_mut().unwrap();
+        for key in ["reasoning", "input_audio", "output_audio"] {
+            cost.remove(key);
+        }
+        for key in ["reasoning", "input_audio", "output_audio"] {
+            cost.get_mut("context_over_200k")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+        }
+        for tier in cost.get_mut("tiers").unwrap().as_array_mut().unwrap() {
+            for key in ["reasoning", "input_audio", "output_audio"] {
+                tier.as_object_mut().unwrap().remove(key);
+            }
+        }
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0013_remove_extra_model_prices.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (json, revision, price): (String, i64, String) =
+            sqlx::query_as("SELECT metadata_json, revision, cost_input FROM provider_models")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            expected
+        );
+        assert_eq!(revision, 7);
+        assert_eq!(price, "0.1234567890123456789012345678");
+        let rule_price: String =
+            sqlx::query_scalar("SELECT cost_input FROM provider_model_cost_rules")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rule_price, price);
+        let identity_after: (String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT provider_id, model_id, snapshot_state, metadata_source_provider_id FROM provider_models")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(identity_after, identity_before);
+        for table in ["provider_models", "provider_model_cost_rules"] {
+            let columns: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT name FROM pragma_table_info('{table}')"
+            )))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            for removed in ["cost_reasoning", "cost_input_audio", "cost_output_audio"] {
+                assert!(!columns.iter().any(|column| column == removed));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn model_specification_upgrade_preserves_data_and_target_maps() {

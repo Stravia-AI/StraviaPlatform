@@ -355,40 +355,17 @@ pub struct PriceComponents {
         with = "rust_decimal::serde::arbitrary_precision_option",
         skip_serializing_if = "Option::is_none"
     )]
-    pub reasoning: Option<Decimal>,
-    #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
-        skip_serializing_if = "Option::is_none"
-    )]
     pub cache_read: Option<Decimal>,
     #[serde(
         with = "rust_decimal::serde::arbitrary_precision_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_write: Option<Decimal>,
-    #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub input_audio: Option<Decimal>,
-    #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub output_audio: Option<Decimal>,
 }
 
 impl PriceComponents {
     fn validate(&self) -> anyhow::Result<()> {
-        for value in [
-            self.input,
-            self.output,
-            self.reasoning,
-            self.cache_read,
-            self.cache_write,
-            self.input_audio,
-            self.output_audio,
-        ] {
+        for value in [self.input, self.output, self.cache_read, self.cache_write] {
             if value.is_some_and(|value| value.is_sign_negative()) {
                 anyhow::bail!("Provider Model costs must be non-negative");
             }

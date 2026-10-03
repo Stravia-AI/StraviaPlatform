@@ -4,11 +4,8 @@ import type { ProviderModelMetadata, ProviderModelPrices } from '$lib/types'
 export interface ProviderModelPriceForm {
   input: string
   output: string
-  reasoning: string
   cache_read: string
   cache_write: string
-  input_audio: string
-  output_audio: string
 }
 
 export interface ProviderModelCostTierForm extends ProviderModelPriceForm {
@@ -27,16 +24,13 @@ interface RawDecimal {
 const priceFields: Array<{ key: keyof ProviderModelPriceForm; label: () => string }> = [
   { key: 'input', label: m.provider_model_field_input },
   { key: 'output', label: m.provider_model_field_output },
-  { key: 'reasoning', label: m.provider_model_field_reasoning },
   { key: 'cache_read', label: m.provider_model_field_cache_read },
   { key: 'cache_write', label: m.provider_model_field_cache_write },
-  { key: 'input_audio', label: m.provider_model_field_audio_input },
-  { key: 'output_audio', label: m.provider_model_field_audio_output },
 ]
 const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 export function emptyProviderModelPrices(): ProviderModelPriceForm {
-  return { input: '', output: '', reasoning: '', cache_read: '', cache_write: '', input_audio: '', output_audio: '' }
+  return { input: '', output: '', cache_read: '', cache_write: '' }
 }
 
 function pricesFromMetadata(prices: ProviderModelPrices | null | undefined): ProviderModelPriceForm {
@@ -143,9 +137,13 @@ export function buildProviderModelMetadataJson(
   }
 
   if (Object.prototype.hasOwnProperty.call(metadata, 'cost') && metadata.cost !== null) {
+    const extendedContextPrices = metadata.cost?.context_over_200k
     const costValue: Record<string, unknown> = {
       ...buildPrices(cost.base, m.provider_model_editor_base_cost(), errors),
-      context_over_200k: metadata.cost?.context_over_200k,
+      context_over_200k:
+        extendedContextPrices == null
+          ? extendedContextPrices
+          : Object.fromEntries(priceFields.map(({ key }) => [key, extendedContextPrices[key]])),
     }
     costValue.tiers = cost.tiers.map((tier, index) => {
       const threshold = Number(tier.threshold)
