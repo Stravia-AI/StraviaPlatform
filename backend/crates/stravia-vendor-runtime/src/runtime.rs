@@ -368,34 +368,42 @@ impl VendorRuntime {
 
     fn validate_imports(&self, component: &Component) -> Result<(), LoadError> {
         for (name, _) in component.component_type().imports(&self.engine) {
-            if !matches!(
+            let allowed = matches!(
                 name,
-                "stravia:vendor/host@0.4.0"
-                    | "stravia:vendor/types@0.4.0"
-                    // Rust 1.98's wasm32-wasip2 standard library is pinned to
-                    // WASIp2 0.2.9. These exact interfaces provide closed
-                    // stdio, empty environment, clocks, and entropy through
-                    // the restricted WasiCtx below. Filesystem and socket
-                    // packages are intentionally absent.
-                    | "wasi:io/poll@0.2.9"
-                    | "wasi:io/error@0.2.9"
-                    | "wasi:io/streams@0.2.9"
-                    | "wasi:clocks/monotonic-clock@0.2.9"
-                    | "wasi:clocks/wall-clock@0.2.9"
-                    | "wasi:random/random@0.2.9"
-                    | "wasi:random/insecure@0.2.9"
-                    | "wasi:random/insecure-seed@0.2.9"
-                    | "wasi:cli/stdin@0.2.9"
-                    | "wasi:cli/stdout@0.2.9"
-                    | "wasi:cli/stderr@0.2.9"
-                    | "wasi:cli/environment@0.2.9"
-                    | "wasi:cli/exit@0.2.9"
-                    | "wasi:cli/terminal-input@0.2.9"
-                    | "wasi:cli/terminal-output@0.2.9"
-                    | "wasi:cli/terminal-stdin@0.2.9"
-                    | "wasi:cli/terminal-stdout@0.2.9"
-                    | "wasi:cli/terminal-stderr@0.2.9"
-            ) {
+                "stravia:vendor/host@0.4.0" | "stravia:vendor/types@0.4.0"
+            ) || name.rsplit_once('@').is_some_and(|(interface, version)| {
+                // Component compilation already validates SemVer. Ignore build
+                // metadata and admit only stable 0.2.x; the linker still checks
+                // required functions and resource types. Interface permissions
+                // remain independent of patch-version compatibility.
+                let release = version
+                    .split_once('+')
+                    .map_or(version, |(release, _)| release);
+                release.strip_prefix("0.2.").is_some_and(|patch| {
+                    !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit())
+                }) && matches!(
+                    interface,
+                    "wasi:io/poll"
+                        | "wasi:io/error"
+                        | "wasi:io/streams"
+                        | "wasi:clocks/monotonic-clock"
+                        | "wasi:clocks/wall-clock"
+                        | "wasi:random/random"
+                        | "wasi:random/insecure"
+                        | "wasi:random/insecure-seed"
+                        | "wasi:cli/stdin"
+                        | "wasi:cli/stdout"
+                        | "wasi:cli/stderr"
+                        | "wasi:cli/environment"
+                        | "wasi:cli/exit"
+                        | "wasi:cli/terminal-input"
+                        | "wasi:cli/terminal-output"
+                        | "wasi:cli/terminal-stdin"
+                        | "wasi:cli/terminal-stdout"
+                        | "wasi:cli/terminal-stderr"
+                )
+            });
+            if !allowed {
                 return Err(LoadError::ForbiddenImport(name.to_owned()));
             }
         }

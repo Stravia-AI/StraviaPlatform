@@ -27,3 +27,5 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 stravia-runtime-contract = { workspace = true }
 stravia-vendor-sdk = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+wasmprinter = { workspace = true }
+wat = { workspace = true }

@@ -45,6 +45,8 @@ serde_json = "1"
 semver = { version = "1", features = ["serde"] }
 wasmtime = { version = "=49.0.1", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation"] }
 wasmtime-wasi = { version = "=49.0.1", default-features = false, features = ["p2"] }
+wasmprinter = "=0.258.0"
+wat = "=1.258.0"
 serde-saphyr = "1"
 json5 = "1"
 async-trait = "0.1"

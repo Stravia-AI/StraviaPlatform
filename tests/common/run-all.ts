@@ -142,6 +142,7 @@ const localIgnored: Record<string, true> = {
   no_code_continuation_error_requires_requested_id_before_response_created: true,
   affinity_and_account_headers_follow_actual_codex_frames: true,
   large_reasoning_signature_completes: true,
+  real_base_executes_with_stable_wasi_patches_and_mixed_imports: true,
 }
 
 async function runRustBinaries(binaries: RustBinary[], requireLocalIgnored: boolean): Promise<void> {
