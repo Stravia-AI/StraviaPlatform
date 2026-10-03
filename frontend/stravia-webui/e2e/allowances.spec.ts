@@ -150,6 +150,131 @@ async function selectFilter(page: Page, label: string, option: string): Promise<
   await page.getByRole('option', { name: option, exact: true }).click()
 }
 
+function requestGate() {
+  let release!: () => void
+  const promise = new Promise<void>((resolve) => (release = resolve))
+  return { promise, release }
+}
+
+test('keeps confirmed guards and open details when an older account read finishes after saving', async ({ page }) => {
+  await page.clock.install()
+  const snapshots = structuredClone([freshSnapshot])
+  await mockAllowances(page, snapshots)
+  const readStarted = requestGate()
+  const releaseRead = requestGate()
+  const readFinished = requestGate()
+  try {
+    await page.goto('/allowances')
+    const provider = page.getByTestId('allowance-provider-provider-alpha')
+    const toggleDetails = provider.getByRole('button', { name: 'Alpha account allowance details' })
+    await toggleDetails.click()
+    const details = provider.getByRole('table', { name: 'Alpha account allowance details' })
+    const weekly = details.getByRole('switch', { name: 'Pause this service when Weekly window is exhausted' })
+    await expect(weekly).not.toBeChecked()
+    const oldSnapshot = structuredClone(snapshots[0])
+    await page.route('**/api/v1/provider-allowances/provider-alpha', async (route) => {
+      readStarted.release()
+      await releaseRead.promise
+      try {
+        await route.fulfill({ json: { data: oldSnapshot } })
+      } finally {
+        readFinished.release()
+      }
+    })
+    await page.route('**/api/v1/provider-allowances/provider-alpha/guards', async (route) => {
+      const { keys } = route.request().postDataJSON() as { keys: string[] }
+      snapshots[0] = {
+        ...snapshots[0],
+        allowances: snapshots[0].allowances.map((item) => ({ ...item, guarded: keys.includes(item.key) })),
+      }
+      await route.fulfill({ json: { data: snapshots[0] } })
+    })
+    await page.clock.fastForward(180_001)
+    await readStarted.promise
+    await weekly.click()
+    await expect(weekly).toBeChecked()
+    await expect(weekly).toBeEnabled()
+
+    releaseRead.release()
+    await readFinished.promise
+    await expect(details).toBeVisible()
+    await expect(weekly).toBeChecked()
+    await expect(details.getByText('Weekly window', { exact: true })).toBeVisible()
+  } finally {
+    releaseRead.release()
+  }
+})
+
+test('publishes successful bulk refreshes and toasts the first target failure even when it finishes last', async ({
+  page,
+}) => {
+  await mockAllowances(page, [freshSnapshot, staleSnapshot, errorSnapshot])
+  const releaseFirstFailure = requestGate()
+  const releaseSuccess = requestGate()
+  const successStarted = requestGate()
+  const laterFailureFinished = requestGate()
+  await page.route('**/api/v1/provider-allowances/*/refresh', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.includes('provider-alpha')) {
+      await releaseFirstFailure.promise
+      await route.fulfill({ status: 400, json: { error: 'Alpha refresh rejected' } })
+    } else if (path.includes('provider-beta')) {
+      successStarted.release()
+      await releaseSuccess.promise
+      await route.fulfill({
+        json: {
+          data: {
+            ...staleSnapshot,
+            status: 'fresh',
+            error: undefined,
+            allowances: [
+              {
+                ...staleSnapshot.allowances[0],
+                used_percent: 25,
+                used: { value: 25, unit: 'requests' },
+                condition: 'normal',
+              },
+            ],
+          },
+        },
+      })
+    } else {
+      await route.fulfill({ status: 400, json: { error: 'Gamma refresh rejected' } })
+      laterFailureFinished.release()
+    }
+  })
+  try {
+    await page.goto('/allowances')
+    const beta = page.getByTestId('allowance-provider-provider-beta')
+    await beta.getByRole('button', { name: 'Beta account allowance details' }).click()
+    const details = beta.getByRole('table', { name: 'Beta account allowance details' })
+    await expect(details.getByRole('progressbar', { name: 'Weekly window Remaining' })).toHaveAttribute(
+      'aria-valuenow',
+      '0',
+    )
+    await page.getByRole('button', { name: 'Refresh all' }).click()
+    await Promise.all([successStarted.promise, laterFailureFinished.promise])
+    releaseSuccess.release()
+    await expect(details.getByRole('progressbar', { name: 'Weekly window Remaining' })).toHaveAttribute(
+      'aria-valuenow',
+      '75',
+    )
+    await expect(page.getByRole('button', { name: 'Refresh all' })).toBeDisabled()
+    releaseFirstFailure.release()
+    await expect(page.getByText(/Alpha refresh rejected/)).toBeVisible()
+    await expect(page.getByText(/Gamma refresh rejected/)).toHaveCount(0)
+    await expect(details).toBeVisible()
+    await expect(details.getByRole('progressbar', { name: 'Weekly window Remaining' })).toHaveAttribute(
+      'aria-valuenow',
+      '75',
+    )
+    await expect(page.getByRole('button', { name: 'Refresh all' })).toBeEnabled()
+  } finally {
+    releaseFirstFailure.release()
+    releaseSuccess.release()
+  }
+})
+
 for (const locale of ['en-US', 'zh-CN']) {
   test(`guards preserve missing keys and confirmed values (${locale})`, async ({ page }) => {
     await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)

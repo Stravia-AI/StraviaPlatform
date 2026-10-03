@@ -599,6 +599,11 @@ _避免使用_：通用表单状态机、Core 草稿、把部分成功当作全�
 Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不是 Provider 健康状态；只有守护条目的读取结果可以经额度暂停影响路由资格，其余条目只用于展示、趋势与预计耗尽。
 _避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
 
+## Provider Allowance 读取编排
+
+Provider Allowance 读取编排是管理面围绕额度快照读取、手动刷新与守护配置保存的操作协调，区分进行中的操作与已确认的结果。它不定义上游额度、额度暂停或样本事实，也不包含搜索、筛选、摘要与时间轴的展示派生。
+_避免使用_：Provider Allowance Monitor、完整额度工作区
+
 ## Provider Allowance Monitor
 
 Provider Allowance Monitor 是 Provider 所引用的 Vendor Plugin 为该类供应商读取并规范化上游额度的受信能力。Stravia 负责按 Provider 调度读取、保存样本与呈现结果；Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
