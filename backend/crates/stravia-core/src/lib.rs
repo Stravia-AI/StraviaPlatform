@@ -31,6 +31,8 @@ pub mod rpm;
 pub mod startup_progress;
 pub mod storage;
 pub(crate) mod storage_codec;
+#[cfg(test)]
+mod test_support;
 pub mod thinking;
 pub mod turn_chain;
 pub(crate) mod web_access;

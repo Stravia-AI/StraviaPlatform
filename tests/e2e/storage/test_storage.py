@@ -62,7 +62,7 @@ def test_failed_request_projection_survives_restart_and_clear(
     database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_failed_requests")
-        storage_runtime["run_schema_action"]("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        storage_runtime["run_schema_action"]("create", pg_url=pg_url, schema=schema)
         database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
     mock_port = find_free_port()
     mock, _ = minimal_mock_provider(mock_port)
@@ -115,7 +115,7 @@ def test_failed_request_projection_survives_restart_and_clear(
         mock.shutdown()
         mock.server_close()
         if schema is not None:
-            storage_runtime["run_schema_action"]("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+            storage_runtime["run_schema_action"]("drop", pg_url=pg_url, schema=schema)
 
 
 @pytest.mark.e2e
@@ -183,7 +183,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
         "postgres_dsn_for_schema"
     ]  # type: ignore[assignment]
     schema = make_schema("stravia_server_e2e")
-    run_schema_action("create", work_dir=work_dir, pg_url=pg_url, schema=schema)
+    run_schema_action("create", pg_url=pg_url, schema=schema)
 
     try:
         postgres_dsn = postgres_dsn_for_schema(pg_url, schema)
@@ -318,7 +318,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
                 plugins.rename(plugin_dir)
 
         schema_report = run_schema_action(
-            "inspect_observation", work_dir=work_dir, pg_url=pg_url, schema=schema
+            "inspect_observation", pg_url=pg_url, schema=schema
         )
         # debug_trace_manifests moved to <data_dir>/diagnostics/observation-debug/
         # <trace_id>/manifest.json (B); observation_events_expiry_idx was dropped (C).
@@ -399,7 +399,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
             finally:
                 stop_stravia_server(reconnect_proc, reconnect_logs)
     finally:
-        run_schema_action("drop", work_dir=work_dir, pg_url=pg_url, schema=schema)
+        run_schema_action("drop", pg_url=pg_url, schema=schema)
 
 
 @pytest.mark.e2e
@@ -423,7 +423,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
         assert isinstance(pg_url, str)
         schema = make_schema("stravia_redaction_restart")
         run_schema_action(
-            "create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema,
+            "create", pg_url=pg_url, schema=schema,
         )
         database = {"backend": "postgres", "url": dsn_for_schema(pg_url, schema)}
     process = None
@@ -504,7 +504,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             stop_stravia_server(process, logs)
         if schema is not None:
             run_schema_action(
-                "drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema,
+                "drop", pg_url=pg_url, schema=schema,
             )
 
 
@@ -529,7 +529,7 @@ def test_observation_tool_replay_and_trace_survive_restart(
     database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_tool_replay")
-        run_schema_action("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        run_schema_action("create", pg_url=pg_url, schema=schema)
         database = {
             "backend": "postgres",
             "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema),
@@ -636,4 +636,4 @@ def test_observation_tool_replay_and_trace_survive_restart(
         mock.server_close()
         mock_thread.join(timeout=5.0)
         if schema is not None:
-            run_schema_action("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+            run_schema_action("drop", pg_url=pg_url, schema=schema)

@@ -339,7 +339,6 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
             new_schema = storage_runtime["make_isolated_schema"]("stravia_vendor_plugins")  # type: ignore[operator]
             storage_runtime["run_schema_action"](  # type: ignore[operator]
                 "create",
-                work_dir=storage_runtime["work_dir"],
                 pg_url=pg_url,
                 schema=new_schema,
             )
@@ -743,7 +742,6 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         if schema is not None:
             storage_runtime["run_schema_action"](  # type: ignore[operator]
                 "drop",
-                work_dir=storage_runtime["work_dir"],
                 pg_url=pg_url,
                 schema=schema,
             )

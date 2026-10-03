@@ -29,7 +29,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
     database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_compaction_restart")
-        storage_runtime["run_schema_action"]("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        storage_runtime["run_schema_action"]("create", pg_url=pg_url, schema=schema)
         database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
     process = None
     logs = []
@@ -108,4 +108,4 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
         if process is not None:
             stop_stravia_server(process, logs)
         if schema is not None:
-            storage_runtime["run_schema_action"]("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+            storage_runtime["run_schema_action"]("drop", pg_url=pg_url, schema=schema)

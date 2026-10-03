@@ -112,10 +112,14 @@ mod tests {
 
     #[tokio::test]
     async fn renew_extends_by_ttl() {
-        let deadline = Deadline::from_now(Duration::from_millis(40));
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let ttl = Duration::from_secs(60);
+        let deadline = Deadline::from_now(ttl);
+        deadline.reset(Instant::now() + Duration::from_secs(30));
+        let original = deadline.at();
+        let earliest = Instant::now() + ttl;
         deadline.renew();
-        assert!(deadline.at() >= Instant::now() + Duration::from_millis(35));
+        assert!(deadline.at() > original);
+        assert!(deadline.at() >= earliest);
     }
 
     #[tokio::test]
@@ -136,21 +140,24 @@ mod tests {
         assert_eq!(deadline.remaining(), Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn wait_rearms_on_renewal() {
-        let deadline = Deadline::from_now(Duration::from_millis(60));
-        let renewer = deadline.clone();
-        let renewals = tokio::spawn(async move {
-            for _ in 0..3 {
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                renewer.renew();
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(2), deadline.wait())
-            .await
-            .expect("deadline should fire after renewals stop");
-        renewals.await.expect("renewal task panicked");
-        // Three renewals at 30ms intervals push the firing point past 100ms.
+        let deadline = Deadline::from_now(Duration::from_secs(60));
+        deadline.reset(Instant::now() + Duration::from_secs(10));
+        let original = deadline.at();
+        let mut waiting = std::pin::pin!(deadline.wait());
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+        deadline.clone().renew();
+        assert!(deadline.at() > original);
+        // 只推进旧 Tokio timer；共享 std::time 截止时间仍在未来。
+        // 不要求 renewal task 必须在繁忙机器上的几十毫秒内获得调度。
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert!(!deadline.is_exceeded());
+
+        deadline.reset(Instant::now() - Duration::from_millis(1));
+        waiting.await;
         assert!(deadline.is_exceeded());
     }
 

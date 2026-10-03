@@ -6,11 +6,7 @@ use std::{io::Cursor, sync::Arc};
 async fn fixture() -> anyhow::Result<(tempfile::TempDir, sqlx::SqlitePool, InteractionObservation)>
 {
     let directory = tempfile::tempdir()?;
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await?;
-    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let pool = crate::test_support::migrated_sqlite_pool().await?;
     let observation = InteractionObservation::new(
         Some(pool.clone()),
         None,

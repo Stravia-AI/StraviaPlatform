@@ -73,6 +73,7 @@ Platform Tools 在 Stravia 内部执行，可将结果交给后续模型轮次�
 | 开发 WebUI / WebUI 与独立服务端 / 桌面端 | `task dev:web` / `task dev:server` / `task dev:desktop` |
 | 构建 WebUI / 服务端 / 桌面端 | `task build:web` / `task build:server` / `task build:desktop` |
 | 仓库静态检查 / 支持的单元测试 | `task check` / `task test` |
+| 完整本地测试矩阵（含增量构建与清理，限时五分钟） | `task test:all` |
 | 代理 / 管理 E2E | `task test:e2e:proxy` / `task test:e2e:admin` |
 | SQLite 存储 E2E | `task test:e2e:storage:sqlite` |
 | PostgreSQL 存储 E2E | 设置 `DB_URL`，再运行 `task test:e2e:storage:postgres` |
@@ -81,6 +82,24 @@ Platform Tools 在 Stravia 内部执行，可将结果交给后续模型轮次�
 | Windows 桌面冒烟测试 | `task test:e2e:desktop` |
 
 `DB_URL` 必须指向隔离的测试数据库，不得使用生产数据库。
+
+`task test:all` 在 Windows 上运行全部本地测试面，包括桌面 Rust 单元测试、真实 Chromium 与 Tauri 冒烟测试、SQLite/PostgreSQL 存储、开发服务器和本地可运行的 opt-in 测试。它要求已安装锁定依赖、浏览器、Docker，以及本地 `postgres:16` 镜像；自动创建并清理仅监听 loopback 的独立 PostgreSQL 容器，不使用调用者的数据库连接。存储测试的每个并行 worker 使用独立数据库，避免随机 schema 仍争用同一数据库级迁移锁；真实迁移、重连检查和产品锁保持不变。需要生产凭据或外部服务的 live-upstream、S3 与显式忽略的文档示例仍须单独满足前置条件后运行。
+
+五分钟从统一命令启动计到测试与清理完成，包括源码/工具链检查和必要的增量构建；超时或任一测试失败均返回非零。首次冷构建不承诺五分钟。`target/test-artifacts/` 只缓存按源码、编译环境和实际文件校验的独立编译产物，不缓存测试结果；不得以跳过测试、缩短产品 TTL、丢弃大输入边界或重试掩盖失败来满足时限。逐项日志与计时保存在 `target/test-results/all/`。
+
+### 单个测试的最快路径
+
+先跑目标用例，通过后再扩大验证；单例调试不必先跑全量。以下从仓库根目录执行，`<…>` 替换为实际目标。
+
+| 测试类型 | 定向命令 |
+|---|---|
+| Rust 单元测试 | `cargo test --locked --jobs 4 -p <crate> --lib <完整测试名> -- --exact` |
+| WebUI 单元测试 | `bun test --cwd frontend/stravia-webui <测试文件> -t "<测试名>"` |
+| HTTP E2E | `uv run --locked --group test python -m pytest "<文件>::<函数>" -q` |
+| Chromium E2E | `bun run --filter stravia-webui test:e2e <测试文件> --grep "<测试名>" --workers=1 --retries=0` |
+
+- E2E 先按 `Taskfile.yml` 对应任务的 `deps` / `env` 准备构建与环境，成功后再定向执行；源码变更后重新校验缓存。WebUI 单元测试需要的生成物未准备时，先运行 `test:unit`；Rust 集成测试将 `--lib` 换成 `--test <文件名，不含 .rs>`。
+- 确认目标用例确实执行并通过；零测试或全部被过滤不算通过。
 
 ### 按改动范围选择检查
 

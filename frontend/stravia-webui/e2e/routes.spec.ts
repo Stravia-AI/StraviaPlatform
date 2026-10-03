@@ -338,12 +338,7 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
 
   await page.goto('/models')
   await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
-  await page
-    .locator('main')
-    .getByRole('link')
-    .filter({ hasText: 'gpt-5.4' })
-    .getByText('gpt-5.4', { exact: true })
-    .click()
+  await page.getByRole('main').getByRole('link', { name: 'Team GPT', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
   const editModelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
   const editDisplayName = page.getByLabel('Display name', { exact: true })
@@ -654,7 +649,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
               limit: available.specification.limit,
               modalities: available.specification.modalities,
               reasoning_efforts: available.specification.reasoning_efforts,
-              cost: { input: 0.25, output: 1 },
+              cost: { input: 0.25, output: 1, tiers: [] },
             },
             extensions: {},
             created_at: '2026-08-17T00:00:00Z',

@@ -46,6 +46,24 @@ tasks:
   build:vendors:all:
     desc: Build standalone Wasm plugins for release assets and explicit integration tests.
     deps: [build:vendors]
+    sources:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - backend/crates/stravia-vendor-*/Cargo.toml
+      - backend/crates/stravia-vendor-*/build.rs
+      - backend/crates/stravia-vendor-*/src/**/*.rs
+      - backend/crates/stravia-vendor-*/messages/*.json
+      - backend/crates/stravia-vendor-sdk/build-support/**/*.rs
+      - backend/crates/stravia-vendor-sdk/wit/**/*.wit
+      - backend/crates/stravia-protocol-codec/Cargo.toml
+      - backend/crates/stravia-protocol-codec/src/**/*.rs
+      - backend/crates/stravia-runtime-contract/Cargo.toml
+      - backend/crates/stravia-runtime-contract/src/**/*.rs
+      - backend/crates/stravia-core/assets/providers.stravia.json
+    generates:
+      - target/vendor-plugins-all/manifest.json
     cmds:
       - cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors -- --all
 
@@ -96,8 +114,35 @@ tasks:
   build:web:
     desc: Build the Stravia WebUI distribution assets.
     deps: [install:web]
+    sources: &web_sources
+      - Taskfile.yml
+      - package.json
+      - bun.lock
+      - frontend/stravia-webui/package.json
+      - frontend/stravia-webui/svelte.config.js
+      - frontend/stravia-webui/vite.config.ts
+      - frontend/stravia-webui/tsconfig*.json
+      - .env*
+      - frontend/stravia-webui/.env*
+      - frontend/stravia-webui/src/**/*
+      - exclude: frontend/stravia-webui/src/lib/paraglide/**/*
+      - frontend/stravia-webui/static/**/*
+      - frontend/stravia-webui/messages/*.json
+      - frontend/stravia-webui/project.inlang/**/*
+      - frontend/stravia-webui/scripts/compile-i18n.ts
+    generates:
+      - frontend/stravia-webui/dist/index.html
     cmds:
       - bun run build:web
+
+  build:web:desktop-e2e:
+    desc: Build isolated desktop smoke-test WebUI assets.
+    deps: [install:web]
+    sources: *web_sources
+    generates:
+      - frontend/stravia-webui/dist-desktop-e2e/index.html
+    cmds:
+      - bun run build:web:desktop-e2e
 
   build:server:
     desc: Build the standalone Stravia server for production.
@@ -123,6 +168,73 @@ tasks:
     cmds:
       - cargo build -p stravia-devtools
 
+  build:test:workspace:
+    desc: Incrementally prepare the complete supported Rust test executables.
+    deps: [build:web, build:vendor-fixtures]
+    sources: &rust_test_sources
+      - Taskfile.yml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - backend/**/*.rs
+      - backend/**/*.toml
+      - backend/**/*.json
+      - backend/**/*.wit
+      - backend/**/migrations/**/*.sql
+      - backend/apps/stravia-desktop/icons/**/*
+      - frontend/stravia-webui/dist/**/*
+      - frontend/stravia-webui/dist-desktop-e2e/**/*
+      - target/vendor-plugins/*.wasm
+      - target/vendor-plugins/manifest.json
+      - target/vendor-plugins-all/*.wasm
+      - target/vendor-plugins-all/manifest.json
+      - target/vendor-test-fixtures/*.wasm
+      - tests/common/build-test-artifacts.ts
+    generates: [target/test-artifacts/workspace/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status workspace]
+    cmds: [bun tests/common/build-test-artifacts.ts workspace]
+
+  build:test:desktop-tests:
+    desc: Prepare real desktop Rust unit tests without the native smoke feature.
+    deps: [build:web, build:vendors]
+    sources: *rust_test_sources
+    generates: [target/test-artifacts/desktop-tests/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status desktop-tests]
+    cmds: [bun tests/common/build-test-artifacts.ts desktop-tests]
+
+  build:test:services:
+    desc: Preserve isolated release server, tools and storage-harness executables.
+    deps: [build:web, build:vendors]
+    sources: *rust_test_sources
+    generates: [target/test-artifacts/services/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status services]
+    cmds: [bun tests/common/build-test-artifacts.ts services]
+
+  build:test:release:
+    desc: Preserve the production embedded-WebUI server for full testing.
+    deps: [build:web, build:vendors]
+    sources: *rust_test_sources
+    generates: [target/test-artifacts/release/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status release]
+    cmds: [bun tests/common/build-test-artifacts.ts release]
+
+  build:test:development:
+    desc: Prepare an isolated default-feature graph for the real dev:server command.
+    deps: [build:web, build:vendors]
+    sources: *rust_test_sources
+    generates: [target/test-artifacts/development/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status development]
+    cmds: [bun tests/common/build-test-artifacts.ts development]
+
+  build:test:desktop-native:
+    desc: Preserve the actual native smoke executable independently of unit builds.
+    deps: [build:web:desktop-e2e, build:vendors]
+    sources: *rust_test_sources
+    generates: [target/test-artifacts/desktop-native/manifest.json]
+    status: [bun tests/common/build-test-artifacts.ts --status desktop-native]
+    cmds: [bun tests/common/build-test-artifacts.ts desktop-native]
+
   build:desktop:
     desc: Build Stravia desktop bundles for production.
     deps: [install:web, build:vendors]
@@ -146,7 +258,9 @@ tasks:
 
   test:e2e:desktop:
     desc: Run the Windows Tauri desktop smoke test.
-    deps: [build:desktop:e2e, build:vendor-fixtures]
+    deps: [build:test:desktop-native, build:vendor-fixtures]
+    env:
+      STRAVIA_DESKTOP_E2E_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/desktop-native/stravia-desktop{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - bun tests/common/run-in-tempdir.ts bun run test:e2e:desktop
 
@@ -173,9 +287,17 @@ tasks:
       - bun tests/common/run-in-tempdir.ts bun run --filter stravia-webui test:unit
       - bun tests/common/run-in-tempdir.ts cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture
 
+  test:all:
+    desc: Run every local test surface, including incremental builds and cleanup, with a five-minute budget.
+    cmds:
+      - bun tests/common/run-all.ts
+
   test:e2e:proxy:
     desc: Run the proxy protocol matrix E2E tests.
-    deps: [build:server:debug, build:devtools:debug]
+    deps: [build:test:services]
+    env:
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-server{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_TOOLS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-tools{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
 
@@ -188,15 +310,19 @@ tasks:
     desc: Run the Admin service E2E tests.
     # The development-origin E2E starts `cargo run`; prebuild that profile so a
     # cold CI runner tests the server instead of timing out during compilation.
-    deps: [build:server, build:server:debug]
+    deps: [build:test:release, build:test:development]
     env:
-      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
+      - CARGO_TARGET_DIR="{{.ROOT_DIR}}/target/test-development" bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
 
   test:e2e:storage:sqlite:
     desc: Run the SQLite storage E2E tests.
-    deps: [build:server:debug, build:vendor-fixtures]
+    deps: [build:test:services, build:vendor-fixtures]
+    env:
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-server{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_TOOLS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-tools{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_STORAGE_HARNESS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-storage-test-harness{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k sqlite
 
@@ -204,15 +330,20 @@ tasks:
     desc: Run the PostgreSQL storage E2E tests.
     requires:
       vars: [DB_URL]
-    deps: [build:server:debug, build:vendor-fixtures]
+    deps: [build:test:services, build:vendor-fixtures]
+    env:
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-server{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_TOOLS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-tools{{if eq OS "windows"}}.exe{{end}}'
+      STRAVIA_STORAGE_HARNESS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-storage-test-harness{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
 
   test:e2e:web:
-    desc: Run Chromium WebUI E2E tests using the production build from build:server.
-    deps: [build:server]
+    desc: Run Chromium WebUI E2E tests using the cached production server.
+    deps: [build:test:release]
     env:
       PLAYWRIGHT_USE_PREBUILT: '1'
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - bun tests/common/run-in-tempdir.ts bun run test:e2e:web
 

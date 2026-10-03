@@ -9,9 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -621,23 +620,17 @@ def test_status_describes_gateway_without_a_listener_port(admin_env: dict[str, s
 def test_unified_listener_preserves_proxy_cors_without_cross_origin_management(
     admin_env: dict[str, str],
 ) -> None:
-    origin = admin_env["admin"]
+    origin = admin_env["proxy_cors_origin"]
     for path in ("/api/v1/providers", "/v1/chat/completions"):
-        request = Request(
+        status, headers, _ = http_bytes(
+            "OPTIONS",
             f"{admin_env['admin']}{path}",
-            method="OPTIONS",
             headers={
                 "Origin": origin,
                 "Access-Control-Request-Method": "POST",
             },
         )
-        try:
-            with urlopen(request) as response:
-                status = response.status
-                allowed_origin = response.headers.get("Access-Control-Allow-Origin")
-        except HTTPError as error:
-            status = error.code
-            allowed_origin = error.headers.get("Access-Control-Allow-Origin")
+        allowed_origin = headers.get("access-control-allow-origin")
 
         if path.startswith("/api/"):
             assert status == 403
@@ -653,27 +646,19 @@ def test_proxy_rejects_untrusted_cors_origin_and_method(
     admin_env: dict[str, str],
 ) -> None:
     def preflight(origin: str, method: str) -> tuple[int, str | None, str | None]:
-        request = Request(
+        status, headers, _ = http_bytes(
+            "OPTIONS",
             f"{admin_env['admin']}/v1/chat/completions",
-            method="OPTIONS",
             headers={
                 "Origin": origin,
                 "Access-Control-Request-Method": method,
             },
         )
-        try:
-            with urlopen(request) as response:
-                return (
-                    response.status,
-                    response.headers.get("Access-Control-Allow-Origin"),
-                    response.headers.get("Access-Control-Allow-Methods"),
-                )
-        except HTTPError as error:
-            return (
-                error.code,
-                error.headers.get("Access-Control-Allow-Origin"),
-                error.headers.get("Access-Control-Allow-Methods"),
-            )
+        return (
+            status,
+            headers.get("access-control-allow-origin"),
+            headers.get("access-control-allow-methods"),
+        )
 
     # tower-http rejects an origin by omitting Access-Control-Allow-Origin. The
     # network response can still be 200; browsers enforce the denial.
@@ -681,9 +666,9 @@ def test_proxy_rejects_untrusted_cors_origin_and_method(
     assert status == 200
     assert allowed_origin is None
 
-    status, allowed_origin, allowed_methods = preflight(admin_env["admin"], "PATCH")
+    status, allowed_origin, allowed_methods = preflight(admin_env["proxy_cors_origin"], "PATCH")
     assert status == 200
-    assert allowed_origin == admin_env["admin"]
+    assert allowed_origin == admin_env["proxy_cors_origin"]
     assert allowed_methods is not None
     assert "PATCH" not in {method.strip() for method in allowed_methods.split(",")}
 

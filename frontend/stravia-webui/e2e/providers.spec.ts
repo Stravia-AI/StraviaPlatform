@@ -722,7 +722,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const precisionRow = table.getByRole('row').filter({ hasText: /Precision Model.*precision-model/ })
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
-  await expect(binaryRow).toContainText('Context 1,048,576')
+  await expect(binaryRow.getByRole('cell', { name: '1,048,576', exact: true })).toBeVisible()
   const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
   await expect(identityCell).not.toContainText('1.05M')
   await expect(identityCell).not.toContainText('Input')
@@ -730,12 +730,17 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   await expect(precisionRow).toContainText('Input')
   await expect(precisionRow).toContainText('Output')
   await expect(precisionRow).toContainText('high')
-  const precisionSpecification = precisionRow.getByRole('group', { name: 'Model specification' })
-  await expect(precisionSpecification).toContainText('Image')
-  await expect(precisionSpecification).toContainText('PDF')
-  await expect(precisionSpecification).toContainText('Text')
-  const unknownSpecification = unknownRow.getByRole('group', { name: 'Model specification' })
-  await expect(unknownSpecification).toContainText('Not registered')
+  const precisionModalities = precisionRow
+    .getByRole('cell')
+    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
+  await expect(precisionModalities.getByRole('term')).toHaveText(['Input', 'Output'])
+  await expect(precisionModalities.getByRole('definition')).toHaveText(['Image, PDF', 'Text'])
+  const unknownModalities = unknownRow
+    .getByRole('cell')
+    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
+  await expect(unknownModalities.getByRole('term')).toHaveText(['Input', 'Output'])
+  await expect(unknownModalities.getByRole('definition')).toHaveText(['Not registered', 'Not registered'])
+  await expect(unknownRow.getByRole('cell', { name: 'Not registered', exact: true })).toHaveCount(2)
   await expect.poll(() => detailRequests).toBe(0)
 })
 
@@ -1082,8 +1087,11 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await availableModelRow.getByRole('cell').nth(1).click()
 
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-test')
-  await page.getByText('Advanced model settings', { exact: false }).click()
-  await expect(page.getByText('Extension fields (read only) · 1')).toBeVisible()
+  const extensionFields = page.getByRole('button', { name: 'Extension fields (read only) · 1', exact: true })
+  await extensionFields.click()
+  const extensionPreview = extensionFields.locator('..').locator('pre')
+  await expect(extensionPreview).toContainText('"vendor_extension"')
+  await expect(extensionPreview).toContainText('"private"')
   await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities).toContainText('text, image, binary')
@@ -1133,7 +1141,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const savedMetadata = JSON.parse(updateBody).metadata
   expect(savedMetadata.open_weights).toBe(true)
   expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
-  expect(savedMetadata.cost).not.toHaveProperty('context_over_200k')
+  expect(savedMetadata.cost.context_over_200k).toEqual(detail.metadata.cost.context_over_200k)
   expect(savedMetadata.cost).toMatchObject({ reasoning: 2, input_audio: 3, output_audio: 4 })
   expect(savedMetadata.cost.tiers).toEqual([
     expect.objectContaining({
@@ -1165,8 +1173,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect.poll(() => prepareBodies[0]).toEqual({ model_id: 'gpt-5.4', template_id: 'openai/gpt-5.4' })
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-5.4')
   await expect(page.locator('#provider-model-name')).toHaveValue('GPT-5.4')
-  await page.getByText('Advanced model settings', { exact: false }).click()
-  await expect(page.getByText('Extension fields (read only) · 1')).toBeVisible()
+  await extensionFields.click()
+  await expect(extensionPreview).toContainText('"benchmarks"')
+  await expect(extensionPreview).toContainText('Template benchmark')
 
   await page.getByRole('button', { name: 'Close model editor' }).click()
   await page.getByRole('button', { name: 'Add model', exact: true }).click()

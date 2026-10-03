@@ -8,15 +8,18 @@ function html(text: string): string {
 }
 
 describe('markdown HTML', () => {
-  test('shows title-only model output as text instead of swallowing the HTML tag', () => {
-    const rendered = html('<title>Analyze the current project codebase</title>')
-    expect(rendered).toContain('&lt;title&gt;Analyze the current project codebase&lt;/title&gt;')
-    expect(rendered).not.toContain('<title>')
-  })
-
-  test('keeps inline title tags visible inside a paragraph', () => {
-    const rendered = html('Hello <title>x</title> world')
-    expect(rendered).toBe('<p>Hello &lt;title&gt;x&lt;/title&gt; world</p>\n')
+  test('keeps block and inline title markup visible as escaped model output', () => {
+    for (const { source, escaped } of [
+      {
+        source: '<title>Analyze the current project codebase</title>',
+        escaped: '&lt;title&gt;Analyze the current project codebase&lt;/title&gt;',
+      },
+      { source: 'Hello <title>x</title> world', escaped: 'Hello &lt;title&gt;x&lt;/title&gt; world' },
+    ]) {
+      const rendered = html(source)
+      expect(rendered).toContain(escaped)
+      expect(rendered).not.toContain('<title>')
+    }
   })
 
   test('escapes script and img HTML so they cannot execute', () => {

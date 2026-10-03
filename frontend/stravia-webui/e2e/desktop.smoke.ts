@@ -83,6 +83,9 @@ async function expectPortSwitch(previousTimeOrigin: number, port: number): Promi
   expect(state.mode).toBe('fixed')
   expect(state.currentPort).toBe(port)
   expect(state.fixedPort).toBe(port)
+  await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+  await expect($('#desktop-fixed-port')).toHaveValue(String(port))
+  await expect($('header button[aria-expanded]')).toBeDisplayed()
 }
 
 async function unusedPort(): Promise<number> {
@@ -314,7 +317,6 @@ describe('Stravia desktop smoke', () => {
       await $('button=Save Port').click()
       await expectPortSwitch(previousTimeOrigin, nextPort)
       activePort = nextPort
-      await expect($('[aria-label="Stravia 观策行"]')).toBeDisplayed()
       await expectProtectedStatus(nextPort, nativeSession.access_token)
     }
 
@@ -337,9 +339,7 @@ describe('Stravia desktop smoke', () => {
     await expect($('button=Pause')).not.toExist()
     await expect($('button=Cancel')).not.toExist()
     await expect($('[data-slot="dialog-title"]')).toHaveText('Install Stravia 9.9.9?')
-    await expect($('[data-slot="dialog-description"]')).toHaveText(
-      'Stravia will exit now. Any requests in progress will be interrupted.',
-    )
+    await expect($('[data-slot="dialog-content"]').$('button=Exit and install')).toBeEnabled()
     await (await $('[data-slot="dialog-content"]')).$('button=Close').click()
     await expect($('[data-slot="dialog-title"]')).not.toExist()
     await $('button=Exit and install').click()

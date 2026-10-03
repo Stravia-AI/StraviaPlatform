@@ -12,14 +12,9 @@ pub use sql::SqlTurnChainStore;
 
 #[cfg(test)]
 pub(crate) async fn test_store() -> SqlTurnChainStore {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    let pool = crate::test_support::migrated_sqlite_pool()
         .await
-        .expect("SQLite Turn Chain test pool");
-    crate::migrations::migrate_sqlite(&pool, None)
-        .await
-        .expect("SQLite Turn Chain test migrations");
+        .expect("SQLite Turn Chain test database");
     SqlTurnChainStore::sqlite(pool, std::sync::Arc::new(tokio::sync::Mutex::new(())))
 }
 

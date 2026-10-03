@@ -177,52 +177,62 @@ test('settings fields align in wide containers and stack in narrow containers', 
   await page.setViewportSize({ width: 1500, height: 900 })
   await page.goto('/settings')
 
-  const themeField = page.locator('[data-slot="field"]').filter({ has: page.locator('#theme-preference') })
-  const themeLabel = themeField.locator('[data-slot="field-label"]')
-  const themeControl = themeField.locator('#theme-preference')
-  const proxyUrl = page.locator('#proxy-url')
-  const proxyBypass = page.locator('#proxy-bypass')
-  const retention = page.locator('#log-retention')
+  await expect(page.locator('#proxy-url')).toBeVisible()
+  await page.evaluate(() => document.fonts.ready.then(() => undefined))
+  // Async sections can shift the entire page between protocol calls. Compare
+  // every field from the same layout snapshot, not mixed pre/post-load boxes.
+  const measureFields = () =>
+    page.evaluate(() => {
+      const selectors = {
+        themeLabel: '[data-slot="field"]:has(#theme-preference) [data-slot="field-label"]',
+        themeControl: '#theme-preference',
+        proxyUrl: '#proxy-url',
+        proxyBypass: '#proxy-bypass',
+        retention: '#log-retention',
+        proxyLabel: 'label[for="proxy-url"]',
+      }
+      const boxes = {} as Record<keyof typeof selectors, { x: number; y: number; width: number; height: number }>
+      for (const name of Object.keys(selectors) as (keyof typeof selectors)[]) {
+        const element = document.querySelector(selectors[name])
+        if (!element) throw new Error(`Missing settings field: ${name}`)
+        const { x, y, width, height } = element.getBoundingClientRect()
+        boxes[name] = { x, y, width, height }
+      }
+      return boxes
+    })
 
-  const wideThemeLabelBox = await themeLabel.boundingBox()
-  const wideThemeControlBox = await themeControl.boundingBox()
-  const wideProxyUrlBox = await proxyUrl.boundingBox()
-  const wideProxyBypassBox = await proxyBypass.boundingBox()
-  const wideRetentionBox = await retention.boundingBox()
-  expect(wideThemeLabelBox).not.toBeNull()
-  expect(wideThemeControlBox).not.toBeNull()
-  expect(wideProxyUrlBox).not.toBeNull()
-  expect(wideProxyBypassBox).not.toBeNull()
-  expect(wideRetentionBox).not.toBeNull()
-  expect(wideThemeLabelBox!.x + wideThemeLabelBox!.width).toBeLessThan(wideThemeControlBox!.x)
-  expect(Math.abs(wideProxyUrlBox!.x - wideProxyBypassBox!.x)).toBeLessThan(1)
-  expect(Math.abs(wideProxyUrlBox!.width - wideProxyBypassBox!.width)).toBeLessThan(1)
+  const {
+    themeLabel: wideThemeLabelBox,
+    themeControl: wideThemeControlBox,
+    proxyUrl: wideProxyUrlBox,
+    proxyBypass: wideProxyBypassBox,
+    retention: wideRetentionBox,
+    proxyLabel: proxyLabelBox,
+  } = await measureFields()
+  expect(wideThemeLabelBox.x + wideThemeLabelBox.width).toBeLessThan(wideThemeControlBox.x)
+  expect(Math.abs(wideProxyUrlBox.x - wideProxyBypassBox.x)).toBeLessThan(1)
+  expect(Math.abs(wideProxyUrlBox.width - wideProxyBypassBox.width)).toBeLessThan(1)
   expect(
-    Math.abs(wideProxyUrlBox!.x + wideProxyUrlBox!.width - (wideRetentionBox!.x + wideRetentionBox!.width)),
+    Math.abs(wideProxyUrlBox.x + wideProxyUrlBox.width - (wideRetentionBox.x + wideRetentionBox.width)),
   ).toBeLessThan(1)
 
-  const proxyLabelBox = await page.locator('label[for="proxy-url"]').boundingBox()
-  expect(proxyLabelBox).not.toBeNull()
   expect(
-    Math.abs(proxyLabelBox!.y + proxyLabelBox!.height / 2 - (wideProxyUrlBox!.y + wideProxyUrlBox!.height / 2)),
+    Math.abs(proxyLabelBox.y + proxyLabelBox.height / 2 - (wideProxyUrlBox.y + wideProxyUrlBox.height / 2)),
   ).toBeLessThan(1)
 
   await page.setViewportSize({ width: 500, height: 900 })
 
-  const narrowThemeLabelBox = await themeLabel.boundingBox()
-  const narrowThemeControlBox = await themeControl.boundingBox()
-  const narrowProxyUrlBox = await proxyUrl.boundingBox()
-  const narrowProxyBypassBox = await proxyBypass.boundingBox()
-  const narrowRetentionBox = await retention.boundingBox()
-  expect(narrowThemeLabelBox).not.toBeNull()
-  expect(narrowThemeControlBox).not.toBeNull()
-  expect(narrowProxyUrlBox).not.toBeNull()
-  expect(narrowProxyBypassBox).not.toBeNull()
-  expect(narrowRetentionBox).not.toBeNull()
-  expect(narrowThemeLabelBox!.y + narrowThemeLabelBox!.height).toBeLessThanOrEqual(narrowThemeControlBox!.y)
-  expect(Math.abs(narrowProxyUrlBox!.x - narrowProxyBypassBox!.x)).toBeLessThan(1)
-  expect(Math.abs(narrowProxyUrlBox!.width - narrowProxyBypassBox!.width)).toBeLessThan(1)
-  expect(Math.abs(narrowProxyUrlBox!.width - narrowRetentionBox!.width)).toBeLessThan(1)
+  const {
+    themeLabel: narrowThemeLabelBox,
+    themeControl: narrowThemeControlBox,
+    proxyUrl: narrowProxyUrlBox,
+    proxyBypass: narrowProxyBypassBox,
+    retention: narrowRetentionBox,
+  } = await measureFields()
+  expect(narrowThemeLabelBox.y + narrowThemeLabelBox.height).toBeLessThanOrEqual(narrowThemeControlBox.y)
+  expect(Math.abs(narrowProxyUrlBox.x - narrowProxyBypassBox.x)).toBeLessThan(1)
+  expect(Math.abs(narrowProxyUrlBox.width - narrowProxyBypassBox.width)).toBeLessThan(1)
+  expect(Math.abs(narrowProxyUrlBox.width - narrowRetentionBox.width)).toBeLessThan(1)
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
 })
 
@@ -490,7 +500,11 @@ test('unloaded settings stay non-editable until a failed baseline is recovered',
   await expect(page.locator('#proxy-url')).toHaveCount(0)
   await expect(page.locator('#log-retention')).toBeVisible()
   unavailable = false
-  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await page
+    .getByRole('alert')
+    .filter({ hasText: 'Some settings could not be' })
+    .getByRole('button', { name: 'Retry', exact: true })
+    .click()
   await expect(page.locator('#proxy-enabled')).toBeChecked()
   await expect(page.locator('#proxy-url')).toBeVisible()
 })

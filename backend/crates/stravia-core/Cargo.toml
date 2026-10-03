@@ -10,7 +10,7 @@ description = "Core library for Stravia Agent infra — model access, tool execu
 workspace = true
 
 [features]
-test-support = []
+test-support = ["sqlx/sqlite-deserialize"]
 
 [dependencies]
 stravia-runtime-contract = { workspace = true }
@@ -96,6 +96,7 @@ stable_deref_trait = { workspace = true }
 windows-sys-052 = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_Security_Cryptography", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_SystemServices"] }
 
 [dev-dependencies]
+sqlx = { workspace = true, features = ["sqlite-deserialize"] }
 office_oxide = { workspace = true }
 stravia-media = { workspace = true, features = ["test-support"] }
 jsonschema = { workspace = true }

@@ -1143,10 +1143,11 @@ mod deadline_tests {
 
     #[tokio::test]
     async fn host_boundary_activity_renews_shared_deadline() {
-        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let deadline = Deadline::from_now(Duration::from_secs(60));
         let state = state(deadline.clone());
+        // 不依赖线程在毫秒级 sleep 后准时获得调度；先建立仍有效但更早的共享截止时间。
+        deadline.reset(std::time::Instant::now() + Duration::from_secs(30));
         let original = deadline.at();
-        tokio::time::sleep(Duration::from_millis(40)).await;
         state.active().expect("boundary call before expiry");
         // The renewal pushed the shared instant out, so a clone held by an
         // outer layer observes the extension too.
@@ -1165,7 +1166,7 @@ mod deadline_tests {
 
     #[tokio::test]
     async fn cancelled_operation_fails_without_renewing() {
-        let deadline = Deadline::from_now(Duration::from_millis(60));
+        let deadline = Deadline::from_now(Duration::from_secs(60));
         let state = state(deadline.clone());
         state.cancellation.cancel();
         let at = deadline.at();
