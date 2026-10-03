@@ -62,6 +62,7 @@ impl TargetRow {
             target_cooldown_ms: self.target_cooldown_ms,
             created_at: self.created_at,
             thinking_level_map: self.thinking_level_map.0,
+            model_name: None,
         }
     }
 }

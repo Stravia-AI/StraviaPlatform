@@ -26,9 +26,15 @@ export type RouteTargetsValidationError =
   | 'incomplete-target'
   | 'no-enabled-target'
 
-export interface RouteTargetLane {
+export interface RouteTargetLane<T extends PriorityLaneMember = RouteTargetForm> {
   priority: number
-  targets: RouteTargetForm[]
+  targets: T[]
+}
+
+/** 编辑器表单与已保存 Target 共用的分层依据：仅已启用目标参与，同一 priority 为一层。 */
+export interface PriorityLaneMember {
+  enabled: boolean
+  priority: number
 }
 
 export type RouteTargetInsertion =
@@ -159,8 +165,8 @@ export function secondsToMilliseconds(seconds: number): number | undefined {
   return Math.round(Number(seconds) * 1000)
 }
 
-export function priorityLanes(targets: RouteTargetForm[]): RouteTargetLane[] {
-  const lanes = new Map<number, RouteTargetForm[]>()
+export function priorityLanes<T extends PriorityLaneMember>(targets: readonly T[]): RouteTargetLane<T>[] {
+  const lanes = new Map<number, T[]>()
   for (const target of targets) {
     if (!target.enabled) continue
     const lane = lanes.get(target.priority)

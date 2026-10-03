@@ -212,8 +212,42 @@
   "model_editor_discard_changes": "放弃更改",
   "models_display_name": "显示名称",
   "models_client_model_id": "客户端模型 ID",
-  "models_associated_services": "关联服务",
-  "models_no_associated_services": "没有关联服务",
+  "models_destinations_none_available": "没有可用的请求目标",
+  "models_destinations_first_layer_unavailable": "第 1 层不可用",
+  "models_destinations_layers_unavailable": "第 1–{last} 层不可用",
+  "models_destinations_credential_invalid": "凭据失效 {count}",
+  "models_destinations_provider_disabled": "服务已禁用 {count}",
+  "models_destinations_allowance_suspended": "额度暂停 {count}",
+  "models_destinations_multiple": [
+    {
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} 个目标 · {strategy}",
+        "countPlural=other": "{count} 个目标 · {strategy}"
+      }
+    }
+  ],
+  "models_destinations_fallback": [
+    {
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
+      "match": {
+        "layersPlural=one": "另有 {layers} 层后备（{targets} 个目标）",
+        "layersPlural=other": "另有 {layers} 层后备（{targets} 个目标）"
+      }
+    }
+  ],
+  "models_destinations_unavailable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} 个目标不可用",
+        "countPlural=other": "{count} 个目标不可用"
+      }
+    }
+  ],
   "overview_no_traffic_title": "尚无请求流量",
   "overview_configuration_unavailable": "无法读取配置",
   "overview_loading_configuration": "正在加载配置",

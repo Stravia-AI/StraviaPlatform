@@ -162,7 +162,7 @@ test('Models table fits the desktop content width without horizontal scrolling',
   await expect(tableContainer).toBeVisible()
   await expect(tableContainer.getByRole('columnheader', { name: 'Display name' })).toBeVisible()
   await expect(tableContainer.getByRole('columnheader', { name: 'Client Model ID' })).toBeVisible()
-  await expect(tableContainer.getByRole('columnheader', { name: 'Associated services' })).toBeVisible()
+  await expect(tableContainer.getByRole('columnheader', { name: 'Destinations' })).toBeVisible()
   await expect(tableContainer.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('gpt-5.6-sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(2)
@@ -178,6 +178,84 @@ test('Models table fits the desktop content width without horizontal scrolling',
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
     await tableContainer.evaluate((element) => element.clientWidth),
   )
+})
+
+test('Model destinations summarize the preferred layer across any number of layers', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 800 })
+  const provider = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    protocol: 'open-responses',
+    base_url: `https://${id}.example/v1`,
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
+    ...extra,
+  })
+  const target = (providerId: string, model: string, priority: number, modelName: string | null = null) => ({
+    id: `${providerId}-${model}-${priority}`,
+    model_id: 'route',
+    provider_id: providerId,
+    model,
+    model_name: modelName,
+    enabled: true,
+    priority,
+    thinking_level_map: [],
+  })
+  const route = (modelId: string, targets: object[]) => ({
+    id: modelId,
+    model_id: modelId,
+    display_name: null,
+    balance: 'traffic_equalization',
+    is_enabled: true,
+    targets,
+  })
+  await page.route('**/api/v1/providers', (request) =>
+    request.fulfill({
+      json: {
+        data: [
+          provider('codex', 'OpenAI Codex'),
+          provider('zhipu', 'Zhipu'),
+          provider('claude', 'Claude', { credential_status: 'invalid' }),
+        ],
+      },
+    }),
+  )
+  await page.route('**/api/v1/models', (request) =>
+    request.fulfill({
+      json: {
+        data: [
+          route('a-layered', [
+            target('codex', 'gpt-6-luna', 10, 'GPT-6-Luna'),
+            target('zhipu', 'glm-5.3', 0),
+            target('claude', 'claude-x', 0),
+          ]),
+          route('b-skipped', [
+            target('claude', 'claude-x', 30),
+            target('claude', 'claude-y', 20),
+            target('codex', 'gpt-6-luna', 10, 'GPT-6-Luna'),
+            target('zhipu', 'glm-5.3', 0, 'GLM 5.3'),
+          ]),
+          route('c-balanced', [target('codex', 'gpt-6-luna', 0), target('zhipu', 'glm-5.3', 0)]),
+          route('d-dead', [target('claude', 'claude-x', 0)]),
+        ],
+      },
+    }),
+  )
+
+  await page.goto('/models')
+  const rows = page.locator('[data-slot="table-container"]').getByRole('row')
+  await expect(rows.nth(1)).toContainText('GPT-6-Luna · OpenAI Codex')
+  await expect(rows.nth(1)).toContainText('1 fallback layer (1 available)')
+  await expect(rows.nth(1)).toContainText('1 destination unavailable')
+  await expect(rows.nth(1)).not.toContainText('gpt-6-luna')
+  await expect(rows.nth(2)).toContainText('GPT-6-Luna · OpenAI Codex')
+  await expect(rows.nth(2)).toContainText('Layers 1–2 unavailable')
+  await expect(rows.nth(2)).toContainText('1 fallback layer (1 available)')
+  await expect(rows.nth(3)).toContainText('2 destinations · Traffic equalization')
+  await expect(rows.nth(4)).toContainText('No available destination')
+  await expect(rows.nth(4)).toContainText('Credential invalid: 1')
 })
 
 test('Mobile model links preserve new-tab navigation and keep row actions independent', async ({ page, context }) => {

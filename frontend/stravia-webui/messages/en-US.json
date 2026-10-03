@@ -212,8 +212,42 @@
   "model_editor_discard_changes": "Discard changes",
   "models_display_name": "Display name",
   "models_client_model_id": "Client Model ID",
-  "models_associated_services": "Associated services",
-  "models_no_associated_services": "No associated services",
+  "models_destinations_none_available": "No available destination",
+  "models_destinations_first_layer_unavailable": "Layer 1 unavailable",
+  "models_destinations_layers_unavailable": "Layers 1–{last} unavailable",
+  "models_destinations_credential_invalid": "Credential invalid: {count}",
+  "models_destinations_provider_disabled": "Service disabled: {count}",
+  "models_destinations_allowance_suspended": "Allowance paused: {count}",
+  "models_destinations_multiple": [
+    {
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} destination · {strategy}",
+        "countPlural=other": "{count} destinations · {strategy}"
+      }
+    }
+  ],
+  "models_destinations_fallback": [
+    {
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
+      "match": {
+        "layersPlural=one": "{layers} fallback layer ({targets} available)",
+        "layersPlural=other": "{layers} fallback layers ({targets} available)"
+      }
+    }
+  ],
+  "models_destinations_unavailable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} destination unavailable",
+        "countPlural=other": "{count} destinations unavailable"
+      }
+    }
+  ],
   "overview_no_traffic_title": "No request traffic yet",
   "overview_configuration_unavailable": "Configuration unavailable",
   "overview_loading_configuration": "Loading configuration",

@@ -540,6 +540,7 @@ impl RouteStore for MemoryStorage {
                         .map(|current| current.created_at.clone())
                         .unwrap_or_else(now_rfc3339),
                     thinking_level_map: target.thinking_level_map,
+                    model_name: None,
                 }
             })
             .collect::<Vec<_>>();

@@ -267,6 +267,9 @@ pub struct TargetConfig {
     pub target_cooldown_ms: i64,
     pub created_at: String,
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
+    /// 管理面读取时从 Provider Model 快照投影的展示名；不持久化，存储层读出时为 `None`，
+    /// 快照缺失或未登记名称时也为 `None`，由展示方回退到上游模型 ID。
+    pub model_name: Option<String>,
 }
 
 impl TargetConfig {
@@ -285,6 +288,7 @@ pub struct TargetView<'a> {
     pub model_id: &'a str,
     pub provider_id: &'a str,
     pub model: &'a str,
+    pub model_name: Option<&'a str>,
     pub enabled: bool,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
@@ -301,6 +305,7 @@ impl<'a> From<&'a TargetConfig> for TargetView<'a> {
             model_id: &target.model_id,
             provider_id: target.provider_id().as_str(),
             model: target.model().as_str(),
+            model_name: target.model_name.as_deref(),
             enabled: target.enabled,
             priority: target.priority,
             first_token_timeout_ms: target.first_token_timeout_ms,
