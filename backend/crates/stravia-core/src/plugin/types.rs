@@ -41,7 +41,7 @@ pub struct PluginDataDiscard {
 pub struct PluginBindingImpact {
     pub route_id: String,
     pub provider_id: String,
-    pub upstream_model: Option<String>,
+    pub upstream_model: String,
     pub capability: String,
 }
 

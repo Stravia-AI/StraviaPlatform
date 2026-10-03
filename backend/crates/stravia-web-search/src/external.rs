@@ -68,7 +68,7 @@ impl SearchBackend for ExternalSearchBackend {
             tool_calls: 0,
             publication: Some(execution.publication),
             provider_id: Some(execution.provider_id),
-            upstream_model: execution.upstream_model,
+            upstream_model: Some(execution.upstream_model),
             target_id: Some(execution.target_id),
         })
     }

@@ -22,7 +22,7 @@ pub(crate) struct VendorRouteExecution {
     pub(crate) output: OperationOutput,
     pub(crate) publication: VendorPublicationFence,
     pub(crate) provider_id: String,
-    pub(crate) upstream_model: Option<String>,
+    pub(crate) upstream_model: String,
     pub(crate) target_id: String,
 }
 
@@ -120,18 +120,14 @@ impl Gateway {
                 .iter()
                 .find(|channel| channel.id == channel_id)
                 .ok_or_else(|| anyhow::anyhow!("Target Provider channel is unavailable"))?;
-            let model = match target.model() {
-                Some(model) => {
-                    self.storage
-                        .provider_models()
-                        .find(target.provider_id().as_str(), model.as_str())
-                        .await?
-                }
-                None => None,
-            };
+            let model = self
+                .storage
+                .provider_models()
+                .find(target.provider_id().as_str(), target.model().as_str())
+                .await?;
             super::validate_target_capability(
                 channel,
-                target.model().map(|model| model.as_str()),
+                target.model().as_str(),
                 model.as_ref(),
                 capability,
             )?;
@@ -252,19 +248,19 @@ impl Gateway {
                     result = self.storage.providers().get(target.provider_id().as_str()) => result?,
                 }
                 .ok_or_else(|| anyhow::anyhow!("Target Provider is unavailable"))?;
-                let attempt = target.model().map(|model| {
+                let attempt = {
                     AttemptObservation::new(
                         context.observer.clone(),
                         capability_observation.id.clone(),
                         selected_target_key(&target),
                         provider.id.clone(),
                         provider.name.clone(),
-                        model.clone().into(),
+                        target.model().clone().into(),
                         provider.protocol.clone(),
                         provider.base_url.clone(),
                         None,
                     )
-                });
+                };
                 let preparation_failure = if prepared.is_none() {
                     let vendor_id = provider
                         .vendor
@@ -284,7 +280,7 @@ impl Gateway {
                                 self.prepare_vendor_execution_with_lease(
                                     lease,
                                     target.provider_id().as_str(),
-                                    target.model().map(|model| model.as_str()),
+                                    Some(target.model().as_str()),
                                     operation,
                                     &context,
                                 )
@@ -292,7 +288,7 @@ impl Gateway {
                             } else {
                                 self.prepare_vendor_execution(
                                     target.provider_id().as_str(),
-                                    target.model().map(|model| model.as_str()),
+                                    Some(target.model().as_str()),
                                     operation,
                                     &context,
                                 )
@@ -356,10 +352,8 @@ impl Gateway {
                             requires_image: false,
                         }),
                     });
-                    if let Some(attempt) = &attempt {
-                        attempt_context.model_turn_id = Some(capability_observation.id.clone());
-                        attempt_context.attempt_id = Some(attempt.id.clone());
-                    }
+                    attempt_context.model_turn_id = Some(capability_observation.id.clone());
+                    attempt_context.attempt_id = Some(attempt.id.clone());
                     self.execute_independent_attempt(
                         prepared
                             .as_ref()
@@ -379,24 +373,18 @@ impl Gateway {
                                 | (VendorRequest::MediaImage(_), OperationOutput::MediaImage(_))
                         );
                         if !output_matches {
-                            if let Some(attempt) = &attempt {
-                                attempt.finish(
-                                    "failed",
-                                    None,
-                                    Some("vendor_output_invalid".into()),
-                                    None,
-                                );
-                            }
+                            attempt.finish(
+                                "failed",
+                                None,
+                                Some("vendor_output_invalid".into()),
+                                None,
+                            );
                             anyhow::bail!("Vendor returned an output for the wrong operation");
                         }
-                        if let Some(usage) = operation_usage(&execution.output)
-                            && let Some(attempt) = &attempt
-                        {
+                        if let Some(usage) = operation_usage(&execution.output) {
                             attempt.confirm_usage(usage);
                         }
-                        if let Some(attempt) = &attempt {
-                            attempt.finish("completed", None, None, None);
-                        }
+                        attempt.finish("completed", None, None, None);
                         let target_id = selected_target_key(&target);
                         policy.state().record_success(
                             policy.context(),
@@ -410,7 +398,7 @@ impl Gateway {
                             output: execution.output,
                             publication: execution.publication,
                             provider_id: provider_id.into(),
-                            upstream_model: upstream_model.map(Into::into),
+                            upstream_model: upstream_model.into(),
                             target_id,
                         });
                     }
@@ -442,17 +430,15 @@ impl Gateway {
                             )
                             .await;
                         }
-                        if let Some(attempt) = &attempt {
-                            attempt.finish(
-                                "failed",
-                                failure
-                                    .error
-                                    .downcast_ref::<RuntimeError>()
-                                    .and_then(RuntimeError::upstream_status),
-                                Some(failure.code.to_owned()),
-                                None,
-                            );
-                        }
+                        attempt.finish(
+                            "failed",
+                            failure
+                                .error
+                                .downcast_ref::<RuntimeError>()
+                                .and_then(RuntimeError::upstream_status),
+                            Some(failure.code.to_owned()),
+                            None,
+                        );
                         let Some(kind) = failure.retry_kind.clone() else {
                             return Err(failure.error);
                         };

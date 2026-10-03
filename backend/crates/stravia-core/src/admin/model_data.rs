@@ -25,11 +25,11 @@ pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::R
     let mut targets = std::collections::BTreeSet::new();
     for backend in backends {
         let provider_id = backend.provider_id.trim();
-        let provider_model_id = backend.model.as_deref().map(str::trim);
+        let provider_model_id = backend.model.trim();
         if provider_id.is_empty() {
             anyhow::bail!("backend provider_id cannot be empty");
         }
-        if provider_model_id.is_some_and(str::is_empty) {
+        if provider_model_id.is_empty() {
             anyhow::bail!("backend model cannot be empty");
         }
         if !targets.insert((provider_id, provider_model_id)) {

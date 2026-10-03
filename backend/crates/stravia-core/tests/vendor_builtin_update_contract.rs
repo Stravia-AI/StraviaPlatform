@@ -291,9 +291,8 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("fixture-model".into()),
+                model: "fixture-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

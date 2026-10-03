@@ -209,7 +209,7 @@ impl SearchAdminHost for SearchHost {
                                     let (provider_id, model) = target.destination.into_parts();
                                     SearchRouteTarget {
                                         provider_id: provider_id.into(),
-                                        model: model.map(Into::into),
+                                        model: model.into(),
                                         enabled: target.enabled,
                                     }
                                 })

@@ -262,9 +262,7 @@ impl SearchAdmin {
             if !provider.is_enabled {
                 continue;
             }
-            let Some(model) = target.model.as_deref() else {
-                continue;
-            };
+            let model = target.model.as_str();
             let provider_model = self
                 .host
                 .provider_model(&target.provider_id, model)

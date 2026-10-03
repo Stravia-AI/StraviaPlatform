@@ -443,17 +443,16 @@ async fn create_provider(
 async fn create_route(
     gateway: &Gateway,
     route_id: &str,
-    targets: Vec<(&stravia_core::db::models::Provider, Option<&str>, i32)>,
+    targets: Vec<(&stravia_core::db::models::Provider, &str, i32)>,
     target_retry_budget: i32,
 ) -> anyhow::Result<stravia_core::db::models::RouteConfig> {
     for (provider, model, _) in &targets {
-        if let Some(model) = model
-            && gateway
-                .storage
-                .provider_models()
-                .find(&provider.id, model)
-                .await?
-                .is_none()
+        if gateway
+            .storage
+            .provider_models()
+            .find(&provider.id, model)
+            .await?
+            .is_none()
         {
             gateway
                 .admin()
@@ -485,13 +484,12 @@ async fn create_route(
                 .into_iter()
                 .map(|(provider, model, priority)| CreateTarget {
                     provider_id: provider.id.clone(),
-                    model: model.map(str::to_owned),
+                    model: model.to_owned(),
                     enabled: true,
                     priority: Some(priority),
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(0),
-                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -669,61 +667,23 @@ async fn call_generate(client: &McpClient, input: Value) -> rmcp::model::CallToo
 }
 
 #[tokio::test]
-async fn provider_only_and_model_search_targets_enforce_complete_report_contracts()
--> anyhow::Result<()> {
+async fn model_search_targets_enforce_complete_report_contracts() -> anyhow::Result<()> {
     let harness = TestHarness::new().await?;
     install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;
     let upstream = LocalUpstream::start().await?;
     let provider = create_provider(
         &harness.gateway,
-        "Provider-only research",
+        "Model research",
         "fixture.capability-search",
         &upstream.url,
         "fixture-search",
     )
     .await?;
 
-    let before_models = harness
-        .gateway
-        .admin()
-        .list_provider_models(&provider.id)
-        .await?;
-    assert!(before_models.models.is_empty());
-    let provider_only = create_route(
-        &harness.gateway,
-        "provider-only-research",
-        vec![(&provider, None, 10)],
-        0,
-    )
-    .await?;
-    configure_external_search(&harness.gateway, &provider_only.model_id).await?;
-    upstream
-        .push_json(
-            "/search",
-            StatusCode::OK,
-            search_response("Provider-only answer [sc:fixture-source]"),
-        )
-        .await;
-    let result = completed_search(
-        terminal_search(
-            &harness.gateway,
-            Principal::new(harness.key_id.clone()),
-            "provider-only query",
-            None,
-            CancellationToken::new(),
-        )
-        .await,
-    );
-    assert!(result.report.answer.contains("Provider-only answer"));
-    assert_eq!(result.report.sources.len(), 1);
-    let source_path = format!("{}/sources/1", result.turn_id.reference());
-    assert_eq!(result.report.sources[0].path, source_path);
-    assert!(result.report.answer.contains(&format!("[{source_path}]")));
-
     let model_route = create_route(
         &harness.gateway,
         "model-search",
-        vec![(&provider, Some("research-model"), 10)],
+        vec![(&provider, "research-model", 10)],
         0,
     )
     .await?;
@@ -751,6 +711,15 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
             .answer
             .contains("Model-qualified answer")
     );
+    assert_eq!(model_result.report.sources.len(), 1);
+    let source_path = format!("{}/sources/1", model_result.turn_id.reference());
+    assert_eq!(model_result.report.sources[0].path, source_path);
+    assert!(
+        model_result
+            .report
+            .answer
+            .contains(&format!("[{source_path}]"))
+    );
 
     harness
         .gateway
@@ -771,7 +740,7 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
     let ineligible_model_route = create_route(
         &harness.gateway,
         "ineligible-model-search",
-        vec![(&provider, Some("image-metadata-only"), 10)],
+        vec![(&provider, "image-metadata-only", 10)],
         0,
     )
     .await?;
@@ -854,11 +823,6 @@ async fn provider_only_and_model_search_targets_enforce_complete_report_contract
     assert!(
         eligible
             .iter()
-            .any(|route| { route.model_id == provider_only.model_id.as_str() && route.available })
-    );
-    assert!(
-        eligible
-            .iter()
             .any(|route| { route.model_id == model_route.model_id.as_str() && route.available })
     );
     assert!(eligible.iter().any(|route| {
@@ -881,6 +845,23 @@ async fn external_search_half_open_probe_sends_once_and_recovers_the_target() ->
         "fixture-search",
     )
     .await?;
+    harness
+        .gateway
+        .admin()
+        .create_manual_provider_model(
+            &provider.id,
+            "research-model",
+            CreateManualProviderModel {
+                metadata: json!({
+                    "id": "research-model",
+                    "name": "Research Model",
+                    "capabilities": ["search"],
+                    "modalities": {"input": ["text"], "output": ["text"]}
+                }),
+                template_id: None,
+            },
+        )
+        .await?;
     let route = harness
         .gateway
         .admin()
@@ -890,13 +871,13 @@ async fn external_search_half_open_probe_sends_once_and_recovers_the_target() ->
             balance: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
-                model: None,
+                model: "research-model".into(),
                 enabled: true,
                 priority: Some(0),
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(60_000),
-                rpm_pool_id: None,
+
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1000,9 +981,9 @@ async fn external_search_retry_after_outside_window() -> anyhow::Result<()> {
             "fixture-search",
         )
         .await?;
-        let mut targets = vec![(&primary, None, 20)];
+        let mut targets = vec![(&primary, "research-model", 20)];
         if backup {
-            targets.push((&fallback, None, 10));
+            targets.push((&fallback, "research-model", 10));
         }
         let route = create_route(&harness.gateway, "retry-window-search", targets, 5).await?;
         configure_external_search(&harness.gateway, &route.model_id).await?;
@@ -1080,7 +1061,10 @@ async fn external_search_switches_only_retryable_started_failures() -> anyhow::R
     let route = create_route(
         &harness.gateway,
         "search-failover",
-        vec![(&primary, None, 20), (&fallback, None, 10)],
+        vec![
+            (&primary, "research-model", 20),
+            (&fallback, "research-model", 10),
+        ],
         0,
     )
     .await?;
@@ -1126,7 +1110,7 @@ async fn external_search_switches_only_retryable_started_failures() -> anyhow::R
     let parameter_route = create_route(
         &harness.gateway,
         "search-parameter-error",
-        vec![(&parameter_provider, None, 10)],
+        vec![(&parameter_provider, "research-model", 10)],
         3,
     )
     .await?;
@@ -1167,7 +1151,7 @@ async fn external_search_switches_only_retryable_started_failures() -> anyhow::R
     let deadline_route = create_route(
         &harness.gateway,
         "search-deadline",
-        vec![(&deadline_provider, None, 10)],
+        vec![(&deadline_provider, "research-model", 10)],
         3,
     )
     .await?;
@@ -1219,7 +1203,7 @@ async fn external_search_switches_only_retryable_started_failures() -> anyhow::R
     let cancellation_route = create_route(
         &harness.gateway,
         "search-cancellation",
-        vec![(&cancellation_provider, None, 10)],
+        vec![(&cancellation_provider, "research-model", 10)],
         3,
     )
     .await?;
@@ -1279,7 +1263,7 @@ async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Re
     let route = create_route(
         &harness.gateway,
         "pure-image-route",
-        vec![(&provider, Some("image-only-model"), 10)],
+        vec![(&provider, "image-only-model", 10)],
         0,
     )
     .await?;
@@ -1306,8 +1290,8 @@ async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Re
         &harness.gateway,
         "mixed-image-route",
         vec![
-            (&provider, Some("image-only-model"), 20),
-            (&search_only_provider, Some("search-only-model"), 10),
+            (&provider, "image-only-model", 20),
+            (&search_only_provider, "search-only-model", 10),
         ],
         0,
     )
@@ -1483,7 +1467,7 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
     let image_route = create_route(
         &harness.gateway,
         "mixed-channel-image-only",
-        vec![(&provider, Some("media-image-only"), 10)],
+        vec![(&provider, "media-image-only", 10)],
         0,
     )
     .await?;
@@ -1491,8 +1475,8 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
         &harness.gateway,
         "mixed-channel-chat-failover",
         vec![
-            (&provider, Some("image-output-only"), 20),
-            (&provider, Some("legacy-text-model"), 10),
+            (&provider, "image-output-only", 20),
+            (&provider, "legacy-text-model", 10),
         ],
         0,
     )
@@ -1579,14 +1563,14 @@ async fn compatible_update_keeps_search_and_image_retries_on_the_pinned_componen
     let search_route = create_route(
         &harness.gateway,
         "pinned-retry-search",
-        vec![(&provider, None, 10)],
+        vec![(&provider, "research-model", 10)],
         1,
     )
     .await?;
     let image_route = create_route(
         &harness.gateway,
         "pinned-retry-image",
-        vec![(&provider, Some("multi-image"), 10)],
+        vec![(&provider, "multi-image", 10)],
         1,
     )
     .await?;
@@ -1714,7 +1698,10 @@ async fn compatible_update_keeps_search_and_image_failover_on_the_supplier_compo
     let search_route = create_route(
         &harness.gateway,
         "pinned-supplier-search-failover",
-        vec![(&primary, None, 20), (&fallback, None, 10)],
+        vec![
+            (&primary, "research-model", 20),
+            (&fallback, "research-model", 10),
+        ],
         0,
     )
     .await?;
@@ -1722,8 +1709,8 @@ async fn compatible_update_keeps_search_and_image_failover_on_the_supplier_compo
         &harness.gateway,
         "pinned-supplier-image-failover",
         vec![
-            (&primary, Some("multi-image"), 20),
-            (&fallback, Some("multi-image"), 10),
+            (&primary, "multi-image", 20),
+            (&fallback, "multi-image", 10),
         ],
         0,
     )
@@ -1850,14 +1837,14 @@ async fn incompatible_update_cancels_search_and_image_retry_backoff_without_repl
     let search_route = create_route(
         &harness.gateway,
         "cancelled-retry-search",
-        vec![(&provider, None, 10)],
+        vec![(&provider, "research-model", 10)],
         1,
     )
     .await?;
     let image_route = create_route(
         &harness.gateway,
         "cancelled-retry-image",
-        vec![(&provider, Some("multi-image"), 10)],
+        vec![(&provider, "multi-image", 10)],
         1,
     )
     .await?;
@@ -1998,7 +1985,7 @@ async fn compatible_capability_removal_preserves_inflight_result_and_binding() -
     let route = create_route(
         &harness.gateway,
         "capability-removal-search",
-        vec![(&provider, None, 10)],
+        vec![(&provider, "research-model", 10)],
         0,
     )
     .await?;
@@ -2108,21 +2095,21 @@ async fn incompatible_update_cancels_late_inference_search_and_image_without_har
     let search_route = create_route(
         &harness.gateway,
         "updating-search",
-        vec![(&updating_provider, None, 10)],
+        vec![(&updating_provider, "research-model", 10)],
         0,
     )
     .await?;
     let image_route = create_route(
         &harness.gateway,
         "updating-image",
-        vec![(&updating_provider, Some("multi-image"), 10)],
+        vec![(&updating_provider, "multi-image", 10)],
         0,
     )
     .await?;
     let other_route = create_route(
         &harness.gateway,
         "independent-search",
-        vec![(&other_provider, None, 10)],
+        vec![(&other_provider, "research-model", 10)],
         0,
     )
     .await?;
@@ -2370,14 +2357,14 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
     let search_route = create_route(
         &first,
         "previous-builtin-search",
-        vec![(&provider, None, 10)],
+        vec![(&provider, "research-model", 10)],
         0,
     )
     .await?;
     let image_route = create_route(
         &first,
         "previous-builtin-image",
-        vec![(&provider, Some("fixture-image"), 10)],
+        vec![(&provider, "fixture-image", 10)],
         0,
     )
     .await?;
@@ -2583,7 +2570,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
     let inference_route = create_route(
         &gateway,
         "deepseek-base-inference",
-        vec![(&preexisting, Some("deepseek-v4"), 10)],
+        vec![(&preexisting, "deepseek-v4", 10)],
         0,
     )
     .await?;
@@ -2642,7 +2629,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
     let search_route = create_route(
         &gateway,
         "deepseek-dedicated-search",
-        vec![(&dedicated_provider, None, 10)],
+        vec![(&dedicated_provider, "research-model", 10)],
         0,
     )
     .await?;
@@ -2768,7 +2755,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
     let openai_route = create_route(
         &restarted,
         "unaffected-base-inference",
-        vec![(&openai, Some("gpt-test"), 10)],
+        vec![(&openai, "gpt-test", 10)],
         0,
     )
     .await?;
@@ -2911,7 +2898,7 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
     let route = create_route(
         &harness.gateway,
         "codex-multi-capability",
-        vec![(&provider, Some("gpt-5.4"), 10)],
+        vec![(&provider, "gpt-5.4", 10)],
         0,
     )
     .await?;

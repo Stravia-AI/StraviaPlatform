@@ -14,7 +14,7 @@ struct ClientModelCapabilities {
 pub struct RouteTargetStatus {
     pub target_id: String,
     pub provider_id: String,
-    pub model: Option<String>,
+    pub model: String,
     pub state: TargetRuntimeState,
     /// ADR-0073：Provider 凭据失效时置位。失效压过冷却态呈现——凭据死了
     /// 冷却无意义；与 `state` 熔断状态机正交，不新增枚举值。
@@ -110,7 +110,7 @@ impl RouteModule<'_> {
                     .route_policy_state
                     .target_status(&crate::router::target_key(
                         target.provider_id().as_str(),
-                        target.model().map(|model| model.as_str()),
+                        target.model().as_str(),
                     ));
                 let credential_invalid = credential_invalid.contains(target.provider_id().as_str());
                 let allowance_suspended =
@@ -119,7 +119,7 @@ impl RouteModule<'_> {
                 RouteTargetStatus {
                     target_id: target.id.into(),
                     provider_id: provider_id.into(),
-                    model: model.map(Into::into),
+                    model: model.into(),
                     state: status.state,
                     credential_invalid,
                     allowance_suspended,
@@ -227,9 +227,7 @@ impl RouteModule<'_> {
 
         for route in &mut *routes {
             for target in route.targets.iter().filter(|target| target.enabled) {
-                let Some(model) = target.model().map(|model| model.as_str()) else {
-                    continue;
-                };
+                let model = target.model().as_str();
                 let key = format!("{}\u{0}{model}", target.provider_id());
                 if capabilities_by_target.contains_key(&key) {
                     continue;
@@ -281,7 +279,7 @@ fn target_capabilities<'a>(
     target: &TargetConfig,
     capabilities_by_target: &'a BTreeMap<String, ClientModelCapabilities>,
 ) -> Option<&'a ClientModelCapabilities> {
-    let model = target.model().map(|model| model.as_str())?;
+    let model = target.model().as_str();
     capabilities_by_target.get(&format!("{}\u{0}{model}", target.provider_id()))
 }
 

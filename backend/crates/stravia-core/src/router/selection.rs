@@ -205,10 +205,7 @@ impl RouteSelector {
                 || snapshot.credential_invalid_providers.contains(provider_id)
                 || self
                     .policy_state
-                    .target_status(&target_key(
-                        provider_id,
-                        target.model().map(|model| model.as_str()),
-                    ))
+                    .target_status(&target_key(provider_id, target.model().as_str()))
                     .cooldown_remaining_ms
                     .is_some()
                 || !self
@@ -254,10 +251,7 @@ impl RouteSelector {
             allowance_suspended_providers,
         };
         for target in targets {
-            let key = target_key(
-                target.provider_id().as_str(),
-                target.model().map(|model| model.as_str()),
-            );
+            let key = target_key(target.provider_id().as_str(), target.model().as_str());
             let index = snapshot
                 .targets
                 .iter()
@@ -269,9 +263,7 @@ impl RouteSelector {
                     });
                     snapshot.targets.len() - 1
                 });
-            let Some(model) = target.model().map(|model| model.as_str()) else {
-                continue;
-            };
+            let model = target.model().as_str();
             let provider_id = target.provider_id().as_str();
             let pricing = match self.policy_state.pricing(provider_id, model) {
                 PricingProbe::Hit(pricing) => pricing,
@@ -382,7 +374,6 @@ mod tests {
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
-            rpm_pool_id: None,
             created_at: String::new(),
             thinking_level_map: Vec::new(),
         }
@@ -976,17 +967,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_selection_carries_provider_only_target_without_generation_hints() {
+    async fn independent_selection_carries_model_target_without_generation_hints() {
         let consultations = Arc::new(AtomicUsize::new(0));
         let fixture = fixture(
             memory(),
             Arc::new(CountingContinuation(Arc::clone(&consultations))),
         );
-        let mut provider_only = target("research", 0);
-        provider_only.destination = crate::db::identity::TargetDestination::ProviderOnly {
-            provider_id: provider_only.provider_id().clone(),
-        };
-        let route = route(vec![provider_only]);
+        let route = route(vec![target("research", 0)]);
 
         let mut policy = fixture
             .selector
@@ -999,11 +986,11 @@ mod tests {
             )
             .await
             .expect("independent selection");
-        let selected = policy.next_healthy().expect("Provider-only Target");
+        let selected = policy.next_healthy().expect("Model Target");
 
         assert_eq!(consultations.load(Ordering::SeqCst), 0);
         assert_eq!(selected.provider_id().as_str(), "research");
-        assert!(selected.model().is_none());
+        assert_eq!(selected.model().as_str(), "model");
     }
 
     #[tokio::test]

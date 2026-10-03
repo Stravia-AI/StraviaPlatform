@@ -20,7 +20,6 @@ const channel: VendorChannelDescriptor = {
   auth: { flow: 'authorization_code' },
   protocol: 'openai',
   capabilities: ['infer', 'config_validation'],
-  search_model_required: false,
 }
 
 const descriptor: ProviderDescriptor = {

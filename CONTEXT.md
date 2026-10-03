@@ -141,9 +141,14 @@ _避免使用_：Principal Concurrency Limit、执行并发数、连接数、TPM
 RootRequest 是一次已准入客户端根请求共享的执行上下文。它跨内部 Model Turn、工具与后台执行保留同根身份、累计等待和受控冷却尝试的归属，不是活跃执行名额，也不是客户端 Session。独立客户端续接建立新的 RootRequest。
 _避免使用_：Concurrency Lease、Session、Model Turn
 
+## Target
+
+Target 是 Route 中一个明确绑定 Provider 与非空白 upstream model 的执行目的地；所有能力（包括完整搜索）都通过所选 Provider Model 校验资格。它不是只绑定连接的服务入口。
+_避免使用_：无模型 Target、把 Provider 连接等同于 Target
+
 ## RPM Pool
 
-RPM Pool 是共享上游请求频率额度的容量身份；同一 Provider 与 upstream model 的默认目的地跨 Route 共享，也可由管理员将不同 Target 显式归入一个共享池。每次实际上游请求包括重试各计一次；显式共享池替代默认池，不双重扣额。池不是健康身份，成员不因此共享失败计数、冷却或凭据状态。
+RPM Pool 是共享上游请求频率额度的容量身份；成员属于 Provider 与 upstream model 组成的目的地，跨 Route 共享，由 `destinations[].rpm_pool_id` 显式归入共享池，Route Target 不保存池绑定。每次实际上游请求包括重试各计一次；显式共享池替代目的地自身额度，不双重扣额。Provider 详情模型目录只编辑成员关系与自身限额，Model services 列表统一编辑池名称与限额；池不是健康身份，成员不因此共享失败计数、冷却或凭据状态。
 _避免使用_：Target Health、Route、Session、并发池
 
 ## Hook

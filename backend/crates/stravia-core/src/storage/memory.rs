@@ -514,7 +514,7 @@ impl RouteStore for MemoryStorage {
             .map(|target| {
                 let destination = crate::db::identity::TargetDestination::new(
                     target.provider_id.trim().into(),
-                    target.model.as_deref().map(str::trim).map(Into::into),
+                    target.model.trim().into(),
                 );
                 let previous = existing_targets
                     .iter()
@@ -536,7 +536,6 @@ impl RouteStore for MemoryStorage {
                     target_cooldown_ms: target
                         .target_cooldown_ms
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
-                    rpm_pool_id: target.rpm_pool_id,
                     created_at: previous
                         .map(|current| current.created_at.clone())
                         .unwrap_or_else(now_rfc3339),
@@ -835,7 +834,7 @@ impl ProviderModelStore for MemoryStorage {
         for (route_index, route) in routes.iter().enumerate() {
             for (target_index, target) in route.targets.iter().enumerate() {
                 if target.provider_id().as_str() != provider_id
-                    || target.model().map(|upstream| upstream.as_str()) != Some(model_id)
+                    || target.model().as_str() != model_id
                 {
                     continue;
                 }
@@ -1159,12 +1158,11 @@ mod tests {
         crate::db::models::CreateTarget {
             enabled: true,
             provider_id: provider_id.into(),
-            model: Some(model.into()),
+            model: model.into(),
             priority: Some(1),
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
-            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         }
     }

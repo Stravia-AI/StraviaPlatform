@@ -491,9 +491,8 @@ async fn gateway_with_captured_thinking(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -514,9 +513,8 @@ async fn gateway_with_captured_thinking(
                 display_name: None,
                 balance: None,
                 targets: vec![CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: provider.id,
-                    model: Some("upstream-model".into()),
+                    model: "upstream-model".into(),
                     enabled: true,
                     priority: None,
                     first_token_timeout_ms: None,
@@ -688,10 +686,9 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 enabled: true,
                 provider_id: provider.id,
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 priority: None,
                 first_token_timeout_ms: Some(1000),
                 target_retry_budget: Some(0),
@@ -808,12 +805,11 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                 .map(|(index, provider)| CreateTarget {
                     enabled: true,
                     provider_id: provider.id.clone(),
-                    model: Some("upstream-model".into()),
+                    model: "upstream-model".into(),
                     priority: Some((providers.len() - index) as i32),
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(0),
                     target_cooldown_ms: None,
-                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -900,9 +896,8 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1013,9 +1008,8 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1408,16 +1402,15 @@ mod rpm_admission {
         (format!("http://{address}/v1"), calls)
     }
 
-    fn target(provider: &str, pool: Option<&str>) -> CreateTarget {
+    fn target(provider: &str) -> CreateTarget {
         CreateTarget {
             provider_id: provider.into(),
-            model: Some("upstream-model".into()),
+            model: "upstream-model".into(),
             enabled: true,
             priority: Some(0),
             first_token_timeout_ms: Some(60_000),
             target_retry_budget: Some(0),
             target_cooldown_ms: Some(0),
-            rpm_pool_id: pool.map(str::to_owned),
             thinking_level_map: Vec::new(),
         }
     }
@@ -1455,7 +1448,7 @@ mod rpm_admission {
                         model_id: name.into(),
                         display_name: None,
                         balance: None,
-                        targets: vec![target(provider, None)],
+                        targets: vec![target(provider)],
                         default_thinking_level: None,
                     })
                     .await
@@ -1505,8 +1498,18 @@ mod rpm_admission {
     fn destination(provider: &str, limit: i32) -> DestinationRpmLimit {
         DestinationRpmLimit {
             provider_id: provider.into(),
-            model: Some("upstream-model".into()),
+            model: "upstream-model".into(),
             rpm_limit: Some(limit),
+            rpm_pool_id: None,
+        }
+    }
+
+    fn pooled_destination(provider: &str, pool: &str) -> DestinationRpmLimit {
+        DestinationRpmLimit {
+            provider_id: provider.into(),
+            model: "upstream-model".into(),
+            rpm_limit: None,
+            rpm_pool_id: Some(pool.into()),
         }
     }
 
@@ -1561,6 +1564,7 @@ mod rpm_admission {
                 RpmConfig {
                     total_wait_ms: 0,
                     preferred_wait_ms: 0,
+                    destinations: vec![pooled_destination(&fixture.providers[1], "full")],
                     pools: vec![RpmPool {
                         id: "full".into(),
                         name: "Full".into(),
@@ -1573,7 +1577,7 @@ mod rpm_admission {
             set_thinking_targets(
                 &fixture.gateway,
                 "rpm-b",
-                vec![target(&fixture.providers[1], Some("full"))],
+                vec![target(&fixture.providers[1])],
             )
             .await;
             let events = execute(&fixture.gateway, &fixture.key, "rpm-b")
@@ -1595,12 +1599,31 @@ mod rpm_admission {
                 stravia_runtime_contract::Deadline::never(),
             );
             entered.notified().await;
-            let mut updated = target(&fixture.providers[0], Some("full"));
+            configure(
+                &fixture,
+                RpmConfig {
+                    preferred_wait_ms: 0,
+                    total_wait_ms: 0,
+                    destinations: fixture
+                        .providers
+                        .iter()
+                        .map(|id| pooled_destination(id, "full"))
+                        .collect(),
+                    pools: vec![RpmPool {
+                        id: "full".into(),
+                        name: "Full".into(),
+                        rpm_limit: Some(1),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await;
+            let mut updated = target(&fixture.providers[0]);
             updated.enabled = !disable;
             set_thinking_targets(
                 &fixture.gateway,
                 "rpm-a",
-                vec![updated, target(&fixture.providers[1], Some("full"))],
+                vec![updated, target(&fixture.providers[1])],
             )
             .await;
             release.notify_one();
@@ -1703,7 +1726,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn rebinding_a_queued_target_uses_its_current_pool() {
+    async fn rebinding_a_queued_destination_uses_its_current_pool() {
         let mut fixture = fixture(false).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1728,7 +1751,7 @@ mod rpm_admission {
         set_thinking_targets(
             &fixture.gateway,
             "rpm-a",
-            vec![target(&fixture.providers[0], None)],
+            vec![target(&fixture.providers[0])],
         )
         .await;
         let config = RpmConfig {
@@ -1740,7 +1763,7 @@ mod rpm_admission {
             }],
             ..Default::default()
         };
-        configure(&fixture, config).await;
+        configure(&fixture, config.clone()).await;
         let _clock = Clock::pause();
         execute(&fixture.gateway, &fixture.key, "rpm-a")
             .await
@@ -1752,10 +1775,12 @@ mod rpm_admission {
             stravia_runtime_contract::Deadline::never(),
         );
         fixture.gateway.rpm_admission.wait_started.notified().await;
-        set_thinking_targets(
-            &fixture.gateway,
-            "rpm-a",
-            vec![target(&fixture.providers[0], Some("new-pool"))],
+        configure(
+            &fixture,
+            RpmConfig {
+                destinations: vec![pooled_destination(&fixture.providers[0], "new-pool")],
+                ..config
+            },
         )
         .await;
         tokio::select! {
@@ -1796,12 +1821,12 @@ mod rpm_admission {
         });
         fixture.providers[0] =
             add_captured_thinking_provider(&fixture.gateway, format!("http://{address}/v1")).await;
-        let mut primary = target(&fixture.providers[0], None);
+        let mut primary = target(&fixture.providers[0]);
         primary.priority = Some(10);
         set_thinking_targets(
             &fixture.gateway,
             "rpm-a",
-            vec![primary, target(&fixture.providers[1], None)],
+            vec![primary, target(&fixture.providers[1])],
         )
         .await;
         configure(
@@ -1869,7 +1894,7 @@ mod rpm_admission {
         set_thinking_targets(
             &fixture.gateway,
             "rpm-a",
-            vec![target(&fixture.providers[0], None)],
+            vec![target(&fixture.providers[0])],
         )
         .await;
         configure(
@@ -1899,12 +1924,12 @@ mod rpm_admission {
     #[tokio::test]
     async fn original_target_gets_five_seconds_before_an_available_backup() {
         let fixture = fixture(false).await;
-        let mut preferred = target(&fixture.providers[0], None);
+        let mut preferred = target(&fixture.providers[0]);
         preferred.priority = Some(10);
         set_thinking_targets(
             &fixture.gateway,
             "rpm-a",
-            vec![preferred, target(&fixture.providers[1], None)],
+            vec![preferred, target(&fixture.providers[1])],
         )
         .await;
         configure(
@@ -2070,7 +2095,7 @@ mod rpm_admission {
         set_thinking_targets(
             &fixture.gateway,
             "rpm-a",
-            vec![target(&fixture.providers[0], None)],
+            vec![target(&fixture.providers[0])],
         )
         .await;
         configure(
@@ -2284,7 +2309,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn explicit_pool_shares_cross_provider_capacity_without_debiting_default_pools() {
+    async fn explicit_pool_shares_cross_provider_capacity_without_debiting_destination_windows() {
         let fixture = fixture(false).await;
         configure(
             &fixture,
@@ -2294,7 +2319,7 @@ mod rpm_admission {
                 destinations: fixture
                     .providers
                     .iter()
-                    .map(|id| destination(id, 1))
+                    .map(|id| pooled_destination(id, "shared"))
                     .collect(),
                 pools: vec![RpmPool {
                     id: "shared".into(),
@@ -2305,14 +2330,6 @@ mod rpm_admission {
             },
         )
         .await;
-        for (model, provider) in ["rpm-a", "rpm-b"].into_iter().zip(&fixture.providers) {
-            set_thinking_targets(
-                &fixture.gateway,
-                model,
-                vec![target(provider, Some("shared"))],
-            )
-            .await;
-        }
         let _clock = Clock::pause();
         execute(&fixture.gateway, &fixture.key, "rpm-a")
             .await
@@ -2321,8 +2338,22 @@ mod rpm_admission {
             .await
             .unwrap();
         exhausted(execute(&fixture.gateway, &fixture.key, "rpm-a").await);
+        configure(
+            &fixture,
+            RpmConfig {
+                preferred_wait_ms: 0,
+                total_wait_ms: 0,
+                destinations: fixture
+                    .providers
+                    .iter()
+                    .map(|id| destination(id, 1))
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .await;
         for (model, provider) in ["rpm-a", "rpm-b"].into_iter().zip(&fixture.providers) {
-            set_thinking_targets(&fixture.gateway, model, vec![target(provider, None)]).await;
+            set_thinking_targets(&fixture.gateway, model, vec![target(provider)]).await;
             execute(&fixture.gateway, &fixture.key, model)
                 .await
                 .unwrap();
@@ -2385,9 +2416,8 @@ async fn execute_tools_without_model_capability_declarations() {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -2504,12 +2534,11 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                 .map(|(index, provider)| CreateTarget {
                     enabled: true,
                     provider_id: provider.id.clone(),
-                    model: Some("upstream-model".into()),
+                    model: "upstream-model".into(),
                     priority: Some((providers.len() - index) as i32),
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(5),
                     target_cooldown_ms: None,
-                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -2681,13 +2710,12 @@ fn restricted_thinking_map(levels: &[ThinkingLevel]) -> Vec<crate::thinking::Thi
 fn thinking_target(provider_id: &str, levels: &[ThinkingLevel], priority: i32) -> CreateTarget {
     CreateTarget {
         provider_id: provider_id.into(),
-        model: Some("upstream-model".into()),
+        model: "upstream-model".into(),
         enabled: true,
         priority: Some(priority),
         first_token_timeout_ms: None,
         target_retry_budget: Some(0),
         target_cooldown_ms: None,
-        rpm_pool_id: None,
         thinking_level_map: restricted_thinking_map(levels),
     }
 }
@@ -3089,9 +3117,8 @@ async fn route_default_thinking_level_is_dropped_when_no_level_is_supported() {
             "empty-support-model",
             crate::db::models::UpdateRoute {
                 targets: Some(vec![crate::db::models::CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: target.provider_id().clone().into(),
-                    model: target.model().cloned().map(Into::into),
+                    model: target.model().clone().into(),
                     enabled: true,
                     priority: None,
                     first_token_timeout_ms: None,
@@ -4031,9 +4058,8 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

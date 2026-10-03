@@ -418,7 +418,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO model_backends (id, model_id, provider_id, priority, target_retry_budget) VALUES ('t', 'r', 'p', -3, 3)")
+        sqlx::query("INSERT INTO model_backends (id, model_id, provider_id, model, priority, target_retry_budget) VALUES ('t', 'r', 'p', 'm', -3, 3)")
             .execute(&pool).await.unwrap();
         let expires_at = chrono::Utc::now().timestamp_millis() + 60_000;
         for (id, parent, payload, format) in [

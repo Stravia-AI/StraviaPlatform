@@ -360,9 +360,8 @@ async fn create_route(
             display_name: Some("Management Lifecycle Route".into()),
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider_id.into(),
-                model: Some(MODEL_ID.into()),
+                model: MODEL_ID.into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -782,10 +781,9 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
                 .into_iter()
                 .map(|(id, priority)| stravia_core::db::models::CreateTarget {
                     provider_id: id.clone(),
-                    model: Some(MODEL_ID.into()),
+                    model: MODEL_ID.into(),
                     enabled: true,
                     priority: Some(priority),
-                    rpm_pool_id: None,
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
                     target_cooldown_ms: None,
@@ -830,10 +828,9 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
             .enumerate()
             .map(|(index, id)| stravia_core::db::models::CreateTarget {
                 provider_id: id.clone(),
-                model: Some(MODEL_ID.into()),
+                model: MODEL_ID.into(),
                 enabled: index != 0 || primary_enabled,
                 priority: Some(1 - index as i32),
-                rpm_pool_id: None,
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
@@ -2253,12 +2250,7 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
         retained_route.targets[0].provider_id().as_str(),
         provider.id.as_str()
     );
-    assert_eq!(
-        retained_route.targets[0]
-            .model()
-            .map(|model| model.as_str()),
-        Some(MODEL_ID)
-    );
+    assert_eq!(retained_route.targets[0].model().as_str(), MODEL_ID);
     assert_eq!(
         allowance_sample_count(directory.path(), &provider.id).await?,
         samples_before,

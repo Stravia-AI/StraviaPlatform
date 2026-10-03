@@ -143,9 +143,8 @@ mod tests {
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 targets: vec![crate::db::models::CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: provider.id.clone(),
-                    model: Some("vision".into()),
+                    model: "vision".into(),
                     enabled: true,
                     priority: None,
                     first_token_timeout_ms: None,
@@ -164,9 +163,8 @@ mod tests {
                 balance: Some("traffic_equalization".into()),
                 targets: vec![
                     crate::db::models::CreateTarget {
-                        rpm_pool_id: None,
                         provider_id: provider.id.clone(),
-                        model: Some("vision".into()),
+                        model: "vision".into(),
                         enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
@@ -175,9 +173,8 @@ mod tests {
                         thinking_level_map: Vec::new(),
                     },
                     crate::db::models::CreateTarget {
-                        rpm_pool_id: None,
                         provider_id: provider.id.clone(),
-                        model: Some("text".into()),
+                        model: "text".into(),
                         enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,

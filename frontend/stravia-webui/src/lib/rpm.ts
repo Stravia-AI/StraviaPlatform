@@ -8,8 +8,9 @@ export interface RpmPool {
 
 export interface DestinationRpmLimit {
   provider_id: string
-  model: string | null
+  model: string
   rpm_limit: number | null
+  rpm_pool_id?: string | null
 }
 
 export interface RpmConfig {

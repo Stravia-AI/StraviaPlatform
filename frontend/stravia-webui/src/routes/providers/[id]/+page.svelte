@@ -16,7 +16,6 @@ import type { Provider, ProviderModelSyncSummary } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import ProviderConnectionView from '$lib/components/provider-connection-view.svelte'
-import RpmManagement from '$lib/components/rpm-management.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import ProviderModelCatalog from '$lib/components/provider-model-catalog.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -52,7 +51,7 @@ const usesProviderModels = $derived(
   Boolean(
     channel?.capabilities.includes('infer') ||
     channel?.capabilities.includes('media_image') ||
-    channel?.search_model_required,
+    channel?.capabilities.includes('search'),
   ),
 )
 const detailTabs = $derived([
@@ -190,7 +189,6 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
 
     {#if view === 'connection' || (view === 'models' && !usesProviderModels)}
       <ProviderConnectionView {provider} onSaved={(saved: Provider) => (savedProvider = saved)} />
-      <RpmManagement providerId={provider.id} />
     {:else if view === 'models'}
       {#if syncStatus === 'syncing' || syncStatus === 'error'}
         <section class="rounded-xl border p-4" aria-live="polite">
@@ -265,13 +263,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
                   {#if logicalModelSecondaryId(reference.route)}
                     · {reference.route.model_id}{/if}
                 </a>
-                {#if reference.target.model}
-                  <TechnicalValue value={reference.target.model} copyable />
-                {:else}
-                  <span class="text-sm text-muted-foreground">
-                    {m.model_editor_provider_only_search_destination()}
-                  </span>
-                {/if}
+                <TechnicalValue value={reference.target.model} copyable />
                 <Badge variant="outline">{m.providers_order()} {reference.target.priority}</Badge>
               </div>
             {/each}

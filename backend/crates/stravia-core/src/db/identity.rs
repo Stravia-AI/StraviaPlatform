@@ -99,9 +99,6 @@ identity!(
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TargetDestination {
-    ProviderOnly {
-        provider_id: ProviderId,
-    },
     Model {
         provider_id: ProviderId,
         model_id: UpstreamModelId,
@@ -109,36 +106,31 @@ pub enum TargetDestination {
 }
 
 impl TargetDestination {
-    pub fn new(provider_id: ProviderId, model: Option<UpstreamModelId>) -> Self {
-        match model {
-            Some(model_id) => Self::Model {
-                provider_id,
-                model_id,
-            },
-            None => Self::ProviderOnly { provider_id },
+    pub fn new(provider_id: ProviderId, model_id: UpstreamModelId) -> Self {
+        Self::Model {
+            provider_id,
+            model_id,
         }
     }
 
     pub fn provider_id(&self) -> &ProviderId {
         match self {
-            Self::ProviderOnly { provider_id } | Self::Model { provider_id, .. } => provider_id,
+            Self::Model { provider_id, .. } => provider_id,
         }
     }
 
-    pub fn model(&self) -> Option<&UpstreamModelId> {
+    pub fn model(&self) -> &UpstreamModelId {
         match self {
-            Self::ProviderOnly { .. } => None,
-            Self::Model { model_id, .. } => Some(model_id),
+            Self::Model { model_id, .. } => model_id,
         }
     }
 
-    pub fn into_parts(self) -> (ProviderId, Option<UpstreamModelId>) {
+    pub fn into_parts(self) -> (ProviderId, UpstreamModelId) {
         match self {
-            Self::ProviderOnly { provider_id } => (provider_id, None),
             Self::Model {
                 provider_id,
                 model_id,
-            } => (provider_id, Some(model_id)),
+            } => (provider_id, model_id),
         }
     }
 }

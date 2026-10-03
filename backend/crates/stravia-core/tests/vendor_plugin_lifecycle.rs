@@ -301,10 +301,9 @@ async fn connection(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 enabled: true,
                 provider_id: provider.id.clone(),
-                model: Some("fixture-model".into()),
+                model: "fixture-model".into(),
                 priority: Some(0),
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
@@ -1045,9 +1044,8 @@ async fn compatible_update_keeps_continuation_recovery_on_the_original_component
             "lifecycle-continuation-recovery",
             UpdateRoute {
                 targets: Some(vec![CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: target.provider_id.clone(),
-                    model: Some("fixture-model".into()),
+                    model: "fixture-model".into(),
                     enabled: true,
                     priority: Some(0),
                     first_token_timeout_ms: None,

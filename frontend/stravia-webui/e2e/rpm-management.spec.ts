@@ -257,7 +257,7 @@ test('real management persists RPM limits, shared pool bindings and failed-save 
     metadata: { id: 'rpm-upstream', name: 'RPM upstream' },
     template_id: null,
   })
-  const model = await api<Route>(page, '/models', 'POST', {
+  await api<Route>(page, '/models', 'POST', {
     model_id: 'rpm-browser-model',
     targets: [
       {
@@ -349,31 +349,42 @@ test('real management persists RPM limits, shared pool bindings and failed-save 
   await savePools.click()
   await expect(savePools).toBeDisabled()
 
-  const openDestination = async () => {
-    await goto(`/models/${encodeURIComponent(model.model_id)}`)
-    await page.locator('[data-slot="target-card"]').click()
-    await expect(page.locator('[id^="target-rpm-pool-"]')).toBeVisible()
+  const catalogUrl = `/providers/${encodeURIComponent(provider.id)}?view=models`
+  const rpmTrigger = page.locator('.route-desktop-table').getByRole('button', { name: /^RPM limit for rpm-upstream:/ })
+  const rpmDialog = page.getByRole('dialog')
+  const readDestination = async () =>
+    (await readRpm()).destinations.find((item) => item.provider_id === provider.id && item.model === 'rpm-upstream')
+  const saveDestination = async () => {
+    await rpmDialog.getByRole('button', { name: 'Save limit', exact: true }).click()
+    await expect(rpmDialog).toBeHidden()
   }
-  await openDestination()
-  const binding = page.locator('[id^="target-rpm-pool-"]')
-  await expect(binding).toContainText('Default destination pool')
-  await binding.click()
+  await goto(catalogUrl)
+  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Unlimited')
+  await rpmTrigger.click()
+  await rpmDialog.getByLabel('Requests per minute', { exact: true }).fill('30')
+  await saveDestination()
+  expect(await readDestination()).toMatchObject({ rpm_limit: 30, rpm_pool_id: null })
+  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
+
+  await rpmTrigger.click()
+  await rpmDialog.getByLabel('Count against', { exact: true }).click()
   await page.getByRole('option', { name: /Browser shared pool/ }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm', exact: true }).click()
-  await page.getByRole('button', { name: 'Save model', exact: true }).click()
-  await expect(page).toHaveURL(`${management.origin}/models`)
-  expect((await api<Route>(page, `/models/${model.model_id}`)).targets[0].rpm_pool_id).toBe(pool.id)
-  await openDestination()
-  await expect(binding).toContainText('Browser shared pool')
-  await binding.click()
-  await page.getByRole('option', { name: 'Default destination pool', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm', exact: true }).click()
-  await page.getByRole('button', { name: 'Save model', exact: true }).click()
-  await expect(page).toHaveURL(`${management.origin}/models`)
-  expect((await api<Route>(page, `/models/${model.model_id}`)).targets[0].rpm_pool_id).toBeNull()
-  await openDestination()
-  await expect(binding).toContainText('Default destination pool')
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(rpmDialog.getByLabel('Requests per minute', { exact: true })).toBeHidden()
+  await saveDestination()
+  expect(await readDestination()).toMatchObject({ rpm_limit: null, rpm_pool_id: pool.id })
+  await page.reload()
+  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Pool: Browser shared pool')
+  await goto('/providers#rpm-pools')
+  await expect(pools.getByRole('link', { name: 'Local RPM service / rpm-upstream', exact: true })).toBeVisible()
+
+  // 回到独立限额且留空即为不限，配置中不再保留该目的地条目。
+  await goto(catalogUrl)
+  await rpmTrigger.click()
+  await rpmDialog.getByLabel('Count against', { exact: true }).click()
+  await page.getByRole('option', { name: "This model's own limit", exact: true }).click()
+  await saveDestination()
+  expect(await readDestination()).toBeUndefined()
+  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Unlimited')
 
   // Switch through the same persisted local preference used by the app.
   await page.evaluate(() => localStorage.setItem('stravia-locale', 'zh-CN'))

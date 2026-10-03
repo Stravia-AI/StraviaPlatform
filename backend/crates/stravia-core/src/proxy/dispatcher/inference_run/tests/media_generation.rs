@@ -293,9 +293,8 @@ async fn generation_http_fixture(
             display_name: Some("Local image generation".into()),
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: generation_provider.id,
-                model: Some("gpt-5.4".into()),
+                model: "gpt-5.4".into(),
                 enabled: true,
                 priority: Some(0),
                 first_token_timeout_ms: None,

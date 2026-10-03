@@ -264,10 +264,6 @@ pub struct ChannelDescriptor {
     /// metadata. Explicit negative canonical model facts still take precedence.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub model_capabilities: BTreeSet<String>,
-    /// `true` when `search` requires an upstream model selection; `false` for
-    /// provider-only research services that pin their own wire model.
-    #[serde(default)]
-    pub search_model_required: bool,
 }
 
 /// Simple conditional display for a config field. No expressions or scripts.
@@ -861,7 +857,6 @@ mod tests {
                 consumes_catalog_models: false,
                 capabilities: capabilities.clone(),
                 model_capabilities: BTreeSet::new(),
-                search_model_required: false,
             }],
             capabilities,
             website: None,

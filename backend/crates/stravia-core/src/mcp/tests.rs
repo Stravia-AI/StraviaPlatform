@@ -497,9 +497,8 @@ async fn media_test_app_with_answer(
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("vision".into()),
+                model: "vision".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

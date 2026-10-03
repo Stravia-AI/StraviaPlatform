@@ -57,9 +57,8 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("vision".into()),
+                model: "vision".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -319,9 +318,8 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("painter".into()),
+                model: "painter".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

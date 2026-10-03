@@ -17,12 +17,10 @@ export interface Route {
 export type RouteSelectionStrategy = 'traffic_equalization' | 'latency_preference'
 
 export interface Target {
-  rpm_pool_id?: string | null
   id: string
   model_id: string
   provider_id: string
-  /** null is a Provider-only full-search destination. */
-  model: string | null
+  model: string
   enabled: boolean
   priority: number
   first_token_timeout_ms: number
@@ -81,9 +79,8 @@ export interface UpdateRoute {
 }
 
 export interface CreateTarget {
-  rpm_pool_id?: string | null
   provider_id: string
-  model: string | null
+  model: string
   enabled?: boolean
   priority?: number
   first_token_timeout_ms?: number
@@ -97,7 +94,7 @@ export type TargetRuntimeState = 'available' | 'cooling_down' | 'half_open' | 'p
 export interface TargetRuntimeStatus {
   target_id: string
   provider_id: string
-  model: string | null
+  model: string
   state: TargetRuntimeState
   /** ADR-0073: the owning Provider's credentials were rejected upstream. */
   credential_invalid?: boolean

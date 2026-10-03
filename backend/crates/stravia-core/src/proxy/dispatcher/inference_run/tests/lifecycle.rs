@@ -1356,9 +1356,8 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("glm-5".into()),
+                model: "glm-5".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1571,9 +1570,8 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
             selection_strategy: route.balance.clone(),
             is_enabled: route.is_enabled,
             targets: Some(vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: route.targets[0].provider_id().clone().into(),
-                model: route.targets[0].model().cloned().map(Into::into),
+                model: route.targets[0].model().clone().into(),
                 enabled: route.targets[0].enabled,
                 priority: Some(route.targets[0].priority),
                 first_token_timeout_ms: Some(route.targets[0].first_token_timeout_ms),
@@ -1643,13 +1641,12 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
             }
             crate::db::models::CreateTarget {
                 provider_id: target.provider_id().clone().into(),
-                model: target.model().cloned().map(Into::into),
+                model: target.model().clone().into(),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                rpm_pool_id: None,
                 thinking_level_map: map,
             }
         })
@@ -1728,13 +1725,12 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
             };
             crate::db::models::CreateTarget {
                 provider_id: target.provider_id().clone().into(),
-                model: target.model().cloned().map(Into::into),
+                model: target.model().clone().into(),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                rpm_pool_id: None,
                 thinking_level_map: map,
             }
         })
