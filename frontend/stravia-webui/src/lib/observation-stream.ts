@@ -3,7 +3,7 @@ import { createParser, type EventSourceMessage } from 'eventsource-parser'
 import { apiBase, authenticatedFetch, isTauri } from '$lib/auth'
 import { openExternalUrl } from '$lib/open-external'
 import { isLiveContentBlock } from '$lib/observation-state'
-import type { DownloadTicket, ObservationEvent, ObservationStreamUpdate } from '$lib/types'
+import type { DownloadTicket, ObservationChange, ObservationLiveUpdate, ObservationStreamUpdate } from '$lib/types'
 
 export interface ObservationSubscription {
   close(): void
@@ -15,16 +15,65 @@ export function subscribeToObservations(
   onUpdate: (update: ObservationStreamUpdate) => void | Promise<void>,
   onConnectionChange: (connected: boolean) => void,
 ): ObservationSubscription {
+  return subscribeStream(
+    snapshotSequence,
+    (update) => {
+      if (update.type === 'event' || update.type === 'reset_required') return onUpdate(update)
+    },
+    onConnectionChange,
+  )
+}
+
+export function subscribeToInteractionLive(
+  interactionId: string,
+  onUpdate: (update: ObservationLiveUpdate) => void,
+  onConnectionChange: (connected: boolean) => void = () => undefined,
+): ObservationSubscription {
+  return subscribeStream(
+    0,
+    (update) => {
+      if (update.type !== 'event' && update.type !== 'reset_required') onUpdate(update)
+    },
+    onConnectionChange,
+    interactionId,
+  )
+}
+
+function subscribeStream(
+  snapshotSequence: number,
+  onUpdate: (update: ObservationStreamUpdate | ObservationLiveUpdate) => void | Promise<void>,
+  onConnectionChange: (connected: boolean) => void,
+  interactionId?: string,
+): ObservationSubscription {
   let cursor = snapshotSequence
   let stopped = false
   let controller: AbortController | undefined
   let reconnectDelay = 500
+  let deliveryFailed = false
+
+  const deliver = (update: ObservationStreamUpdate | ObservationLiveUpdate): void => {
+    const connection = controller
+    const pending = onUpdate(update)
+    if (pending) {
+      void pending.catch(() => {
+        if (stopped || controller !== connection) return
+        // A consumer rejection invalidates this connection; reconnect without blocking notifications.
+        if (update.type === 'event') cursor = Math.min(cursor, update.event.sequence - 1)
+        deliveryFailed = true
+        connection?.abort()
+      })
+    }
+  }
 
   const accept = async (message: EventSourceMessage): Promise<void> => {
     if (
       !message.data ||
       !message.event ||
-      !['observation', 'reset_required', 'live_content', 'live_snapshot', 'live_gap'].includes(message.event)
+      !(
+        interactionId
+          ? ['live_content', 'live_snapshot', 'live_gap', 'live_finished']
+          : ['observation', 'reset_required']
+      ).includes(message.event)
     )
       return
     const payload: unknown = JSON.parse(message.data)
@@ -33,11 +82,20 @@ export function subscribeToObservations(
       if (message.id) throw new Error('Volatile Observation cannot have a cursor')
       if (message.event === 'live_content') {
         if (!isLiveContentBlock(payload)) throw new Error('Invalid live content')
-        await onUpdate({ type: 'live_content', block: payload })
+        deliver({ type: 'live_content', block: payload })
       } else if (message.event === 'live_snapshot') {
         if (!('blocks' in payload) || !Array.isArray(payload.blocks) || !payload.blocks.every(isLiveContentBlock))
           throw new Error('Invalid live snapshot')
-        await onUpdate({ type: 'live_snapshot', blocks: payload.blocks })
+        deliver({ type: 'live_snapshot', blocks: payload.blocks })
+      } else if (message.event === 'live_finished') {
+        if (
+          !('interaction_id' in payload) ||
+          typeof payload.interaction_id !== 'string' ||
+          !('run_id' in payload) ||
+          typeof payload.run_id !== 'string'
+        )
+          throw new Error('Invalid live terminal')
+        deliver({ type: 'live_finished', interaction_id: payload.interaction_id, run_id: payload.run_id })
       } else {
         if (
           !('interaction_id' in payload) ||
@@ -48,7 +106,7 @@ export function subscribeToObservations(
           typeof payload.reason !== 'string'
         )
           throw new Error('Invalid live gap')
-        await onUpdate({
+        deliver({
           type: 'live_gap',
           interaction_id: payload.interaction_id,
           run_id: payload.run_id,
@@ -64,23 +122,26 @@ export function subscribeToObservations(
       await onUpdate({ type: 'reset_required', snapshot_sequence: Number(payload.snapshot_sequence) })
       return
     }
-    const event = payload as ObservationEvent
+    const event = payload as ObservationChange
     const sequence = message.id ? Number(message.id) : event.sequence
     if (!Number.isSafeInteger(sequence) || sequence !== event.sequence) throw new Error('Invalid Observation sequence')
     if (sequence <= cursor) return
-    await onUpdate({ type: 'event', event })
+    deliver({ type: 'event', event })
     cursor = Math.max(cursor, sequence)
   }
 
   const connect = async (): Promise<void> => {
     while (!stopped) {
       controller = new AbortController()
+      deliveryFailed = false
       let superseded: boolean
       try {
-        const response = await authenticatedFetch(`/observations/events?after=${cursor}`, {
-          headers: { Accept: 'text/event-stream' },
-          signal: controller.signal,
-        })
+        const response = await authenticatedFetch(
+          interactionId
+            ? `/observations/interactions/${encodeURIComponent(interactionId)}/live`
+            : `/observations/events?after=${cursor}`,
+          { headers: { Accept: 'text/event-stream' }, signal: controller.signal },
+        )
         if (!response.ok || !response.body) throw new Error(`Observation stream HTTP ${response.status}`)
         onConnectionChange(true)
         reconnectDelay = 500
@@ -98,13 +159,13 @@ export function subscribeToObservations(
             }
             pending.length = 0
           }
-          superseded = controller.signal.aborted
+          superseded = controller.signal.aborted && !deliveryFailed
         } finally {
           reader.releaseLock()
         }
       } catch (error) {
         if (stopped) break
-        superseded = error instanceof DOMException && error.name === 'AbortError'
+        superseded = !deliveryFailed && error instanceof DOMException && error.name === 'AbortError'
       } finally {
         onConnectionChange(false)
       }

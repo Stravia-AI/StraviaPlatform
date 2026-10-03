@@ -201,10 +201,31 @@ def _diagnostic(conversation: _LocalConversation, detail: dict[str, Any], status
     event = events[0]
     assert event["payload"]["status"] == status
     forest_item = next(item for item in _all_interactions(conversation.env, conversation.route_id) if item["id"] == summary["id"])
-    assert event in forest_item["context_events"]
+    forest_event = next(
+        item for item in forest_item["context_events"]
+        if item["sequence"] == event["sequence"]
+    )
+    assert forest_event["kind"] == "retained_tail_associated"
+    assert forest_event["interaction_id"] == summary["id"]
+    assert forest_event["run_id"] == run["id"]
+    assert forest_event["occurred_at"] == event["occurred_at"]
+    assert forest_event["payload"] == event["payload"]
     streamed = _sse_event(conversation.env, event["sequence"] - 1)
     assert streamed["event"] == "observation"
-    assert streamed["data"] == event
+    metadata = streamed["data"]
+    # Global replay carries only routing/invalidation metadata. Diagnostic evidence
+    # remains available through the persisted detail and forest context events.
+    assert set(metadata) <= {
+        "sequence", "occurred_at", "interaction_id", "run_id", "rejection_id",
+        "kind", "root_id", "boundary",
+    }
+    assert int(streamed["id"]) == event["sequence"] == metadata["sequence"]
+    assert metadata["occurred_at"] == event["occurred_at"]
+    assert metadata["kind"] == "retained_tail_associated"
+    assert metadata["interaction_id"] == summary["id"]
+    assert metadata["run_id"] == run["id"]
+    assert metadata["root_id"] == summary["root_id"]
+    assert metadata["boundary"] is False
     if status != "inferred":
         assert event["payload"]["source_run_id"] is None
         assert event["payload"]["source_interaction_id"] is None

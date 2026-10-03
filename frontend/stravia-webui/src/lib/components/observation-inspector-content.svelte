@@ -28,6 +28,8 @@ interface Props {
   onretry?: () => void
   oninteraction?: () => void
   liveBlocks?: LiveContentBlock[]
+  liveActive?: boolean
+  liveContentEpoch?: number
   liveGap?: boolean
   liveCapacity?: boolean
   olderLoading?: boolean
@@ -46,6 +48,8 @@ let {
   onretry,
   oninteraction,
   liveBlocks = [],
+  liveActive = true,
+  liveContentEpoch = 0,
   liveGap = false,
   liveCapacity = false,
   olderLoading = false,
@@ -299,11 +303,14 @@ function jumpToRun(runId: string | null) {
   <Alert.Root variant="destructive"><Alert.Title>{m.observation_live_save_failed()}</Alert.Title></Alert.Root>
 {/if}
 
-{#if loading}
+{#if error && (interaction || failure)}
+  <RequestFailure message={error} retry={onretry} />
+{/if}
+{#if loading && !interaction && !failure}
   <div class="grid flex-1 place-items-center">
     <p class="text-sm text-muted-foreground">{m.observation_loading_details()}</p>
   </div>
-{:else if error}
+{:else if error && !interaction && !failure}
   <RequestFailure message={error} retry={onretry} />
 {:else if failure}
   <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -373,7 +380,13 @@ function jumpToRun(runId: string | null) {
     <Tabs.Content value="timeline" class="min-h-0 flex-1 overflow-hidden">
       {#if interaction}
         {#key interaction.interaction.id}
-          <ObservationConversation detail={interaction} {liveBlocks} {olderLoading} {onolder} />
+          <ObservationConversation
+            detail={interaction}
+            {liveBlocks}
+            {liveActive}
+            {liveContentEpoch}
+            {olderLoading}
+            {onolder} />
         {/key}
       {/if}
     </Tabs.Content>

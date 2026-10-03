@@ -2259,7 +2259,7 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
     gateway.admin().observation_flush().await?;
     let retained_history = gateway
         .admin()
-        .observation_interaction_summary(&history_id, ForestQuery::default())
+        .observation_interaction(&history_id, ForestQuery::default())
         .await?
         .expect("interaction history survives plugin reset");
     assert_eq!(retained_history.interaction.usage, history_usage);

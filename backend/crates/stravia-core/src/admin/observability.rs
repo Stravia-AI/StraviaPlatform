@@ -22,15 +22,11 @@ impl AdminService {
         self.gw.observation.query_forest(query).await
     }
 
-    pub async fn observation_interaction_summary(
+    pub async fn observation_root_changes(
         &self,
-        id: &str,
-        filters: ForestQuery,
-    ) -> anyhow::Result<Option<InteractionSnapshot>> {
-        self.gw
-            .observation
-            .get_interaction_summary(id, filters)
-            .await
+        query: RootChangesQuery,
+    ) -> anyhow::Result<RootChangesPage> {
+        self.gw.observation.query_root_changes(query).await
     }
 
     pub async fn observation_interaction(
@@ -67,6 +63,10 @@ impl AdminService {
 
     pub fn observation_subscribe(&self, after: i64) -> ObservationStream {
         self.gw.observation.subscribe(after)
+    }
+
+    pub fn observation_subscribe_live(&self, interaction_id: String) -> ObservationStream {
+        self.gw.observation.subscribe_live(interaction_id)
     }
 
     pub fn observation_debug(&self) -> DebugState {

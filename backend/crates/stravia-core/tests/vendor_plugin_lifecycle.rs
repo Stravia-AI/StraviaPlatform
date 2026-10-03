@@ -584,7 +584,7 @@ async fn vendor_network_diagnostics_preserve_raw_selected_protocol_ndjson_bytes(
     ];
     request.reply(UpstreamReply::ndjson(&lines));
     assert_success_with(&call.await?, "first-ndjson-business");
-    let (interaction_id, _) = finished_observation(&mut observations).await?;
+    let (interaction_id, _) = finished_observation(&gateway, &mut observations).await?;
     let records = observation_bundle_records(&gateway, &interaction_id).await?;
     let chunks = records
         .iter()
@@ -661,7 +661,7 @@ async fn vendor_network_wire_only_masks_authorization_while_observations_stay_sa
     ]));
     assert_success_with(&call.await?, "first-live-business");
 
-    let (interaction_id, live) = finished_observation(&mut observations).await?;
+    let (interaction_id, live) = finished_observation(&gateway, &mut observations).await?;
     assert!(
         live.contains("first-live-business"),
         "live diagnostic content: {live}"
@@ -744,7 +744,7 @@ async fn protocol_selection_errors_protect_connection_secrets_in_diagnostics() -
     assert!(!failed.1.to_string().contains(LICENSE));
     upstream.assert_no_request();
 
-    let (_, live) = finished_observation(&mut observations).await?;
+    let (_, live) = finished_observation(&gateway, &mut observations).await?;
     assert!(live.contains("selection-business-rejected"));
     assert!(!live.contains(LICENSE));
     let admin = gateway.admin();

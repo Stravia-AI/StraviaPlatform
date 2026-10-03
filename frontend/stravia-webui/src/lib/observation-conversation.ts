@@ -1,5 +1,5 @@
 import { payloadRecord, payloadString } from './observation-payload'
-import type { InteractionDetail, LiveContentBlock, RunDetail } from './types/observation'
+import type { InteractionDetail, LiveContentBlock, ObservationOutputPreview, RunDetail } from './types/observation'
 
 export interface ObservationChatMessage {
   id: string
@@ -30,6 +30,61 @@ function runInputText(run: RunDetail): string | undefined {
     (event) => event.kind === 'input_preview_recorded' && event.run_id === run.id,
   )?.payload
   return payloadString(payloadRecord(payload).text)
+}
+
+const previewSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+function previewSuffix(text: string, limit: number): string {
+  let start = text.length
+  for (let count = 0; count < limit && start > 0; count += 1) {
+    start -= 1
+    const unit = text.charCodeAt(start)
+    if (unit >= 0xdc00 && unit <= 0xdfff && start > 0) start -= 1
+  }
+  if (start === 0) return text
+  const boundary = previewSegmenter.segment(text).containing(start)
+  if (boundary && boundary.index < start) start = boundary.index + boundary.segment.length
+  return text.slice(start)
+}
+
+/** 画布只取得选中输出的有界尾部，不复制累计详情全文，也不包含 Thinking。 */
+export function observationOutputPreview(
+  detail: InteractionDetail,
+  blocks: LiveContentBlock[],
+): ObservationOutputPreview {
+  const runs = detail.runs.toSorted((a, b) => a.started_at - b.started_at)
+  const committed = new Set(
+    runs.flatMap((run) =>
+      run.events
+        .filter((event) => event.kind === 'client_visible_content')
+        .map((event) => payloadString(payloadRecord(event.payload).block_id)),
+    ),
+  )
+  const visible = blocks.filter(
+    (block) =>
+      block.interaction_id === detail.interaction.id &&
+      block.kind === 'client_visible_content_delta' &&
+      !committed.has(block.block_id),
+  )
+  // 先裁剪各片段，再连接有界尾部，避免复制长正文后才裁剪。
+  let tail = ''
+  let length = 0
+  const append = (text: string) => {
+    length += text.length
+    tail = previewSuffix(tail + previewSuffix(text, 4096), 4096)
+  }
+  for (const run of runs) {
+    const text = runText(run)
+    if (length && text) append('\n\n')
+    if (text) append(text)
+    for (const block of visible.filter((block) => block.run_id === run.id)) {
+      append(block.text)
+    }
+  }
+  for (const block of visible.filter((block) => !runs.some((run) => run.id === block.run_id))) {
+    append(block.text)
+  }
+  return length ? { text: tail, start: length - tail.length } : { text: detail.interaction.visible_tail, start: 0 }
 }
 
 export function observationConversationMessages(

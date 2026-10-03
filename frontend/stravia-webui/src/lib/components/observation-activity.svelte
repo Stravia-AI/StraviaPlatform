@@ -12,7 +12,11 @@ import * as Collapsible from '$lib/components/ui/collapsible'
 import * as Marker from '$lib/components/ui/marker'
 import { Spinner } from '$lib/components/ui/spinner'
 
-let { activity }: { activity: ObservationActivity } = $props()
+let {
+  activity,
+  liveActive = true,
+  liveContentEpoch = 0,
+}: { activity: ObservationActivity; liveActive?: boolean; liveContentEpoch?: number } = $props()
 const contentId = $props.id()
 const storageKey = $derived(`stravia:observation-activity:${activity.id}`)
 const expandable = $derived(activity.kind === 'thinking' || activity.input !== undefined || activity.results.length > 0)
@@ -82,7 +86,10 @@ function formatContent(content: unknown): string {
       <Collapsible.Content id={contentId} class="min-w-0">
         <div class="activity-detail">
           {#if activity.kind === 'thinking'}
-            <StreamingMarkdown text={activity.text} active={activity.live} />
+            <StreamingMarkdown
+              text={activity.text}
+              active={activity.live && liveActive && open}
+              snapshotKey={liveContentEpoch} />
           {:else}
             {#if activity.input !== undefined}
               <div class="activity-section">

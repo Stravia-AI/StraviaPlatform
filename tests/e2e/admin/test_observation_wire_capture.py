@@ -295,16 +295,64 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
         for event in detail["runs"][0]["events"]
         if event["kind"] == "client_visible_content"
     )
-    replay = _sse_event(admin_env, visible_event["sequence"] - 1)
+    persisted_content = "".join(
+        event["payload"]["text"]
+        for event in detail["runs"][0]["events"]
+        if event["kind"] == "client_visible_content"
+    )
+    assert sentinel not in persisted_content
+    assert safe in persisted_content
+    assert "example.test/cb" in persisted_content
+    assert "name=Ada" in persisted_content
+
+    replay = _sse_event(
+        admin_env,
+        visible_event["sequence"] - 1,
+        lambda event: event["event"] == "observation"
+        and event["data"]["sequence"] == visible_event["sequence"],
+    )
     serialized_replay = json.dumps(replay)
     assert sentinel not in serialized_replay
-    assert safe in serialized_replay
+    assert safe not in serialized_replay
+    assert "payload" not in replay["data"]
+    assert "text" not in replay["data"]
+    assert set(replay["data"]) <= {
+        "sequence", "occurred_at", "interaction_id", "root_id", "run_id",
+        "rejection_id", "kind", "boundary",
+    }
+    assert int(replay["id"]) == visible_event["sequence"]
+    assert replay["data"]["kind"] == visible_event["kind"]
+    assert replay["data"]["interaction_id"] == detail["interaction"]["id"]
+    assert replay["data"]["run_id"] == detail["runs"][0]["id"]
+    assert replay["data"]["root_id"] == detail["interaction"]["root_id"]
+
+    snapshot = _sse_event(
+        admin_env, 0, interaction_id=detail["interaction"]["id"],
+    )
+    assert snapshot["event"] == "live_snapshot"
+    assert snapshot["id"] == ""
+    assert sentinel not in json.dumps(snapshot)
+    # Finalized text may already have left the volatile mirror. Its authoritative
+    # business content is checked above in the actual persisted detail.
+    for block in snapshot["data"]["blocks"]:
+        assert block["interaction_id"] == detail["interaction"]["id"]
+        assert block["run_id"] == detail["runs"][0]["id"]
 
     _, _, archive = download_observation_bundle(admin_env, detail)
     records = observation_bundle_events(archive)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         contents = [bundle.read(name) for name in bundle.namelist()]
+        exported = json.loads(bundle.read("interaction.json"))
+    exported_content = "".join(
+        event["payload"]["text"]
+        for event in exported["events"]
+        if event["kind"] == "client_visible_content"
+    )
+    assert exported_content == persisted_content
+    assert sentinel not in json.dumps(exported)
     if debug_enabled:
+        # Debug wire records deliberately preserve the real network body, unlike
+        # redacted observation facts and selected-scope previews.
         assert any(sentinel.encode() in content for content in contents)
     else:
         assert all(sentinel.encode() not in content for content in contents)

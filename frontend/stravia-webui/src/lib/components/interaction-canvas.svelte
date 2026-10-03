@@ -28,7 +28,7 @@ import { interactionNodeWidth, interactionNodeHeight } from '$lib/interaction-no
 import type { LayoutPosition } from '$lib/interaction-layout.worker'
 import { hasHistoricalFailure, interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationStatusLabel } from '$lib/observation-labels'
-import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
+import type { ForestRoot, InteractionNodeData, InteractionSummary, ObservationOutputPreview } from '$lib/types'
 import InteractionNode from '$lib/components/interaction-node.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Progress } from '$lib/components/ui/progress'
@@ -38,6 +38,9 @@ type FlowInteractionNode = Node<InteractionNodeData, 'interaction'>
 interface Props {
   roots: ForestRoot[]
   selectedId?: string
+  selectedOutputPreview?: ObservationOutputPreview
+  selectedOutputActive?: boolean
+  liveContentEpoch?: number
   selectedPath: Set<string>
   loadingMore: boolean
   nextCursor?: string | null
@@ -56,6 +59,9 @@ interface Props {
 let {
   roots,
   selectedId,
+  selectedOutputPreview,
+  selectedOutputActive = false,
+  liveContentEpoch = 0,
   selectedPath,
   loadingMore,
   nextCursor,
@@ -118,6 +124,10 @@ let nodes = $derived.by<FlowInteractionNode[]>(() => {
         current.selected === selected &&
         current.data.onSelectedPath === onSelectedPath &&
         current.data.subdued === subdued &&
+        current.data.outputPreview?.text === (selected ? selectedOutputPreview?.text : undefined) &&
+        current.data.outputPreview?.start === (selected ? selectedOutputPreview?.start : undefined) &&
+        current.data.outputActive === (selected && selectedOutputActive) &&
+        current.data.outputSnapshotKey === (selected ? liveContentEpoch : 0) &&
         current.ariaLabel === ariaLabel
       )
         return [current]
@@ -130,7 +140,14 @@ let nodes = $derived.by<FlowInteractionNode[]>(() => {
           height: interactionNodeHeight,
           handles: interactionNodeHandles,
           measured: current?.measured,
-          data: { interaction, onSelectedPath, subdued },
+          data: {
+            interaction,
+            onSelectedPath,
+            subdued,
+            outputPreview: selected ? selectedOutputPreview : undefined,
+            outputActive: selected && selectedOutputActive,
+            outputSnapshotKey: selected ? liveContentEpoch : 0,
+          },
           selected,
           draggable: false,
           connectable: false,

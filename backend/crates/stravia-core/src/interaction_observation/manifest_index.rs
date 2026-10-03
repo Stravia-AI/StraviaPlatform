@@ -158,6 +158,14 @@ impl DebugTraceIndex {
             .filter(|m| !m.tombstoned)
             .map(FileTraceManifest::trace)
     }
+    pub(crate) fn run_complete(&self, id: &str) -> bool {
+        let entries = self.entries.read();
+        entries
+            .runs
+            .get(id)
+            .and_then(|id| entries.traces.get(id))
+            .is_some_and(|manifest| !manifest.tombstoned && manifest.status == "complete")
+    }
     pub(crate) fn for_rejection(&self, id: &str) -> Option<TraceManifest> {
         let entries = self.entries.read();
         entries

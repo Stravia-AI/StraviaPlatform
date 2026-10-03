@@ -139,6 +139,19 @@ fn query_window(
     }
 }
 
+fn forest_window(query: &ForestQuery) -> anyhow::Result<QueryWindow> {
+    let mut window = query_window(
+        query.start_at,
+        query.end_at,
+        query.anchor_at,
+        query.window_index,
+    )?;
+    if query.live_window {
+        window.bounded_end = false;
+    }
+    Ok(window)
+}
+
 #[derive(FromRow, Clone)]
 struct InteractionRow {
     id: String,
@@ -165,6 +178,234 @@ struct InteractionRow {
     last_event_sequence: i64,
     debug_status: String,
 }
+
+#[derive(Clone, Copy)]
+enum RunDebugStatus {
+    None,
+    Partial,
+    Complete,
+}
+
+impl RunDebugStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Partial => "partial",
+            Self::Complete => "complete",
+        }
+    }
+}
+
+struct RootChangesRead {
+    sequence: i64,
+    first: Option<i64>,
+    total: i64,
+    rows: Vec<InteractionRow>,
+    matched: HashSet<String>,
+    debug: std::collections::HashMap<String, RunDebugStatus>,
+    events: Vec<ObservationEvent>,
+    root_rows: Vec<(String, i64)>,
+}
+
+macro_rules! root_changes_reader {
+    ($name:ident, $pool:ty, $roots:ident, $members:ident, $matching:ident, $flags:ident, $context:ident, $isolation:expr) => {
+        async fn $name(
+            pool: &$pool,
+            query: &RootChangesQuery,
+            window: &QueryWindow,
+            forest: bool,
+            index: &super::manifest_index::DebugTraceIndex,
+        ) -> anyhow::Result<RootChangesRead> {
+            let mut tx = pool.begin().await?;
+            if let Some(sql) = $isolation {
+                sqlx::query(sql).execute(&mut *tx).await?;
+            }
+            let (sequence, first): (i64, Option<i64>) = sqlx::query_as(
+                "SELECT COALESCE(MAX(sequence),0),MIN(sequence) FROM observation_events",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            let mut filters = query.filters.clone();
+            if !forest {
+                filters.cursor = None;
+            }
+            let limit = if forest {
+                filters.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64
+            } else {
+                0
+            };
+            let (total, root_rows) = $roots(
+                &mut *tx,
+                &filters,
+                window.start,
+                window.end,
+                window.bounded_end,
+                limit,
+            )
+            .await?;
+            let root_ids: Vec<_> = if forest {
+                root_rows
+                    .iter()
+                    .take(limit as usize)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            } else {
+                query
+                    .roots
+                    .iter()
+                    .map(|root| root.root_id.clone())
+                    .collect()
+            };
+            let mut read = RootChangesRead {
+                sequence,
+                first,
+                total,
+                rows: Vec::new(),
+                matched: HashSet::new(),
+                debug: std::collections::HashMap::new(),
+                events: Vec::new(),
+                root_rows,
+            };
+            for chunk in root_ids.chunks(900) {
+                read.rows.extend($members(&mut *tx, chunk).await?);
+                read.matched
+                    .extend($matching(&mut *tx, &filters, chunk).await?);
+            }
+            let ids: Vec<_> = read.rows.iter().map(|row| row.id.as_str()).collect();
+            let mut runs = Vec::new();
+            for chunk in ids.chunks(900) {
+                runs.extend($flags(&mut *tx, chunk).await?);
+            }
+            read.debug = ObservationStore::debug_statuses_from_runs(index, runs);
+            let context_ids: Vec<_> = if forest
+                || query
+                    .roots
+                    .iter()
+                    .all(|root| root.known_interactions.is_empty())
+            {
+                ids
+            } else {
+                read.rows
+                    .iter()
+                    .filter(|row| {
+                        let known = query
+                            .roots
+                            .iter()
+                            .find(|root| root.root_id == row.root_id)
+                            .and_then(|root| {
+                                root.known_interactions
+                                    .iter()
+                                    .find(|known| known.id == row.id)
+                            });
+                        interaction_changed(
+                            row,
+                            read.matched.contains(&row.id),
+                            read.debug
+                                .get(&row.id)
+                                .copied()
+                                .unwrap_or(RunDebugStatus::None)
+                                .as_str(),
+                            known,
+                        )
+                    })
+                    .map(|row| row.id.as_str())
+                    .collect()
+            };
+            for chunk in context_ids.chunks(900) {
+                read.events
+                    .extend($context(&mut *tx, chunk, sequence).await?);
+            }
+            tx.commit().await?;
+            Ok(read)
+        }
+    };
+}
+
+fn interaction_changed(
+    row: &InteractionRow,
+    matched: bool,
+    debug_status: &str,
+    known: Option<&KnownInteraction>,
+) -> bool {
+    known.is_none_or(|known| {
+        known.last_event_sequence != row.last_event_sequence
+            || known.matched != matched
+            || known.debug_status != debug_status
+    })
+}
+
+fn group_context_events(
+    events: Vec<ObservationEvent>,
+) -> std::collections::HashMap<String, Vec<ObservationEvent>> {
+    let mut grouped: std::collections::HashMap<String, Vec<ObservationEvent>> =
+        std::collections::HashMap::new();
+    for event in events {
+        if let Some(id) = &event.interaction_id {
+            grouped.entry(id.clone()).or_default().push(event);
+        }
+    }
+    grouped
+}
+
+root_changes_reader!(
+    root_changes_sqlite,
+    sqlx::SqlitePool,
+    forest_roots_sqlite,
+    interactions_for_roots_sqlite,
+    matching_in_roots_sqlite,
+    debug_flags_sqlite,
+    context_events_sqlite,
+    None::<&str>
+);
+root_changes_reader!(
+    root_changes_postgres,
+    sqlx::PgPool,
+    forest_roots_postgres,
+    interactions_for_roots_postgres,
+    matching_in_roots_postgres,
+    debug_flags_postgres,
+    context_events_postgres,
+    Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+);
+
+macro_rules! interaction_batch_queries {
+    ($db:ty, $connection:ty, $flags:ident, $context:ident, $map:ident) => {
+        async fn $flags(executor: &mut $connection, ids: &[&str])
+            -> anyhow::Result<Vec<(String, String, bool)>> {
+            let mut query = QueryBuilder::<$db>::new(
+                "SELECT interaction_id,id,debug_enabled FROM inference_run_observations WHERE interaction_id IN (");
+            let mut separated = query.separated(",");
+            for id in ids { separated.push_bind(*id); }
+            query.push(")");
+            Ok(query.build_query_as().fetch_all(executor).await?)
+        }
+        async fn $context(executor: &mut $connection, ids: &[&str], through: i64)
+            -> anyhow::Result<Vec<ObservationEvent>> {
+            let mut query = QueryBuilder::<$db>::new(
+                "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (");
+            let mut separated = query.separated(",");
+            for id in ids { separated.push_bind(*id); }
+            query.push(") AND sequence<=").push_bind(through);
+            query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
+            $map(query.build().fetch_all(executor).await?)
+        }
+    };
+}
+interaction_batch_queries!(
+    sqlx::Sqlite,
+    sqlx::SqliteConnection,
+    debug_flags_sqlite,
+    context_events_sqlite,
+    map_sqlite_events
+);
+interaction_batch_queries!(
+    sqlx::Postgres,
+    sqlx::PgConnection,
+    debug_flags_postgres,
+    context_events_postgres,
+    map_postgres_events
+);
+
 #[derive(FromRow)]
 struct RunRow {
     id: String,
@@ -232,6 +473,26 @@ struct DiscoveryRow {
 const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind='credential_mappings_created' AND i.expires_at>";
 
 impl ObservationStore {
+    pub(super) async fn observation_root_id(
+        &self,
+        interaction: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(match self {
+            Self::Sqlite(pool, _, _) => {
+                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=?")
+                    .bind(interaction)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Self::Postgres(pool, _) => {
+                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=$1")
+                    .bind(interaction)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        })
+    }
+
     pub(super) async fn contains_gap_run(&self, run_id: &str) -> anyhow::Result<bool> {
         Ok(match self {
             Self::Sqlite(pool, _, _) => {
@@ -368,89 +629,141 @@ impl ObservationStore {
         })
     }
 
-    async fn context_events(
+    pub async fn query_root_changes(
         &self,
-        interactions: &[&str],
-        through: i64,
-    ) -> anyhow::Result<std::collections::HashMap<String, Vec<ObservationEvent>>> {
-        let mut grouped: std::collections::HashMap<String, Vec<ObservationEvent>> =
+        query: RootChangesQuery,
+    ) -> anyhow::Result<RootChangesPage> {
+        let window = forest_window(&query.filters)?;
+        let read = match self {
+            Self::Sqlite(pool, _, _) => {
+                root_changes_sqlite(pool, &query, &window, false, self.debug_trace_index()).await?
+            }
+            Self::Postgres(pool, _) => {
+                root_changes_postgres(pool, &query, &window, false, self.debug_trace_index())
+                    .await?
+            }
+        };
+        let mut page = RootChangesPage {
+            snapshot_sequence: read.sequence,
+            root_total: read.total,
+            reset_required: false,
+            changes: Vec::new(),
+        };
+        let mut seen_roots = HashSet::new();
+        if query.roots.iter().any(|root| {
+            !seen_roots.insert(root.root_id.as_str())
+                || root.after_sequence < 0
+                || root.after_sequence > read.sequence
+                || (!root.known_interactions.is_empty()
+                    && read
+                        .first
+                        .is_some_and(|first| root.after_sequence < first - 1))
+                || root.known_interactions.iter().any(|known| {
+                    known.last_event_sequence < 0 || known.last_event_sequence > root.after_sequence
+                })
+        }) {
+            page.reset_required = true;
+            return Ok(page);
+        }
+        let mut rows_by_root: std::collections::HashMap<String, Vec<InteractionRow>> =
             std::collections::HashMap::new();
-        // Leave room for the sequence bound under SQLite's historical 999-variable limit.
-        for ids in interactions.chunks(900) {
-            let events = match self {
-                Self::Sqlite(pool, _, _) => {
-                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (",
-                    );
-                    let mut separated = query.separated(",");
-                    for id in ids {
-                        separated.push_bind(*id);
-                    }
-                    query.push(") AND sequence<=").push_bind(through);
-                    query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
-                    map_sqlite_events(query.build().fetch_all(pool).await?)?
-                }
-                Self::Postgres(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (",
-                    );
-                    let mut separated = query.separated(",");
-                    for id in ids {
-                        separated.push_bind(*id);
-                    }
-                    query.push(") AND sequence<=").push_bind(through);
-                    query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
-                    map_postgres_events(query.build().fetch_all(pool).await?)?
-                }
-            };
-            for event in events {
-                if let Some(id) = &event.interaction_id {
-                    grouped.entry(id.clone()).or_default().push(event);
-                }
+        for row in read.rows {
+            if let Some(members) = rows_by_root.get_mut(&row.root_id) {
+                members.push(row);
+            } else {
+                rows_by_root.insert(row.root_id.clone(), vec![row]);
             }
         }
-        Ok(grouped)
+        let matched = read.matched;
+        let mut debug = read.debug;
+        let mut context = group_context_events(read.events);
+        for baseline in query.roots {
+            let members = rows_by_root.remove(&baseline.root_id).unwrap_or_default();
+            let last = members
+                .iter()
+                .map(|row| row.last_active_at)
+                .max()
+                .unwrap_or(0);
+            let reason = if members.is_empty() {
+                Some("deleted")
+            } else if !members.iter().any(|row| matched.contains(&row.id)) {
+                Some("filter")
+            } else if last < window.start || (window.bounded_end && last >= window.end) {
+                Some("window")
+            } else {
+                None
+            };
+            let mut change = RootChange {
+                root_id: baseline.root_id,
+                last_active_at: last,
+                interactions: Vec::new(),
+                removed_interaction_ids: Vec::new(),
+                removal_reason: reason.map(str::to_owned),
+            };
+            for known in &baseline.known_interactions {
+                if matches!(reason, Some("deleted" | "filter"))
+                    || !members.iter().any(|row| row.id == known.id)
+                {
+                    change.removed_interaction_ids.push(known.id.clone());
+                }
+            }
+            if reason.is_none()
+                || (reason == Some("window") && !baseline.known_interactions.is_empty())
+            {
+                for row in members {
+                    let is_matched = matched.contains(&row.id);
+                    let debug_status = debug
+                        .get(&row.id)
+                        .copied()
+                        .unwrap_or(RunDebugStatus::None)
+                        .as_str();
+                    let known = baseline
+                        .known_interactions
+                        .iter()
+                        .find(|known| known.id == row.id);
+                    if interaction_changed(&row, is_matched, debug_status, known) {
+                        let events = context.remove(&row.id).unwrap_or_default();
+                        let status = debug.remove(&row.id).unwrap_or(RunDebugStatus::None);
+                        let mut interaction = summary(row, is_matched);
+                        interaction.context_events = events;
+                        interaction.debug_status = status.as_str().into();
+                        change.interactions.push(interaction);
+                    }
+                }
+            }
+            page.changes.push(change);
+        }
+        Ok(page)
     }
 
     pub async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
-        let QueryWindow {
-            anchor,
-            index,
-            start,
-            end,
-            bounded_end,
-        } = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
+        let window = forest_window(&q)?;
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
         use tracing::Instrument as _;
         let span = tracing::info_span!(target: "stravia::perf", "observation.query.forest_roots", status = tracing::field::Empty);
-        let roots = async {
+        let query = RootChangesQuery {
+            filters: q.clone(),
+            roots: Vec::new(),
+        };
+        let result = async {
             match self {
                 Self::Sqlite(p, _, _) => {
-                    forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await
+                    root_changes_sqlite(p, &query, &window, true, self.debug_trace_index()).await
                 }
                 Self::Postgres(p, _) => {
-                    forest_roots_postgres(p, &q, start, end, bounded_end, limit).await
+                    root_changes_postgres(p, &query, &window, true, self.debug_trace_index()).await
                 }
             }
         }
         .instrument(span.clone())
         .await;
-        span.record("status", if roots.is_ok() { "completed" } else { "error" });
+        span.record("status", if result.is_ok() { "completed" } else { "error" });
         drop(span);
-        let (root_total, root_rows) = roots?;
-        let root_ids: Vec<String> = root_rows
-            .iter()
-            .take(limit as usize)
-            .map(|(id, _)| id.clone())
-            .collect();
-        let rows = match self {
-            Self::Sqlite(p, _, _) => interactions_for_roots_sqlite(p, &root_ids).await?,
-            Self::Postgres(p, _) => interactions_for_roots_postgres(p, &root_ids).await?,
-        };
-        let matched = match self {
-            Self::Sqlite(p, _, _) => matching_in_roots_sqlite(p, &q, &root_ids).await?,
-            Self::Postgres(p, _) => matching_in_roots_postgres(p, &q, &root_ids).await?,
-        };
+        let read = result?;
+        let root_total = read.total;
+        let root_rows = read.root_rows;
+        let rows = read.rows;
+        let matched = read.matched;
         let mut roots: Vec<ForestRoot> = root_rows
             .iter()
             .take(limit as usize)
@@ -476,28 +789,26 @@ impl ObservationStore {
                 }
             })
             .collect();
-        let ids: Vec<_> = roots
-            .iter()
-            .flat_map(|root| &root.interactions)
-            .map(|interaction| interaction.id.as_str())
-            .collect();
-        // 快照序列必须在行读取之后获取：行状态可能已包含终态（如 run_finished 提交），
-        // 若快照早于行读取，事件分页会截掉行状态已经反映的终态事件。
-        let snapshot_sequence = self.max_sequence().await?;
-        let mut context = self.context_events(&ids, snapshot_sequence).await?;
+        let snapshot_sequence = read.sequence;
+        let mut context = group_context_events(read.events);
+        let mut debug = read.debug;
         for root in &mut roots {
             for interaction in &mut root.interactions {
                 interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
-                interaction.debug_status = self.interaction_debug_status(&interaction.id).await?;
+                interaction.debug_status = debug
+                    .remove(&interaction.id)
+                    .unwrap_or(RunDebugStatus::None)
+                    .as_str()
+                    .into();
             }
         }
         let next_cursor =
             (root_rows.len() > limit as usize).then(|| root_rows[limit as usize - 1].0.clone());
         Ok(ForestPage {
-            anchor_at: anchor,
-            window_index: index,
-            window_start: start,
-            window_end: end,
+            anchor_at: window.anchor,
+            window_index: window.index,
+            window_start: window.start,
+            window_end: window.end,
             roots,
             root_total,
             next_cursor,
@@ -510,30 +821,32 @@ impl ObservationStore {
         id: &str,
         filters: ForestQuery,
     ) -> anyhow::Result<Option<InteractionSnapshot>> {
-        query_window(
-            filters.start_at,
-            filters.end_at,
-            filters.anchor_at,
-            filters.window_index,
-        )?;
-        let Some(selected_row) = (match self {
-            Self::Sqlite(p, _, _) => interaction_sqlite(p, id).await?,
-            Self::Postgres(p, _) => interaction_postgres(p, id).await?,
-        }) else {
+        let window = forest_window(&filters)?;
+        let Some(root_id) = self.observation_root_id(id).await? else {
             return Ok(None);
         };
-        let root_id = selected_row.root_id.clone();
-        let root_ids = [root_id.clone()];
-        let root_rows = match self {
-            Self::Sqlite(p, _, _) => interactions_for_roots_sqlite(p, &root_ids).await?,
-            Self::Postgres(p, _) => interactions_for_roots_postgres(p, &root_ids).await?,
+        let query = RootChangesQuery {
+            filters,
+            roots: vec![RootChangesBaseline {
+                root_id: root_id.clone(),
+                after_sequence: 0,
+                known_interactions: Vec::new(),
+            }],
         };
-        let matched = match self {
-            Self::Sqlite(p, _, _) => matching_in_roots_sqlite(p, &filters, &root_ids).await?,
-            Self::Postgres(p, _) => matching_in_roots_postgres(p, &filters, &root_ids).await?,
+        let read = match self {
+            Self::Sqlite(p, _, _) => {
+                root_changes_sqlite(p, &query, &window, false, self.debug_trace_index()).await?
+            }
+            Self::Postgres(p, _) => {
+                root_changes_postgres(p, &query, &window, false, self.debug_trace_index()).await?
+            }
         };
+        let root_rows = read.rows;
+        let Some(selected_row) = root_rows.iter().find(|row| row.id == id).cloned() else {
+            return Ok(None);
+        };
+        let matched = read.matched;
         let mut selected = summary(selected_row.clone(), matched.contains(id));
-        selected.debug_status = self.interaction_debug_status(id).await?;
         let mut root_interactions: Vec<_> = root_rows
             .into_iter()
             .map(|row| {
@@ -541,18 +854,19 @@ impl ObservationStore {
                 summary(row, hit)
             })
             .collect();
-        let ids: Vec<_> = root_interactions
-            .iter()
-            .map(|interaction| interaction.id.as_str())
-            .collect();
-        // 与 query_forest 相同：快照序列在行读取之后获取，避免事件分页截掉行状态已见的终态事件。
-        let snapshot_sequence = self.max_sequence().await?;
-        let mut context = self.context_events(&ids, snapshot_sequence).await?;
+        let snapshot_sequence = read.sequence;
+        let mut context = group_context_events(read.events);
+        let mut debug = read.debug;
         for interaction in &mut root_interactions {
             interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
-            interaction.debug_status = self.interaction_debug_status(&interaction.id).await?;
+            interaction.debug_status = debug
+                .remove(&interaction.id)
+                .unwrap_or(RunDebugStatus::None)
+                .as_str()
+                .into();
             if interaction.id == id {
                 selected.context_events = interaction.context_events.clone();
+                selected.debug_status = interaction.debug_status.clone();
             }
         }
         root_interactions.sort_by(|a, b| {
@@ -932,35 +1246,36 @@ impl ObservationStore {
     async fn manifest_for_rejection(&self, id: &str) -> anyhow::Result<Option<TraceManifest>> {
         Ok(self.debug_trace_index().for_rejection(id))
     }
-    async fn interaction_debug_status(&self, id: &str) -> anyhow::Result<String> {
-        let runs: Vec<(String, bool)> = match self {
-            Self::Sqlite(pool, _, _) => sqlx::query_as(
-                "SELECT id,debug_enabled FROM inference_run_observations WHERE interaction_id=?",
-            )
-            .bind(id)
-            .fetch_all(pool)
-            .await?,
-            Self::Postgres(pool, _) => sqlx::query_as(
-                "SELECT id,debug_enabled FROM inference_run_observations WHERE interaction_id=$1",
-            )
-            .bind(id)
-            .fetch_all(pool)
-            .await?,
-        };
-        Ok(if runs.iter().all(|(_, enabled)| !enabled) {
-            "none"
-        } else if runs.iter().all(|(id, enabled)| {
-            *enabled
-                && self
-                    .debug_trace_index()
-                    .for_run(id)
-                    .is_some_and(|trace| trace.status == "complete")
-        }) {
-            "complete"
-        } else {
-            "partial"
+
+    fn debug_statuses_from_runs(
+        index: &super::manifest_index::DebugTraceIndex,
+        runs: Vec<(String, String, bool)>,
+    ) -> std::collections::HashMap<String, RunDebugStatus> {
+        let mut grouped: std::collections::HashMap<String, RunDebugStatus> =
+            std::collections::HashMap::new();
+        for (interaction, run, enabled) in runs {
+            match grouped.entry(interaction) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(if !enabled {
+                        RunDebugStatus::None
+                    } else if index.run_complete(&run) {
+                        RunDebugStatus::Complete
+                    } else {
+                        RunDebugStatus::Partial
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => match *entry.get() {
+                    RunDebugStatus::None if enabled => {
+                        entry.insert(RunDebugStatus::Partial);
+                    }
+                    RunDebugStatus::Complete if !enabled || !index.run_complete(&run) => {
+                        entry.insert(RunDebugStatus::Partial);
+                    }
+                    RunDebugStatus::None | RunDebugStatus::Partial | RunDebugStatus::Complete => {}
+                },
+            }
         }
-        .into())
+        grouped
     }
     async fn rejection_events(
         &self,
@@ -1076,7 +1391,7 @@ fn add_chain_token_filter_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &For
 }
 
 async fn forest_roots_sqlite(
-    p: &sqlx::SqlitePool,
+    connection: &mut sqlx::SqliteConnection,
     q: &ForestQuery,
     start: i64,
     end: i64,
@@ -1093,7 +1408,10 @@ async fn forest_roots_sqlite(
         base.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     base.push(") matched_roots");
-    let total = base.build_query_scalar::<i64>().fetch_one(p).await?;
+    let total = base
+        .build_query_scalar::<i64>()
+        .fetch_one(&mut *connection)
+        .await?;
     let mut page = QueryBuilder::<sqlx::Sqlite>::new(
         "SELECT i.root_id,MAX(i.last_active_at) latest FROM interaction_observations i WHERE 1=1",
     );
@@ -1107,10 +1425,13 @@ async fn forest_roots_sqlite(
         page.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     page.push(" ORDER BY i.root_id LIMIT ").push_bind(limit + 1);
-    Ok((total, page.build_query_as().fetch_all(p).await?))
+    Ok((
+        total,
+        page.build_query_as().fetch_all(&mut *connection).await?,
+    ))
 }
 async fn forest_roots_postgres(
-    p: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     q: &ForestQuery,
     start: i64,
     end: i64,
@@ -1127,7 +1448,10 @@ async fn forest_roots_postgres(
         base.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     base.push(") matched_roots");
-    let total = base.build_query_scalar::<i64>().fetch_one(p).await?;
+    let total = base
+        .build_query_scalar::<i64>()
+        .fetch_one(&mut *connection)
+        .await?;
     let mut page = QueryBuilder::<sqlx::Postgres>::new(
         "SELECT i.root_id,MAX(i.last_active_at) latest FROM interaction_observations i WHERE TRUE",
     );
@@ -1141,11 +1465,14 @@ async fn forest_roots_postgres(
         page.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     page.push(" ORDER BY i.root_id LIMIT ").push_bind(limit + 1);
-    Ok((total, page.build_query_as().fetch_all(p).await?))
+    Ok((
+        total,
+        page.build_query_as().fetch_all(&mut *connection).await?,
+    ))
 }
 
 async fn interactions_for_roots_sqlite(
-    p: &sqlx::SqlitePool,
+    p: &mut sqlx::SqliteConnection,
     ids: &[String],
 ) -> anyhow::Result<Vec<InteractionRow>> {
     if ids.is_empty() {
@@ -1161,7 +1488,7 @@ async fn interactions_for_roots_sqlite(
     Ok(b.build_query_as().fetch_all(p).await?)
 }
 async fn interactions_for_roots_postgres(
-    p: &sqlx::PgPool,
+    p: &mut sqlx::PgConnection,
     ids: &[String],
 ) -> anyhow::Result<Vec<InteractionRow>> {
     if ids.is_empty() {
@@ -1193,7 +1520,7 @@ async fn interaction_postgres(
     Ok(b.build_query_as().fetch_optional(p).await?)
 }
 async fn matching_in_roots_sqlite(
-    p: &sqlx::SqlitePool,
+    p: &mut sqlx::SqliteConnection,
     q: &ForestQuery,
     ids: &[String],
 ) -> anyhow::Result<HashSet<String>> {
@@ -1216,7 +1543,7 @@ async fn matching_in_roots_sqlite(
         .collect())
 }
 async fn matching_in_roots_postgres(
-    p: &sqlx::PgPool,
+    p: &mut sqlx::PgConnection,
     q: &ForestQuery,
     ids: &[String],
 ) -> anyhow::Result<HashSet<String>> {
@@ -1633,73 +1960,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn context_batches_preserve_groups_order_and_watermark() -> anyhow::Result<()> {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        let store = ObservationStore::Sqlite(
-            pool.clone(),
-            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
-                std::path::Path::new(""),
-            )),
-            std::sync::Arc::new(tokio::sync::Mutex::new(())),
-        );
-        // An empty root must not touch observation storage at all.
-        assert!(store.context_events(&[], 10).await?.is_empty());
-        sqlx::query("CREATE TABLE observation_events (sequence INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, interaction_id TEXT, run_id TEXT, rejection_id TEXT, kind TEXT NOT NULL, payload BLOB NOT NULL)")
-            .execute(&pool).await?;
-        let ids: Vec<_> = (0..1_801)
-            .map(|index| format!("interaction-{index}"))
-            .collect();
-        let mut tx = pool.begin().await?;
-        for (index, id) in ids.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,'compaction_operation',?)",
-            )
-            .bind(index as i64 + 1)
-            .bind(id)
-            .bind(crate::storage_codec::encode(b"{}")?)
-            .execute(&mut *tx)
-            .await?;
-        }
-        for (sequence, kind) in [
-            (1_802i64, "retained_tail_associated"),
-            (1_803, "native_compaction_associated"),
-            (1_804, "client_tool_result"),
-            (1_805, "compaction_operation"),
-        ] {
-            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,?,?)")
-                .bind(sequence)
-                .bind(&ids[0])
-                .bind(kind)
-                .bind(crate::storage_codec::encode(b"{}")?)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        let refs: Vec<_> = ids.iter().map(String::as_str).collect();
-        let context = store.context_events(&refs, 1_804).await?;
-        for (index, id) in ids.iter().enumerate() {
-            let sequences: Vec<_> = context[id].iter().map(|event| event.sequence).collect();
-            assert_eq!(
-                sequences,
-                if index == 0 {
-                    vec![1, 1_802, 1_803]
-                } else {
-                    vec![index as i64 + 1]
-                }
-            );
-            assert!(
-                context[id]
-                    .iter()
-                    .all(|event| event.interaction_id.as_ref() == Some(id))
-            );
-        }
-        Ok(())
-    }
-
     async fn admit_chain_node(
         store: &ObservationStore,
         id: &str,
@@ -1707,11 +1967,23 @@ mod tests {
         parent: Option<&str>,
         now: i64,
     ) -> anyhow::Result<()> {
+        admit_chain_run(store, id, id, root_id, parent, now, false).await
+    }
+
+    async fn admit_chain_run(
+        store: &ObservationStore,
+        id: &str,
+        run_id: &str,
+        root_id: &str,
+        parent: Option<&str>,
+        now: i64,
+        debug_enabled: bool,
+    ) -> anyhow::Result<()> {
         store
             .admit(Admission {
                 metadata: None,
                 start: &RunStart {
-                    id: id.into(),
+                    id: run_id.into(),
                     principal: "owner".into(),
                     api_key_id: None,
                     api_key_name: None,
@@ -1726,7 +1998,7 @@ mod tests {
                 ingress_received_at: now,
                 parent_run_id: parent,
                 parent_interaction_id: parent,
-                debug_enabled: false,
+                debug_enabled,
                 inferred_retry: false,
                 grouping_reason: if parent.is_some() {
                     "new_user"
@@ -1942,13 +2214,17 @@ mod tests {
                 .await?;
             let result = async {
                 crate::migrations::migrate_postgres(&pool, None).await?;
-                pending_input_estimate_scenario(&ObservationStore::Postgres(
+                let directory = tempfile::tempdir()?;
+                let store = ObservationStore::Postgres(
                     pool.clone(),
-                    std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
-                        std::path::Path::new(""),
-                    )),
-                ))
-                .await
+                    std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::load(
+                        directory.path(),
+                    )?),
+                );
+                cleared_snapshot_scenario(&store).await?;
+                pending_input_estimate_scenario(&store).await?;
+                root_changes_scenario(&store).await?;
+                batched_debug_scenario(&store).await
             }
             .await;
             pool.close().await;
@@ -2116,6 +2392,536 @@ mod tests {
         let page = store.query_forest(query).await?;
         assert_eq!(page.root_total, 1);
         assert_eq!(page.roots[0].id, "pending");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batched_debug_status_tracks_final_manifest_and_clear() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let index = std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::load(
+            directory.path(),
+        )?);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            index.clone(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
+        cleared_snapshot_scenario(&store).await?;
+        batched_debug_scenario(&store).await
+    }
+
+    async fn cleared_snapshot_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_chain_node(store, "clear-root", "clear-root", None, 1).await?;
+        store
+            .finish_run(
+                "clear-root",
+                "clear-root",
+                &RunOutcome {
+                    status: "completed".into(),
+                    terminal_reason: None,
+                    delivery: None,
+                    client_output_committed: false,
+                    delivery_completed_at: None,
+                    generation_node_id: None,
+                    generation_root_id: None,
+                },
+                2,
+                i64::MAX,
+            )
+            .await?;
+        let filters = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            ..Default::default()
+        };
+        let before = store.query_forest(filters.clone()).await?;
+        store.mark_clear_tombstones().await?;
+        store.purge_clear_rows().await?;
+        let expired = store
+            .query_root_changes(RootChangesQuery {
+                filters: filters.clone(),
+                roots: vec![RootChangesBaseline {
+                    root_id: "clear-root".into(),
+                    after_sequence: before.snapshot_sequence,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert!(expired.reset_required);
+        let empty = store.query_forest(filters.clone()).await?;
+        assert_eq!(empty.snapshot_sequence, 0);
+        assert_eq!(empty.root_total, 0);
+        let recovered = store
+            .query_root_changes(RootChangesQuery {
+                filters,
+                roots: vec![RootChangesBaseline {
+                    root_id: "clear-root".into(),
+                    after_sequence: empty.snapshot_sequence,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert!(!recovered.reset_required);
+        assert_eq!(
+            recovered.changes[0].removal_reason.as_deref(),
+            Some("deleted")
+        );
+        Ok(())
+    }
+
+    async fn batched_debug_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        for n in 0..903 {
+            let id = format!("debug-node-{n:04}");
+            admit_chain_run(
+                store,
+                &id,
+                &id,
+                "debug-node-0000",
+                (n > 0).then_some("debug-node-0000"),
+                1,
+                n != 0,
+            )
+            .await?;
+            store
+                .persist_run_event(
+                    &id,
+                    &id,
+                    &RunEvent::NativeCompactionAssociated {
+                        source_generation_id: None,
+                        source_operation_id: None,
+                        registration_id: id.clone(),
+                    },
+                    2,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let filters = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            ..Default::default()
+        };
+        let snapshot = store.query_forest(filters.clone()).await?;
+        let root = snapshot
+            .roots
+            .iter()
+            .find(|root| root.id == "debug-node-0000")
+            .expect("debug root");
+        for item in &root.interactions {
+            assert_eq!(
+                item.context_events
+                    .iter()
+                    .map(|event| event.payload["registration_id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![item.id.as_str()]
+            );
+            assert!(
+                item.context_events
+                    .iter()
+                    .all(|event| event.sequence <= snapshot.snapshot_sequence
+                        && event.interaction_id.as_deref() == Some(item.id.as_str()))
+            );
+        }
+        assert_eq!(
+            root.interactions
+                .iter()
+                .find(|item| item.id == "debug-node-0000")
+                .unwrap()
+                .debug_status,
+            "none"
+        );
+        assert_eq!(
+            root.interactions
+                .iter()
+                .find(|item| item.id == "debug-node-0900")
+                .unwrap()
+                .debug_status,
+            "partial"
+        );
+        for (trace_index, n) in [899, 900, 901, 902].into_iter().enumerate() {
+            let id = format!("debug-node-{n:04}");
+            let manifest = TraceManifest {
+                trace_id: char::from(b'a' + trace_index as u8)
+                    .to_string()
+                    .repeat(stravia_runtime_contract::identifier::ID_LEN),
+                enabled: true,
+                status: "complete".into(),
+                bytes_written: 10,
+                event_count: 1,
+                reasons: Vec::new(),
+            };
+            store
+                .debug_trace_index()
+                .save_manifest(Some(&id), None, &manifest, 1, i64::MAX, true)
+                .await?;
+        }
+        admit_chain_run(
+            store,
+            "debug-node-0901",
+            "debug-disabled-run",
+            "debug-node-0000",
+            Some("debug-node-0000"),
+            2,
+            false,
+        )
+        .await?;
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: filters.clone(),
+                roots: vec![RootChangesBaseline {
+                    root_id: root.id.clone(),
+                    after_sequence: snapshot.snapshot_sequence,
+                    known_interactions: root
+                        .interactions
+                        .iter()
+                        .map(|item| KnownInteraction {
+                            id: item.id.clone(),
+                            last_event_sequence: item.last_event_sequence,
+                            matched: item.matched,
+                            debug_status: item.debug_status.clone(),
+                        })
+                        .collect(),
+                }],
+            })
+            .await?;
+        assert!(!page.reset_required);
+        for id in ["debug-node-0899", "debug-node-0900", "debug-node-0902"] {
+            let item = page.changes[0]
+                .interactions
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap();
+            assert_eq!(
+                item.context_events
+                    .iter()
+                    .map(|event| event.payload["registration_id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![id]
+            );
+            assert_eq!(
+                page.changes[0]
+                    .interactions
+                    .iter()
+                    .find(|item| item.id == id)
+                    .unwrap()
+                    .debug_status,
+                "complete"
+            );
+        }
+        assert_eq!(
+            page.changes[0]
+                .interactions
+                .iter()
+                .find(|item| item.id == "debug-node-0901")
+                .unwrap()
+                .debug_status,
+            "partial"
+        );
+        let detail = store
+            .get_interaction("debug-node-0902", filters.clone())
+            .await?
+            .expect("debug detail");
+        assert_eq!(detail.interaction.debug_status, "complete");
+        let tombstones = store
+            .debug_trace_index()
+            .mark_all_debug_tombstones()
+            .await?;
+        store
+            .debug_trace_index()
+            .delete_manifests(&tombstones)
+            .await?;
+        let detail = store
+            .get_interaction("debug-node-0902", filters)
+            .await?
+            .expect("debug detail");
+        assert_eq!(detail.interaction.debug_status, "partial");
+        assert_eq!(
+            detail
+                .root
+                .interactions
+                .iter()
+                .find(|item| item.id == "debug-node-0900")
+                .unwrap()
+                .debug_status,
+            "partial"
+        );
+        assert_eq!(
+            detail
+                .root
+                .interactions
+                .iter()
+                .find(|item| item.id == "debug-node-0000")
+                .unwrap()
+                .debug_status,
+            "none"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn root_changes_omit_unchanged_siblings_and_update_token_membership() -> anyhow::Result<()>
+    {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
+        root_changes_scenario(&store).await
+    }
+
+    async fn root_changes_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_chain_node(store, "delta-root", "delta-root", None, 1).await?;
+        admit_chain_node(store, "delta-child", "delta-root", Some("delta-root"), 2).await?;
+        let filters = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            ..Default::default()
+        };
+        let snapshot = store.query_forest(filters.clone()).await?;
+        let baseline = RootChangesBaseline {
+            root_id: "delta-root".into(),
+            after_sequence: snapshot.snapshot_sequence,
+            known_interactions: snapshot
+                .roots
+                .iter()
+                .find(|root| root.id == "delta-root")
+                .expect("delta root")
+                .interactions
+                .iter()
+                .map(|item| KnownInteraction {
+                    id: item.id.clone(),
+                    last_event_sequence: item.last_event_sequence,
+                    matched: item.matched,
+                    debug_status: item.debug_status.clone(),
+                })
+                .collect(),
+        };
+        confirm_displayed_tokens(store, "delta-child", 3_000, 2_000, 0, 0, 3).await?;
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: filters.clone(),
+                roots: vec![baseline.clone()],
+            })
+            .await?;
+        assert!(!page.reset_required);
+        assert_eq!(
+            page.changes[0]
+                .interactions
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["delta-child"]
+        );
+        let mut nonmatching = baseline;
+        for known in &mut nonmatching.known_interactions {
+            known.matched = false;
+        }
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery {
+                    min_tokens: Some(5_000),
+                    ..filters
+                },
+                roots: vec![nonmatching],
+            })
+            .await?;
+        assert!(!page.reset_required);
+        assert!(page.root_total >= 1);
+        assert_eq!(page.changes[0].interactions.len(), 2);
+        assert!(page.changes[0].interactions.iter().all(|item| item.matched));
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery {
+                    start_at: Some(10),
+                    end_at: Some(20),
+                    ..Default::default()
+                },
+                roots: vec![RootChangesBaseline {
+                    root_id: "delta-root".into(),
+                    after_sequence: page.snapshot_sequence,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert_eq!(page.changes[0].removal_reason.as_deref(), Some("window"));
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery {
+                    start_at: Some(0),
+                    end_at: Some(DAY_MS),
+                    min_tokens: Some(i64::MAX),
+                    ..Default::default()
+                },
+                roots: vec![RootChangesBaseline {
+                    root_id: "delta-root".into(),
+                    after_sequence: page.snapshot_sequence,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert_eq!(page.changes[0].removal_reason.as_deref(), Some("filter"));
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery::default(),
+                roots: vec![RootChangesBaseline {
+                    root_id: "missing".into(),
+                    after_sequence: page.snapshot_sequence,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert_eq!(page.changes[0].removal_reason.as_deref(), Some("deleted"));
+        let page = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery::default(),
+                roots: vec![RootChangesBaseline {
+                    root_id: "delta-root".into(),
+                    after_sequence: page.snapshot_sequence + 1,
+                    known_interactions: Vec::new(),
+                }],
+            })
+            .await?;
+        assert!(page.reset_required);
+        assert!(page.changes.is_empty());
+        historical_window_scenario(store).await
+    }
+
+    async fn historical_window_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_chain_node(store, "window-root", "window-root", None, 10).await?;
+        admit_chain_node(
+            store,
+            "window-child",
+            "window-root",
+            Some("window-root"),
+            11,
+        )
+        .await?;
+        let filters = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(100),
+            ..Default::default()
+        };
+        let snapshot = store.query_forest(filters.clone()).await?;
+        let root = snapshot
+            .roots
+            .iter()
+            .find(|root| root.id == "window-root")
+            .expect("historical root");
+        let baseline = RootChangesBaseline {
+            root_id: root.id.clone(),
+            after_sequence: snapshot.snapshot_sequence,
+            known_interactions: root
+                .interactions
+                .iter()
+                .map(|item| KnownInteraction {
+                    id: item.id.clone(),
+                    last_event_sequence: item.last_event_sequence,
+                    matched: item.matched,
+                    debug_status: item.debug_status.clone(),
+                })
+                .collect(),
+        };
+        store
+            .finish_run(
+                "window-child",
+                "window-child",
+                &RunOutcome {
+                    status: "completed".into(),
+                    terminal_reason: None,
+                    delivery: None,
+                    client_output_committed: false,
+                    delivery_completed_at: None,
+                    generation_node_id: None,
+                    generation_root_id: None,
+                },
+                150,
+                i64::MAX,
+            )
+            .await?;
+        let historical = store
+            .query_root_changes(RootChangesQuery {
+                filters: filters.clone(),
+                roots: vec![baseline.clone()],
+            })
+            .await?;
+        assert!(!historical.reset_required);
+        assert_eq!(
+            historical.changes[0].removal_reason.as_deref(),
+            Some("window")
+        );
+        assert!(historical.changes[0].removed_interaction_ids.is_empty());
+        assert_eq!(
+            historical.changes[0]
+                .interactions
+                .iter()
+                .find(|item| item.id == "window-child")
+                .unwrap()
+                .status,
+            "completed"
+        );
+        let live_filters = ForestQuery {
+            live_window: true,
+            ..filters.clone()
+        };
+        let live = store
+            .query_root_changes(RootChangesQuery {
+                filters: live_filters.clone(),
+                roots: vec![baseline.clone()],
+            })
+            .await?;
+        assert!(!live.reset_required);
+        assert_eq!(live.changes[0].removal_reason, None);
+        assert_eq!(
+            live.changes[0]
+                .interactions
+                .iter()
+                .find(|item| item.id == "window-child")
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert!(
+            store
+                .query_forest(live_filters)
+                .await?
+                .roots
+                .iter()
+                .any(|root| root.id == "window-root")
+        );
+        assert!(
+            !store
+                .query_forest(filters.clone())
+                .await?
+                .roots
+                .iter()
+                .any(|root| root.id == "window-root")
+        );
+        let filtered = store
+            .query_root_changes(RootChangesQuery {
+                filters: ForestQuery {
+                    status: Some("missing-status".into()),
+                    ..filters
+                },
+                roots: vec![baseline],
+            })
+            .await?;
+        assert_eq!(
+            filtered.changes[0].removal_reason.as_deref(),
+            Some("filter")
+        );
+        assert!(filtered.changes[0].interactions.is_empty());
         Ok(())
     }
 

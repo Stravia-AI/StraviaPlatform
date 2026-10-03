@@ -13,6 +13,8 @@ interface Props {
   onretry?: () => void
   oninteraction?: () => void
   liveBlocks?: LiveContentBlock[]
+  liveActive?: boolean
+  liveContentEpoch?: number
   liveGap?: boolean
   liveCapacity?: boolean
   olderLoading?: boolean
@@ -33,6 +35,8 @@ let {
   onretry,
   oninteraction,
   liveBlocks = [],
+  liveActive = true,
+  liveContentEpoch = 0,
   liveGap = false,
   liveCapacity = false,
   olderLoading = false,
@@ -113,6 +117,8 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
     {oninteraction}
     {loading}
     {liveBlocks}
+    {liveActive}
+    {liveContentEpoch}
     {liveGap}
     {liveCapacity}
     {olderLoading}

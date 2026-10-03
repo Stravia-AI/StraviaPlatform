@@ -11,7 +11,7 @@ use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
     BundleRequest, BundleResourceKind, FailedRequestQuery, ForestQuery, InteractionEventsQuery,
-    ObservationQueryError, ObservationUpdate, RejectionQuery,
+    ObservationQueryError, ObservationUpdate, RejectionQuery, RootChangesQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,18 +42,12 @@ pub(super) async fn interaction_forest(
     }
 }
 
-pub(super) async fn interaction_summary(
+pub(super) async fn interaction_changes(
     State(gateway): State<Gateway>,
-    Path(id): Path<String>,
-    Query(filters): Query<ForestQuery>,
+    Json(query): Json<RootChangesQuery>,
 ) -> Response {
-    match gateway
-        .admin()
-        .observation_interaction_summary(&id, filters)
-        .await
-    {
-        Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
-        Ok(None) => not_found(),
+    match gateway.admin().observation_root_changes(query).await {
+        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
         Err(error) => observation_query_error(error),
     }
 }
@@ -135,23 +129,14 @@ pub(super) async fn observation_events(
     let stream = gateway
         .admin()
         .observation_subscribe(query.after)
-        .map(|update| {
+        .filter_map(|update| async move {
             let event = match update {
-                ObservationUpdate::Event(observation) => Event::default()
+                ObservationUpdate::Change(observation) => Event::default()
                     .event("observation")
                     .id(observation.sequence.to_string())
                     .data(
                         serde_json::to_string(&observation).expect("ObservationEvent serializes"),
                     ),
-                ObservationUpdate::LiveContent(block) => Event::default()
-                    .event("live_content")
-                    .data(serde_json::to_string(&block).expect("LiveContentBlock serializes")),
-                ObservationUpdate::LiveSnapshot { blocks } => Event::default()
-                    .event("live_snapshot")
-                    .data(serde_json::json!({ "blocks": blocks }).to_string()),
-                ObservationUpdate::LiveGap { interaction_id, run_id, reason } => Event::default()
-                    .event("live_gap")
-                    .data(serde_json::json!({ "interaction_id": interaction_id, "run_id": run_id, "reason": reason }).to_string()),
                 ObservationUpdate::ResetRequired { snapshot_sequence } => {
                     Event::default().event("reset_required").data(
                         serde_json::json!({
@@ -161,8 +146,43 @@ pub(super) async fn observation_events(
                         .to_string(),
                     )
                 }
+                ObservationUpdate::Event(_)
+                | ObservationUpdate::LiveContent(_)
+                | ObservationUpdate::LiveSnapshot { .. }
+                | ObservationUpdate::LiveGap { .. }
+                | ObservationUpdate::LiveFinished { .. } => return None,
             };
-            Ok::<_, Infallible>(event)
+            Some(Ok::<_, Infallible>(event))
+        });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+pub(super) async fn interaction_live(
+    State(gateway): State<Gateway>,
+    Path(id): Path<String>,
+) -> Response {
+    let stream = gateway.admin().observation_subscribe_live(id).filter_map(|update| async move {
+        let event = match update {
+                ObservationUpdate::LiveContent(block) => Event::default()
+                    .event("live_content")
+                    .data(serde_json::to_string(&block).expect("LiveContentBlock serializes")),
+                ObservationUpdate::LiveSnapshot { blocks } => Event::default()
+                    .event("live_snapshot")
+                    .data(serde_json::json!({ "blocks": blocks }).to_string()),
+                ObservationUpdate::LiveGap { interaction_id, run_id, reason } => Event::default()
+                    .event("live_gap")
+                    .data(serde_json::json!({ "interaction_id": interaction_id, "run_id": run_id, "reason": reason }).to_string()),
+                ObservationUpdate::LiveFinished { interaction_id, run_id } => Event::default()
+                    .event("live_finished")
+                    .data(serde_json::json!({ "interaction_id": interaction_id, "run_id": run_id }).to_string()),
+                ObservationUpdate::Event(_)
+                | ObservationUpdate::Change(_)
+                | ObservationUpdate::ResetRequired { .. } => return None,
+            };
+            Some(Ok::<_, Infallible>(event))
         });
 
     Sse::new(stream)

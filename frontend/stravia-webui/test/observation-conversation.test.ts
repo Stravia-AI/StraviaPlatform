@@ -135,25 +135,24 @@ describe('observation conversation', () => {
     expect(observationConversationMessages(current)[1].text).toBe('')
   })
 
-  test('background live memory is bounded independently from the selected interaction', () => {
+  test('selected live memory excludes other interactions and keeps the newest received content bounded', () => {
     const blocks: LiveContentBlock[] = Array.from({ length: 100 }, (_, index) => ({
       block_id: String(index),
-      interaction_id: index === 0 ? 'selected' : 'background',
+      interaction_id: index % 2 === 0 ? 'selected' : 'other',
       run_id: String(index),
       kind: 'client_visible_content_delta',
       model_turn_id: null,
       attempt_id: null,
       occurred_at: index,
       revision: 1,
-      text: 'x'.repeat(16_384),
+      text: 'x'.repeat(131_072),
     }))
     const retained = retainLiveBlocks(blocks, 'selected')
-    expect(retained.find((block) => block.interaction_id === 'selected')).toBe(blocks[0])
-    expect(
-      retained
-        .filter((block) => block.interaction_id !== 'selected')
-        .reduce((bytes, block) => bytes + block.text.length * 2, 0),
-    ).toBeLessThanOrEqual(256 * 1024)
+    expect(retained.every((block) => block.interaction_id === 'selected')).toBe(true)
+    expect(retained.at(-1)).toBe(blocks[98])
+    expect(retained).not.toContain(blocks[0])
+    expect(retained.reduce((bytes, block) => bytes + block.text.length * 2, 0)).toBeLessThanOrEqual(8 * 1024 * 1024)
+    expect(retainLiveBlocks(blocks)).toEqual([])
   })
   test('shows the user once and orders delivered text without exposing tool or checkpoint payloads', () => {
     const messages = observationConversationMessages(

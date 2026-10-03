@@ -1,6 +1,6 @@
 import { CanvasLinkIndex } from '$lib/interaction-canvas-links'
 import { hiddenFailureNode } from '$lib/observation-chain-visibility'
-import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
+import { mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import type { ObservationSubscription } from '$lib/observation-stream'
 import type {
   BundleResourceKind,
@@ -14,10 +14,12 @@ import type {
   InteractionDetail,
   InteractionEventsPage,
   InteractionEventsQuery,
-  InteractionSnapshot,
   InteractionSummary,
   LiveContentBlock,
   ObservationStreamUpdate,
+  ObservationLiveUpdate,
+  RootChangesQuery,
+  RootChangesPage,
 } from '$lib/types/observation'
 
 export const OBSERVATION_BATCH_SIZE = 12
@@ -29,6 +31,7 @@ export const OBSERVATION_MIN_TOKEN_STOPS = [
 ]
 export const OBSERVATION_DEFAULT_MIN_TOKEN_STOP = 4
 const FAILURE_BATCH_SIZE = 30
+export const OBSERVATION_REFRESH_WINDOW_MS = 100
 
 export function isValidObservationRange(startMs: number, endMs: number): boolean {
   return (
@@ -42,10 +45,10 @@ export function isValidObservationRange(startMs: number, endMs: number): boolean
 /** logs 页需要的 admin.observations 窄面；admin.observations 结构满足此接口。 */
 export interface ObservationWorkspaceApi {
   forest(query: ForestQuery): Promise<ForestPage>
+  changes(query: RootChangesQuery): Promise<RootChangesPage>
   failures(query: FailedRequestQuery): Promise<FailedRequestPage>
   interaction(id: string, query?: ForestQuery): Promise<InteractionDetail>
   interactionEvents(id: string, query: InteractionEventsQuery): Promise<InteractionEventsPage>
-  interactionSummary(id: string, query?: ForestQuery): Promise<InteractionSnapshot>
   failure(kind: FailedRequestSummary['kind'], id: string): Promise<FailedRequestDetail>
 }
 
@@ -53,6 +56,11 @@ export type ObservationWorkspaceSubscribe = (
   snapshotSequence: number,
   onUpdate: (update: ObservationStreamUpdate) => void | Promise<void>,
   onConnectionChange: (connected: boolean) => void,
+) => ObservationSubscription
+
+export type ObservationWorkspaceSubscribeLive = (
+  interactionId: string,
+  onUpdate: (update: ObservationLiveUpdate) => void,
 ) => ObservationSubscription
 
 /** 控制器不触达 DOM：聚焦/适配由页面以 tick+canvas 实现；错误由页面 toast。 */
@@ -66,6 +74,7 @@ export interface ObservationWorkspaceHooks {
 export interface ObservationWorkspaceDeps {
   api: ObservationWorkspaceApi
   subscribe: ObservationWorkspaceSubscribe
+  subscribeLive: ObservationWorkspaceSubscribeLive
   hooks: ObservationWorkspaceHooks
   onSnapshot?: (snapshot: ObservationWorkspaceSnapshot) => void
   now?: () => number
@@ -98,6 +107,10 @@ export interface ObservationWorkspaceSnapshot {
   detailLoading: boolean
   olderLoading: boolean
   selectedLiveBlocks: LiveContentBlock[]
+  liveContentEpoch: number
+  selectedLiveActive: boolean
+  liveTerminalEpoch: number
+  detailError: unknown
   liveGaps: string[]
   liveCapacityGaps: string[]
   streamConnected: boolean
@@ -124,6 +137,7 @@ export interface ObservationWorkspaceSnapshot {
 export class ObservationWorkspaceController {
   readonly #api: ObservationWorkspaceApi
   readonly #subscribe: ObservationWorkspaceSubscribe
+  readonly #subscribeLive: ObservationWorkspaceSubscribeLive
   readonly #hooks: ObservationWorkspaceHooks
   readonly #listener: (snapshot: ObservationWorkspaceSnapshot) => void
   readonly #now: () => number
@@ -148,8 +162,30 @@ export class ObservationWorkspaceController {
 
   #roots: ForestRoot[] = []
   #rootTotal = 0
+  #rootTotalSequence = 0
   #nextCursor: string | null | undefined
   #snapshotSequence = 0
+  #appliedSequence = 0
+  #pendingRoots = new Map<string, number>()
+  #rootErrors = new Map<string, unknown>()
+  #rootSequences = new Map<string, number>()
+  #inFlightRoots = new Map<string, number>()
+  #refreshDeadline: number | undefined
+  #refreshTimer: ReturnType<typeof setTimeout> | undefined
+  #eventsRequest: Promise<void> | undefined
+  #eventsPending = 0
+  #failurePending = 0
+  #failureSequence = 0
+  #failureFlight: Promise<void> | undefined
+  #failureQueryRequest: Promise<void> | undefined
+  #failureQueryEpoch = -1
+  #liveStream: ObservationSubscription | undefined
+  #liveContentEpoch = 0
+  #selectedLiveActive = false
+  #finishedLiveRuns = new Set<string>()
+  #liveTerminalEpoch = 0
+  #detailError: unknown
+  #disposed = false
   #loading = true
   #loadingMore = false
   #loadError: unknown
@@ -158,6 +194,8 @@ export class ObservationWorkspaceController {
   #selectedInteraction: InteractionSummary | undefined
   #selectedFailure: FailedRequestSummary | undefined
   #interactionDetail: InteractionDetail | undefined
+  #interactionDetailEpoch = -1
+  #resetRecoveryPending = false
   #failureDetail: FailedRequestDetail | undefined
   #failureDetailError: unknown
   #detailLoading = false
@@ -186,6 +224,7 @@ export class ObservationWorkspaceController {
   constructor(deps: ObservationWorkspaceDeps) {
     this.#api = deps.api
     this.#subscribe = deps.subscribe
+    this.#subscribeLive = deps.subscribeLive
     this.#hooks = deps.hooks
     this.#listener = deps.onSnapshot ?? (() => undefined)
     this.#now = deps.now ?? Date.now
@@ -200,13 +239,27 @@ export class ObservationWorkspaceController {
   }
 
   dispose(): void {
+    this.#disposed = true
     this.#rangeVersion += 1
     this.#selectionVersion += 1
     this.#stream?.close()
+    this.#liveStream?.close()
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
   }
 
   /** 页面秒针：推进 live 窗口边界，窗口内过期内容触发整页重查而非本地过滤。 */
   advanceClock(): void {
+    if (this.#resetRecoveryPending) {
+      this.#updateLiveBounds()
+      this.#publish()
+      return
+    }
+    if (this.#refreshDeadline !== undefined && this.#now() >= this.#refreshDeadline) {
+      if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
+      this.#refreshTimer = undefined
+      this.#refreshDeadline = undefined
+      this.#flushRefresh()
+    }
     if (!this.#liveWindow) return
     this.#updateLiveBounds()
     if (!this.#loading && !this.#loadingMore && this.#roots.some((root) => root.last_active_at < this.#windowStart)) {
@@ -271,20 +324,20 @@ export class ObservationWorkspaceController {
     }
   }
 
-  reloadForest(): Promise<void> {
-    return this.#loadForest(true)
+  async reloadForest(): Promise<void> {
+    if (this.#resetRecoveryPending) return this.#retryReset()
+    await this.#loadForest(true)
+    this.#scheduleRefresh(true)
   }
 
-  /** 清空历史等外部变更后的整页重查：不换 epoch，不动 selection。 */
-  async refreshData(): Promise<void> {
-    await Promise.all([
-      this.#loadForest(true),
-      this.#activeTab === 'failures' ? this.loadFailures() : Promise.resolve(),
-    ])
+  /** 外部历史变更使原基线失效：与 SSE reset 共用完整恢复，保留尚可读取的 selection。 */
+  refreshData(): Promise<void> {
+    return this.#retryReset()
   }
 
   async applyFilters(): Promise<void> {
     this.#rangeVersion += 1
+    this.#resetRefreshState()
     this.closeInspector()
     this.#followPaused = !this.#liveWindow
     this.#hasNewActivity = false
@@ -332,6 +385,8 @@ export class ObservationWorkspaceController {
   }
 
   async tabChanged(value: string): Promise<void> {
+    this.#rangeVersion += 1
+    this.#resetRefreshState()
     this.#activeTab = value
     this.closeInspector()
     this.#publish()
@@ -373,6 +428,7 @@ export class ObservationWorkspaceController {
     this.closeInspector()
     const selection = this.#selectionVersion
     this.#selectedInteraction = interaction
+    this.#openLive(interaction.id, selection)
     this.#detailLoading = true
     if (interaction.id !== this.#latestInteraction()?.id) this.#followPaused = true
     this.#publish()
@@ -380,7 +436,10 @@ export class ObservationWorkspaceController {
       this.#applySelectedDetail(await this.#api.interaction(interaction.id, this.#query()), selection)
       await this.#refreshSelectedEvents(interaction.id, selection)
     } catch (error) {
-      if (selection === this.#selectionVersion) this.#hooks.onError(error)
+      if (selection === this.#selectionVersion) {
+        if (!this.#removeMissingSelection(error, selection)) this.#detailError = error
+        this.#hooks.onError(error)
+      }
     } finally {
       if (selection === this.#selectionVersion) this.#detailLoading = false
       this.#publish()
@@ -424,9 +483,8 @@ export class ObservationWorkspaceController {
   }
 
   closeInspector(): void {
-    this.#selectionVersion += 1
-    this.#olderLoading = false
-    this.#liveBlocks = retainLiveBlocks(this.#liveBlocks)
+    this.#closeLiveScope()
+    this.#liveBlocks = []
     this.#selectedInteraction = undefined
     this.#selectedFailure = undefined
     this.#interactionDetail = undefined
@@ -468,13 +526,14 @@ export class ObservationWorkspaceController {
     if (!id) return
     const selection = this.#selectionVersion
     try {
-      const snapshot = await this.#api.interactionSummary(id)
+      const snapshot = await this.#api.interaction(id)
       if (selection !== this.#selectionVersion) return
       this.closeInspector()
       this.#activeTab = 'interactions'
       this.#followPaused = true
       this.#revealedFailures = new Set([...this.#revealedFailures, id])
       this.#roots = [...this.#roots.filter((root) => root.id !== snapshot.root.id), snapshot.root]
+      this.#rootSequences.set(snapshot.root.id, snapshot.snapshot_sequence)
       this.#publish()
       await this.#hooks.focusNode(id)
     } catch (error) {
@@ -484,20 +543,45 @@ export class ObservationWorkspaceController {
 
   /** 诊断数据清除后重取当前选中项；无选中时是空操作。 */
   async refreshSelectedDetail(): Promise<void> {
+    if (this.#resetRecoveryPending) {
+      await this.#retryReset()
+      return
+    }
+    this.#detailError = undefined
     const selection = this.#selectionVersion
     const interactionId = this.#selectedInteraction?.id
     const failure = this.#selectedFailure
-    if (interactionId && selection === this.#selectionVersion) {
-      this.#applySelectedDetail(await this.#api.interaction(interactionId, this.#query()), selection)
-      await this.#refreshSelectedEvents(interactionId, selection)
-    }
-    if (failure && selection === this.#selectionVersion) {
-      this.#failureDetail = await this.#api.failure(failure.kind, failure.id)
+    try {
+      if (interactionId && selection === this.#selectionVersion) {
+        this.#applySelectedDetail(await this.#api.interaction(interactionId, this.#query()), selection)
+        await this.#refreshSelectedEvents(interactionId, selection)
+      }
+      if (failure && selection === this.#selectionVersion) {
+        const detail = await this.#api.failure(failure.kind, failure.id)
+        if (selection === this.#selectionVersion) this.#failureDetail = detail
+      }
+    } catch (error) {
+      if (selection === this.#selectionVersion) {
+        if (interactionId) {
+          if (!this.#removeMissingSelection(error, selection)) this.#detailError = error
+        } else this.#failureDetailError = error
+      }
+    } finally {
       this.#publish()
     }
   }
 
-  async loadFailures(replace = true): Promise<void> {
+  loadFailures(replace = true): Promise<void> {
+    if (this.#failureQueryRequest && this.#failureQueryEpoch === this.#rangeVersion) return this.#failureQueryRequest
+    this.#failureQueryEpoch = this.#rangeVersion
+    const request = this.#pullFailures(replace).finally(() => {
+      if (this.#failureQueryRequest === request) this.#failureQueryRequest = undefined
+    })
+    this.#failureQueryRequest = request
+    return request
+  }
+
+  async #pullFailures(replace: boolean): Promise<void> {
     if (!replace && this.#failureLoading) return
     const version = this.#rangeVersion
     const requestVersion = ++this.#failureRequestVersion
@@ -516,7 +600,15 @@ export class ObservationWorkspaceController {
         api_key: query.api_key,
       })
       if (version !== this.#rangeVersion || requestVersion !== this.#failureRequestVersion) return
-      this.#failures = replace ? page.items : [...this.#failures, ...page.items]
+      this.#failures = replace
+        ? page.items
+        : [
+            ...this.#failures,
+            ...page.items.filter(
+              (item) => !this.#failures.some((known) => known.kind === item.kind && known.id === item.id),
+            ),
+          ]
+      this.#failureSequence = page.snapshot_sequence
       this.#failureTotal = page.total
       this.#failureCursor = page.next_cursor
     } catch (error) {
@@ -559,6 +651,7 @@ export class ObservationWorkspaceController {
   #query(): ForestQuery {
     const minTokens = this.#minTokens()
     return {
+      live_window: this.#liveWindow,
       start_at: this.#windowStart,
       end_at: this.#windowEnd,
       limit: OBSERVATION_BATCH_SIZE,
@@ -617,6 +710,7 @@ export class ObservationWorkspaceController {
 
   async #reloadWindow(): Promise<void> {
     this.#rangeVersion += 1
+    this.#resetRefreshState()
     this.closeInspector()
     this.#migratedRoots = new Set()
     this.#followPaused = !this.#liveWindow
@@ -633,17 +727,40 @@ export class ObservationWorkspaceController {
     this.#roots = replace
       ? page.roots
       : [...this.#roots, ...page.roots.filter((root) => !this.#roots.some((known) => known.id === root.id))]
-    this.#rootTotal = page.root_total
+    if (replace || page.snapshot_sequence >= this.#rootTotalSequence) {
+      this.#rootTotal = page.root_total
+      this.#rootTotalSequence = page.snapshot_sequence
+    }
     this.#nextCursor = page.next_cursor
     this.#snapshotSequence = page.snapshot_sequence
-    if (replace && advanceStream) this.#stream?.setCursor(page.snapshot_sequence)
+    this.#appliedSequence = Math.max(this.#appliedSequence, page.snapshot_sequence)
+    if (replace) {
+      for (const [id, sequence] of this.#pendingRoots) {
+        if (sequence <= page.snapshot_sequence) {
+          this.#pendingRoots.delete(id)
+          this.#rootErrors.delete(id)
+        }
+      }
+      this.#rootSequences = new Map(page.roots.map((root) => [root.id, page.snapshot_sequence]))
+    }
+    if (replace && advanceStream) {
+      this.#resetRecoveryPending = false
+      this.#stream?.setCursor(page.snapshot_sequence)
+    }
     if (!this.#stream) {
       this.#stream = this.#subscribe(
         page.snapshot_sequence,
-        (update) => this.#onStreamUpdate(update),
+        (update) => {
+          if (update.type === 'reset_required') return this.#onStreamUpdate(update)
+          void this.#onStreamUpdate(update).catch((error) => {
+            if (!this.#disposed) {
+              this.#loadError = error
+              this.#publish()
+            }
+          })
+        },
         (connected) => {
           this.#streamConnected = connected
-          if (!connected) this.#liveBlocks = []
           this.#publish()
         },
       )
@@ -663,8 +780,9 @@ export class ObservationWorkspaceController {
         cursor: replace ? undefined : (this.#nextCursor ?? undefined),
       })
       if (version !== this.#rangeVersion) return
+      if (replace && page.snapshot_sequence < this.#appliedSequence) return
       this.#applyPage(page, replace, advanceStream)
-      this.#loadError = undefined
+      this.#loadError = this.#rootErrors.values().next().value
       this.#publish()
       if (replace && this.#liveWindow && !this.#followPaused) await this.#hooks.focusLatest()
     } catch (error) {
@@ -680,15 +798,42 @@ export class ObservationWorkspaceController {
 
   #applySelectedDetail(detail: InteractionDetail, selection: number): void {
     if (selection !== this.#selectionVersion) return
-    if (this.#interactionDetail && this.#interactionDetail.snapshot_sequence > detail.snapshot_sequence) return
+    if (
+      this.#interactionDetailEpoch === selection &&
+      this.#interactionDetail &&
+      this.#interactionDetail.snapshot_sequence > detail.snapshot_sequence
+    )
+      return
     this.#selectedInteraction = detail.interaction
+    if (!this.#liveStream) this.#openLive(detail.interaction.id, selection)
     this.#interactionDetail = detail
+    this.#interactionDetailEpoch = selection
     this.#liveBlocks = withoutCommittedBlocks(this.#liveBlocks, detail)
     this.#detailLoading = false
     this.#publish()
   }
 
-  async #refreshSelectedEvents(id: string, selection: number): Promise<void> {
+  #refreshSelectedEvents(id: string, selection: number): Promise<void> {
+    if (this.#eventsRequest) return this.#eventsRequest
+    const request = this.#pullSelectedEvents(id, selection)
+      .catch((error) => {
+        if (selection === this.#selectionVersion) {
+          if (!this.#removeMissingSelection(error, selection)) this.#detailError = error
+          this.#hooks.onError(error)
+          this.#publish()
+        }
+      })
+      .finally(() => {
+        if (this.#eventsRequest !== request) return
+        this.#eventsRequest = undefined
+        if (!this.#detailError && this.#eventsPending > (this.#interactionDetail?.snapshot_sequence ?? 0))
+          this.#scheduleRefresh(false)
+      })
+    this.#eventsRequest = request
+    return request
+  }
+
+  async #pullSelectedEvents(id: string, selection: number): Promise<void> {
     if (!this.#interactionDetail || selection !== this.#selectionVersion) return
     let after = this.#interactionDetail.snapshot_sequence
     let through: number | undefined
@@ -709,6 +854,7 @@ export class ObservationWorkspaceController {
             : this.#interactionDetail.snapshot_sequence,
       }
       this.#liveBlocks = withoutCommittedBlocks(this.#liveBlocks, this.#interactionDetail)
+      this.#detailError = undefined
       this.#publish()
       if (page.next_cursor === null) return
       after = page.next_cursor
@@ -729,7 +875,25 @@ export class ObservationWorkspaceController {
     this.#liveBlocks = retained
   }
 
-  async #onStreamUpdate(update: ObservationStreamUpdate): Promise<void> {
+  #openLive(id: string, selection: number): void {
+    this.#liveStream?.close()
+    this.#liveStream = this.#subscribeLive(id, (update) => {
+      if (selection !== this.#selectionVersion || this.#disposed) return
+      if (
+        update.type !== 'live_snapshot' &&
+        (update.type === 'live_content' ? update.block.interaction_id : update.interaction_id) !== id
+      )
+        return
+      this.#onLiveUpdate(update)
+    })
+  }
+
+  #onLiveUpdate(update: ObservationLiveUpdate): void {
+    if (update.type === 'live_finished') {
+      this.#finishLiveRun(update.run_id)
+      this.#publish()
+      return
+    }
     if (update.type === 'live_content') {
       const previous = this.#liveBlocks.find((block) => block.block_id === update.block.block_id)
       if (previous && previous.revision >= update.block.revision) return
@@ -738,12 +902,20 @@ export class ObservationWorkspaceController {
         : [...this.#liveBlocks, update.block]
       if (this.#interactionDetail) blocks = withoutCommittedBlocks(blocks, this.#interactionDetail)
       this.#applyLiveBlocks(blocks)
+      this.#selectedLiveActive = !this.#finishedLiveRuns.has(update.block.run_id)
       this.#publish()
       return
     }
     if (update.type === 'live_snapshot') {
+      this.#liveContentEpoch += 1
+      this.#selectedLiveActive = update.blocks.length > 0 && this.#selectedInteraction?.status === 'running'
       this.#applyLiveBlocks(
-        this.#interactionDetail ? withoutCommittedBlocks(update.blocks, this.#interactionDetail) : update.blocks,
+        this.#interactionDetail
+          ? withoutCommittedBlocks(
+              update.blocks.filter((block) => block.interaction_id === this.#selectedInteraction?.id),
+              this.#interactionDetail,
+            )
+          : update.blocks.filter((block) => block.interaction_id === this.#selectedInteraction?.id),
       )
       this.#publish()
       return
@@ -762,15 +934,79 @@ export class ObservationWorkspaceController {
       this.#publish()
       return
     }
-    const version = this.#rangeVersion
+  }
+
+  #finishLiveRun(runId: string): void {
+    if (this.#finishedLiveRuns.has(runId)) return
+    this.#finishedLiveRuns.add(runId)
+    this.#selectedLiveActive = false
+    this.#liveTerminalEpoch += 1
+  }
+
+  #resetRefreshState(): void {
+    this.#appliedSequence = 0
+    this.#snapshotSequence = 0
+    this.#rootSequences.clear()
+    this.#rootTotalSequence = 0
+    this.#pendingRoots.clear()
+    this.#rootErrors.clear()
+    this.#failurePending = 0
+    this.#failureFlight = undefined
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
+    this.#refreshTimer = undefined
+    this.#refreshDeadline = undefined
+  }
+
+  #closeLiveScope(): void {
+    this.#selectionVersion += 1
+    this.#olderLoading = false
+    this.#liveStream?.close()
+    this.#liveStream = undefined
+    this.#liveContentEpoch += 1
+    this.#eventsRequest = undefined
+    this.#eventsPending = 0
+    this.#selectedLiveActive = false
+    this.#finishedLiveRuns.clear()
+    this.#liveGaps = []
+    this.#liveCapacityGaps = []
+    this.#detailError = undefined
+  }
+
+  #removeMissingSelection(error: unknown, selection: number): boolean {
+    if (
+      selection !== this.#selectionVersion ||
+      !error ||
+      typeof error !== 'object' ||
+      !('status' in error) ||
+      error.status !== 404
+    )
+      return false
+    const id = this.#selectedInteraction?.id
+    if (!id) return false
+    const count = this.#roots.length
+    this.#roots = this.#roots
+      .map((root) => ({ ...root, interactions: root.interactions.filter((item) => item.id !== id) }))
+      .filter((root) => root.interactions.length > 0)
+    this.#rootTotal = Math.max(0, this.#rootTotal - (count - this.#roots.length))
+    this.closeInspector()
+    return true
+  }
+
+  #retryReset(): Promise<void> {
+    return this.#onStreamUpdate({ type: 'reset_required', snapshot_sequence: this.#snapshotSequence }).catch((error) =>
+      this.#hooks.onError(error),
+    )
+  }
+
+  async #onStreamUpdate(update: ObservationStreamUpdate): Promise<void> {
+    if (this.#disposed) return
     this.#updateLiveBounds()
     if (update.type === 'reset_required') {
-      this.#selectionVersion += 1
-      this.#olderLoading = false
-      this.#liveBlocks = []
-      this.#liveGaps = []
-      this.#liveCapacityGaps = []
-      this.#interactionDetail = undefined
+      this.#rangeVersion += 1
+      const version = this.#rangeVersion
+      this.#resetRefreshState()
+      this.#resetRecoveryPending = true
+      this.#closeLiveScope()
       const selection = this.#selectionVersion
       const interactionId = this.#selectedInteraction?.id
       const failure = this.#selectedFailure
@@ -785,6 +1021,13 @@ export class ObservationWorkspaceController {
             ? this.#api
                 .interaction(interactionId, this.#query())
                 .then((detail) => this.#applySelectedDetail(detail, selection))
+                .catch((error) => {
+                  if (selection !== this.#selectionVersion) return
+                  if (!this.#removeMissingSelection(error, selection)) {
+                    this.#detailError = error
+                    throw error
+                  }
+                })
             : failure
               ? this.#api.failure(failure.kind, failure.id).then((detail) => {
                   if (selection === this.#selectionVersion) this.#failureDetail = detail
@@ -792,13 +1035,21 @@ export class ObservationWorkspaceController {
               : Promise.resolve(),
         ])
         if (version !== this.#rangeVersion) return
+        if (this.#failureError && this.#activeTab === 'failures')
+          throw this.#failureError instanceof Error
+            ? this.#failureError
+            : new Error(
+                typeof this.#failureError === 'string' ? this.#failureError : 'observation failures reload failed',
+              )
         if (this.#loadError) {
           const loadError = this.#loadError
           throw loadError instanceof Error
             ? loadError
             : new Error(typeof loadError === 'string' ? loadError : 'observation reload failed')
         }
+        this.#resetRecoveryPending = false
         this.#stream?.setCursor(this.#snapshotSequence)
+        this.#scheduleRefresh(true)
       } catch (error) {
         if (version !== this.#rangeVersion) return
         if (failure && selection === this.#selectionVersion) this.#failureDetailError = error
@@ -812,17 +1063,12 @@ export class ObservationWorkspaceController {
       return
     }
     const streamEvent = update.event
-    if (streamEvent.interaction_id !== this.#selectedInteraction?.id) {
-      const blockId = eventBlockId(streamEvent)
-      if (blockId) this.#liveBlocks = this.#liveBlocks.filter((block) => block.block_id !== blockId)
-    }
-    this.#snapshotSequence = Math.max(this.#snapshotSequence, streamEvent.sequence)
     if (
       this.#liveWindow &&
       this.#activeTab === 'failures' &&
       ['request_rejected', 'run_finished'].includes(streamEvent.kind)
     ) {
-      await this.loadFailures()
+      this.#failurePending = Math.max(this.#failurePending, streamEvent.sequence)
     }
     // 「新活动·跟随」只响应输出预览（visible_tail）的追加；思考条目与工具调用
     // 仍照常落库刷新卡片数据，但不点亮跟随入口、不移动视口。
@@ -836,59 +1082,166 @@ export class ObservationWorkspaceController {
     }
     this.#publish()
     const interactionId = streamEvent.interaction_id
-    if (interactionId) {
-      const known = this.#interactions().find((item) => item.id === interactionId)
-      const selected = this.#selectedInteraction?.id === interactionId
-      const inspectorNeedsEvent = selected && (this.#interactionDetail?.snapshot_sequence ?? 0) < streamEvent.sequence
-      const eventInWindow = streamEvent.occurred_at >= this.#windowStart && streamEvent.occurred_at < this.#windowEnd
-      if (
-        (!(known && known.last_event_sequence >= streamEvent.sequence) || inspectorNeedsEvent) &&
-        (known || selected || this.#liveWindow || eventInWindow)
-      ) {
-        const selection = this.#selectionVersion
-        try {
-          const [snapshot] = await Promise.all([
-            this.#api.interactionSummary(interactionId, this.#query()),
-            selected ? this.#refreshSelectedEvents(interactionId, selection) : Promise.resolve(),
-          ])
-          if (version !== this.#rangeVersion) return
-          this.#updateLiveBounds()
-          const root = snapshot.root
-          const existing = this.#roots.some((item) => item.id === root.id)
-          const inWindow = root.last_active_at >= this.#windowStart && root.last_active_at < this.#windowEnd
-          // Keep loaded historical roots after migration, and live roots that advanced during this request.
-          const keepLoaded = existing && (!this.#liveWindow || root.last_active_at >= this.#windowStart)
-          const visible = (inWindow || keepLoaded) && root.interactions.some((item) => item.matched)
-          if (visible) {
-            this.#roots = existing
-              ? this.#roots.map((item) => (item.id === root.id ? root : item))
-              : [...this.#roots, root]
-            if (!existing) this.#rootTotal += 1
-          } else if (existing) {
-            this.#roots = this.#roots.filter((item) => item.id !== root.id)
-            this.#rootTotal = Math.max(0, this.#rootTotal - 1)
+    const known = this.#interactions().find((item) => item.id === interactionId)
+    const rootId = streamEvent.root_id ?? known?.root_id
+    if (rootId && this.#activeTab === 'interactions' && (!known || known.last_event_sequence < streamEvent.sequence)) {
+      this.#pendingRoots.set(rootId, Math.max(this.#pendingRoots.get(rootId) ?? 0, streamEvent.sequence))
+    }
+    if (interactionId && interactionId === this.#selectedInteraction?.id) {
+      this.#eventsPending = Math.max(this.#eventsPending, streamEvent.sequence)
+      if (streamEvent.boundary && streamEvent.kind === 'run_finished') {
+        if (streamEvent.run_id) this.#finishLiveRun(streamEvent.run_id)
+      }
+      if (streamEvent.kind === 'run_started') this.#selectedLiveActive = true
+    }
+    this.#scheduleRefresh(streamEvent.boundary)
+    if (!this.#followPaused && this.#liveWindow && extendsOutputPreview) void this.#hooks.focusLatest()
+    this.#publish()
+  }
+
+  #scheduleRefresh(immediate: boolean): void {
+    if (this.#disposed || this.#resetRecoveryPending) return
+    if (immediate) {
+      if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
+      this.#refreshTimer = undefined
+      this.#refreshDeadline = undefined
+      this.#flushRefresh()
+    } else if (!this.#refreshTimer) {
+      this.#refreshDeadline = this.#now() + OBSERVATION_REFRESH_WINDOW_MS
+      this.#refreshTimer = setTimeout(() => {
+        this.#refreshTimer = undefined
+        this.#refreshDeadline = undefined
+        this.#flushRefresh()
+      }, OBSERVATION_REFRESH_WINDOW_MS)
+    }
+  }
+
+  #flushRefresh(): void {
+    if (this.#disposed || this.#resetRecoveryPending) return
+    const ids = [...this.#pendingRoots.keys()].filter((id) => this.#inFlightRoots.get(id) !== this.#rangeVersion)
+    if (ids.length && this.#activeTab === 'interactions') void this.#refreshRoots(ids)
+    const selected = this.#selectedInteraction?.id
+    if (selected && this.#eventsPending > (this.#interactionDetail?.snapshot_sequence ?? 0))
+      void this.#refreshSelectedEvents(selected, this.#selectionVersion)
+    if (this.#failurePending && !this.#failureFlight && this.#activeTab === 'failures') {
+      const version = this.#rangeVersion
+      const request = this.loadFailures().finally(() => {
+        if (this.#failureFlight !== request) return
+        this.#failureFlight = undefined
+        if (version !== this.#rangeVersion) return
+        if (!this.#failureError) {
+          if (this.#failurePending <= this.#failureSequence) this.#failurePending = 0
+          else this.#scheduleRefresh(false)
+        }
+      })
+      this.#failureFlight = request
+    }
+  }
+
+  async #refreshRoots(ids: string[]): Promise<void> {
+    const version = this.#rangeVersion
+    const selection = this.#selectionVersion
+    ids.forEach((id) => this.#inFlightRoots.set(id, version))
+    try {
+      const page = await this.#api.changes({
+        filters: this.#query(),
+        roots: ids.map((root_id) => ({
+          root_id,
+          after_sequence: this.#rootSequences.get(root_id) ?? this.#snapshotSequence,
+          known_interactions: (this.#roots.find((root) => root.id === root_id)?.interactions ?? []).map(
+            ({ id, last_event_sequence, matched, debug_status }) => ({
+              id,
+              last_event_sequence,
+              matched,
+              debug_status,
+            }),
+          ),
+        })),
+      })
+      if (version !== this.#rangeVersion) return
+      if (page.reset_required) {
+        await this.#onStreamUpdate({ type: 'reset_required', snapshot_sequence: page.snapshot_sequence })
+        return
+      }
+      for (const change of page.changes) {
+        if (page.snapshot_sequence < (this.#rootSequences.get(change.root_id) ?? 0)) continue
+        const previous = this.#roots.find((root) => root.id === change.root_id)
+        const keepWindowRoot =
+          change.removal_reason === 'window' &&
+          previous &&
+          (!this.#liveWindow || change.last_active_at >= this.#windowStart)
+        if (change.removal_reason && !keepWindowRoot) {
+          this.#roots = this.#roots.filter((root) => root.id !== change.root_id)
+          if (
+            change.removal_reason === 'deleted' &&
+            selection === this.#selectionVersion &&
+            this.#selectedInteraction?.root_id === change.root_id
+          )
+            this.closeInspector()
+          continue
+        }
+        if (change.removal_reason === 'window' && previous && !this.#liveWindow) {
+          this.#migratedRoots = new Set([...this.#migratedRoots, change.root_id])
+        }
+        const changesById = new Map(change.interactions.map((item) => [item.id, item]))
+        const knownIds = new Set(previous?.interactions.map((item) => item.id))
+        const removed = new Set(change.removed_interaction_ids)
+        if (
+          (!change.removal_reason || change.removal_reason === 'window') &&
+          selection === this.#selectionVersion &&
+          this.#selectedInteraction &&
+          removed.has(this.#selectedInteraction.id)
+        )
+          this.closeInspector()
+        const root: ForestRoot = {
+          id: change.root_id,
+          last_active_at: change.last_active_at,
+          interactions: [
+            ...(previous?.interactions ?? [])
+              .filter((item) => !removed.has(item.id))
+              .map((item) => changesById.get(item.id) ?? item),
+            ...change.interactions.filter((item) => !knownIds.has(item.id) && !removed.has(item.id)),
+          ],
+        }
+        this.#roots = previous ? this.#roots.map((item) => (item.id === root.id ? root : item)) : [...this.#roots, root]
+        if (selection === this.#selectionVersion) {
+          const selected = root.interactions.find((item) => item.id === this.#selectedInteraction?.id)
+          if (selected) {
+            this.#selectedInteraction = selected
+            if (this.#interactionDetail)
+              this.#interactionDetail = { ...this.#interactionDetail, interaction: selected, root }
           }
-          if (selected && selection === this.#selectionVersion) {
-            this.#selectedInteraction = snapshot.interaction
-            if (this.#interactionDetail) {
-              this.#interactionDetail = {
-                ...this.#interactionDetail,
-                interaction: snapshot.interaction,
-                root: snapshot.root,
-              }
-            }
-          }
-          this.#loadError = undefined
-          this.#publish()
-        } catch (error) {
-          if (version !== this.#rangeVersion) return
-          this.#loadError = error
-          this.#publish()
-          throw error
         }
       }
+      if (page.snapshot_sequence >= this.#rootTotalSequence) {
+        this.#rootTotal = page.root_total
+        this.#rootTotalSequence = page.snapshot_sequence
+      }
+      for (const id of ids) {
+        this.#rootSequences.set(id, Math.max(this.#rootSequences.get(id) ?? 0, page.snapshot_sequence))
+        if ((this.#pendingRoots.get(id) ?? 0) <= page.snapshot_sequence) this.#pendingRoots.delete(id)
+      }
+      this.#appliedSequence = Math.max(this.#appliedSequence, page.snapshot_sequence)
+      ids.forEach((id) => this.#rootErrors.delete(id))
+      this.#loadError = this.#rootErrors.values().next().value
+      this.#publish()
+    } catch (error) {
+      if (version === this.#rangeVersion) {
+        ids.forEach((id) => this.#rootErrors.set(id, error))
+        this.#loadError = error
+        this.#publish()
+      }
+    } finally {
+      ids.forEach((id) => {
+        if (this.#inFlightRoots.get(id) === version) this.#inFlightRoots.delete(id)
+      })
+      if (
+        version === this.#rangeVersion &&
+        !ids.some((id) => this.#rootErrors.has(id)) &&
+        ids.some((id) => this.#pendingRoots.has(id))
+      )
+        this.#scheduleRefresh(false)
     }
-    if (!this.#followPaused && this.#liveWindow && extendsOutputPreview) await this.#hooks.focusLatest()
   }
 
   #snapshot(): ObservationWorkspaceSnapshot {
@@ -933,6 +1286,10 @@ export class ObservationWorkspaceController {
       detailLoading: this.#detailLoading,
       olderLoading: this.#olderLoading,
       selectedLiveBlocks: this.#liveBlocks.filter((block) => block.interaction_id === this.#selectedInteraction?.id),
+      liveContentEpoch: this.#liveContentEpoch,
+      selectedLiveActive: this.#selectedLiveActive,
+      liveTerminalEpoch: this.#liveTerminalEpoch,
+      detailError: this.#detailError,
       liveGaps: this.#liveGaps,
       liveCapacityGaps: this.#liveCapacityGaps,
       streamConnected: this.#streamConnected,

@@ -115,6 +115,7 @@ struct WriterContext<'a> {
     retention: &'a AtomicU32,
     updates: &'a broadcast::Sender<ObservationUpdate>,
     trace_sequence: &'a AtomicI64,
+    live: &'a super::live::LiveState,
 }
 
 pub(super) fn spawn(
@@ -142,7 +143,7 @@ pub(super) fn spawn(
         let mut pending_text = TextBuffer {
             retained_bytes: 0,
             blocks: HashMap::new(),
-            live,
+            live: Arc::clone(&live),
             gaps: unpersisted_gaps.clone(),
         };
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
@@ -152,14 +153,22 @@ pub(super) fn spawn(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut deferred = None;
         let mut maintenance = tokio::time::Instant::now();
+        let mut next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
         let context = WriterContext {
             store: &store,
             debug_trace_index: &debug_trace_index,
             retention: retention_days.as_ref(),
             updates: &updates,
             trace_sequence: trace_sequence.as_ref(),
+            live: live.as_ref(),
         };
         loop {
+            // Deferred batches bypass select!, so check the fixed deadline on
+            // every writer turn as well as waking the idle writer with interval.
+            if tokio::time::Instant::now() >= next_live_publish {
+                pending_text.publish_live();
+                next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
+            }
             // 仅重试缺失标记，不重放发现，避免把诊断故障转化为重复计数或执行失败。
             for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
                 if expires(occurred_at, retention_days.load(Ordering::Acquire)) > now()
@@ -172,11 +181,15 @@ pub(super) fn spawn(
                 deferred.take()
             } else {
                 tokio::select! {
+                    _ = tokio::time::sleep_until(next_live_publish) => {
+                        pending_text.publish_live();
+                        next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
+                        continue;
+                    },
                     _ = interval.tick() => {
                         unpersisted_gaps.lock()
                             .expire(now(), retention_days.load(Ordering::Acquire));
                         attribution.sweep(now());
-                        pending_text.publish_live(&updates);
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
                         flush_active_manifests(
@@ -202,21 +215,12 @@ pub(super) fn spawn(
                 command => command,
             };
             attribution.sweep(now());
-            match &command {
-                Some(WriterCommand::ClearTail | WriterCommand::Purge { .. }) => {
-                    flush_text(&context, &attribution, &mut pending_text).await;
-                }
-                Some(
-                    WriterCommand::InputPreview { run_id, .. }
-                    | WriterCommand::Tail { run_id, .. }
-                    | WriterCommand::Finalize {
-                        run_id: Some(run_id),
-                        ..
-                    },
-                ) => {
-                    flush_one(&context, &attribution, &mut pending_text, run_id).await;
-                }
-                _ => {}
+            if let Some(WriterCommand::Finalize {
+                run_id: Some(run_id),
+                ..
+            }) = &command
+            {
+                flush_one(&mut pending_text, run_id);
             }
             match command {
                 Some(WriterCommand::ClearTail) => attribution.clear_tail(),
@@ -233,6 +237,11 @@ pub(super) fn spawn(
                         Ok(())
                     }
                     .await;
+                    if result.is_ok() {
+                        let _ = updates.send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: trace_sequence.load(Ordering::Acquire),
+                        });
+                    }
                     let _ = response.send(result);
                 }
                 Some(WriterCommand::ClientDisconnected { runs }) => {
@@ -252,7 +261,6 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::ClientToolResults { run_id, events }) => {
-                    flush_one(&context, &attribution, &mut pending_text, &run_id).await;
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         continue;
                     };
@@ -313,6 +321,12 @@ pub(super) fn spawn(
                         None => store.purge_clear_rows().await,
                     }
                     .map(|removed| {
+                        live.invalidate(&removed);
+                        if !removed.is_empty() || expired_before.is_none() {
+                            let _ = updates.send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: trace_sequence.load(Ordering::Acquire),
+                            });
+                        }
                         attribution.forget_interactions(&removed);
                         pending_gaps.retain(|interaction, _| !removed.contains(interaction));
                         pending_text.retain(|run| attribution.interaction_for_run(run).is_some());
@@ -397,7 +411,7 @@ pub(super) fn spawn(
                         .cloned()
                         .collect();
                     for run in affected {
-                        flush_one(&context, &attribution, &mut pending_text, &run).await;
+                        flush_one(&mut pending_text, &run);
                     }
                     let expires = expires(now, retention_days.load(Ordering::Relaxed));
                     match store
@@ -528,6 +542,11 @@ pub(super) fn spawn(
                     let block = pending_text.blocks.entry(id).or_insert_with(|| {
                         TextBlock::new(event, interaction.clone(), run_id.clone())
                     });
+                    if block.overflowed {
+                        // Canonical close is persisted independently; a capacity
+                        // gap must not resurrect an incomplete volatile block.
+                        continue;
+                    }
                     let previous_bytes = block.allocated_bytes;
                     let growth_headroom = match &block.event {
                         RunEvent::ClientVisibleContentDelta { text, .. }
@@ -547,14 +566,34 @@ pub(super) fn spawn(
                         *text_mut(&mut block.event).expect("text block") = String::new();
                         block.revision += 1;
                     } else {
+                        let ordered_append = block
+                            .parts
+                            .keys()
+                            .next_back()
+                            .is_none_or(|last| part_index >= *last);
                         block.append_part(part_index, &incoming);
+                        if block.revision == 1 || !ordered_append {
+                            if !pending_text.live.replace(block.live()) {
+                                block.overflowed = true;
+                            }
+                        } else if !pending_text
+                            .live
+                            .append(&block.id, &incoming, block.revision)
+                        {
+                            block.overflowed = true;
+                        }
                     }
                     pending_text.retained_bytes =
                         retained_bytes - previous_bytes + block.allocated_bytes;
-                    pending_text.publish_live(&updates);
+                    if block.published == 0 || block.overflowed {
+                        TextBuffer::publish_block(
+                            &pending_text.live,
+                            &mut pending_text.retained_bytes,
+                            block,
+                        );
+                    }
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
-                    flush_one(&context, &attribution, &mut pending_text, &run_id).await;
                     let block_id = canonical_block_id(&event);
                     let mut batch = vec![(event, block_id, now())];
                     while batch.len() < 64 {
@@ -581,6 +620,15 @@ pub(super) fn spawn(
                         }
                     }
                     for (event, block_id, occurred_at) in &batch {
+                        if block_id.is_some()
+                            || matches!(
+                                event,
+                                RunEvent::DeliveryFinished { .. }
+                                    | RunEvent::ModelThinkingFinished { .. }
+                            )
+                        {
+                            flush_one(&mut pending_text, &run_id);
+                        }
                         if let Some(id) = block_id {
                             if let Some(block) = pending_text.blocks.remove(id) {
                                 pending_text.retained_bytes -= block.allocated_bytes;
@@ -623,7 +671,7 @@ pub(super) fn spawn(
                             Err(error) => {
                                 unpersisted_gaps.lock().record(&run_id, at);
                                 pending_gaps.insert(interaction.to_owned(), at);
-                                let _ = updates.send(ObservationUpdate::LiveGap {
+                                live.emit(ObservationUpdate::LiveGap {
                                     interaction_id: interaction.to_owned(),
                                     run_id: run_id.clone(),
                                     reason: "persistence_failed".into(),
@@ -870,7 +918,7 @@ pub(super) fn spawn(
                         .cloned()
                         .collect();
                     for run in runs {
-                        flush_one(&context, &attribution, &mut pending_text, &run).await;
+                        flush_one(&mut pending_text, &run);
                     }
                     flush_active_manifests(
                         &context,
@@ -883,7 +931,7 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Barrier(done)) => {
-                    flush_text(&context, &attribution, &mut pending_text).await;
+                    // 读己之写屏障不绕过正文限频；新订阅从当前镜像读取。
                     flush_active_manifests(
                         &context,
                         &attribution,
@@ -895,12 +943,12 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Shutdown(done)) => {
-                    flush_text(&context, &attribution, &mut pending_text).await;
+                    pending_text.publish_live();
                     let _ = done.send(());
                     break;
                 }
                 None => {
-                    flush_text(&context, &attribution, &mut pending_text).await;
+                    pending_text.publish_live();
                     break;
                 }
                 Some(WriterCommand::Text { .. }) => unreachable!("text command resolved above"),
@@ -969,7 +1017,7 @@ async fn flush_active_manifests(
 
 /// Persistence errors may echo SQL statements, bind values or payload text;
 /// only the driver error class and database error code are safe diagnostics.
-fn redacted_persist_cause(error: &anyhow::Error) -> String {
+pub(super) fn redacted_persist_cause(error: &anyhow::Error) -> String {
     for cause in error.chain() {
         match cause.downcast_ref::<sqlx::Error>() {
             Some(sqlx::Error::Database(database)) => {
@@ -1014,7 +1062,7 @@ async fn persist_finish(
     outcome: &RunOutcome,
     at: i64,
 ) {
-    flush_one(context, attribution, pending_text, run_id).await;
+    flush_one(pending_text, run_id);
     pending_text.retain(|run| run != run_id);
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
         let expiry = expires(at, context.retention.load(Ordering::Relaxed));
@@ -1041,7 +1089,7 @@ async fn persist_finish(
                 if let Err(error) = context.store.mark_observation_gap(interaction).await {
                     tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
                 }
-                let _ = context.updates.send(ObservationUpdate::LiveGap {
+                context.live.emit(ObservationUpdate::LiveGap {
                     interaction_id: interaction.to_owned(),
                     run_id: run_id.to_owned(),
                     reason: "persistence_failed".into(),
@@ -1050,32 +1098,22 @@ async fn persist_finish(
             }
         }
     }
+    if let Some(interaction) = attribution.interaction_for_run(run_id) {
+        context.live.emit(ObservationUpdate::LiveFinished {
+            interaction_id: interaction.to_owned(),
+            run_id: run_id.to_owned(),
+        });
+    }
     attribution.finish(run_id, &outcome.status, at);
 }
 
-async fn flush_text(
-    context: &WriterContext<'_>,
-    attribution: &RunAttribution<ObservationEvidence>,
-    pending: &mut TextBuffer,
-) {
-    let ids: Vec<_> = pending
+fn flush_one(pending: &mut TextBuffer, run_id: &str) {
+    for block in pending
         .blocks
-        .values()
-        .map(|block| block.run.clone())
-        .collect();
-    for id in ids {
-        flush_one(context, attribution, pending, &id).await;
-    }
-}
-async fn flush_one(
-    context: &WriterContext<'_>,
-    attribution: &RunAttribution<ObservationEvidence>,
-    pending: &mut TextBuffer,
-    run_id: &str,
-) {
-    let _ = attribution;
-    for block in pending.blocks.values().filter(|block| block.run == run_id) {
-        pending.publish_block(block, context.updates);
+        .values_mut()
+        .filter(|block| block.run == run_id)
+    {
+        TextBuffer::publish_block(&pending.live, &mut pending.retained_bytes, block);
     }
 }
 
@@ -1195,52 +1233,33 @@ struct TextBuffer {
     gaps: Arc<Mutex<super::UnpersistedGaps>>,
 }
 impl TextBuffer {
-    fn publish_block(&self, block: &TextBlock, updates: &broadcast::Sender<ObservationUpdate>) {
+    fn publish_block(
+        live: &super::live::LiveState,
+        retained_bytes: &mut usize,
+        block: &mut TextBlock,
+    ) {
         if block.revision == block.published {
             return;
         }
-        let value = block.live();
-        if !block.overflowed && self.live.replace(value.clone()) {
-            if updates.receiver_count() > 0 {
-                let _ = updates.send(ObservationUpdate::LiveContent(value));
-            }
+        if !block.overflowed {
+            live.publish(&block.id);
         } else {
-            self.live.remove(&block.id);
-            if updates.receiver_count() > 0 {
-                let _ = updates.send(ObservationUpdate::LiveGap {
-                    interaction_id: block.interaction.clone(),
-                    run_id: block.run.clone(),
-                    reason: "live_capacity".into(),
-                });
-            }
+            *retained_bytes -= block.allocated_bytes;
+            block.allocated_bytes = 0;
+            block.parts.clear();
+            *text_mut(&mut block.event).expect("text block") = String::new();
+            live.remove(&block.id);
+            live.emit(ObservationUpdate::LiveGap {
+                interaction_id: block.interaction.clone(),
+                run_id: block.run.clone(),
+                reason: "live_capacity".into(),
+            });
         }
+        block.published = block.revision;
     }
-    fn publish_live(&mut self, updates: &broadcast::Sender<ObservationUpdate>) {
+    fn publish_live(&mut self) {
         for block in self.blocks.values_mut() {
-            if block.revision == block.published {
-                continue;
-            }
-            let value = block.live();
-            if !block.overflowed && self.live.replace(value.clone()) {
-                if updates.receiver_count() > 0 {
-                    let _ = updates.send(ObservationUpdate::LiveContent(value));
-                }
-            } else {
-                block.overflowed = true;
-                self.retained_bytes -= block.allocated_bytes;
-                block.allocated_bytes = 0;
-                block.parts.clear();
-                *text_mut(&mut block.event).expect("text block") = String::new();
-                self.live.remove(&block.id);
-                if updates.receiver_count() > 0 {
-                    let _ = updates.send(ObservationUpdate::LiveGap {
-                        interaction_id: block.interaction.clone(),
-                        run_id: block.run.clone(),
-                        reason: "live_capacity".into(),
-                    });
-                }
-            }
-            block.published = block.revision;
+            Self::publish_block(&self.live, &mut self.retained_bytes, block);
         }
     }
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
@@ -1321,16 +1340,20 @@ fn delta_block_id(event: &RunEvent, run_id: &str) -> String {
 #[cfg(test)]
 mod block_tests {
     use super::*;
-    #[test]
-    fn live_revisions_replace_and_committed_identity_is_removable() {
+    #[tokio::test]
+    async fn live_revisions_replace_and_committed_identity_is_removable() {
+        use futures::StreamExt;
         let mirror = Arc::new(super::super::live::LiveState::default());
-        let buffer = TextBuffer {
+        let mut buffer = TextBuffer {
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: mirror.clone(),
             gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
         };
-        let (updates, mut receiver) = broadcast::channel(8);
+        let mut receiver = mirror.subscribe("interaction".into());
+        assert!(
+            matches!(receiver.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty())
+        );
         let mut block = TextBlock::new(
             RunEvent::ClientVisibleContentDelta {
                 item_ordinal: 0,
@@ -1341,20 +1364,93 @@ mod block_tests {
             "run".into(),
         );
         block.append("first");
-        buffer.publish_block(&block, &updates);
-        block.append(" second");
-        buffer.publish_block(&block, &updates);
-        let ObservationUpdate::LiveContent(first) = receiver.try_recv().unwrap() else {
+        mirror.replace(block.live());
+        let id = block.id.clone();
+        buffer.retained_bytes = block.allocated_bytes;
+        buffer.blocks.insert(id.clone(), block);
+        buffer.publish_live();
+        let Some(ObservationUpdate::LiveContent(first)) = receiver.next().await else {
             panic!("live block");
         };
-        let ObservationUpdate::LiveContent(second) = receiver.try_recv().unwrap() else {
+        let block = buffer.blocks.get_mut(&id).unwrap();
+        let previous = block.allocated_bytes;
+        block.append(" second");
+        buffer.retained_bytes += block.allocated_bytes - previous;
+        mirror.replace(block.live());
+        flush_one(&mut buffer, "run");
+        let Some(ObservationUpdate::LiveContent(second)) = receiver.next().await else {
             panic!("live block");
         };
         assert_eq!(first.block_id, second.block_id);
         assert!(first.revision < second.revision);
-        assert_eq!(mirror.snapshot()[0].text, "first second");
+        let mut current = mirror.subscribe("interaction".into());
+        assert!(
+            matches!(current.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks[0].text == "first second")
+        );
         mirror.remove(&second.block_id);
-        assert!(mirror.snapshot().is_empty());
+        let mut retired = mirror.subscribe("interaction".into());
+        assert!(
+            matches!(retired.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty())
+        );
+    }
+    #[tokio::test]
+    async fn overflow_boundary_retires_current_body_and_terminal_preserves_gap_order() {
+        use futures::StreamExt;
+        let live = Arc::new(super::super::live::LiveState::default());
+        let mut buffer = TextBuffer {
+            retained_bytes: 0,
+            blocks: HashMap::new(),
+            live: live.clone(),
+            gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
+        };
+        let mut block = TextBlock::new(
+            RunEvent::ClientVisibleContentDelta {
+                item_ordinal: 0,
+                part_index: (false, 0),
+                text: String::new(),
+            },
+            "interaction".into(),
+            "run".into(),
+        );
+        block.append("actual partial");
+        live.replace(block.live());
+        let id = block.id.clone();
+        buffer.retained_bytes = block.allocated_bytes;
+        buffer.blocks.insert(id.clone(), block);
+        let mut existing = live.subscribe("interaction".into());
+        assert!(
+            matches!(existing.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks[0].text == "actual partial")
+        );
+        let block = buffer.blocks.get_mut(&id).unwrap();
+        block.overflowed = true;
+        // The first publication path uses the same cleanup as timer/terminal.
+        flush_one(&mut buffer, "run");
+        let mut reconnect = live.subscribe("interaction".into());
+        assert!(
+            matches!(reconnect.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty())
+        );
+        assert!(
+            matches!(reconnect.next().await, Some(ObservationUpdate::LiveGap { reason, .. }) if reason == "live_capacity")
+        );
+        live.emit(ObservationUpdate::LiveFinished {
+            interaction_id: "interaction".into(),
+            run_id: "run".into(),
+        });
+        assert!(
+            matches!(existing.next().await, Some(ObservationUpdate::LiveGap { reason, .. }) if reason == "live_capacity")
+        );
+        assert!(
+            matches!(existing.next().await, Some(ObservationUpdate::LiveFinished { run_id, .. }) if run_id == "run")
+        );
+        let mut switched = live.subscribe("interaction".into());
+        assert!(
+            matches!(switched.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty())
+        );
+        buffer.publish_live();
+        let mut recovered = live.subscribe("interaction".into());
+        assert!(
+            matches!(recovered.next().await, Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty())
+        );
     }
     #[test]
     fn canonical_items_keep_identity_ordered_parts_and_cumulative_revisions() {
