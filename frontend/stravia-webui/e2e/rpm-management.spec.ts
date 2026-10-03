@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 
-import type { ApiKey, Provider, Route } from '../src/lib/types'
+import type { ApiKey, Provider, ProviderModelDetail, Route } from '../src/lib/types'
 import type { RpmConfig } from '../src/lib/rpm'
 
 const root = resolve(import.meta.dirname, '../../..')
@@ -254,7 +254,15 @@ test('real management persists root and destination RPM limits and queue setting
   })
   await api(page, `/providers/${provider.id}/models`, 'POST', {
     model_id: 'rpm-upstream',
-    metadata: { id: 'rpm-upstream', name: 'RPM upstream' },
+    metadata: {
+      id: 'rpm-upstream',
+      name: 'RPM upstream',
+      description: 'Preserve this description',
+      limit: { context: 200000 },
+      modalities: { input: ['text', 'image', 'binary'], output: ['text'] },
+      reasoning_efforts: ['low', 'high', 'future'],
+      cost: { input: 0.25, output: 1, cache_read: 0.025 },
+    },
     template_id: null,
   })
   await api<Route>(page, '/models', 'POST', {
@@ -358,6 +366,70 @@ test('real management persists root and destination RPM limits and queue setting
   await page.reload()
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Unlimited')
   expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 10000, queue_capacity: 16 })
+
+  const readModel = () => api<ProviderModelDetail>(page, `/providers/${provider.id}/model?model=rpm-upstream`)
+  const initialMetadata = (await readModel()).metadata
+  const table = page.locator('.route-desktop-table')
+  const contextTrigger = table.getByRole('button', { name: 'Context tokens rpm-upstream', exact: true })
+  const cellEditor = page.locator('[data-slot="popover-content"]')
+  await contextTrigger.click()
+  await cellEditor.getByRole('spinbutton', { name: 'Context tokens', exact: true }).fill('256000')
+  const concurrent = await readModel()
+  await api(page, `/providers/${provider.id}/model`, 'PUT', {
+    model_id: 'rpm-upstream',
+    metadata: { ...concurrent.metadata, description: 'Changed by another administrator' },
+    revision: concurrent.revision,
+  })
+  await cellEditor.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect(cellEditor.getByRole('alert')).toBeVisible()
+  await expect(cellEditor.getByRole('spinbutton', { name: 'Context tokens', exact: true })).toHaveValue('256000')
+  expect((await readModel()).metadata.limit?.context).toBe(200000)
+  expect((await readModel()).metadata.description).toBe('Changed by another administrator')
+  await cellEditor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await contextTrigger.click()
+  await cellEditor.getByRole('spinbutton', { name: 'Context tokens', exact: true }).fill('256000')
+  await cellEditor.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect(cellEditor).toBeHidden()
+  expect((await readModel()).metadata).toEqual({
+    ...initialMetadata,
+    description: 'Changed by another administrator',
+    limit: { context: 256000 },
+  })
+  await expect(page).toHaveURL(`${management.origin}${catalogUrl}`)
+  await table.getByRole('button', { name: 'Modalities rpm-upstream', exact: true }).click()
+  await cellEditor.getByRole('button', { name: 'Generated output types', exact: true }).click()
+  await page.getByRole('option', { name: 'Image', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await cellEditor.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect(cellEditor).toBeHidden()
+  expect((await readModel()).metadata.modalities).toEqual({
+    input: ['text', 'image', 'binary'],
+    output: ['text', 'image'],
+  })
+  await table.getByRole('button', { name: 'Reasoning effort rpm-upstream', exact: true }).click()
+  await cellEditor.getByRole('textbox', { name: 'Custom reasoning effort', exact: true }).fill('custom-effort')
+  await cellEditor.getByRole('button', { name: 'Add', exact: true }).click()
+  await cellEditor.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect(cellEditor).toBeHidden()
+  expect((await readModel()).metadata.reasoning_efforts).toEqual(['low', 'high', 'future', 'custom-effort'])
+  expect((await readModel()).metadata.cost).toEqual(initialMetadata.cost)
+  await table.getByRole('button', { name: 'Availability when adding models rpm-upstream', exact: true }).click()
+  await cellEditor.getByRole('button', { name: 'Availability when adding models', exact: true }).click()
+  await page.getByRole('option', { name: 'Always allow', exact: true }).click()
+  await expect(cellEditor).toBeHidden()
+  expect((await readModel()).selection_policy).toBe('force_enabled')
+
+  await goto(`${catalogUrl}&model=rpm-upstream`)
+  const detailRpm = page.locator('section[aria-labelledby="provider-model-rpm-title"]')
+  await detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true }).fill('21')
+  await detailRpm.getByRole('button', { name: 'Save limit', exact: true }).click()
+  await expect.poll(async () => (await readDestination())?.rpm_limit).toBe(21)
+  expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 10000, queue_capacity: 16 })
+  await page.reload()
+  await expect(detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true })).toHaveValue('21')
+  await detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true }).fill('')
+  await detailRpm.getByRole('button', { name: 'Save limit', exact: true }).click()
+  await expect.poll(readDestination).toBeUndefined()
 
   // Switch through the same persisted local preference used by the app.
   await page.evaluate(() => localStorage.setItem('stravia-locale', 'zh-CN'))

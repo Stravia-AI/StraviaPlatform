@@ -845,29 +845,32 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const precisionRow = table.getByRole('row').filter({ hasText: /Precision Model.*precision-model/ })
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
-  await expect(binaryRow.getByRole('cell', { name: '1,048,576', exact: true })).toBeVisible()
+  await expect(binaryRow.getByRole('button', { name: 'Context tokens binary-limit', exact: true })).toHaveText(
+    '1,048,576',
+  )
   const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
   await expect(identityCell).not.toContainText('1.05M')
   await expect(identityCell).not.toContainText('Input')
-  await expect(precisionRow.getByRole('cell', { name: '1.05M', exact: true })).toBeVisible()
-  await expect(precisionRow.getByRole('cell', { name: 'low, high', exact: true })).toBeVisible()
-  const precisionModalities = precisionRow
-    .getByRole('cell')
-    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
-  await expect(precisionModalities.getByRole('term')).toHaveText(['Input', 'Output'])
-  const [precisionInput, precisionOutput] = [0, 1].map((index) =>
-    precisionModalities.getByRole('definition').nth(index),
+  await expect(precisionRow.getByRole('button', { name: 'Context tokens precision-model', exact: true })).toHaveText(
+    '1.05M',
   )
+  await expect(precisionRow.getByRole('button', { name: 'Reasoning effort precision-model', exact: true })).toHaveText(
+    'low, high',
+  )
+  const precisionModalities = precisionRow.getByRole('button', { name: 'Modalities precision-model', exact: true })
+  const precisionInput = precisionModalities.getByRole('group', { name: 'Input', exact: true })
+  const precisionOutput = precisionModalities.getByRole('group', { name: 'Output', exact: true })
   await expect(precisionInput.getByRole('listitem')).toHaveText(['Image', 'PDF'])
   await expect(precisionOutput.getByRole('listitem')).toHaveText(['Text'])
-  await precisionInput.getByRole('listitem').first().hover()
-  await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Image')
-  const unknownModalities = unknownRow
-    .getByRole('cell')
-    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
-  await expect(unknownModalities.getByRole('term')).toHaveText(['Input', 'Output'])
-  await expect(unknownModalities.getByRole('definition')).toHaveText(['Not registered', 'Not registered'])
-  await expect(unknownRow.getByRole('cell', { name: 'Not registered', exact: true })).toHaveCount(2)
+  const unknownModalities = unknownRow.getByRole('button', { name: 'Modalities unknown-model', exact: true })
+  await expect(unknownModalities.getByRole('group', { name: 'Input', exact: true })).toContainText('Not registered')
+  await expect(unknownModalities.getByRole('group', { name: 'Output', exact: true })).toContainText('Not registered')
+  await expect(unknownRow.getByRole('button', { name: 'Context tokens unknown-model', exact: true })).toHaveText(
+    'Not registered',
+  )
+  await expect(unknownRow.getByRole('button', { name: 'Reasoning effort unknown-model', exact: true })).toHaveText(
+    'Not registered',
+  )
   await expect.poll(() => detailRequests).toBe(0)
 })
 
@@ -1201,7 +1204,10 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect(page.getByRole('row').filter({ hasText: /GPT Retired.*gpt-retired/ })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
   await expect(page.getByText('Shown when adding models', { exact: true })).toHaveCount(0)
-  await availableModelRow.getByRole('cell').nth(1).click()
+  await availableModelRow
+    .getByRole('cell')
+    .filter({ hasText: /GPT Test.*gpt-test/ })
+    .click()
 
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-test')
   const extensionFields = page.getByRole('button', { name: 'Extension fields (read only) · 1', exact: true })
@@ -1832,7 +1838,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     .getByRole('row')
     .filter({ hasText: /GPT Test.*openai\/gpt-test/ })
     .getByRole('cell')
-    .nth(1)
+    .filter({ hasText: /GPT Test.*openai\/gpt-test/ })
     .click()
   await expect(page).toHaveURL(/view=models&model=openai%2Fgpt-test/)
   await page.getByRole('button', { name: 'Model actions' }).click()
@@ -1883,7 +1889,10 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await expect(retiredModelRow).toBeVisible()
   await expect(page.getByRole('link', { name: 'Used by 1 model', exact: true })).toBeVisible()
 
-  await retiredModelRow.getByRole('cell').nth(2).click()
+  await retiredModelRow
+    .getByRole('cell')
+    .filter({ hasText: /Retired Model.*retired-model/ })
+    .click()
   await expect(page).toHaveURL(/view=models&model=retired-model/)
   await expect(page.getByRole('heading', { name: 'Retired Model', level: 2 })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Save model' })).toBeVisible()
@@ -1903,7 +1912,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     .getByRole('row')
     .filter({ hasText: /Retired Model.*retired-model/ })
     .getByRole('cell')
-    .nth(1)
+    .filter({ hasText: /Retired Model.*retired-model/ })
     .click()
   await page.getByRole('button', { name: 'Model actions' }).click()
   await page.getByRole('menuitem', { name: 'Remove manually added model…' }).click()
@@ -1928,7 +1937,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     .getByRole('row')
     .filter({ hasText: /Retired Model.*retired-model/ })
     .getByRole('cell')
-    .nth(2)
+    .filter({ hasText: /Retired Model.*retired-model/ })
     .click()
   await page.getByRole('button', { name: 'Model actions' }).click()
   await page.getByRole('menuitem', { name: 'Remove manually added model…' }).click()
