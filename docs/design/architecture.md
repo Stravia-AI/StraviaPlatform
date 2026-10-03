@@ -780,6 +780,10 @@ Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小�
 
 保存守护、连接配置变更、OAuth 账号重新绑定、Provider 重新启用、手动刷新以及 Gateway 启动时的已暂停且启用 Provider 都复用既有合并并发的刷新路径。已知最早 `reset_at` 在进程内重建单次定时读取，不直接恢复，也不在仍耗尽时追加重试；其余沿用 30 分钟采样与 180 秒成功 TTL。重建定时计划时的存储错误记录 warning，生命周期任务等待状态变更或既有采样周期后继续，不因一次错误永久退出。Provider 禁用或凭据失效期间不读取额度，持久化暂停保留。暂停决策写失败只记 warning，不改变原额度读取结果。完整领域约束见 [ADR-0078](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md)。
 
+额度页的 Provider Allowance 读取编排由 `frontend/stravia-webui/src/lib/provider-allowance-read.ts` 拥有。该 module 通过现有 HTTP adapter 与 TanStack Query 的 `QueryObserver` 集中管理查询资格、凭据失效记忆、手动刷新、守护保存与确认快照发布；继续使用共享 `QueryClient`、既有查询键、重试规则与 180 秒轮询，不另建缓存或计时器。`.svelte.ts` 壳只镜像快照并连接组件生命周期，页面和测试使用同一操作 interface；搜索、筛选、摘要、时间轴与展开偏好仍属于页面或既有纯 module，不进入读取编排。
+
+同一 Provider 的手动刷新与守护保存互斥且不排队，其他 Provider 的操作独立。守护编辑以已确认快照构造完整集合并保留当前缺失的 key；保存失败保留已确认值，取消旧 GET 与读取代际检查共同防止迟到结果覆盖保存结果或污染凭据失效记忆。批量刷新逐项发布成功快照，部分失败仍按 Target 顺序报告第一个失败。组件销毁后关闭自身 observer 并停止视图通知，不清理共享缓存，也不承诺撤销已经发出的后端写入；这些编排行为不改变 Core 的 Monitor、Allowance Suspension、采样规则或协议。
+
 SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 始终包含 Provider 与非空白上游模型。所有能力共用这一要求，搜索也不例外；Target 写入不接受缺省、`null` 或空白 `model`。
 
 SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_backends.model` 约束为非空且非空白；所属 Route 和其他 Target 保留，不推导或填入虚假模型。仅有无模型 Target 的 Route 升级后没有可执行 Target，管理员必须重新绑定真实 Provider Model。迁移同时从 `rpm_admission` 中删除无模型目的地；共享池随后由 0013 删除，详见 §8.4。
