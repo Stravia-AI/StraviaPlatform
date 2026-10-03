@@ -1,10 +1,13 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
+import { onMount } from 'svelte'
 import { createQueries, createQuery, useQueryClient } from '@tanstack/svelte-query'
-import { renderSnippet } from '@tanstack/svelte-table'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
+import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
+import CircleHelpIcon from '@lucide/svelte/icons/circle-help'
 import Clock3Icon from '@lucide/svelte/icons/clock-3'
+import ShieldCheckIcon from '@lucide/svelte/icons/shield-check'
 import GaugeIcon from '@lucide/svelte/icons/gauge'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Progress } from '$lib/components/ui/progress'
@@ -20,7 +23,6 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatList, formatLogTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
 import { formatAllowanceAmount, formatAllowancePercent } from '$lib/provider-allowance-format'
@@ -44,20 +46,19 @@ import type {
   ProviderAllowanceTarget,
 } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
+import StatusIndicator from '$lib/components/status-indicator.svelte'
 import { Badge, type BadgeVariant } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Card from '$lib/components/ui/card'
-import {
-  DataTable,
-  createDataTableColumnHelper,
-  type DataTableCellContext,
-  type DataTableRow,
-} from '$lib/components/ui/data-table'
 import * as InputGroup from '$lib/components/ui/input-group'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import { Switch } from '$lib/components/ui/switch'
+import * as Table from '$lib/components/ui/table'
+import * as ToggleGroup from '$lib/components/ui/toggle-group'
+import * as Tooltip from '$lib/components/ui/tooltip'
 import AllowanceSuspensionBanner from '$lib/components/allowance-suspension.svelte'
+import { cn } from '$lib/utils'
 
 interface VisibleProvider {
   target: ProviderAllowanceTarget
@@ -75,10 +76,10 @@ interface VisibleAllowance {
   allowance: Allowance
 }
 
-interface AllowanceMatrixRow {
-  provider: VisibleProvider
-  allowance?: Allowance
-}
+type AllowanceValueMode = 'remaining' | 'used'
+
+// 仅是本机展示偏好，不进入管理面配置
+const VALUE_MODE_STORAGE_KEY = 'stravia:allowances:value-mode'
 
 const queryClient = useQueryClient()
 const savingGuardIds = new SvelteSet<string>()
@@ -137,7 +138,25 @@ let searchQuery = $state('')
 let catalogFilter = $state('all')
 let conditionFilter = $state<'all' | AllowanceCondition>('all')
 let freshnessFilter = $state<'all' | ProviderAllowanceStatus>('all')
+let valueMode = $state<AllowanceValueMode>('remaining')
 const refreshingProviderIds = new SvelteSet<string>()
+const expandedProviderIds = new SvelteSet<string>()
+
+onMount(() => {
+  if (localStorage.getItem(VALUE_MODE_STORAGE_KEY) === 'used') valueMode = 'used'
+})
+
+function changeValueMode(next: string): void {
+  // 单选 ToggleGroup 再次点击当前项会给出空值；保持当前选择
+  if (next !== 'remaining' && next !== 'used') return
+  valueMode = next
+  localStorage.setItem(VALUE_MODE_STORAGE_KEY, next)
+}
+
+function setProviderExpanded(providerId: string, open: boolean): void {
+  if (open) expandedProviderIds.add(providerId)
+  else expandedProviderIds.delete(providerId)
+}
 
 async function toggleGuard(snapshot: ProviderAllowanceSnapshot, key: string, checked: boolean): Promise<void> {
   const id = snapshot.provider_id
@@ -235,50 +254,8 @@ const visibleAllowances = $derived(
     snapshot == null ? [] : allowances.map((allowance) => ({ snapshot, allowance })),
   ),
 )
-const allowanceMatrixRows = $derived(
-  visibleProviders.flatMap((provider) =>
-    provider.allowances.length > 0 ? provider.allowances.map((allowance) => ({ provider, allowance })) : [{ provider }],
-  ),
-)
-const tableLabels = $derived(getDataTableLabels())
-const allowanceColumnHelper = createDataTableColumnHelper<AllowanceMatrixRow>()
-const allowanceColumns = allowanceColumnHelper.columns([
-  allowanceColumnHelper.accessor(({ provider }) => provider.target.provider_id, {
-    id: 'provider',
-    header: '',
-    enableSorting: false,
-  }),
-  allowanceColumnHelper.display({
-    id: 'allowance',
-    header: () => m.allowances_item(),
-    cell: (context) => renderSnippet(allowanceItemCell, context),
-    enableSorting: false,
-    meta: { label: () => m.allowances_item(), headerClass: 'w-[14rem]', cellClass: 'ps-7' },
-  }),
-  allowanceColumnHelper.display({
-    id: 'used',
-    header: () => m.allowances_used(),
-    cell: (context) => renderSnippet(allowanceUsedCell, context),
-    enableSorting: false,
-    meta: { label: () => m.allowances_used(), headerClass: 'w-[8rem]' },
-  }),
-  allowanceColumnHelper.display({
-    id: 'remaining',
-    header: () => m.allowances_remaining(),
-    cell: (context) => renderSnippet(allowanceRemainingCell, context),
-    enableSorting: false,
-    meta: { label: () => m.allowances_remaining(), headerClass: 'w-[9rem]' },
-  }),
-  allowanceColumnHelper.display({
-    id: 'reset',
-    header: () => m.allowances_reset(),
-    cell: (context) => renderSnippet(allowanceResetCell, context),
-    enableSorting: false,
-    meta: { label: () => m.allowances_reset(), headerClass: 'w-[11rem]' },
-  }),
-])
-const allowanceGrouping = ['provider']
-const allowanceColumnVisibility = { provider: false }
+const valueModeLabel = $derived(valueMode === 'used' ? m.allowances_used() : m.allowances_remaining())
+const valueModeItemClass = 'data-[state=on]:bg-accent data-[state=on]:text-accent-foreground'
 const overallCondition = $derived(
   worstAllowanceCondition(visibleAllowances.map(({ allowance }) => effectiveAllowanceCondition(allowance))),
 )
@@ -413,10 +390,6 @@ function conditionLabel(condition: AllowanceCondition | undefined): string {
   }
 }
 
-function conditionVariant(condition: AllowanceCondition | undefined): BadgeVariant {
-  return condition === 'exhausted' ? 'destructive' : condition === 'tight' ? 'outline' : 'secondary'
-}
-
 function conditionTone(condition: AllowanceCondition | undefined): string {
   switch (condition) {
     case 'exhausted':
@@ -470,17 +443,63 @@ function forecastItemCopy(item: VisibleAllowance): string {
       })
 }
 
-function usedDisplay(allowance: Allowance): string {
-  return allowance.used_percent != null
-    ? formatAllowancePercent(allowance.used_percent, localeState.current)
-    : formatAllowanceAmount(allowance.used, localeState.current)
+function usedPercent(allowance: Allowance): number | undefined {
+  if (allowance.used_percent != null && Number.isFinite(allowance.used_percent)) return allowance.used_percent
+  const remaining = remainingPercent(allowance)
+  return remaining == null ? undefined : 100 - remaining
 }
 
-function remainingDisplay(allowance: Allowance): string {
-  const percent = remainingPercent(allowance)
-  return percent != null
-    ? formatAllowancePercent(percent, localeState.current)
-    : formatAllowanceAmount(allowance.remaining, localeState.current)
+// 账户余额本身就是剩余金额，没有可对照的上限，不随剩余/已用切换
+function modePercent(allowance: Allowance): number | undefined {
+  if (allowance.kind === 'balance') return undefined
+  return valueMode === 'used' ? usedPercent(allowance) : remainingPercent(allowance)
+}
+
+function valueDisplay(allowance: Allowance): string {
+  const percent = modePercent(allowance)
+  if (percent != null) return formatAllowancePercent(percent, localeState.current)
+  const amount = allowance.kind === 'balance' || valueMode === 'remaining' ? allowance.remaining : allowance.used
+  return formatAllowanceAmount(amount, localeState.current)
+}
+
+function meterToneClass(condition: AllowanceCondition | undefined): string {
+  switch (condition) {
+    case 'exhausted':
+      return '[&_[data-slot=progress-indicator]]:bg-destructive'
+    case 'tight':
+      return '[&_[data-slot=progress-indicator]]:bg-warning'
+    default:
+      return ''
+  }
+}
+
+function conditionTextClass(condition: AllowanceCondition | undefined): string {
+  return condition === 'exhausted' ? 'text-destructive' : condition === 'tight' ? 'text-warning' : ''
+}
+
+function conditionStatusTone(condition: AllowanceCondition | undefined): 'healthy' | 'warning' | 'error' | 'neutral' {
+  switch (condition) {
+    case 'normal':
+      return 'healthy'
+    case 'tight':
+      return 'warning'
+    case 'exhausted':
+      return 'error'
+    default:
+      return 'neutral'
+  }
+}
+
+function resetDisplay(allowance: Allowance): string {
+  return allowance.reset_at != null ? formatLogTime(allowance.reset_at, localeState.current) : '–'
+}
+
+function triggeredSuspension(provider: VisibleProvider, allowance: Allowance): boolean {
+  return Boolean(provider.snapshot?.suspension?.triggered_keys.includes(allowance.key))
+}
+
+function providerExpandable(provider: VisibleProvider): boolean {
+  return provider.allowances.length > 0 || Boolean(provider.snapshot?.models.length)
 }
 
 function allowanceLabel(allowance: Allowance): string {
@@ -534,266 +553,318 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       return m.allowances_error_invalid_response()
   }
 }
-
-function allowanceRowId(item: AllowanceMatrixRow): string {
-  return item.allowance
-    ? `${item.provider.target.provider_id}:${item.allowance.key}`
-    : `${item.provider.target.provider_id}:pending`
-}
-
-function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
-  if (row.getIsGrouped()) return 'bg-muted/35 hover:bg-muted/35'
-  if (
-    row.original.allowance &&
-    row.original.provider.snapshot?.suspension?.triggered_keys.includes(row.original.allowance.key)
-  )
-    return 'bg-warning/10 hover:bg-warning/15'
-  return row.original.allowance ? 'hover:bg-muted/20' : 'hidden'
-}
 </script>
 
 <svelte:head><title>{m.allowances_title()} · Stravia</title></svelte:head>
 
-{#snippet allowanceProviderSummary(provider: VisibleProvider, allowances: Allowance[])}
+{#snippet conditionMark(condition: AllowanceCondition | undefined)}
+  {#if condition === 'tight'}
+    <span class="h-0.5 w-2.5 shrink-0 rounded-full bg-warning" aria-hidden="true"></span>
+    <span class="sr-only">{conditionLabel(condition)}</span>
+  {:else if condition === 'exhausted'}
+    <span class="size-1.5 shrink-0 rotate-45 rounded-[1px] bg-destructive" aria-hidden="true"></span>
+    <span class="sr-only">{conditionLabel(condition)}</span>
+  {/if}
+{/snippet}
+
+{#snippet allowanceValue(allowance: Allowance, className: string)}
+  {@const condition = effectiveAllowanceCondition(allowance)}
+  <span
+    class={cn(
+      'font-technical inline-flex items-center gap-1.5 whitespace-nowrap tabular-nums',
+      conditionTextClass(condition),
+      className,
+    )}>
+    {@render conditionMark(condition)}{valueDisplay(allowance)}
+  </span>
+{/snippet}
+
+{#snippet allowanceMeter(allowance: Allowance, className: string, decorative: boolean)}
+  {@const percent = modePercent(allowance)}
+  {#if percent != null}
+    <Progress
+      value={Math.min(100, Math.max(0, percent))}
+      class={cn('h-1.5 shrink-0', meterToneClass(effectiveAllowanceCondition(allowance)), className)}
+      aria-hidden={decorative ? 'true' : undefined}
+      aria-label={decorative ? undefined : `${allowanceLabel(allowance)} ${valueModeLabel}`} />
+  {/if}
+{/snippet}
+
+{#snippet allowanceChips(provider: VisibleProvider)}
+  {@const providerId = provider.target.provider_id}
+  {#if provider.pending}
+    <div class="flex min-h-10 items-center" data-testid={`allowance-loading-${providerId}`}>
+      <Spinner aria-label={m.allowances_loading()} />
+    </div>
+  {:else if provider.failed}
+    <div class="relative z-10 flex flex-wrap items-center gap-3" data-testid={`allowance-failed-${providerId}`}>
+      <span class="inline-flex items-center gap-1.5 text-sm text-destructive" role="status">
+        <span class="size-1.5 shrink-0 rotate-45 rounded-[1px] bg-destructive" aria-hidden="true"></span>
+        {m.allowances_load_failed()}
+      </span>
+      {#if provider.refetch}
+        <Button variant="outline" size="sm" onclick={provider.refetch}>{m.common_retry()}</Button>
+      {/if}
+    </div>
+  {:else if provider.allowances.length > 0}
+    <!-- auto-fill 轨道宽度只取决于容器宽度，使不同服务的同序条目纵向对齐 -->
+    <ul class="grid grid-cols-[repeat(auto-fill,minmax(6.5rem,1fr))] gap-x-4 gap-y-2">
+      {#each provider.allowances as allowance (allowance.key)}
+        <li class="grid min-w-0 gap-0.5">
+          <span class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+            <span class="truncate">{allowanceLabel(allowance)}</span>
+            {#if provider.snapshot?.guard_supported && allowance.guarded}
+              <ShieldCheckIcon class="size-3 shrink-0 text-primary" aria-hidden="true" />
+              <span class="sr-only">{m.allowances_guard_enabled()}</span>
+            {/if}
+          </span>
+          <span class="flex items-center gap-2">
+            {@render allowanceValue(allowance, 'text-sm')}
+            {@render allowanceMeter(allowance, 'w-auto min-w-6 max-w-14 flex-1', true)}
+          </span>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
+
+{#snippet providerAlerts(provider: VisibleProvider)}
   {@const snapshot = provider.snapshot}
   {@const suspension = snapshot ? snapshot.suspension : provider.target.suspension}
-  {@const presentation = snapshot ? statusPresentation(snapshot.status) : undefined}
-  {@const providerCondition = worstAllowanceCondition(allowances.map(effectiveAllowanceCondition))}
-  {@const emptyHint = providerEmptyHint(allowances)}
-  {@const refreshingProvider = refreshingProviderIds.has(provider.target.provider_id) || provider.refreshing}
-  <div class="min-w-0">
-    <div class="flex flex-wrap items-center gap-2">
-      <h3 class="font-semibold">{provider.target.provider_name}</h3>
-      {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
-      {#if providerCondition}<Badge variant={conditionVariant(providerCondition)}
-          >{conditionLabel(providerCondition)}</Badge
-        >{/if}
-      {#if snapshot?.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
-      {#if emptyHint}<span class="text-xs text-muted-foreground">{emptyHint}</span>{/if}
-    </div>
-    <p class="font-technical mt-1 text-xs text-muted-foreground">
-      {provider.target.catalog_provider_id} / {provider.target.channel}
-    </p>
-    {#if provider.credentialInvalid}
-      <Alert.Root
-        class="mt-1.5"
-        variant={snapshot?.status === 'stale' ? 'warning' : 'destructive'}
-        role="status"
-        data-testid={`allowance-credential-invalid-${provider.target.provider_id}`}>
-        <Alert.Description>
-          {#if snapshot?.status === 'stale'}{m.allowances_stale_message()}
-          {/if}
-          {m.allowances_credential_invalid()}
-          <Button
-            variant="link"
-            size="sm"
-            href={`/providers/${encodeURIComponent(provider.target.provider_id)}?view=connection`}>
-            {m.allowances_manage_providers()}
-          </Button>
-        </Alert.Description>
-      </Alert.Root>
-    {:else if snapshot?.error}
-      <Alert.Root class="mt-1.5" variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
-        ><Alert.Description
-          >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
-            snapshot.error.category,
-          )}</Alert.Description
-        ></Alert.Root>
-    {/if}
-    {#if suspension}
-      <div class="mt-2"><AllowanceSuspensionBanner {suspension} /></div>
-    {/if}
-    {#if snapshot?.missing_guarded_keys?.length}
-      <Alert.Root class="mt-2" variant="warning">
-        <Alert.Title>{m.allowances_missing_guards()}</Alert.Title>
-        <Alert.Description>
-          {#each snapshot.missing_guarded_keys as key (key)}
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-technical break-all">{key}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
-                onclick={() => toggleGuard(snapshot, key, false)}>{m.allowances_remove_guard({ key })}</Button>
-            </div>
-          {/each}
-        </Alert.Description>
-      </Alert.Root>
-    {/if}
-    {#if guardErrors.has(provider.target.provider_id)}
-      <Alert.Root class="mt-2" variant="destructive"
-        ><Alert.Description>{guardErrors.get(provider.target.provider_id)}</Alert.Description></Alert.Root>
-    {/if}
-    {#if snapshot && snapshot.models.length > 0}
-      <Collapsible.Root class="mt-1.5">
-        <Collapsible.Trigger
-          class="inline-flex min-h-10 items-center gap-1"
-          aria-label={m.allowances_show_model_allowances({ provider: provider.target.provider_name })}>
-          {m.allowances_model_allowances()}<ChevronDownIcon class="size-3.5" />
-        </Collapsible.Trigger>
-        <Collapsible.Content class="mt-3 max-w-2xl">{@render modelRows(snapshot.models)}</Collapsible.Content>
-      </Collapsible.Root>
-    {/if}
-  </div>
-  <Button
-    size="icon"
-    class="size-10"
-    variant="ghost"
-    onclick={() => refreshProvider(provider)}
-    disabled={provider.credentialInvalid ||
-      providersQuery.isPending ||
-      refreshingProvider ||
-      refreshingAll ||
-      savingGuardIds.has(provider.target.provider_id)}
-    aria-label={m.allowances_refresh_provider({ provider: provider.target.provider_name })}>
-    {#if refreshingProvider}<Spinner
-        data-icon="inline-start"
-        aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
-  </Button>
-{/snippet}
-
-{#snippet providerPendingBlock(testId: string)}
-  <div class="flex items-center justify-center border-t px-3 py-6" data-testid={testId}>
-    <Spinner aria-label={m.allowances_loading()} />
-  </div>
-{/snippet}
-
-{#snippet providerFailedBlock(provider: VisibleProvider, testId: string)}
-  <div class="border-t px-3 py-3" data-testid={testId}>
-    <Alert.Root variant="destructive" role="status"
-      ><Alert.Description class="flex flex-wrap items-center justify-between gap-3"
-        >{m.allowances_load_failed()}{#if provider.refetch}<Button
-            variant="outline"
-            size="sm"
-            onclick={provider.refetch}>{m.common_retry()}</Button
-          >{/if}</Alert.Description
-      ></Alert.Root>
-  </div>
-{/snippet}
-
-{#snippet allowanceGroupRow(row: DataTableRow<AllowanceMatrixRow>)}
-  {@const leaves = row.getLeafRows()}
-  {@const provider = leaves[0]?.original.provider}
-  {#if provider}
-    {@const allowances = leaves.flatMap(({ original }) => (original.allowance ? [original.allowance] : []))}
-    <div
-      class="flex min-h-14 items-center justify-between gap-3 px-3 py-2"
-      data-testid={`allowance-provider-${provider.target.provider_id}`}>
-      {@render allowanceProviderSummary(provider, allowances)}
-    </div>
-    {#if provider.pending}
-      {@render providerPendingBlock(`allowance-loading-${provider.target.provider_id}`)}
-    {:else if provider.failed}
-      {@render providerFailedBlock(provider, `allowance-failed-${provider.target.provider_id}`)}
-    {/if}
-  {/if}
-{/snippet}
-
-{#snippet allowanceItemCell(context: DataTableCellContext<AllowanceMatrixRow>)}
-  {@const allowance = context.row.original.allowance}
-  {#if allowance}
-    <div class="flex min-w-0 items-center gap-2">
-      <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"></span>
-      <span class="truncate font-medium">{allowanceLabel(allowance)}</span>
-      {#if context.row.original.provider.snapshot?.suspension?.triggered_keys.includes(allowance.key)}
-        <Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>
-      {/if}
-      {@render guardControl(context.row.original.provider.snapshot, allowance)}
-    </div>
-  {/if}
-{/snippet}
-
-{#snippet allowanceUsedCell(context: DataTableCellContext<AllowanceMatrixRow>)}
-  {@const allowance = context.row.original.allowance}
-  {#if allowance}
-    {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
-    <span class="font-technical tabular-nums">{usedDisplay(allowance)}</span>
-    <Progress
-      value={percent ?? null}
-      class="mt-1.5 h-1"
-      aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} />
-  {/if}
-{/snippet}
-
-{#snippet allowanceRemainingCell(context: DataTableCellContext<AllowanceMatrixRow>)}
-  {@const allowance = context.row.original.allowance}
-  {#if allowance}
-    {@const condition = effectiveAllowanceCondition(allowance)}
-    <div class="flex min-w-0 items-center gap-2">
-      {#if condition}<span
-          class={[
-            'size-1.5 shrink-0 rounded-full',
-            condition === 'exhausted' ? 'bg-destructive' : condition === 'tight' ? 'bg-warning' : 'bg-success',
-          ]}></span
-        >{/if}
-      <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
-    </div>
-  {/if}
-{/snippet}
-
-{#snippet allowanceResetCell(context: DataTableCellContext<AllowanceMatrixRow>)}
-  {@const allowance = context.row.original.allowance}
-  {#if allowance}
-    <span class="font-technical text-muted-foreground tabular-nums">
-      {allowance.reset_at != null ? formatLogTime(allowance.reset_at, localeState.current) : '–'}
-    </span>
-  {/if}
-{/snippet}
-
-{#snippet guardControl(snapshot: ProviderAllowanceSnapshot | undefined, allowance: Allowance)}
-  {#if snapshot?.guard_supported}
-    <Switch
-      bind:checked={
-        () => allowance.guarded,
-        (checked: boolean) => {
-          void toggleGuard(snapshot, allowance.key, checked)
-        }
-      }
-      disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
-      aria-label={m.allowances_guard_item({ item: allowanceLabel(allowance) })} />
-  {/if}
-{/snippet}
-
-{#snippet mobileAllowanceRow(allowance: Allowance, snapshot: ProviderAllowanceSnapshot | undefined)}
-  {@const condition = effectiveAllowanceCondition(allowance)}
-  {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
-  <div
-    class={[
-      'border-t ps-6 pe-3 py-2.5',
-      snapshot?.suspension?.triggered_keys.includes(allowance.key) && 'bg-warning/10',
-    ]}>
-    <div class="flex min-w-0 items-start justify-between gap-3">
-      <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"></span>
-        <span class="min-w-0 break-words font-medium">{allowanceLabel(allowance)}</span>
-        {#if snapshot?.suspension?.triggered_keys.includes(allowance.key)}
-          <Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>
+  {#if provider.credentialInvalid}
+    <Alert.Root
+      variant={snapshot?.status === 'stale' ? 'warning' : 'destructive'}
+      role="status"
+      data-testid={`allowance-credential-invalid-${provider.target.provider_id}`}>
+      <Alert.Description>
+        {#if snapshot?.status === 'stale'}{m.allowances_stale_message()}
         {/if}
-        {@render guardControl(snapshot, allowance)}
+        {m.allowances_credential_invalid()}
+        <Button
+          variant="link"
+          size="sm"
+          href={`/providers/${encodeURIComponent(provider.target.provider_id)}?view=connection`}>
+          {m.allowances_manage_providers()}
+        </Button>
+      </Alert.Description>
+    </Alert.Root>
+  {:else if snapshot?.error}
+    <Alert.Root variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
+      ><Alert.Description
+        >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
+          snapshot.error.category,
+        )}</Alert.Description
+      ></Alert.Root>
+  {/if}
+  {#if suspension}
+    <AllowanceSuspensionBanner {suspension} />
+  {/if}
+  {#if snapshot?.missing_guarded_keys?.length}
+    <Alert.Root variant="warning">
+      <Alert.Title>{m.allowances_missing_guards()}</Alert.Title>
+      <Alert.Description>
+        {#each snapshot.missing_guarded_keys as key (key)}
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-technical break-all">{key}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
+              onclick={() => toggleGuard(snapshot, key, false)}>{m.allowances_remove_guard({ key })}</Button>
+          </div>
+        {/each}
+      </Alert.Description>
+    </Alert.Root>
+  {/if}
+  {#if guardErrors.has(provider.target.provider_id)}
+    <Alert.Root variant="destructive"
+      ><Alert.Description>{guardErrors.get(provider.target.provider_id)}</Alert.Description></Alert.Root>
+  {/if}
+{/snippet}
+
+{#snippet guardControl(snapshot: ProviderAllowanceSnapshot, allowance: Allowance)}
+  <Switch
+    bind:checked={
+      () => allowance.guarded,
+      (checked: boolean) => {
+        void toggleGuard(snapshot, allowance.key, checked)
+      }
+    }
+    class="-my-1 -ms-1"
+    disabled={savingGuardIds.has(snapshot.provider_id) || refreshingProviderIds.has(snapshot.provider_id)}
+    aria-label={m.allowances_guard_item({ item: allowanceLabel(allowance) })} />
+{/snippet}
+
+{#snippet allowanceDetailTable(provider: VisibleProvider)}
+  {@const snapshot = provider.snapshot}
+  {@const guardSnapshot = snapshot?.guard_supported ? snapshot : undefined}
+  <Table.Root
+    class="table-fixed"
+    aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
+    <Table.Header>
+      <Table.Row class="hover:bg-transparent">
+        <Table.Head class="h-9 ps-0 text-xs font-medium text-muted-foreground">{m.allowances_item()}</Table.Head>
+        <Table.Head class="h-9 w-24 text-xs font-medium text-muted-foreground @md:w-44">{valueModeLabel}</Table.Head>
+        <Table.Head class="hidden h-9 w-44 text-xs font-medium text-muted-foreground @2xl:table-cell"
+          >{m.allowances_reset()}</Table.Head>
+        {#if guardSnapshot}
+          <Table.Head class="h-9 w-24 whitespace-normal text-xs font-medium text-muted-foreground @md:w-36">
+            <span class="inline-flex items-center gap-1">
+              {m.allowances_guard_column()}
+              <Tooltip.Root delayDuration={0}>
+                <Tooltip.Trigger
+                  type="button"
+                  class="relative -m-2.5 inline-flex size-10 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground"
+                  aria-label={m.allowances_guard_help_label()}>
+                  <CircleHelpIcon class="size-3.5" />
+                </Tooltip.Trigger>
+                <Tooltip.Content class="max-w-80 text-pretty">{m.allowances_guard_help()}</Tooltip.Content>
+              </Tooltip.Root>
+            </span>
+          </Table.Head>
+        {/if}
+      </Table.Row>
+    </Table.Header>
+    <Table.Body>
+      {#each provider.allowances as allowance (allowance.key)}
+        {@const triggered = triggeredSuspension(provider, allowance)}
+        <Table.Row class={cn('last:border-b-0 hover:bg-muted/30', triggered && 'bg-warning/10 hover:bg-warning/15')}>
+          <Table.Cell class="ps-0 py-1 whitespace-normal">
+            <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <span class="min-w-0 break-words font-medium">{allowanceLabel(allowance)}</span>
+              {#if triggered}<Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>{/if}
+            </div>
+            {#if allowance.reset_at != null}
+              <p class="font-technical mt-0.5 text-xs text-muted-foreground tabular-nums @2xl:hidden">
+                {m.allowances_reset_at({ time: resetDisplay(allowance) })}
+              </p>
+            {/if}
+          </Table.Cell>
+          <Table.Cell class="py-1">
+            <div class="flex min-w-0 items-center gap-3">
+              {@render allowanceValue(allowance, 'min-w-[4.5rem]')}
+              {@render allowanceMeter(allowance, 'hidden w-16 @md:block', false)}
+            </div>
+          </Table.Cell>
+          <Table.Cell class="font-technical hidden py-1 text-muted-foreground tabular-nums @2xl:table-cell">
+            {resetDisplay(allowance)}
+          </Table.Cell>
+          {#if guardSnapshot}
+            <Table.Cell class="py-1">{@render guardControl(guardSnapshot, allowance)}</Table.Cell>
+          {/if}
+        </Table.Row>
+      {/each}
+    </Table.Body>
+  </Table.Root>
+{/snippet}
+
+{#snippet providerRow(provider: VisibleProvider)}
+  {@const providerId = provider.target.provider_id}
+  {@const snapshot = provider.snapshot}
+  {@const suspension = snapshot ? snapshot.suspension : provider.target.suspension}
+  {@const presentation = snapshot && snapshot.status !== 'fresh' ? statusPresentation(snapshot.status) : undefined}
+  {@const providerCondition = worstAllowanceCondition(provider.allowances.map(effectiveAllowanceCondition))}
+  {@const emptyHint = providerEmptyHint(provider.allowances)}
+  {@const refreshingProvider = refreshingProviderIds.has(providerId) || provider.refreshing}
+  {@const expandable = providerExpandable(provider)}
+  {@const expanded = expandable && expandedProviderIds.has(providerId)}
+  {@const hasAlerts =
+    provider.credentialInvalid ||
+    Boolean(snapshot?.error) ||
+    Boolean(suspension) ||
+    Boolean(snapshot?.missing_guarded_keys?.length) ||
+    guardErrors.has(providerId)}
+  <li class="@container border-b last:border-b-0" data-testid={`allowance-provider-${providerId}`}>
+    <Collapsible.Root open={expanded} onOpenChange={(open: boolean) => setProviderExpanded(providerId, open)}>
+      <div
+        class={cn(
+          'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-3 py-2.5 @3xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
+          expandable && 'transition-colors duration-[140ms] hover:bg-muted/30',
+          expanded && 'bg-muted/20',
+        )}>
+        <div class="flex min-w-0 items-start gap-2">
+          {#if expandable}
+            <ChevronRightIcon
+              class={cn(
+                'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
+                expanded && 'rotate-90',
+              )}
+              aria-hidden="true" />
+          {:else}
+            <span class="size-4 shrink-0" aria-hidden="true"></span>
+          {/if}
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <h3 class="min-w-0 font-semibold break-words">
+                {#if expandable}
+                  <!-- 伸展命中区让整行可点击展开；行内其他控件以 z-10 浮于其上 -->
+                  <Collapsible.Trigger
+                    class="cursor-pointer rounded-sm text-start after:absolute after:inset-0 after:content-['']"
+                    aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
+                    {provider.target.provider_name}
+                  </Collapsible.Trigger>
+                {:else}
+                  {provider.target.provider_name}
+                {/if}
+              </h3>
+              {#if providerCondition}
+                <StatusIndicator
+                  compact
+                  class="text-xs"
+                  label={conditionLabel(providerCondition)}
+                  tone={conditionStatusTone(providerCondition)} />
+              {/if}
+              {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
+              {#if snapshot?.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
+            </div>
+            <p class="font-technical mt-0.5 text-xs break-all text-muted-foreground">
+              {provider.target.catalog_provider_id} / {provider.target.channel}
+            </p>
+            {#if emptyHint}<p class="mt-0.5 text-xs text-muted-foreground">{emptyHint}</p>{/if}
+          </div>
+        </div>
+        <div class="col-span-2 ps-6 @3xl:col-span-1 @3xl:col-start-2 @3xl:row-start-1 @3xl:ps-0">
+          {@render allowanceChips(provider)}
+        </div>
+        <Button
+          size="icon"
+          class="relative z-10 col-start-2 row-start-1 size-10 @3xl:col-start-3"
+          variant="ghost"
+          onclick={() => refreshProvider(provider)}
+          disabled={provider.credentialInvalid ||
+            providersQuery.isPending ||
+            refreshingProvider ||
+            refreshingAll ||
+            savingGuardIds.has(providerId)}
+          aria-label={m.allowances_refresh_provider({ provider: provider.target.provider_name })}>
+          {#if refreshingProvider}<Spinner
+              data-icon="inline-start"
+              aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
+        </Button>
       </div>
-      <div class="flex shrink-0 items-center gap-2">
-        {#if condition}<span
-            class={[
-              'size-1.5 rounded-full',
-              condition === 'exhausted' ? 'bg-destructive' : condition === 'tight' ? 'bg-warning' : 'bg-success',
-            ]}></span
-          >{/if}
-        <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
-      </div>
-    </div>
-    <div class="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-3 text-xs text-muted-foreground">
-      <span class="font-technical tabular-nums">{m.allowances_used()} {usedDisplay(allowance)}</span>
-      <span class="font-technical truncate text-right tabular-nums">
-        {allowance.reset_at != null
-          ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) })
-          : '–'}
-      </span>
-    </div>
-    <Progress
-      value={percent ?? null}
-      class="mt-2 h-1"
-      aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} />
-  </div>
+      {#if hasAlerts}
+        <div class="grid gap-2 px-3 pb-3 @md:ps-9">{@render providerAlerts(provider)}</div>
+      {/if}
+      <!-- Collapsible.Content 收起时仍保留隐藏 DOM；只在展开时渲染详情，避免每行常驻一份明细与开关 -->
+      {#if expanded}
+        <Collapsible.Content class="border-t bg-muted/10 px-3 pb-2 @md:ps-9">
+          {#if provider.allowances.length > 0}
+            {@render allowanceDetailTable(provider)}
+          {/if}
+          {#if snapshot && snapshot.models.length > 0}
+            <Collapsible.Root class="mt-1">
+              <Collapsible.Trigger
+                class="inline-flex min-h-10 items-center gap-1 text-sm font-medium"
+                aria-label={m.allowances_show_model_allowances({ provider: provider.target.provider_name })}>
+                {m.allowances_model_allowances()}<ChevronDownIcon class="size-3.5" />
+              </Collapsible.Trigger>
+              <Collapsible.Content class="mt-2 max-w-2xl">{@render modelRows(snapshot.models)}</Collapsible.Content>
+            </Collapsible.Root>
+          {/if}
+        </Collapsible.Content>
+      {/if}
+    </Collapsible.Root>
+  </li>
 {/snippet}
 
 {#snippet compactAllowanceRows(allowances: Allowance[])}
@@ -801,11 +872,9 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     {#each allowances as allowance (allowance.key)}
       <div class="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto_auto]">
         <span class="font-medium">{allowanceLabel(allowance)}</span>
-        <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
+        {@render allowanceValue(allowance, '')}
         <span class="font-technical text-muted-foreground tabular-nums">
-          {allowance.reset_at != null
-            ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) })
-            : '–'}
+          {allowance.reset_at != null ? m.allowances_reset_at({ time: resetDisplay(allowance) }) : '–'}
         </span>
       </div>
     {/each}
@@ -969,50 +1038,32 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
     <div class="grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]">
       <Card.Root class="min-w-0 gap-0 overflow-hidden" size="sm">
-        <Card.Header class="border-b"
-          ><h2 class="text-base font-semibold">{m.allowances_matrix_title()}</h2></Card.Header>
+        <Card.Header class="items-center border-b">
+          <h2 class="text-base font-semibold">{m.allowances_matrix_title()}</h2>
+          <Card.Action>
+            <ToggleGroup.Root
+              type="single"
+              variant="outline"
+              size="sm"
+              bind:value={() => valueMode, changeValueMode}
+              aria-label={m.allowances_value_mode()}>
+              <ToggleGroup.Item value="remaining" class={valueModeItemClass}
+                >{m.allowances_remaining()}</ToggleGroup.Item>
+              <ToggleGroup.Item value="used" class={valueModeItemClass}>{m.allowances_used()}</ToggleGroup.Item>
+            </ToggleGroup.Root>
+          </Card.Action>
+        </Card.Header>
         <Card.Content class="p-0">
           {#if visibleProviders.length === 0}
             <Empty.Root class="p-8"
               ><Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header
               ></Empty.Root>
           {:else}
-            <div class="route-desktop-table">
-              <DataTable
-                data={allowanceMatrixRows}
-                columns={allowanceColumns}
-                labels={tableLabels}
-                getRowId={allowanceRowId}
-                ariaLabel={m.allowances_matrix_title()}
-                size="small"
-                grouping={allowanceGrouping}
-                expanded={true}
-                columnVisibility={allowanceColumnVisibility}
-                groupRow={allowanceGroupRow}
-                rowClass={allowanceRowClass}
-                class="gap-0 [&_[data-slot=data-table-viewport]]:rounded-none [&_[data-slot=data-table-viewport]]:border-0"
-                tableClass="min-w-[46rem] [&_[data-slot=table-header]]:bg-muted/20" />
-            </div>
-            <div class="route-mobile-list">
+            <ul aria-label={m.allowances_matrix_title()}>
               {#each visibleProviders as provider (provider.target.provider_id)}
-                <section class="border-b last:border-b-0">
-                  <div
-                    class="flex min-h-14 items-center justify-between gap-3 bg-muted/35 px-3 py-2.5"
-                    data-testid={`allowance-mobile-provider-${provider.target.provider_id}`}>
-                    {@render allowanceProviderSummary(provider, provider.allowances)}
-                  </div>
-                  {#if provider.pending}
-                    {@render providerPendingBlock(`allowance-loading-mobile-${provider.target.provider_id}`)}
-                  {:else if provider.failed}
-                    {@render providerFailedBlock(provider, `allowance-failed-mobile-${provider.target.provider_id}`)}
-                  {:else}
-                    {#each provider.allowances as allowance (allowance.key)}
-                      {@render mobileAllowanceRow(allowance, provider.snapshot)}
-                    {/each}
-                  {/if}
-                </section>
+                {@render providerRow(provider)}
               {/each}
-            </div>
+            </ul>
           {/if}
         </Card.Content>
       </Card.Root>
