@@ -193,10 +193,21 @@ for (const locale of ['en-US', 'zh-CN']) {
       })
     })
     await page.goto('/allowances')
-    const matrix = page.getByRole('table')
-    const weekly = matrix.getByRole('switch', { name: locale === 'en-US' ? 'Guard Weekly window' : '守护 每周窗口' })
+    const weekly = page.getByRole('switch', {
+      name: locale === 'en-US' ? 'Pause this service when Weekly window is exhausted' : '每周窗口耗尽时暂停此服务',
+    })
+    // 暂停状态属于必须立即可见的异常，不能藏在默认折叠的详情里
     await expect(page.getByTestId('allowance-suspension').first()).toBeVisible()
-    await expect(matrix.getByText(locale === 'en-US' ? 'Pause trigger' : '暂停触发条目', { exact: true })).toBeVisible()
+    await expect(weekly).toHaveCount(0)
+    await page
+      .getByRole('button', { name: locale === 'en-US' ? 'Alpha account allowance details' : 'Alpha account 额度详情' })
+      .click()
+    const details = page.getByRole('table', {
+      name: locale === 'en-US' ? 'Alpha account allowance details' : 'Alpha account 额度详情',
+    })
+    await expect(
+      details.getByText(locale === 'en-US' ? 'Pause trigger' : '暂停触发条目', { exact: true }),
+    ).toBeVisible()
     await page
       .getByRole('button', {
         name: locale === 'en-US' ? 'Show model allowances for Alpha account' : '展开 Alpha account 的模型额度',
@@ -216,7 +227,7 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(weekly).toBeChecked()
     fail = false
     await page
-      .getByRole('button', { name: locale === 'en-US' ? 'Remove guard for old-window' : '取消 old-window 的守护' })
+      .getByRole('button', { name: locale === 'en-US' ? 'Stop pausing on old-window' : '不再因 old-window 暂停' })
       .first()
       .click()
     await expect.poll(() => submissions.at(-1)).toEqual(['weekly'])
@@ -326,7 +337,7 @@ test('pauses immediately when a snapshot reports persisted credential invalidati
   await refresh.click()
   await expect(refresh).toBeDisabled()
   await expect(provider.getByTestId(`allowance-credential-invalid-${freshSnapshot.provider_id}`)).toBeVisible()
-  await expect(page.getByRole('table').getByText(/44[.,]3/)).toBeVisible()
+  await expect(provider.getByText(/44[.,]3/)).toBeVisible()
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts.filter((path) => path.includes(staleSnapshot.provider_id)).length).toBe(1)
   expect(posts.filter((path) => path.includes(freshSnapshot.provider_id))).toHaveLength(1)
@@ -343,13 +354,12 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await page.goto('/allowances')
 
   await expect(page.getByRole('heading', { name: 'Allowance overview' })).toBeVisible()
-  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   await expect(matrix).toBeVisible()
   await expect(matrix.getByText('Alpha account')).toBeVisible()
   await expect(matrix.getByText('Beta account')).toBeVisible()
   await expect(matrix.getByText('Gamma account')).toBeVisible()
   await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
-  await expect(matrix.getByText('Fresh', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Stale', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Unavailable', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Exhausted', { exact: true }).first()).toBeVisible()
@@ -384,9 +394,10 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(forecastPanel).toContainText('exhausted at')
   await expect(forecastPanel).not.toContainText('may exhaust')
 
+  await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
   await matrix.getByLabel('Show model allowances for Alpha account').click()
   await matrix.getByText('gpt-5.3-codex-spark').click()
-  await expect(matrix.getByText(/Resets/)).toBeVisible()
+  await expect(matrix.getByText(/Resets/).last()).toBeVisible()
 
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
@@ -426,7 +437,7 @@ test('renders provider shells first and fills each group as its snapshot arrives
   })
   await page.goto('/allowances')
 
-  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
   // 组头先行渲染；快照到达前行区与聚合区各自转圈，不出全屏骨架
   await expect(matrix.getByText('Alpha account')).toBeVisible()
@@ -451,7 +462,8 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
     },
   ])
   await page.goto('/allowances')
-  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
+  await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
   await matrix.getByRole('button', { name: 'Show model allowances for Alpha account' }).click()
   const opus = matrix.getByRole('button', { name: 'gpt-5.3-codex-spark', exact: true })
   const sonnet = matrix.getByRole('button', { name: 'gpt-5.4', exact: true })
@@ -462,53 +474,77 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
   await expect(matrix.getByText('GPT-5.4 window')).toBeVisible()
   await sonnet.click()
   await expect(opus).toHaveAttribute('aria-expanded', 'true')
-  await expect(matrix.getByRole('progressbar', { name: 'Weekly window Utilization' })).toHaveAttribute(
+  await expect(matrix.getByRole('progressbar', { name: 'Weekly window Remaining' })).toHaveAttribute(
+    'aria-valuenow',
+    '44.375',
+  )
+  // 余额没有上限可对照，不画进度条，避免把“未知比例”渲染成 0%
+  await expect(matrix.getByRole('progressbar', { name: /Account balance/ })).toHaveCount(0)
+})
+
+test('switches every allowance value between remaining and used and remembers the choice', async ({ page }) => {
+  await mockAllowances(page, [freshSnapshot, staleSnapshot])
+  await page.goto('/allowances')
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
+  const alpha = matrix.getByTestId('allowance-provider-provider-alpha')
+  const beta = matrix.getByTestId('allowance-provider-provider-beta')
+  const remaining = page.getByRole('radio', { name: 'Remaining' })
+  const used = page.getByRole('radio', { name: 'Used' })
+  await expect(remaining).toHaveAttribute('aria-checked', 'true')
+  await expect(alpha).toContainText('44.38%')
+  await expect(alpha).toContainText('9.99 CNY')
+
+  await used.click()
+  await expect(used).toHaveAttribute('aria-checked', 'true')
+  await expect(alpha).toContainText('55.63%')
+  await expect(alpha).not.toContainText('44.38%')
+  await expect(beta).toContainText('111.25%')
+  // 账户余额本身就是剩余金额，不随显示方式变化
+  await expect(alpha).toContainText('9.99 CNY')
+  await alpha.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  const details = matrix.getByRole('table', { name: 'Alpha account allowance details' })
+  await expect(details.getByRole('columnheader', { name: 'Used', exact: true })).toBeVisible()
+  await expect(details.getByRole('progressbar', { name: 'Weekly window Used' })).toHaveAttribute(
     'aria-valuenow',
     '55.625',
   )
-  // 两条余额行（USD 耗尽 + CNY 充值）均无利用率，进度条都应为不确定态
-  await expect(matrix.getByRole('progressbar', { name: 'Account balance Utilization' })).toHaveCount(2)
-  for (const bar of await matrix.getByRole('progressbar', { name: 'Account balance Utilization' }).all()) {
-    await expect(bar).not.toHaveAttribute('aria-valuenow')
-  }
 
-  await page.setViewportSize({ width: 375, height: 760 })
-  await expect(
-    page.getByRole('progressbar', { name: 'Weekly window Utilization', includeHidden: false }),
-  ).toHaveAttribute('aria-valuenow', '55.625')
-  for (const bar of await page
-    .getByRole('progressbar', { name: 'Account balance Utilization', includeHidden: false })
-    .all()) {
-    await expect(bar).not.toHaveAttribute('aria-valuenow')
-  }
+  await used.click()
+  await expect(used).toHaveAttribute('aria-checked', 'true')
+  await page.reload()
+  await expect(page.getByRole('radio', { name: 'Used' })).toHaveAttribute('aria-checked', 'true')
+  await expect(matrix.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
 })
 
 test('keeps allowance details visible when refresh replaces provider snapshots', async ({ page }) => {
   const snapshots = structuredClone([freshSnapshot, staleSnapshot])
   const posts = await mockAllowances(page, snapshots)
   await page.goto('/allowances')
-  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
+  const details = matrix.getByRole('table', { name: 'Alpha account allowance details' })
   await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
   await expect(matrix.getByText('0 USD')).toBeVisible()
+  await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  await expect(details).toBeVisible()
 
   snapshots[0].allowances[1].remaining!.value = 12
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
-  await expect(matrix.getByText('12 USD')).toBeVisible()
-  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
+  await expect(details.getByText('12 USD')).toBeVisible()
+  await expect(details.getByText('Weekly window', { exact: true })).toBeVisible()
 
   snapshots[0].allowances[1].remaining!.value = 24
   await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
-  await expect(matrix.getByText('24 USD')).toBeVisible()
-  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
+  await expect(details.getByText('24 USD')).toBeVisible()
+  await expect(details.getByText('Weekly window', { exact: true })).toBeVisible()
 })
 
 test('does not treat an exhausted allowance without a reset date as exhausted', async ({ page }) => {
   await mockAllowances(page, [freshSnapshot])
   await page.goto('/allowances')
 
-  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const provider = matrix.getByTestId('allowance-provider-provider-alpha')
   const forecastPanel = page
     .locator('[data-slot="card"]')
@@ -538,8 +574,8 @@ test('search and all filters drive the same visible collection', async ({ page }
     .locator('[data-slot="card"]')
     .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
   await search.fill('alpha')
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Beta account')
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
   await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
@@ -549,8 +585,8 @@ test('search and all filters drive the same visible collection', async ({ page }
   await search.fill('')
 
   await selectFilter(page, 'Filter by service type', 'openai / codex')
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).toContainText('Beta account')
   await expect(timelinePanel).not.toContainText('Alpha account')
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
@@ -562,8 +598,8 @@ test('search and all filters drive the same visible collection', async ({ page }
 
   await selectFilter(page, 'Filter by service type', 'All')
   await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
   await expect(timelinePanel).toContainText('Beta account')
   await expect(timelinePanel).not.toContainText('Alpha account')
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
@@ -574,8 +610,8 @@ test('search and all filters drive the same visible collection', async ({ page }
 
   await selectFilter(page, 'Filter by allowance condition', 'All')
   await selectFilter(page, 'Filter by data freshness', 'Unavailable')
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Gamma account')).toBeVisible()
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Gamma account')).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Alpha account')
   await expect(timelinePanel).not.toContainText('Beta account')
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
@@ -603,7 +639,7 @@ test('renders the empty and request-error states with recovery guidance', async 
   await page.unroute('**/api/v1/provider-allowances**')
   await mockAllowances(page, [freshSnapshot])
   await page.getByRole('button', { name: 'Retry' }).click()
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
 })
 
@@ -615,14 +651,10 @@ test('keeps the matrix and side panels usable on a narrow Chinese viewport', asy
 
   await expect(page.getByRole('heading', { name: '额度总览' })).toBeVisible()
   await expect(page.getByRole('button', { name: '全部刷新' })).toBeVisible()
-  const matrixCard = page.locator('[data-slot="card"]').filter({ has: page.getByRole('heading', { name: '额度矩阵' }) })
-  const desktopMatrix = matrixCard.locator('.route-desktop-table')
-  const mobileMatrix = matrixCard.locator('.route-mobile-list')
-  await expect(desktopMatrix).toHaveCount(1)
-  await expect(desktopMatrix).toBeHidden()
-  await expect(mobileMatrix).toHaveCount(1)
-  await expect(mobileMatrix).toBeVisible()
-  await expect(mobileMatrix.getByText('Alpha account')).toBeVisible()
+  const matrix = page.getByRole('list', { name: '额度矩阵' })
+  await expect(matrix.getByText('Alpha account')).toBeVisible()
+  await matrix.getByRole('button', { name: 'Alpha account 额度详情' }).click()
+  await expect(matrix.getByRole('switch', { name: '每周窗口耗尽时暂停此服务' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '重置时间轴' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '预计耗尽' })).toBeVisible()
   const overflow = await page.evaluate(

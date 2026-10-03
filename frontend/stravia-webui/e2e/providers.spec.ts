@@ -855,7 +855,13 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     .getByRole('cell')
     .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
   await expect(precisionModalities.getByRole('term')).toHaveText(['Input', 'Output'])
-  await expect(precisionModalities.getByRole('definition')).toHaveText(['Image, PDF', 'Text'])
+  const [precisionInput, precisionOutput] = [0, 1].map((index) =>
+    precisionModalities.getByRole('definition').nth(index),
+  )
+  await expect(precisionInput.getByRole('listitem')).toHaveText(['Image', 'PDF'])
+  await expect(precisionOutput.getByRole('listitem')).toHaveText(['Text'])
+  await precisionInput.getByRole('listitem').first().hover()
+  await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Image')
   const unknownModalities = unknownRow
     .getByRole('cell')
     .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
@@ -1207,21 +1213,21 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect(extensionPreview).toContainText('"private"')
   await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
-  await expect(inputModalities).toContainText('text, image, binary')
+  await expect(inputModalities.getByRole('listitem')).toHaveText(['Text', 'Image', 'binary'])
   await inputModalities.click()
-  for (const value of ['text', 'image', 'audio', 'video', 'pdf', 'binary']) {
+  for (const value of ['Text', 'Image', 'Audio', 'Video', 'PDF', 'binary']) {
     await expect(page.getByRole('option', { name: value, exact: true })).toBeVisible()
   }
-  await page.getByRole('option', { name: 'audio', exact: true }).click()
+  await page.getByRole('option', { name: 'Audio', exact: true }).click()
   await page.keyboard.press('Escape')
 
   const outputModalities = page.locator('[data-modality-select="output"]')
-  await expect(outputModalities).toContainText('text')
+  await expect(outputModalities.getByRole('listitem')).toHaveText(['Text'])
   await outputModalities.click()
-  for (const value of ['text', 'image', 'audio', 'video', 'pdf']) {
+  for (const value of ['Text', 'Image', 'Audio', 'Video', 'PDF']) {
     await expect(page.getByRole('option', { name: value, exact: true })).toBeVisible()
   }
-  await page.getByRole('option', { name: 'image', exact: true }).click()
+  await page.getByRole('option', { name: 'Image', exact: true }).click()
   await page.keyboard.press('Escape')
   const effortValuesSelect = page.locator('[data-effort-values-select]')
   await expect(effortValuesSelect).toContainText('low, medium, high, future')

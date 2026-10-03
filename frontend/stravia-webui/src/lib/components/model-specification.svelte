@@ -1,8 +1,9 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { formatNumber } from '$lib/format'
-import { formatSpecificationTokens, specificationModality } from '$lib/model-specification'
+import { formatSpecificationTokens } from '$lib/model-specification'
 import type { ModelSpecification } from '$lib/types'
+import ModalityIcons from '$lib/components/modality-icons.svelte'
 
 interface Props {
   specification: ModelSpecification
@@ -11,11 +12,6 @@ interface Props {
 let { specification, density = 'compact' }: Props = $props()
 const context = $derived(specification.limit?.context)
 const efforts = $derived(specification.reasoning_efforts ?? [])
-function modalityText(values: string[] | undefined): string {
-  return values?.length
-    ? values.map((value) => specificationModality(value).label()).join(', ')
-    : m.model_specification_not_registered()
-}
 </script>
 
 {#if density === 'detail'}
@@ -37,11 +33,11 @@ function modalityText(values: string[] | undefined): string {
       </div>
       <div>
         <dt class="text-xs text-muted-foreground">{m.model_specification_input_modalities()}</dt>
-        <dd class="mt-1 text-sm">{modalityText(specification.modalities?.input)}</dd>
+        <dd class="mt-1 text-sm"><ModalityIcons values={specification.modalities?.input} /></dd>
       </div>
       <div>
         <dt class="text-xs text-muted-foreground">{m.model_specification_output_modalities()}</dt>
-        <dd class="mt-1 text-sm">{modalityText(specification.modalities?.output)}</dd>
+        <dd class="mt-1 text-sm"><ModalityIcons values={specification.modalities?.output} /></dd>
       </div>
     </dl>
   </section>
@@ -53,12 +49,12 @@ function modalityText(values: string[] | undefined): string {
     <span class="font-technical"
       >{m.model_specification_context_short()}
       {context == null ? m.model_specification_not_registered() : formatSpecificationTokens(context)}</span>
-    <span
+    <span class="inline-flex items-center gap-1"
       ><span class="text-muted-foreground">{m.model_specification_input()}</span>
-      {modalityText(specification.modalities?.input)}</span>
-    <span
+      <ModalityIcons values={specification.modalities?.input} /></span>
+    <span class="inline-flex items-center gap-1"
       ><span class="text-muted-foreground">{m.model_specification_output()}</span>
-      {modalityText(specification.modalities?.output)}</span>
+      <ModalityIcons values={specification.modalities?.output} /></span>
     {#if density !== 'target'}
       <span class="break-words"
         ><span class="text-muted-foreground">{m.model_specification_reasoning_efforts()}</span>

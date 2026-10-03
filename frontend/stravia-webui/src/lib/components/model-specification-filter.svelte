@@ -96,7 +96,10 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
               checked={value[key].includes(modality.key)}
               onCheckedChange={(checked) =>
                 onChange({ ...value, [key]: toggle(value[key], modality.key, checked === true) })} />
-            <Field.FieldLabel for={`${id}-${key}-${modality.key}`}>{modality.label()}</Field.FieldLabel>
+            <Field.FieldLabel for={`${id}-${key}-${modality.key}`} class="gap-1.5"
+              ><modality.icon
+                class="size-3.5 shrink-0 text-muted-foreground"
+                aria-hidden="true" />{modality.label()}</Field.FieldLabel>
           </Field.Field>
         {/each}
       </Field.FieldGroup>
