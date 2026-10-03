@@ -2462,7 +2462,7 @@ async fn run_vendor_operation(
     let send_admission = crate::rpm::SendAdmission {
         admission: gateway.rpm_admission.clone(),
         root: prepared.root_request.clone(),
-        key: crate::rpm::PoolKey::for_target(target),
+        key: crate::rpm::DestinationKey::for_target(target),
         cancellation: operation_cancellation.clone(),
         deadline: deadline.clone(),
         failure: prepared.send_failure.clone(),

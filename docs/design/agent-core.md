@@ -593,7 +593,7 @@ Run 期间管理员修改 Definition config 不改变当前执行。Definition d
 
 ### 9.2 动态 Principal 检查
 
-每个隐藏 ModelTurn 动态检查 API key 状态、根逻辑 Model 当前可用性与固定 authorization policy。generic Agent 使用 `ClientModelBinding`；Media/Local Web Search 等产品能力使用 code-owned `CapabilityOwned` policy，不要求 key 的 `model_ids` 包含 hidden Model。每个 PlatformTool side effect 前继续复查适用授权；MCP 的 `mcp_access_enabled` 在 invocation 入口检查。隐藏 ModelTurn 复用外层 RootRequest，不重复计 API Key Root RPM；每次实际上游发送仍独立经过 RPM Pool。
+每个隐藏 ModelTurn 动态检查 API key 状态、根逻辑 Model 当前可用性与固定 authorization policy。generic Agent 使用 `ClientModelBinding`；Media/Local Web Search 等产品能力使用 code-owned `CapabilityOwned` policy，不要求 key 的 `model_ids` 包含 hidden Model。每个 PlatformTool side effect 前继续复查适用授权；MCP 的 `mcp_access_enabled` 在 invocation 入口检查。隐藏 ModelTurn 复用外层 RootRequest，不重复计 API Key Root RPM；每次实际上游发送仍独立经过目的地 RPM。
 
 任何检查失败立即终止 Run，不提交 Turn。这保持 `docs/adr/0005-client-credential-security-seam.md` 的现有不变量。
 

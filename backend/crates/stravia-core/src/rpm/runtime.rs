@@ -23,18 +23,15 @@ pub(crate) async fn scope_root_request<F: Future>(root: RootRequest, future: F) 
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PoolKey {
-    Destination(String, String),
-    Shared(String),
-}
+pub(crate) struct DestinationKey(String, String);
 
-impl PoolKey {
+impl DestinationKey {
     pub(crate) fn for_target(target: &crate::router::selector::SelectedTarget) -> Self {
         Self::for_destination(target.provider_id().as_str(), target.model().as_str())
     }
 
     fn for_destination(provider_id: &str, model: &str) -> Self {
-        Self::Destination(provider_id.to_owned(), model.to_owned())
+        Self(provider_id.to_owned(), model.to_owned())
     }
 }
 
@@ -72,9 +69,8 @@ pub(crate) struct TargetAdmission {
 #[derive(Default)]
 struct State {
     config: RpmConfig,
-    limits: HashMap<PoolKey, i32>,
-    destination_pools: HashMap<PoolKey, PoolKey>,
-    windows: HashMap<PoolKey, VecDeque<Instant>>,
+    limits: HashMap<DestinationKey, i32>,
+    windows: HashMap<DestinationKey, VecDeque<Instant>>,
     waiting_roots: usize,
     version: u64,
 }
@@ -144,13 +140,13 @@ impl TargetAdmission {
                 .candidates()
                 .iter()
                 .find(|target| crate::router::selected_target_key(target) == preferred)
-            && let Some(next) = Self::next_at(&mut state, &PoolKey::for_target(target), now)
+            && let Some(next) = Self::next_at(&mut state, &DestinationKey::for_target(target), now)
         {
             return Some((next, true));
         }
         let mut next = None;
         policy.retain(|target| {
-            if let Some(at) = Self::next_at(&mut state, &PoolKey::for_target(target), now) {
+            if let Some(at) = Self::next_at(&mut state, &DestinationKey::for_target(target), now) {
                 next = Some(next.map_or(at, |previous: Instant| previous.min(at)));
                 false
             } else {
@@ -167,36 +163,17 @@ impl TargetAdmission {
     pub(crate) fn configure(&self, config: RpmConfig) {
         let mut state = self.inner.lock();
         let mut limits = HashMap::new();
-        let mut destination_pools = HashMap::new();
         for destination in &config.destinations {
-            if let Some(pool_id) = &destination.rpm_pool_id {
-                destination_pools.insert(
-                    PoolKey::Destination(
-                        destination.provider_id.clone(),
-                        destination.model.clone(),
-                    ),
-                    PoolKey::Shared(pool_id.clone()),
-                );
-            }
             if let Some(limit) = destination.rpm_limit {
                 limits.insert(
-                    PoolKey::Destination(
-                        destination.provider_id.clone(),
-                        destination.model.clone(),
-                    ),
+                    DestinationKey(destination.provider_id.clone(), destination.model.clone()),
                     limit,
                 );
             }
         }
-        for pool in &config.pools {
-            if let Some(limit) = pool.rpm_limit {
-                limits.insert(PoolKey::Shared(pool.id.clone()), limit);
-            }
-        }
-        // 不限期间不记录历史；只有始终受限的池保留窗口，数值调整不返还发送额度。
+        // 不限期间不记录历史；只有始终受限的目的地保留窗口，数值调整不返还发送额度。
         state.windows.retain(|key, _| limits.contains_key(key));
         state.limits = limits;
-        state.destination_pools = destination_pools;
         state.config = config;
         state.version += 1;
         drop(state);
@@ -208,8 +185,7 @@ impl TargetAdmission {
         self.changed.notify_waiters();
     }
 
-    fn next_at(state: &mut State, key: &PoolKey, now: Instant) -> Option<Instant> {
-        let key = state.destination_pools.get(key).unwrap_or(key);
+    fn next_at(state: &mut State, key: &DestinationKey, now: Instant) -> Option<Instant> {
         let &limit = state.limits.get(key)?;
         let window = state.windows.get_mut(key)?;
         while window
@@ -229,11 +205,10 @@ impl TargetAdmission {
         self.inner.lock().version
     }
 
-    fn record_send(state: &mut State, key: &PoolKey, now: Instant) -> Result<(), Instant> {
+    fn record_send(state: &mut State, key: &DestinationKey, now: Instant) -> Result<(), Instant> {
         if let Some(at) = Self::next_at(state, key, now) {
             return Err(at);
         }
-        let key = state.destination_pools.get(key).unwrap_or(key);
         if state.limits.contains_key(key) {
             if let Some(window) = state.windows.get_mut(key) {
                 window.push_back(now);
@@ -373,12 +348,12 @@ enum SendDecision {
     Blocked(Instant),
 }
 
-/// 宿主 transport 在每次真实发送前调用；重试和复用连接不能绕过池额度。
+/// 宿主 transport 在每次真实发送前调用；重试和复用连接不能绕过目的地额度。
 #[derive(Clone)]
 pub(crate) struct SendAdmission {
     pub(crate) admission: TargetAdmission,
     pub(crate) root: RootRequest,
-    pub(crate) key: PoolKey,
+    pub(crate) key: DestinationKey,
     pub(crate) cancellation: CancellationToken,
     pub(crate) deadline: Deadline,
     pub(crate) failure: Arc<Mutex<Option<AdmissionError>>>,
@@ -407,7 +382,7 @@ pub(crate) struct SendEligibility {
 }
 
 impl SendEligibility {
-    async fn current_pool(&self) -> Result<PoolKey, AdmissionError> {
+    async fn current_destination(&self) -> Result<DestinationKey, AdmissionError> {
         use stravia_runtime_contract::model_turn::ModelTurnError;
         let rejected = || {
             AdmissionError::Rejected(ModelTurnError::new(
@@ -442,7 +417,8 @@ impl SendEligibility {
         access.map_err(|error| {
             AdmissionError::Rejected(ModelTurnError::new(error.stable_code(), error.message()))
         })?;
-        let pool = PoolKey::for_destination(target.provider_id().as_str(), target.model().as_str());
+        let destination =
+            DestinationKey::for_destination(target.provider_id().as_str(), target.model().as_str());
         drop(routes);
         let provider = self
             .storage
@@ -525,7 +501,7 @@ impl SendEligibility {
                 return Err(rejected());
             }
         }
-        Ok(pool)
+        Ok(destination)
     }
 }
 
@@ -558,7 +534,7 @@ impl SendAdmission {
             // during those reads invalidates both successful and rejected results.
             let version = self.admission.version();
             let current_key = match &self.eligibility {
-                Some(eligibility) => eligibility.current_pool().await,
+                Some(eligibility) => eligibility.current_destination().await,
                 None => Ok(self.key.clone()),
             };
             #[cfg(test)]
@@ -608,7 +584,7 @@ impl SendAdmission {
     fn commit_send(
         &self,
         version: u64,
-        current_key: Result<PoolKey, AdmissionError>,
+        current_key: Result<DestinationKey, AdmissionError>,
     ) -> Result<SendDecision, AdmissionError> {
         let mut state = self.admission.inner.lock();
         if state.version != version {
@@ -661,53 +637,48 @@ impl SendAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpm::{DestinationRpmLimit, RpmPool};
+    use crate::rpm::DestinationRpmLimit;
 
     #[test]
-    fn destination_rebinding_resolves_the_current_shared_window_under_lock() {
+    fn limit_reduction_retains_each_destination_window() {
         let admission = TargetAdmission::default();
-        let config = |pool: &str| RpmConfig {
+        let config = |limit| RpmConfig {
             destinations: ["a", "b"]
                 .into_iter()
                 .map(|provider| DestinationRpmLimit {
                     provider_id: provider.into(),
                     model: "model".into(),
-                    rpm_limit: None,
-                    rpm_pool_id: Some(pool.into()),
-                })
-                .collect(),
-            pools: ["old", "new"]
-                .into_iter()
-                .map(|id| RpmPool {
-                    id: id.into(),
-                    name: id.into(),
-                    rpm_limit: Some(1),
+                    rpm_limit: Some(limit),
                 })
                 .collect(),
             ..Default::default()
         };
-        let a = PoolKey::for_destination("a", "model");
-        let b = PoolKey::for_destination("b", "model");
+        let a = DestinationKey::for_destination("a", "model");
+        let b = DestinationKey::for_destination("b", "model");
         let now = Instant::now();
-        admission.configure(config("old"));
+        admission.configure(config(2));
         {
             let mut state = admission.inner.lock();
             TargetAdmission::record_send(&mut state, &a, now).unwrap();
-            assert_eq!(
-                TargetAdmission::record_send(&mut state, &b, now),
-                Err(now + WINDOW)
-            );
+            TargetAdmission::record_send(&mut state, &b, now).unwrap();
+            TargetAdmission::record_send(&mut state, &a, now + Duration::from_secs(1)).unwrap();
         }
-        admission.configure(config("new"));
+        admission.configure(config(1));
         {
             let mut state = admission.inner.lock();
-            TargetAdmission::record_send(&mut state, &b, now).unwrap();
             assert_eq!(
-                TargetAdmission::next_at(&mut state, &a, now),
+                TargetAdmission::next_at(&mut state, &a, now + Duration::from_secs(1)),
+                Some(now + Duration::from_secs(1) + WINDOW)
+            );
+            assert_eq!(
+                TargetAdmission::next_at(&mut state, &b, now),
                 Some(now + WINDOW)
             );
-            assert!(!state.windows.contains_key(&a));
-            assert!(!state.windows.contains_key(&b));
+            assert_eq!(
+                TargetAdmission::record_send(&mut state, &a, now + WINDOW),
+                Err(now + Duration::from_secs(1) + WINDOW)
+            );
+            TargetAdmission::record_send(&mut state, &b, now + WINDOW).unwrap();
         }
     }
 }

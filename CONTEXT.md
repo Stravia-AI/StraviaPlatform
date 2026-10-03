@@ -146,9 +146,9 @@ _避免使用_：Concurrency Lease、Session、Model Turn
 Target 是 Route 中一个明确绑定 Provider 与非空白 upstream model 的执行目的地；所有能力（包括完整搜索）都通过所选 Provider Model 校验资格。它不是只绑定连接的服务入口。
 _避免使用_：无模型 Target、把 Provider 连接等同于 Target
 
-## RPM Pool
+## Destination RPM
 
-RPM Pool 是共享上游请求频率额度的容量身份；成员属于 Provider 与 upstream model 组成的目的地，跨 Route 共享，由 `destinations[].rpm_pool_id` 显式归入共享池，Route Target 不保存池绑定。每次实际上游请求包括重试各计一次；显式共享池替代目的地自身额度，不双重扣额。Provider 详情模型目录只编辑成员关系与自身限额，Model services 列表统一编辑池名称与限额；池不是健康身份，成员不因此共享失败计数、冷却或凭据状态。
+Destination RPM 是同一 Provider 与 upstream model 组成的目的地在严格滑动 60 秒内可发送的上游请求数。同目的地跨 Route 共同计数，每次实际上游请求包括重试各计一次；不同目的地不共享额度。请求频率限制不是健康身份，不改变冷却、失败计数或凭据状态。
 _避免使用_：Target Health、Route、Session、并发池
 
 ## Hook

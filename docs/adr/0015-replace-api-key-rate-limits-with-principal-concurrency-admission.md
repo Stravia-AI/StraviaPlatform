@@ -4,9 +4,9 @@ status: superseded
 
 # Replace API-key rate limits with Principal concurrency admission
 
-> **已被取代。** 以下保留原决定的历史，不再描述当前行为。当前决定为 API Key Root RPM 与上游 RPM Pool，见[架构 §8.3–8.4](../design/architecture.md#83-代理请求鉴权与-rpm-准入流程)；冷却隔离见 [ADR-0034](0034-layer-route-target-selection.md)。
+> **已被取代。** 以下保留原决定的历史，不再描述当前行为。当前决定为 API Key Root RPM 与上游目的地 RPM，见[架构 §8.3–8.4](../design/architecture.md#83-代理请求鉴权与-rpm-准入流程)；冷却隔离见 [ADR-0034](0034-layer-route-target-selection.md)。
 >
-> 替代决定：API Key 使用 nullable `rpm_limit`，按客户端根请求执行严格滑动 60 秒准入，超限立即返回 429 与 `Retry-After`；同根重试、隐藏轮次与后台执行共享 RootRequest，而不持有并发 lease。每次实际上游发送另按默认目的地或显式共享 RPM Pool 计数；等待有累计预算与队列边界，不限制活跃流。配置持久化，窗口仅属于单实例且重启清空。SQLite/PostgreSQL `0009_rpm_admission` 删除旧字段，将所有新 `rpm_limit` 置为 `NULL`，不换算旧数值；管理员重新配置前不限。三态 patch 改用 `rpm_limit`；不保留任何并发限制。
+> 替代决定：API Key 使用 nullable `rpm_limit`，按客户端根请求执行严格滑动 60 秒准入，超限立即返回 429 与 `Retry-After`；同根重试、隐藏轮次与后台执行共享 RootRequest，而不持有并发 lease。每次实际上游发送另按 Provider/upstream-model 目的地计数，不同目的地不共享额度；等待有累计预算与队列边界，不限制活跃流。配置持久化，窗口仅属于单实例且重启清空。SQLite/PostgreSQL `0009_rpm_admission` 删除旧字段，将所有新 `rpm_limit` 置为 `NULL`，不换算旧数值；管理员重新配置前不限。三态 patch 改用 `rpm_limit`；不保留任何并发限制。共享池已由 `0013_remove_shared_rpm_pools` 删除，原池成员恢复不限，独立目的地限额保留。
 
 ## Historical decision
 

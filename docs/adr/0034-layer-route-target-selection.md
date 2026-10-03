@@ -16,9 +16,9 @@ Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；�
 
 ## Root-scoped cooldown attempts
 
-本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一次额外实际上游尝试。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，必须经过实际发送 RPM Pool、明确 Retry-After、授权、能力、禁用、Credential Invalid、deadline 和取消门禁；不放宽 Continuation 的执行状态不确定性或 Client Output Commit。
+本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一次额外实际上游尝试。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，必须经过实际发送目的地 RPM、明确 Retry-After、授权、能力、禁用、Credential Invalid、deadline 和取消门禁；不放宽 Continuation 的执行状态不确定性或 Client Output Commit。
 
-额外尝试只有完整成功且冷却世代仍匹配才能清零并恢复；HTTP 200、首 token 或部分输出不算恢复，旧世代迟到成功不得覆盖新冷却。健康相关上游失败沿既有分类和冷却规则处理，请求级错误与取消不改变健康状态也不遗留探测占用。普通冷却到期的独占半开探测继续有效，已在执行的流不因别根触发冷却被取消。RPM Pool 只共享容量，不合并成员健康身份；根累计等待及额度配置见[架构 §8.4](../design/architecture.md#84-rpm-pool-发送门禁与配置)。
+额外尝试只有完整成功且冷却世代仍匹配才能清零并恢复；HTTP 200、首 token 或部分输出不算恢复，旧世代迟到成功不得覆盖新冷却。健康相关上游失败沿既有分类和冷却规则处理，请求级错误与取消不改变健康状态也不遗留探测占用。普通冷却到期的独占半开探测继续有效，已在执行的流不因别根触发冷却被取消。目的地 RPM 不改变健康身份；根累计等待及额度配置见[架构 §8.4](../design/architecture.md#84-上游目的地-rpm-发送门禁与配置)。
 
 远端 Continuation 不存在属于请求级错误，不为取得恢复预算而增加共享健康失败。完整历史回放仍受原 Target Retry Budget 限制；预算为 0 时不回放，已执行的认证恢复占用同一预算，完整回放最多一次。宿主尚未发送请求的本地连接 miss 仍可免费回退；半开探测与冷却额外尝试不获得内部回放许可。
 

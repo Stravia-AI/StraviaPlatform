@@ -320,7 +320,7 @@ impl Gateway {
                     attempt_context.send_admission = Some(crate::rpm::SendAdmission {
                         admission: self.rpm_admission.clone(),
                         root: context.root_request.clone(),
-                        key: crate::rpm::PoolKey::for_target(&target),
+                        key: crate::rpm::DestinationKey::for_target(&target),
                         cancellation: context.cancellation.clone(),
                         deadline: context.deadline.clone(),
                         failure: std::sync::Arc::default(),

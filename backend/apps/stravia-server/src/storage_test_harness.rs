@@ -81,6 +81,56 @@ async fn main() -> anyhow::Result<()> {
                     .bind(&schema).fetch_one(&mut *connection).await?;
                 ensure!(old_columns == 0, "old concurrency column remains");
                 println!("rpm_migration_clears_old_limit=true");
+                for file in files.iter().filter(|path| {
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    name.as_ref() >= "0010" && name.as_ref() < "0013"
+                }) {
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(file)?))
+                        .execute(&mut *connection)
+                        .await?;
+                }
+                let config = serde_json::json!({
+                    "preferred_wait_ms": 987, "total_wait_ms": 1234, "queue_capacity": 7,
+                    "pools": [
+                        {"id": "limited", "name": "Limited", "rpm_limit": 9},
+                        {"id": "unlimited", "name": "Unlimited", "rpm_limit": null}
+                    ],
+                    "destinations": [
+                        {"provider_id": "p", "model": "a", "rpm_limit": null, "rpm_pool_id": "limited"},
+                        {"provider_id": "q", "model": "b", "rpm_limit": null, "rpm_pool_id": "limited"},
+                        {"provider_id": "p", "model": "c", "rpm_limit": null, "rpm_pool_id": "unlimited"},
+                        {"provider_id": "p", "model": "d", "rpm_limit": 3, "rpm_pool_id": null},
+                        {"provider_id": "p", "model": "e", "rpm_limit": 5}
+                    ]
+                });
+                sqlx::query("INSERT INTO settings (name, value) VALUES ('rpm_admission', $1)")
+                    .bind(config.to_string())
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(
+                    directory.join("0013_remove_shared_rpm_pools.sql"),
+                )?))
+                .execute(&mut *connection)
+                .await?;
+                let value: String =
+                    sqlx::query_scalar("SELECT value FROM settings WHERE name = 'rpm_admission'")
+                        .fetch_one(&mut *connection)
+                        .await?;
+                let expected = serde_json::json!({
+                    "preferred_wait_ms": 987, "total_wait_ms": 1234, "queue_capacity": 7,
+                    "destinations": [
+                        {"provider_id": "p", "model": "a", "rpm_limit": null},
+                        {"provider_id": "q", "model": "b", "rpm_limit": null},
+                        {"provider_id": "p", "model": "c", "rpm_limit": null},
+                        {"provider_id": "p", "model": "d", "rpm_limit": 3},
+                        {"provider_id": "p", "model": "e", "rpm_limit": 5}
+                    ]
+                });
+                ensure!(
+                    serde_json::from_str::<serde_json::Value>(&value)? == expected,
+                    "shared RPM removal changed destination limits or other settings"
+                );
+                println!("rpm_migration_preserves_destination_limits=true");
             }
             "inspect_observation" => {
                 let tables: i64 = sqlx::query_scalar(

@@ -1343,7 +1343,7 @@ mod rpm_admission {
     use stravia_vendor_sdk::AiErrorKind;
 
     use super::*;
-    use crate::rpm::{DestinationRpmLimit, RpmConfig, RpmPool};
+    use crate::rpm::{DestinationRpmLimit, RpmConfig};
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -1500,16 +1500,6 @@ mod rpm_admission {
             provider_id: provider.into(),
             model: "upstream-model".into(),
             rpm_limit: Some(limit),
-            rpm_pool_id: None,
-        }
-    }
-
-    fn pooled_destination(provider: &str, pool: &str) -> DestinationRpmLimit {
-        DestinationRpmLimit {
-            provider_id: provider.into(),
-            model: "upstream-model".into(),
-            rpm_limit: None,
-            rpm_pool_id: Some(pool.into()),
         }
     }
 
@@ -1556,7 +1546,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn published_rebinding_or_disable_invalidates_an_inflight_send_snapshot() {
+    async fn published_limit_reduction_or_disable_invalidates_an_inflight_send_snapshot() {
         for disable in [false, true] {
             let fixture = fixture(false).await;
             configure(
@@ -1564,12 +1554,10 @@ mod rpm_admission {
                 RpmConfig {
                     total_wait_ms: 0,
                     preferred_wait_ms: 0,
-                    destinations: vec![pooled_destination(&fixture.providers[1], "full")],
-                    pools: vec![RpmPool {
-                        id: "full".into(),
-                        name: "Full".into(),
-                        rpm_limit: Some(1),
-                    }],
+                    destinations: vec![
+                        destination(&fixture.providers[0], 2),
+                        destination(&fixture.providers[1], 1),
+                    ],
                     ..Default::default()
                 },
             )
@@ -1588,6 +1576,10 @@ mod rpm_admission {
                     if response.error.is_none() && response.output_texts().eq(["admitted"]))
             ));
             assert_eq!(fixture.calls[1].load(Ordering::SeqCst), 1);
+            execute(&fixture.gateway, &fixture.key, "rpm-a")
+                .await
+                .unwrap();
+            assert_eq!(fixture.calls[0].load(Ordering::SeqCst), 1);
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             *fixture.gateway.rpm_admission.validation_gate.lock() =
@@ -1607,13 +1599,8 @@ mod rpm_admission {
                     destinations: fixture
                         .providers
                         .iter()
-                        .map(|id| pooled_destination(id, "full"))
+                        .map(|id| destination(id, 1))
                         .collect(),
-                    pools: vec![RpmPool {
-                        id: "full".into(),
-                        name: "Full".into(),
-                        rpm_limit: Some(1),
-                    }],
                     ..Default::default()
                 },
             )
@@ -1639,7 +1626,7 @@ mod rpm_admission {
                     }),
                 "invalidated send unexpectedly completed successfully"
             );
-            assert_eq!(fixture.calls[0].load(Ordering::SeqCst), 0);
+            assert_eq!(fixture.calls[0].load(Ordering::SeqCst), 1);
         }
     }
 
@@ -1690,7 +1677,7 @@ mod rpm_admission {
         let second = competitors.remove(0).await.unwrap();
         assert_ne!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // Two legal pool slots do not grant a second single-attempt opportunity.
+        // Two legal destination slots do not grant a second single-attempt opportunity.
         assert!(admission.acquire().await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         pending.abort();
@@ -1726,7 +1713,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn rebinding_a_queued_destination_uses_its_current_pool() {
+    async fn removing_a_queued_destination_limit_releases_the_waiter() {
         let mut fixture = fixture(false).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1756,11 +1743,6 @@ mod rpm_admission {
         .await;
         let config = RpmConfig {
             destinations: vec![destination(&fixture.providers[0], 1)],
-            pools: vec![RpmPool {
-                id: "new-pool".into(),
-                name: "New capacity".into(),
-                rpm_limit: None,
-            }],
             ..Default::default()
         };
         configure(&fixture, config.clone()).await;
@@ -1778,7 +1760,7 @@ mod rpm_admission {
         configure(
             &fixture,
             RpmConfig {
-                destinations: vec![pooled_destination(&fixture.providers[0], "new-pool")],
+                destinations: Vec::new(),
                 ..config
             },
         )
@@ -1788,7 +1770,7 @@ mod rpm_admission {
             () = sent.notified() => {}
             () = fixture.gateway.rpm_admission.wait_started.notified() => {
                 queued.abort();
-                panic!("queued request retained its old exhausted pool after rebinding");
+                panic!("queued request retained its removed destination limit");
             }
         }
         let events = queued.await.unwrap().unwrap();
@@ -1861,7 +1843,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn transport_redirects_debit_each_real_send_in_the_destination_pool() {
+    async fn transport_redirects_debit_each_real_send_in_the_destination() {
         let mut fixture = fixture(false).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2309,7 +2291,7 @@ mod rpm_admission {
     }
 
     #[tokio::test]
-    async fn explicit_pool_shares_cross_provider_capacity_without_debiting_destination_windows() {
+    async fn different_providers_have_independent_destination_capacity() {
         let fixture = fixture(false).await;
         configure(
             &fixture,
@@ -2319,25 +2301,24 @@ mod rpm_admission {
                 destinations: fixture
                     .providers
                     .iter()
-                    .map(|id| pooled_destination(id, "shared"))
+                    .map(|id| destination(id, 1))
                     .collect(),
-                pools: vec![RpmPool {
-                    id: "shared".into(),
-                    name: "Shared account".into(),
-                    rpm_limit: Some(2),
-                }],
                 ..Default::default()
             },
         )
         .await;
         let _clock = Clock::pause();
+        for (model, provider) in ["rpm-a", "rpm-b"].into_iter().zip(&fixture.providers) {
+            set_thinking_targets(&fixture.gateway, model, vec![target(provider)]).await;
+        }
         execute(&fixture.gateway, &fixture.key, "rpm-a")
             .await
             .unwrap();
+        exhausted(execute(&fixture.gateway, &fixture.key, "rpm-a").await);
         execute(&fixture.gateway, &fixture.key, "rpm-b")
             .await
             .unwrap();
-        exhausted(execute(&fixture.gateway, &fixture.key, "rpm-a").await);
+        exhausted(execute(&fixture.gateway, &fixture.key, "rpm-b").await);
         configure(
             &fixture,
             RpmConfig {
@@ -2354,13 +2335,10 @@ mod rpm_admission {
         .await;
         for (model, provider) in ["rpm-a", "rpm-b"].into_iter().zip(&fixture.providers) {
             set_thinking_targets(&fixture.gateway, model, vec![target(provider)]).await;
-            execute(&fixture.gateway, &fixture.key, model)
-                .await
-                .unwrap();
             exhausted(execute(&fixture.gateway, &fixture.key, model).await);
         }
-        assert_eq!(fixture.calls[0].load(Ordering::SeqCst), 2);
-        assert_eq!(fixture.calls[1].load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.calls[0].load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.calls[1].load(Ordering::SeqCst), 1);
     }
 }
 
