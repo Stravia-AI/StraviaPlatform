@@ -177,10 +177,18 @@ def test_websocket_waiting_client_disconnects_without_losing_generation(
         if graceful:
             send_frame(connection, 8, struct.pack("!H", 1000))
 
+    def persisted_disconnect() -> dict[str, Any] | None:
+        detail = _detail(admin_env, waiting["id"])
+        if (detail["interaction"]["status"] == "disconnected"
+                and detail["runs"]
+                and detail["runs"][0]["status"] == "disconnected"
+                and detail["runs"][0]["finished_at"] is not None):
+            return detail
+        return None
+
     disconnected = _wait_for(
         "disconnected waiting-client Interaction",
-        lambda: (detail if (detail := _detail(admin_env, waiting["id"]))["interaction"]["status"]
-                 == "disconnected" else None),
+        persisted_disconnect,
     )
     assert disconnected["runs"][0]["terminal_reason"] == "client_disconnected"
     assert disconnected["runs"][0]["generation_node_id"] == generation
@@ -425,16 +433,26 @@ def test_failed_request_records_connection_refusal(admin_env: dict[str, Any]) ->
 @pytest.mark.admin
 def test_failed_request_records_upstream_timeout(admin_env: dict[str, Any]) -> None:
     model = "observation-delay-failed-timeout"
-    route_id, key = _create_route(admin_env, model, retry_budget=0, first_token_timeout_ms=30)
+    # The budget also covers local Wasm/provider preparation. A 30ms budget can
+    # expire before HTTP starts and correctly records a platform timeout instead.
+    # Allow preparation, but expire before the upstream's deliberate 3s delay.
+    timeout_ms = 1_000
+    route_id, key = _create_route(
+        admin_env, model, retry_budget=0, first_token_timeout_ms=timeout_ms,
+    )
     status, _ = _proxy(admin_env, key, model, [{"role": "user", "content": model}])
     assert status >= 500
+    assert any(
+        request.get("messages") == [{"role": "user", "content": model}]
+        for request in admin_env["mock_server"].captured_requests
+    ), "timeout must occur after the real upstream received this request"
     failure = _wait_for(
         "upstream first-token timeout",
         lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert "timeout" in failure["error"]["code"]
-    assert failure["duration_ms"] >= 30
+    assert failure["duration_ms"] >= timeout_ms
 
 
 @pytest.mark.e2e
@@ -1600,7 +1618,10 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
     interaction = _wait_for("debug Interaction", lambda: _route_interactions(admin_env, route_id))[0]
     detail = _wait_for(
         "finalized Debug trace",
-        lambda: (lambda value: value if value["runs"][0].get("trace")
+        lambda: (lambda value: value if value["interaction"]["status"] == "completed"
+            and value["runs"][0]["status"] == "completed"
+            and value["runs"][0]["finished_at"] is not None
+            and value["runs"][0].get("trace")
             and value["runs"][0]["trace"]["status"] == "complete" else None)(
             _detail(admin_env, interaction["id"])
         ),

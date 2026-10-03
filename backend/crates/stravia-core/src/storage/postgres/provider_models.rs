@@ -1306,7 +1306,7 @@ mod tests {
         };
         seed_provider_and_model(&storage, &pool).await;
         insert_route(&pool, "route-1", "route-a", true).await;
-        insert_target(&pool, "target-1", "route-1", None, 0, &[]).await;
+        insert_target(&pool, "target-1", "route-1", Some("other-model"), 0, &[]).await;
 
         // 此前没有关联 Target；并发编辑将已有 Target 绑定到该模型，
         // 同时手工覆盖一行。重导入必须等待并读取新的绑定集合。

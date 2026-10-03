@@ -39,7 +39,7 @@ def test_old_concurrency_limit_is_not_reinterpreted_as_rpm(
         pytest.skip("postgres backend requires DB_URL")
     schema = storage_runtime["make_isolated_schema"]("stravia_rpm_migration")
     action = storage_runtime["run_schema_action"]
-    args = {"work_dir": storage_runtime["work_dir"], "pg_url": pg_url, "schema": schema}
+    args = {"pg_url": pg_url, "schema": schema}
     action("create", **args)
     try:
         output = action("verify_rpm_migration", **args)
@@ -61,7 +61,7 @@ def test_rpm_pools_bindings_and_restart(
     database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_rpm")
-        storage_runtime["run_schema_action"]("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        storage_runtime["run_schema_action"]("create", pg_url=pg_url, schema=schema)
         database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
     mock_port = find_free_port()
     mock, _ = minimal_mock_provider(mock_port)
@@ -167,4 +167,4 @@ def test_rpm_pools_bindings_and_restart(
         mock.shutdown()
         mock.server_close()
         if schema is not None:
-            storage_runtime["run_schema_action"]("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+            storage_runtime["run_schema_action"]("drop", pg_url=pg_url, schema=schema)

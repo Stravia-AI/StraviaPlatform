@@ -12,12 +12,13 @@ import sys
 import threading
 import time
 import zipfile
+from http.client import HTTPConnection
 from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from urllib.request import HTTPHandler, HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 
 # A cold Gateway compiles all bundled Wasm components before becoming ready.
@@ -55,6 +56,27 @@ def is_port_free(port: int) -> bool:
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 
+class CompleteRequestHTTPConnection(HTTPConnection):
+    """Send in-memory fixture bodies with their headers in one socket write."""
+
+    def _send_output(self, message_body: Any = None, encode_chunked: bool = False) -> None:
+        if isinstance(message_body, bytes) and not encode_chunked:
+            # The stock client writes headers and body separately. An early
+            # authorization response can close before the second write and
+            # reset the socket on Windows instead of exposing its 401/403.
+            self._buffer.extend((b"", b""))
+            message = b"\r\n".join(self._buffer)
+            self._buffer.clear()
+            self.send(message + message_body)
+        else:
+            super()._send_output(message_body, encode_chunked)
+
+
+class _CompleteRequestHTTPHandler(HTTPHandler):
+    def http_open(self, request: Request) -> Any:
+        return self.do_open(CompleteRequestHTTPConnection, request)
+
+
 def _decode_body(raw: bytes) -> Any:
     text = raw.decode("utf-8", errors="replace")
     try:
@@ -79,7 +101,10 @@ def http_bytes(
 
     request = Request(url=url, method=method, data=data, headers=hdrs)
     try:
-        with urlopen(request, timeout=timeout) as response:
+        # Do not reuse urllib's process-global opener: module fixtures may
+        # temporarily replace proxy settings and then restore the environment.
+        opener = build_opener(ProxyHandler(), _CompleteRequestHTTPHandler())
+        with opener.open(request, timeout=timeout) as response:
             return (
                 int(response.status),
                 {key.lower(): value for key, value in response.headers.items()},
@@ -149,7 +174,6 @@ class WebSession:
     def __init__(self, origin: str) -> None:
         self.origin = origin.rstrip("/")
         self.cookies = CookieJar()
-        self._opener = build_opener(HTTPCookieProcessor(self.cookies))
 
     def request(
         self,
@@ -171,7 +195,10 @@ class WebSession:
         url = path if path.startswith(("http://", "https://")) else f"{self.origin}{path}"
         request = Request(url, method=method, data=data, headers=request_headers)
         try:
-            with self._opener.open(request, timeout=timeout) as response:
+            opener = build_opener(
+                ProxyHandler(), _CompleteRequestHTTPHandler(), HTTPCookieProcessor(self.cookies),
+            )
+            with opener.open(request, timeout=timeout) as response:
                 return int(response.status), _decode_body(response.read())
         except HTTPError as error:
             return int(error.code), _decode_body(error.read())
@@ -288,6 +315,7 @@ def start_stravia_server(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         env={**os.environ, **(env or {})},
         cwd=cwd,
     )

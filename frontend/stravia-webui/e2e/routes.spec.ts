@@ -338,7 +338,7 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
 
   await page.goto('/models')
   await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
-  const modelLink = page.locator('main').getByRole('link', { name: 'Team GPT', exact: true })
+  const modelLink = page.getByRole('main').getByRole('link', { name: 'Team GPT', exact: true })
   await expect(modelLink).toHaveAttribute('href', '/models/gpt-5.4')
   await modelLink.click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
@@ -753,11 +753,13 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
+  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toBeEnabled()
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GPT Unavailable/ })).toHaveCount(0)
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeEnabled()
   const dialogSpecification = page.getByRole('dialog').getByRole('group', { name: 'Model specification' })
   await expect(dialogSpecification).toContainText('1.05M')
   await expect(dialogSpecification).toContainText('Input')
@@ -824,6 +826,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider B' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled()
   await expect(page.getByRole('dialog').getByRole('group', { name: 'Model specification' })).toHaveCount(0)
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
@@ -844,6 +847,10 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect.poll(() => createAttempts).toBe(2)
   expect(createBody?.model_id).toBe('gpt-5.4')
   expect(createBody?.display_name).toBeNull()
+  expect(createBody?.targets).toEqual([
+    expect.objectContaining({ provider_id: 'provider-b', model: 'gpt-available' }),
+    expect.objectContaining({ provider_id: 'provider-a', model: 'gpt-available' }),
+  ])
   await expect.poll(() => disableBody?.is_enabled).toBe(false)
   await expect(page).toHaveURL(/\/models$/)
   await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)

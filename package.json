@@ -23,5 +23,8 @@
     "format:web": "bun run --filter stravia-webui format",
     "format:check:web": "bun run --filter stravia-webui format:check",
     "preview:web": "bun run --filter stravia-webui preview"
+  },
+  "patchedDependencies": {
+    "@wdio/tauri-service@1.4.0": "patches/@wdio%2Ftauri-service@1.4.0.patch"
   }
 }

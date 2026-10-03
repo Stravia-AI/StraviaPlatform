@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Stravia Agent infra — Standalone Server Binary"
+default-run = "stravia-server"
 
 [lints]
 workspace = true
@@ -12,6 +13,12 @@ workspace = true
 [features]
 default = ["embed-webui"]
 embed-webui = ["dep:rust-embed"]
+test-harness = ["dep:reqwest", "stravia-core/test-support"]
+
+[[bin]]
+name = "stravia-storage-test-harness"
+path = "src/storage_test_harness.rs"
+required-features = ["test-harness"]
 
 [dependencies]
 stravia-core = { workspace = true }
@@ -40,6 +47,7 @@ tower = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 rust-embed = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["json"], optional = true }
 
 # 仅对齐桌面已启用的共享依赖特性，避免切换入口重编译；不引入桌面运行时。
 bitflags = { workspace = true, features = ["serde"] }

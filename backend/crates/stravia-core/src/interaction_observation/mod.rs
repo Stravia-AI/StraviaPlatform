@@ -1805,11 +1805,7 @@ mod snapshot_tests {
     async fn final_observer_closes_missing_activity_without_stopping_live_background()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let run = test_run(&observation, "missing-finish", facts(Vec::new()));
         run.record(RunEvent::ModelTurnStarted {
@@ -1931,11 +1927,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn early_usage_updates_queries_without_advancing_event_sequence() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let run = test_run(&observation, "early-usage", facts(Vec::new()));
         run.record(RunEvent::ModelTurnStarted {
@@ -2002,11 +1994,7 @@ mod snapshot_tests {
     async fn unmergeable_text_overflow_preserves_lifecycle_and_parent_mapping() -> anyhow::Result<()>
     {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let parent = test_run(&observation, "protected-parent", facts(Vec::new()));
         parent.record(RunEvent::ModelTurnStarted {
@@ -2081,11 +2069,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn unavailable_generation_parent_is_an_explicit_observation_gap() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let mut continuation = facts(Vec::new());
         continuation.has_new_user = false;
@@ -2107,11 +2091,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn text_burst_preserves_admission_finish_and_continuation() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let admit = |id: &str, facts| {
             observation
@@ -2199,11 +2179,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn connection_close_and_tool_handoff_commute() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         for close_first in [false, true] {
             let connection = ClientConnectionObservation::new(observation.clone());
@@ -2279,11 +2255,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn committed_details_remain_readable_without_a_writer() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {
@@ -2633,11 +2605,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn input_preview_is_root_owned_and_recorded_once_per_run() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let at = writer::now();
         sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('historical','test','historical','initial','route','running',?,?,?)")
             .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
@@ -2867,11 +2835,7 @@ mod snapshot_tests {
     async fn exact_parent_grouping_uses_delivery_and_ingress_across_restart() -> anyhow::Result<()>
     {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let mut observation = test_observation(&pool, directory.path(), false).await;
         let delivered_at = writer::now() - 100_000;
         for restarted in [false, true] {
@@ -3084,11 +3048,7 @@ mod snapshot_tests {
     async fn clearing_gaps_preserves_active_discoveries_and_unknown_admissions()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let make_run = |id: &str| {
             observation
@@ -3212,11 +3172,7 @@ mod snapshot_tests {
     -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::AiItem;
         let directory = tempfile::tempdir()?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {

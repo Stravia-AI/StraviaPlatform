@@ -9,6 +9,7 @@
 /frontend/stravia-webui/.svelte-kit/
 /frontend/stravia-webui/.vite/
 /frontend/stravia-webui/dist/
+/frontend/stravia-webui/dist-desktop-e2e/
 /frontend/stravia-webui/dist-ssr/
 /package-lock.json
 /frontend/stravia-webui/*.local
@@ -28,6 +29,7 @@
 *.db-wal
 *.db-shm
 *.patch
+!/patches/*.patch
 /.stravia-dev/
 /.stravia-desktop-e2e/
 

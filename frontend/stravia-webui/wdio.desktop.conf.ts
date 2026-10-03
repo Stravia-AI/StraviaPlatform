@@ -6,7 +6,15 @@ import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const appBinaryPath = fileURLToPath(new URL('../../target/debug/stravia-desktop.exe', import.meta.url))
+import type { TauriCapabilities } from '@wdio/tauri-service'
+
+import { prepareDesktopDriver } from './e2e/desktop-driver'
+
+prepareDesktopDriver()
+
+const appBinaryPath =
+  process.env.STRAVIA_DESKTOP_E2E_BINARY ??
+  fileURLToPath(new URL('../../target/debug/stravia-desktop.exe', import.meta.url))
 const runRootPrefix = 'stravia-desktop-e2e-'
 const inheritedRunRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
 const inheritedRelativePath = inheritedRunRoot ? relative(resolve(tmpdir()), resolve(inheritedRunRoot)) : ''
@@ -48,9 +56,12 @@ try {
 }
 
 process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT = runRoot
+process.env.STRAVIA_DESKTOP_E2E_OWNS_RUN_ROOT = ownsRunRoot ? '1' : '0'
 process.env.CODEX_HOME = codexHome
 // 恢复窗口不依赖业务数据根；测试仍将 WebView2 配置隔离到可清理的临时目录。
 process.env.WEBVIEW2_USER_DATA_FOLDER = join(runRoot, 'webview')
+
+const capabilities: TauriCapabilities[] = [{ browserName: 'tauri', 'tauri:options': { application: appBinaryPath } }]
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
@@ -58,12 +69,14 @@ export const config: WebdriverIO.Config = {
   maxInstances: 1,
   services: [
     [
-      '@wdio/tauri-service',
+      fileURLToPath(new URL('./e2e/desktop-service.ts', import.meta.url)),
       {
         appBinaryPath,
         driverProvider: 'embedded',
         embeddedPort: 4445,
-        autoDownloadEdgeDriver: true,
+        // The private preparer owns downloads; the patched service still validates
+        // the official driver's version without invoking its global fallback.
+        autoDownloadEdgeDriver: false,
         autoInstallTauriDriver: true,
         captureBackendLogs: true,
         captureFrontendLogs: true,
@@ -71,7 +84,7 @@ export const config: WebdriverIO.Config = {
       },
     ],
   ],
-  capabilities: [{ browserName: 'tauri', 'tauri:options': { application: appBinaryPath } }],
+  capabilities,
   framework: 'mocha',
   reporters: ['spec'],
   logLevel: 'warn',
@@ -80,22 +93,4 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 1,
   // WDIO 在调用钩子前捕获 Mocha 的预算，钩子内部设置 timeout 无法覆盖该外层截止时间。
   mochaOpts: { ui: 'bdd', timeout: 180_000 },
-  onComplete: async () => {
-    // 继承的目录属于启动本次 WDIO 的进程；本进程仅清理自己创建的目录。
-    if (!ownsRunRoot) return
-    // WebView2 锁文件在应用退出后仍可能被 msedgewebview2.exe 短暂持有。
-    for (let attempt = 1; ; attempt++) {
-      try {
-        rmSync(runRoot, { recursive: true, force: true })
-        return
-      } catch (error) {
-        if (attempt >= 20) {
-          throw new Error(`stravia-desktop-e2e: 无法清理临时目录 ${runRoot}`, { cause: error })
-        }
-        const { promise: sleep, resolve: finishSleep } = Promise.withResolvers<void>()
-        setTimeout(finishSleep, 250)
-        await sleep
-      }
-    }
-  },
 }

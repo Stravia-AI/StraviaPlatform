@@ -21,6 +21,8 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
 
+#[path = "support/sqlite_fixture.rs"]
+mod sqlite_fixture;
 mod vendor_observation;
 use vendor_observation::{finished_observation, observation_bundle_records, wire_payload_bytes};
 
@@ -210,6 +212,7 @@ struct Connection {
 }
 
 async fn new_gateway(data_dir: PathBuf) -> anyhow::Result<Gateway> {
+    sqlite_fixture::seed_database(&data_dir).await?;
     Gateway::new(GatewayConfig {
         data_dir,
         ..GatewayConfig::default()
@@ -446,8 +449,20 @@ async fn invoke_stream(
 
 fn assert_success_with(response: &(StatusCode, serde_json::Value), expected: &str) {
     assert_eq!(response.0, StatusCode::OK, "proxy response: {}", response.1);
+    fn contains_text(value: &serde_json::Value, expected: &str) -> bool {
+        match value {
+            serde_json::Value::String(text) => text.contains(expected),
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| contains_text(value, expected))
+            }
+            serde_json::Value::Object(values) => {
+                values.values().any(|value| contains_text(value, expected))
+            }
+            _ => false,
+        }
+    }
     assert!(
-        response.1.to_string().contains(expected),
+        contains_text(&response.1, expected),
         "response did not contain {expected:?}: {}",
         response.1
     );

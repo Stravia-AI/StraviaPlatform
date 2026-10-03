@@ -24,4 +24,4 @@ tokio = { workspace = true, features = ["sync", "macros", "time"] }
 url = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

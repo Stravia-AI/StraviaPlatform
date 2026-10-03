@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['.svelte-kit', 'build', 'dist', 'src/lib/paraglide']),
+  globalIgnores(['.svelte-kit', 'build', 'dist', 'dist-desktop-e2e', 'src/lib/paraglide']),
   {
     files: ['**/*.{js,ts}'],
     extends: [js.configs.recommended],

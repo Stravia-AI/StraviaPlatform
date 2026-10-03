@@ -1,8 +1,9 @@
 {
   "identifier": "cn.stravia.agent-infra.desktop-e2e",
   "build": {
+    "frontendDist": "../../../frontend/stravia-webui/dist-desktop-e2e",
     "beforeBuildCommand": {
-      "script": "bun run build:web:desktop-e2e",
+      "script": "task build:web:desktop-e2e",
       "cwd": "../../../"
     },
     "features": ["desktop-e2e"]

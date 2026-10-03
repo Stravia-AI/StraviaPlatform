@@ -3592,7 +3592,7 @@ async fn held_publication_turn(
     ModelTurn,
     Arc<HeldPublicationStore>,
     Principal,
-    CancellationToken,
+    (CancellationToken, Deadline),
     i64,
 ) {
     let (directory, mut gateway, _, key) =
@@ -3637,6 +3637,7 @@ async fn held_publication_turn(
     }
     let mut related = request.clone();
     let cancellation = CancellationToken::new();
+    let deadline = Deadline::from_now(Duration::from_secs(300));
     let executor = LiveModelTurnExecutor::new(
         gateway.clone(),
         crate::router::continuation::ScriptedContinuation::miss(),
@@ -3675,10 +3676,7 @@ async fn held_publication_turn(
         .execute(
             TurnInput::new(principal.clone(), request)
                 .with_observer(observer)
-                .with_execution(
-                    cancellation.clone(),
-                    stravia_runtime_contract::Deadline::from_now(Duration::from_secs(300)),
-                ),
+                .with_execution(cancellation.clone(), deadline.clone()),
         )
         .await
         .expect("upstream completed before local publication");
@@ -3706,7 +3704,7 @@ async fn held_publication_turn(
         turn,
         store,
         principal,
-        cancellation,
+        (cancellation, deadline),
         pending_expiry,
     )
 }
@@ -3729,7 +3727,7 @@ async fn consume_until_publication(turn: &mut ModelTurn, store: &HeldPublication
 
 #[tokio::test]
 async fn canonical_completion_publishes_after_trailing_output_and_is_permanently_terminal() {
-    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
         held_publication_turn(false, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
@@ -3795,7 +3793,7 @@ async fn canonical_completion_reports_publication_failure_without_success_or_ups
 #[tokio::test]
 async fn canonical_completion_cancellation_interrupts_publication_without_revoking_committed_mappings()
  {
-    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     cancellation.cancel();
@@ -3821,17 +3819,19 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
 
 #[tokio::test]
 async fn canonical_completion_deadline_interrupts_publication() {
-    let (_directory, _gateway, mut turn, store, _, _, _) =
+    let (_directory, gateway, mut turn, store, _, (_, deadline), _) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(301)).await;
+    // Deadline 使用 std::time::Instant；虚拟推进 Tokio 会空转至真实五分钟。
+    // 发布已经进入阻塞点后，移动共享截止时间，验证独立唤醒和终态收口。
+    deadline.reset(Instant::now());
     assert_eq!(
         turn.output.next().await.unwrap().unwrap_err().code,
         "deadline_exceeded"
     );
     assert!(turn.output.next().await.is_none());
-    tokio::time::resume();
+    drop(turn);
+    assert_publication_observation(&gateway, "deadline_exceeded").await;
 }
 
 async fn assert_publication_observation(gateway: &Gateway, status: &str) {
@@ -3890,7 +3890,7 @@ async fn dropping_pending_canonical_publication_records_cancelled_once() {
 
 #[tokio::test]
 async fn cancellation_in_publications_final_poll_preempts_completed() {
-    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     *store.cancel_on_release.lock() = Some(cancellation);

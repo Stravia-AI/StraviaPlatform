@@ -1,5 +1,6 @@
 .svelte-kit/
 dist/
+dist-desktop-e2e/
 node_modules/
 src/lib/paraglide/
 test-results/

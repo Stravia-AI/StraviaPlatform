@@ -846,14 +846,22 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
   await expect(binaryRow.getByRole('cell', { name: '1,048,576', exact: true })).toBeVisible()
+  const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
+  await expect(identityCell).not.toContainText('1.05M')
+  await expect(identityCell).not.toContainText('Input')
   await expect(precisionRow.getByRole('cell', { name: '1.05M', exact: true })).toBeVisible()
-  await expect(precisionRow.getByRole('definition')).toHaveText(['Image, PDF', 'Text'])
   await expect(precisionRow.getByRole('cell', { name: 'low, high', exact: true })).toBeVisible()
-  await expect(unknownRow).toBeVisible()
-  await expect(unknownRow.getByRole('cell').nth(1)).not.toContainText(/\d/)
-  await expect(unknownRow.getByRole('definition').nth(0)).not.toContainText(/Image|PDF|Text/)
-  await expect(unknownRow.getByRole('definition').nth(1)).not.toContainText(/Image|PDF|Text/)
-  await expect(unknownRow.getByRole('cell').nth(3)).not.toContainText(/low|high/)
+  const precisionModalities = precisionRow
+    .getByRole('cell')
+    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
+  await expect(precisionModalities.getByRole('term')).toHaveText(['Input', 'Output'])
+  await expect(precisionModalities.getByRole('definition')).toHaveText(['Image, PDF', 'Text'])
+  const unknownModalities = unknownRow
+    .getByRole('cell')
+    .filter({ has: page.getByRole('term').filter({ hasText: /^Input$/ }) })
+  await expect(unknownModalities.getByRole('term')).toHaveText(['Input', 'Output'])
+  await expect(unknownModalities.getByRole('definition')).toHaveText(['Not registered', 'Not registered'])
+  await expect(unknownRow.getByRole('cell', { name: 'Not registered', exact: true })).toHaveCount(2)
   await expect.poll(() => detailRequests).toBe(0)
 })
 
@@ -1200,6 +1208,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await availableModelRow.getByRole('cell').nth(1).click()
 
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-test')
+  const extensionFields = page.getByRole('button', { name: 'Extension fields (read only) · 1', exact: true })
+  await expect(extensionFields).toHaveAttribute('aria-expanded', 'false')
+  await extensionFields.click()
+  await expect(extensionFields).toHaveAttribute('aria-expanded', 'true')
+  const extensionPreview = extensionFields.locator('..').locator('pre')
+  await expect(extensionPreview).toContainText('"vendor_extension"')
+  await expect(extensionPreview).toContainText('"private"')
   await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities).toContainText('text, image, binary')
@@ -1239,6 +1254,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const savedMetadata = JSON.parse(updateBody).metadata
   expect(savedMetadata.open_weights).toBe(true)
   expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
+  expect(savedMetadata.cost.context_over_200k).toEqual(detail.metadata.cost.context_over_200k)
   expect(savedMetadata.cost).toMatchObject({ reasoning: 2, input_audio: 3, output_audio: 4 })
   expect(savedMetadata.cost.tiers).toEqual([
     expect.objectContaining({
@@ -1270,6 +1286,11 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect.poll(() => prepareBodies[0]).toEqual({ model_id: 'gpt-5.4', template_id: 'openai/gpt-5.4' })
   await expect(page.locator('#provider-model-id')).toHaveValue('gpt-5.4')
   await expect(page.locator('#provider-model-name')).toHaveValue('GPT-5.4')
+  await expect(extensionFields).toHaveAttribute('aria-expanded', 'false')
+  await extensionFields.click()
+  await expect(extensionFields).toHaveAttribute('aria-expanded', 'true')
+  await expect(extensionPreview).toContainText('"benchmarks"')
+  await expect(extensionPreview).toContainText('Template benchmark')
 
   await page.getByRole('button', { name: 'Close model editor' }).click()
   await page.getByRole('button', { name: 'Add model', exact: true }).click()
@@ -1837,20 +1858,19 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await page.getByRole('option', { name: 'All models', exact: true }).click()
   await expect(page.getByRole('row').filter({ hasText: /Retired Model.*retired-model/ })).toHaveCount(0)
   await availabilityFilterDialog.getByRole('button', { name: 'Apply' }).click()
-  const filterColumnStarts = await modelTable
-    .getByRole('columnheader')
-    .evaluateAll((columns) => columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left)))
-  const modelRowColumns = await Promise.all(
-    [
-      page.getByRole('row').filter({ hasText: /GPT Test.*openai\/gpt-test/ }),
-      page.getByRole('row').filter({ hasText: /Retired Model.*retired-model/ }),
-    ].map((row) =>
-      row
-        .locator(':scope > td')
-        .evaluateAll((columns) => columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left))),
-    ),
-  )
-  expect(modelRowColumns).toEqual([filterColumnStarts, filterColumnStarts])
+  await expect(modelTable.getByRole('row').filter({ hasText: /Retired Model.*retired-model/ })).toBeVisible()
+  const modelColumns = await modelTable.evaluate((table) => {
+    const starts = (columns: Element[]) =>
+      columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left))
+    const rows = Array.from(table.querySelectorAll('tbody tr')).filter((row) =>
+      /GPT Test.*openai\/gpt-test|Retired Model.*retired-model/s.test(row.textContent ?? ''),
+    )
+    return {
+      header: starts(Array.from(table.querySelectorAll('thead th'))),
+      rows: rows.map((row) => starts(Array.from(row.children))),
+    }
+  })
+  expect(modelColumns.rows).toEqual([modelColumns.header, modelColumns.header])
   await expect(page.getByRole('link', { name: 'Used by models' })).toBeVisible()
   await page.getByRole('button', { name: 'Sync models' }).click()
   await expect(page.getByText("Connection saved, but models couldn't be synced")).toBeVisible()

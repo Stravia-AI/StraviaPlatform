@@ -779,21 +779,6 @@ test.describe('Interaction Observation canvas', () => {
         model_turn_id: block.model_turn_id,
         attempt_id: block.attempt_id,
         complete: true,
-        parts: [
-          {
-            type: 'text',
-            text: completed.text,
-            parts: [{ type: 'text', text: completed.text }],
-            block_id: block.block_id,
-            item: 'text:live-table',
-            model_turn_id: block.model_turn_id,
-            attempt_id: block.attempt_id,
-            complete: true,
-          },
-        ],
-        item: 'text:0',
-        block_id: 'block:0',
-        complete: true,
       },
     }
     fixture.emit(durable)
@@ -2418,7 +2403,7 @@ test.describe('Interaction Observation canvas', () => {
     const groups = diagnostics.locator('button[data-group="process"]')
     const group = groups.first()
     await expect(groups).toHaveCount(1)
-    await expect(group).toHaveAccessibleName(/^Response text updated × 3/)
+    await expect(group).toHaveAccessibleName(/× 3/)
     await expect(group).toHaveAttribute('aria-expanded', 'false')
     const records = diagnostics
       .locator('li[data-group="process"]')
@@ -2430,7 +2415,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(records).toHaveCount(3)
 
     emit(14, 'client_visible_content', { text: 'chunk-14' })
-    await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
+    await expect(group).toHaveAccessibleName(/× 4/)
     await expect(group).toHaveAttribute('aria-expanded', 'true')
     await expect(records).toHaveCount(4)
     for (let index = 0; index < 4; index++) {
@@ -2439,12 +2424,15 @@ test.describe('Interaction Observation canvas', () => {
       await records.nth(index).click()
     }
 
-    emit(15, 'delivery_finished', { status: 'delivery_failed', reason: 'client_disconnected' })
+    emit(15, 'run_finished', {
+      status: 'completed',
+      delivery: { status: 'delivery_failed', reason: 'client_disconnected' },
+    })
     emit(16, 'client_visible_content', { text: 'after-failure-16' })
     emit(17, 'client_visible_content', { text: 'after-failure-17' })
     await expect(groups).toHaveCount(2)
-    await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
-    await expect(groups.last()).toHaveAccessibleName(/^Response text updated × 2/)
+    await expect(group).toHaveAccessibleName(/× 4/)
+    await expect(groups.last()).toHaveAccessibleName(/× 2/)
     await expect(diagnostics.getByText('client_disconnected', { exact: true })).toBeVisible()
     await group.focus()
     await page.keyboard.press('Space')
@@ -2460,17 +2448,22 @@ test.describe('Interaction Observation canvas', () => {
     const rows: Array<[string, number, Record<string, unknown>]> = [
       ['model_turn_started', 0, { model_turn_id: 'ordered-turn', model_display_name: 'Cinder' }],
       ['target_attempt_started', 0, { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt' }],
-      ['client_output_committed', 5000, {}],
+      ['input_preview_recorded', 5000, {}],
       ['client_visible_content', 6000, { text: 'first streamed output' }],
       [
-        'usage_confirmed',
+        'model_thinking',
         6500,
-        { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt', usage: { output_tokens: 214 } },
+        { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt', text: 'ordered thought', complete: true },
       ],
       [
         'target_attempt_finished',
         7000,
-        { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt', status: 'completed' },
+        {
+          model_turn_id: 'ordered-turn',
+          attempt_id: 'ordered-attempt',
+          status: 'completed',
+          usage: { output_tokens: 214 },
+        },
       ],
       ['model_turn_finished', 7000, { model_turn_id: 'ordered-turn', status: 'completed' }],
       ['client_visible_content', 6600, { text: 'output recorded before upstream completion' }],
@@ -2489,9 +2482,9 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    // 相邻的 delta / usage_confirmed / delta 合并为一条过程组，原位展开后仍按序出现。
+    // 连续内容记录合并，完成事件仍是独立边界；展开后保留时间与 sequence 顺序。
     const processGroup = diagnostics.locator('button[data-group="process"]')
-    await expect(processGroup).toHaveAccessibleName(/^3 process events/)
+    await expect(processGroup).toHaveAccessibleName(/^4 process events/)
     await processGroup.click()
     const observed: Array<{ kind: string; payload: unknown }> = []
     for (const row of await diagnostics.locator('.stream-row[data-sequence]:visible').all()) {
@@ -2511,11 +2504,16 @@ test.describe('Interaction Observation canvas', () => {
   test('groups only consecutive same-name client tools and shows attempt-local output speed', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     const rows: Array<[string, Record<string, unknown>]> = [
-      ['usage_confirmed', { attempt_id: 'other-attempt', usage: { output_tokens: 9999 } }],
-      ['usage_confirmed', { attempt_id: 'current-attempt', usage: { output_tokens: 1110 } }],
+      ['target_attempt_finished', { attempt_id: 'other-attempt', status: 'completed', usage: { output_tokens: 9999 } }],
       [
         'target_attempt_finished',
-        { attempt_id: 'current-attempt', status: 'completed', duration_ms: 18750, first_token_ms: 7650 },
+        {
+          attempt_id: 'current-attempt',
+          status: 'completed',
+          duration_ms: 18750,
+          first_token_ms: 7650,
+          usage: { output_tokens: 1110 },
+        },
       ],
       ...Array.from({ length: 4 }, (_, index): [string, Record<string, unknown>] => [
         'client_tool_handoff',
@@ -2592,21 +2590,9 @@ test.describe('Interaction Observation canvas', () => {
           rejection_id: null,
           occurred_at: startedAt + 299_000 + sequence,
         })
-        parent.events.push(
-          ordinary(1, 'model_thinking_delta', {
-            model_turn_id: 'activity-turn',
-            attempt_id: 'activity-attempt',
-            text: 'Inspect the environment. ',
-          }),
-          ordinary(2, 'model_thinking_delta', {
-            model_turn_id: 'activity-turn',
-            attempt_id: 'activity-attempt',
-            text: 'Then run the command.',
-          }),
-        )
+        // The thinking item is persisted by fixture.emit; do not fabricate a second row at its sequence.
         if (completed)
           parent.events.push(
-            ordinary(13, 'model_thinking_finished', { model_turn_id: 'activity-turn', attempt_id: 'activity-attempt' }),
             ordinary(14, 'platform_tool_started', {
               model_turn_id: 'activity-turn',
               tool_id: 'call-search',
@@ -2623,7 +2609,9 @@ test.describe('Interaction Observation canvas', () => {
         if (!completed) {
           parent.status = 'running'
           parent.finished_at = null
-          parent.events = parent.events.filter((event) => event.kind !== 'client_tool_handoff')
+          parent.events = parent.events.filter(
+            (event) => event.kind !== 'client_tool_handoff' && event.kind !== 'model_thinking',
+          )
           return
         }
         const childId = 'run-cinder-tool-return'
@@ -2645,11 +2633,25 @@ test.describe('Interaction Observation canvas', () => {
           ],
         })
       })
+      await installPersistentObservationStream(page)
       await page.goto('/logs?interaction=interaction-cinder')
       await expect(page.getByRole('tab', { name: 'Debug records', exact: true })).toHaveCount(0)
       const conversation = page.getByRole('log', { name: 'Conversation' })
       const thinking = conversation.getByRole('button', { name: /^Thinking(?:…)?$/ })
       const tool = conversation.getByRole('button', { name: 'Tool call Bash', exact: true })
+      await expect(conversation).toContainText('Cinder client-visible answer')
+      const thought = {
+        block_id: 'activity-thinking',
+        interaction_id: 'interaction-cinder',
+        run_id: 'run-interaction-cinder',
+        kind: 'model_thinking_delta',
+        model_turn_id: 'activity-turn',
+        attempt_id: 'activity-attempt',
+        occurred_at: startedAt + 299_001,
+        revision: 1,
+        text: 'Inspect the environment. Then run the command.',
+      }
+      await sendObservation(page, 'live_content', thought)
       await expect(thinking).toHaveAttribute('aria-expanded', 'false')
       await expect(thinking).toHaveAccessibleName('Thinking…')
       await expect(tool).toHaveCount(0)
@@ -2663,14 +2665,40 @@ test.describe('Interaction Observation canvas', () => {
       ).toBeVisible()
       completed = true
       fixture.emit({
-        sequence: 12,
+        sequence: 17,
         occurred_at: startedAt + 299_008,
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: 'model_thinking_finished',
-        payload: { model_turn_id: 'activity-turn', attempt_id: 'activity-attempt' },
+        kind: 'model_thinking',
+        payload: {
+          model_turn_id: 'activity-turn',
+          attempt_id: 'activity-attempt',
+          block_id: thought.block_id,
+          text: thought.text,
+          complete: true,
+        },
       })
+      await sendObservation(
+        page,
+        'observation',
+        {
+          sequence: 17,
+          occurred_at: startedAt + 299_008,
+          interaction_id: thought.interaction_id,
+          run_id: thought.run_id,
+          rejection_id: null,
+          kind: 'model_thinking',
+          payload: {
+            model_turn_id: thought.model_turn_id,
+            attempt_id: thought.attempt_id,
+            block_id: thought.block_id,
+            text: thought.text,
+            complete: true,
+          },
+        },
+        17,
+      )
       await expect(thinking).toHaveAccessibleName('Thinking')
       await expect(thinking).toHaveAttribute('aria-expanded', 'true')
       await expect(tool).toHaveAttribute('aria-expanded', 'false')
@@ -2700,6 +2728,7 @@ test.describe('Interaction Observation canvas', () => {
 
   test('renders multiple thinking Markdown paragraphs live and after reload', async ({ page }) => {
     const fixture = await installObservationFixture(page, false, false, true)
+    await installPersistentObservationStream(page)
     await page.goto('/logs?interaction=interaction-cinder')
     const conversation = page.getByRole('log', { name: 'Conversation' })
     const thinking = conversation.getByRole('button', { name: /^Thinking(?:…)?$/ })
@@ -2714,10 +2743,26 @@ test.describe('Interaction Observation canvas', () => {
         kind,
         payload,
       })
-    emit(11, 'model_thinking_delta', { ...scope, text: '**Selecting top ' })
+    await expect(conversation).toBeVisible()
+    const live = {
+      ...scope,
+      block_id: 'paragraph-thinking',
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      kind: 'model_thinking_delta',
+      occurred_at: startedAt + 299_011,
+      revision: 1,
+      text: '**Selecting top ',
+    }
+    await sendObservation(page, 'live_content', live)
     await thinking.click()
-    emit(12, 'model_thinking_delta', { ...scope, text: 'five candidate features**' })
-    emit(13, 'model_thinking_delta', { ...scope, text: '\n\n**Implementing temp path and timestamp retrieval**' })
+    await sendObservation(page, 'live_content', {
+      ...live,
+      revision: 2,
+      text: '**Selecting top five candidate features**',
+    })
+    const text = '**Selecting top five candidate features**\n\n**Implementing temp path and timestamp retrieval**'
+    await sendObservation(page, 'live_content', { ...live, revision: 3, text })
     const content = conversation.locator('.markdown-content').filter({ hasText: 'Selecting top' })
     const assertParagraphs = async () => {
       await expect(content.locator('p')).toHaveCount(2)
@@ -2728,7 +2773,22 @@ test.describe('Interaction Observation canvas', () => {
       await expect(content).not.toContainText('****')
     }
     await assertParagraphs()
-    emit(14, 'model_thinking_finished', scope)
+    const payload = { ...scope, block_id: live.block_id, text, complete: true }
+    emit(14, 'model_thinking', payload)
+    await sendObservation(
+      page,
+      'observation',
+      {
+        sequence: 14,
+        occurred_at: startedAt + 299_014,
+        interaction_id: live.interaction_id,
+        run_id: live.run_id,
+        rejection_id: null,
+        kind: 'model_thinking',
+        payload,
+      },
+      14,
+    )
     await expect(thinking).toHaveAccessibleName('Thinking')
     await page.reload()
     await thinking.click()
@@ -2737,6 +2797,8 @@ test.describe('Interaction Observation canvas', () => {
 
   test('reveals only received live graphemes and respects paused reading and reduced motion', async ({ page }) => {
     const fixture = await installObservationFixture(page, false, false, true)
+    await installPersistentObservationStream(page)
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
     await page.goto('/logs')
     await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
@@ -2745,6 +2807,9 @@ test.describe('Interaction Observation canvas', () => {
     const response = responseActor.locator('.markdown-content')
     const initial = ''
     await expect(response).toBeHidden()
+    // Keep the fixture's fixed wall time; reinstalling starts a real-time clock between RPCs.
+    // Drive animation frames explicitly so a busy parallel worker cannot skip the entire reveal.
+    await page.clock.pauseAt(startedAt + 300_000)
     await responseActor.evaluate((element) => {
       const samples: string[] = []
       Object.assign(window, { conversationSamples: samples })
@@ -2753,7 +2818,7 @@ test.describe('Interaction Observation canvas', () => {
       ).observe(element, { childList: true, subtree: true, characterData: true })
     })
     const delta = `New live text: ${'🙂 e\u0301 👩🏽‍💻 '.repeat(8)}Finished.`
-    fixture.emit({
+    const firstEvent: ObservationEvent = {
       sequence: 11,
       occurred_at: startedAt + 299_000,
       interaction_id: 'interaction-cinder',
@@ -2767,7 +2832,17 @@ test.describe('Interaction Observation canvas', () => {
         block_id: 'block:0',
         complete: true,
       },
-    })
+    }
+    fixture.emit(firstEvent)
+    const receivedFirst = page.waitForResponse((response) =>
+      response.url().includes('/interaction-cinder/events?after_sequence=10'),
+    )
+    await sendObservation(page, 'observation', firstEvent, firstEvent.sequence)
+    await receivedFirst
+    await page.clock.runFor(100)
+    await expect(response).toBeVisible()
+    expect(await response.innerText()).not.toBe(initial + delta)
+    await page.clock.runFor(400)
     await expect(response).toHaveText(initial + delta)
     const samples = await page.evaluate(
       () => (window as unknown as { conversationSamples: string[] }).conversationSamples,
@@ -2788,7 +2863,7 @@ test.describe('Interaction Observation canvas', () => {
       ;(window as unknown as { conversationSamples: string[] }).conversationSamples.length = 0
     })
     const secondDelta = ' Additional received content.'.repeat(30)
-    fixture.emit({
+    const secondEvent: ObservationEvent = {
       sequence: 12,
       occurred_at: startedAt + 299_100,
       interaction_id: 'interaction-cinder',
@@ -2802,7 +2877,9 @@ test.describe('Interaction Observation canvas', () => {
         block_id: 'block:0',
         complete: true,
       },
-    })
+    }
+    fixture.emit(secondEvent)
+    await sendObservation(page, 'observation', secondEvent, secondEvent.sequence)
     await expect(response).toHaveText(initial + delta + secondDelta)
     expect(await conversation.evaluate((element) => element.scrollTop)).toBe(0)
     const reducedSamples = await page.evaluate(
@@ -2817,7 +2894,7 @@ test.describe('Interaction Observation canvas', () => {
       .poll(() => conversation.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop))
       .toBeLessThanOrEqual(2)
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
-    fixture.emit({
+    const finishedEvent: ObservationEvent = {
       sequence: 13,
       occurred_at: startedAt + 299_200,
       interaction_id: 'interaction-cinder',
@@ -2825,7 +2902,9 @@ test.describe('Interaction Observation canvas', () => {
       rejection_id: null,
       kind: 'run_finished',
       payload: { status: 'completed', delivery: { delivered: true } },
-    })
+    }
+    fixture.emit(finishedEvent)
+    await sendObservation(page, 'observation', finishedEvent, finishedEvent.sequence)
     await expect(
       inspector
         .getByRole('tabpanel', { name: 'Diagnostics', exact: true })
@@ -3242,6 +3321,12 @@ test.describe('Interaction Observation canvas', () => {
         })
         .toBe(duration)
     }
+    // The last option leaves the pointer over Cinder's input preview after
+    // the menu closes and the forest relayouts. Leave the canvas before
+    // dismissing its tooltip so it cannot cover the custom-range control.
+    await page.mouse.move(0, 0)
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('tooltip')).toBeHidden()
     await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
     const start = '2026-09-06T08:00'
@@ -3296,12 +3381,23 @@ test.describe('Interaction Observation canvas', () => {
 
   test('retains the selected observation and detail tab across mobile and desktop layouts', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
-    await installObservationFixture(page, false, true)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page, false, true)
     await page.goto('/logs')
+    // Atlas is outside the initial latest-interaction camera. Fit the forest before
+    // keyboard navigation so viewport culling cannot replace the focused node.
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    await expect(page.getByText('3 / 3 chains', { exact: true })).toBeVisible()
     const selectedNode = node(page, 'Atlas', 'completed')
+    await expect(selectedNode.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
     await selectedNode.focus()
+    await expect(selectedNode).toBeFocused()
     await selectedNode.press('Enter')
     const desktop = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(desktop.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
+    expect(fixture.detailRequests.map((url) => url.pathname)).toEqual([
+      '/api/v1/observations/interactions/interaction-atlas',
+    ])
     await desktop.getByRole('tab', { name: 'Diagnostics' }).click()
     await expect(desktop.getByRole('tabpanel', { name: 'Diagnostics', exact: true })).toBeVisible()
 

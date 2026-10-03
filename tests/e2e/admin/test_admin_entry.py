@@ -7,7 +7,6 @@ import sqlite3
 import subprocess
 import threading
 from contextlib import contextmanager
-from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,6 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from tests.common.helpers import (
+    CompleteRequestHTTPConnection,
     WebSession,
     find_free_port,
     initialize_server,
@@ -81,7 +81,7 @@ def _request(
 ) -> tuple[int, Any]:
     """真实 HTTP 请求保留重复头，用于验证代理边界而非解析器实现。"""
     target = urlsplit(base)
-    connection = HTTPConnection(target.hostname, target.port, timeout=15)
+    connection = CompleteRequestHTTPConnection(target.hostname, target.port, timeout=15)
     data = json.dumps(payload).encode() if payload is not None else b""
     try:
         connection.putrequest(method, path, skip_host=True)

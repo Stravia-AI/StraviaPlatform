@@ -883,14 +883,9 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
 #[tokio::test]
 async fn artifact_identity_participates_in_reusable_prefix_semantics() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    let pool = crate::test_support::migrated_sqlite_pool()
         .await
-        .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool, None)
-        .await
-        .expect("SQLite migrations");
+        .expect("SQLite database");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
         pool,
         data_dir.path().join("artifacts"),
@@ -974,14 +969,9 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
 #[tokio::test]
 async fn reuploaded_identical_media_continues_the_persisted_generation() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    let pool = crate::test_support::migrated_sqlite_pool()
         .await
-        .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool, None)
-        .await
-        .expect("SQLite migrations");
+        .expect("SQLite database");
     let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
         pool,
         data_dir.path().join("artifacts"),

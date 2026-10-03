@@ -395,9 +395,7 @@ impl BundleProjection {
                     "observation_gap" => observation_gap = true,
                     _ => {}
                 }
-                let Some(run) = event.run_id.as_deref() else {
-                    return None;
-                };
+                let run = event.run_id.as_deref()?;
                 match event.kind.as_str() {
                     "run_admitted" => {
                         runs.insert(run, "running");

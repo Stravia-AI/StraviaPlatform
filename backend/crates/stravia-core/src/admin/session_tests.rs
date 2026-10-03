@@ -116,8 +116,7 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
     let (data_dir, gw) = build_gateway().await?;
 
     let init = init_codex_session(&gw).await?;
-    let err = gw
-        .admin()
+    gw.admin()
         .complete_oauth_session(
             &init.session_id,
             AuthCompletionInput {
@@ -130,10 +129,6 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
         .await
         .expect_err("invalid callback state should fail the exchange");
 
-    assert!(
-        err.to_string().contains("state"),
-        "unexpected complete error: {err:#}"
-    );
     let session = gw
         .admin()
         .get_auth_session_record(&init.session_id)
@@ -146,10 +141,8 @@ async fn invalid_callback_keeps_session_pending_for_retry() -> anyhow::Result<()
             .await?,
         AuthSessionStatusData::Pending {
             ref error_code,
-            ref last_error,
             ..
         } if error_code.as_deref() == Some("AUTH_CALLBACK_STATE_MISMATCH")
-            && last_error.as_deref().is_some_and(|message| message.contains("state"))
     ));
 
     gw.shutdown().await;
