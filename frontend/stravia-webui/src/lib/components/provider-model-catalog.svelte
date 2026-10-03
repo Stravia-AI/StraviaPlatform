@@ -28,7 +28,6 @@ import {
   specificationFilterCount,
   type SpecificationFilter,
 } from '$lib/model-specification-filter'
-import ModelSpecification from '$lib/components/model-specification.svelte'
 import ModelSpecificationFilter from '$lib/components/model-specification-filter.svelte'
 import type {
   Route,
@@ -59,6 +58,8 @@ import CatalogEditorDrawer from './provider-model-catalog/editor-drawer.svelte'
 import CatalogFilterSheet from './provider-model-catalog/filter-sheet.svelte'
 import ManualModelDialog from './provider-model-catalog/manual-model-dialog.svelte'
 import RpmLimit from './provider-model-catalog/rpm-limit.svelte'
+import RpmForm from './provider-model-catalog/rpm-form.svelte'
+import ModelCellEditor from './provider-model-catalog/model-cell-editor.svelte'
 
 interface Props {
   providerId: string
@@ -610,37 +611,60 @@ async function deleteManualModel(): Promise<void> {
 {/snippet}
 
 {#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
-  {@const value = context.row.original.specification.limit?.context}
-  <span class="font-technical text-sm"
-    >{value == null ? m.model_specification_not_registered() : formatSpecificationTokens(value)}</span>
+  {@render modelContext(context.row.original)}
+{/snippet}
+
+{#snippet modelContext(model: ProviderModelSummary)}
+  {@const value = model.specification.limit?.context}
+  <ModelCellEditor {providerId} {model} field="context">
+    <span class="font-technical text-sm"
+      >{value == null ? m.model_specification_not_registered() : formatSpecificationTokens(value)}</span>
+  </ModelCellEditor>
 {/snippet}
 
 {#snippet providerModelModalitiesCell(context: DataTableCellContext<ProviderModelSummary>)}
-  {@const modalities = context.row.original.specification.modalities}
-  <dl class="space-y-0.5 text-xs">
-    <div class="flex items-center gap-1.5">
-      <dt class="text-muted-foreground">{m.model_specification_input()}</dt>
-      <dd><ModalityIcons values={modalities?.input} /></dd>
-    </div>
-    <div class="flex items-center gap-1.5">
-      <dt class="text-muted-foreground">{m.model_specification_output()}</dt>
-      <dd><ModalityIcons values={modalities?.output} /></dd>
-    </div>
-  </dl>
+  {@render modelModalities(context.row.original)}
+{/snippet}
+
+{#snippet modelModalities(model: ProviderModelSummary)}
+  {@const modalities = model.specification.modalities}
+  <ModelCellEditor {providerId} {model} field="modalities">
+    <span class="flex flex-col gap-0.5 text-xs">
+      <span role="group" aria-label={m.model_specification_input()} class="flex items-center gap-1.5">
+        <span class="text-muted-foreground">{m.model_specification_input()}</span>
+        <ModalityIcons values={modalities?.input} tooltip={false} />
+      </span>
+      <span role="group" aria-label={m.model_specification_output()} class="flex items-center gap-1.5">
+        <span class="text-muted-foreground">{m.model_specification_output()}</span>
+        <ModalityIcons values={modalities?.output} tooltip={false} />
+      </span>
+    </span>
+  </ModelCellEditor>
 {/snippet}
 
 {#snippet providerModelEffortsCell(context: DataTableCellContext<ProviderModelSummary>)}
-  {@const efforts = context.row.original.specification.reasoning_efforts}
-  <span class="break-words font-technical text-xs"
-    >{efforts?.length ? efforts.join(', ') : m.model_specification_not_registered()}</span>
+  {@render modelEfforts(context.row.original)}
+{/snippet}
+
+{#snippet modelEfforts(model: ProviderModelSummary)}
+  {@const efforts = model.specification.reasoning_efforts}
+  <ModelCellEditor {providerId} {model} field="efforts">
+    <span class="break-words font-technical text-xs"
+      >{efforts?.length ? efforts.join(', ') : m.model_specification_not_registered()}</span>
+  </ModelCellEditor>
 {/snippet}
 
 {#snippet providerModelAvailabilityCell(context: DataTableCellContext<ProviderModelSummary>)}
-  {@const model = context.row.original}
+  {@render modelAvailability(context.row.original)}
+{/snippet}
+
+{#snippet modelAvailability(model: ProviderModelSummary)}
   {@const reason = availabilityReason(model)}
-  <Badge variant={model.available ? 'secondary' : 'outline'}>
-    {model.available ? m.model_specification_available() : m.common_unavailable()}
-  </Badge>
+  <ModelCellEditor {providerId} {model} field="availability">
+    <Badge variant={model.available ? 'secondary' : 'outline'}>
+      {model.available ? m.model_specification_available() : m.common_unavailable()}
+    </Badge>
+  </ModelCellEditor>
   {#if reason}<p class="mt-1 text-xs text-muted-foreground">{reason}</p>{/if}
 {/snippet}
 
@@ -786,6 +810,12 @@ async function deleteManualModel(): Promise<void> {
             if (!discarding) dirty = value
           }} />
       </div>
+      {#key selectedDetail.id}
+        <section class="flex min-w-0 flex-col gap-4 border-t pt-4" aria-labelledby="provider-model-rpm-title">
+          <h3 id="provider-model-rpm-title" class="text-sm font-semibold">{m.rpm_column()}</h3>
+          <RpmForm {providerId} modelId={selectedDetail.id} />
+        </section>
+      {/key}
       <div
         class="sticky bottom-0 z-20 mt-2 flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
         <Button variant="outline" class="min-h-10" onclick={requestClose}>{m.common_cancel()}</Button>
@@ -886,7 +916,6 @@ async function deleteManualModel(): Promise<void> {
       {:else}
         {#each filteredModels as model (model.id)}
           {@const references = modelReferences(model.id)}
-          {@const reason = availabilityReason(model)}
           {@const matchingRoute = routeForModel(model.id)}
           <div class="route-mobile-row">
             <a
@@ -896,12 +925,13 @@ async function deleteManualModel(): Promise<void> {
               <span class="block truncate font-medium">{model.name}</span>
               <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
             </a>
-            <div class="col-span-2 min-w-0">
-              <ModelSpecification specification={model.specification} />
+            <div class="col-span-2 grid min-w-0 gap-2">
+              {@render modelContext(model)}
+              {@render modelModalities(model)}
+              {@render modelEfforts(model)}
             </div>
             <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-2">
-              <Badge variant={model.available ? 'secondary' : 'outline'}
-                >{model.available ? m.model_specification_available() : m.common_unavailable()}</Badge>
+              {@render modelAvailability(model)}
               <Badge variant="outline"
                 >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
               <RpmLimit {providerId} modelId={model.id} showLabel />
@@ -924,7 +954,6 @@ async function deleteManualModel(): Promise<void> {
               {:else}
                 <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
               {/if}
-              {#if reason}<span class="text-xs text-muted-foreground">{reason}</span>{/if}
             </div>
           </div>
         {/each}
