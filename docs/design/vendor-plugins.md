@@ -84,8 +84,9 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 - 媒体生成沿用现有设计的图片生成与参考图编辑范围，不因插件能力可组合而提前增加音频或视频类型。
 - 媒体生成沿用 Provider Model → Target → Route，不另建直接绑定 Provider 的执行路径。Provider Model 可表示纯图片模型；Codex 的 GPT 模型可以同时支持推理与图片生成。
 - 媒体生成绑定及执行按所需能力校验；纯图片模型不能被普通聊天请求选中，不以虚构聊天能力满足路由接入要求。继续遵守媒体生成设计中所有已启用 Target 的资格校验规则。
-- 完整联网搜索引入 Route 绑定，替代 Codex 专属的固定 Provider 与 upstream Model 绑定。搜索 Target 支持 Provider 加上游模型，也支持仅 Provider 的独立研究服务；后者不要求创建 Provider Model 或虚假模型 ID。Provider-only 契约及运行验证属于本期，未来服务的正式接入不自动成为本期交付要求。
-- 独立搜索服务以 [Parallel Responses API](https://docs.parallel.ai/responses-api/responses-quickstart) 一类直接交付带引用综合答案的服务为参考，仍接入完整 Search Report 契约，不扩展为仅返回基础检索结果的来源。这里“不选择模型”指管理员无需选择模型，不表示上游 wire 必须没有 model 字段；供应商要求的固定标识由插件处理，不强迫管理员建立虚假的可选模型。
+- 完整联网搜索引入 Route 绑定，替代 Codex 专属的固定 Provider 与 upstream Model 绑定。搜索与其他能力一致，Target 必须绑定 Provider 和非空白的上游模型，并通过对应 Provider Model 的能力校验。
+- Channel 描述符不再提供搜索模型可省略的开关。第三方 Rust 描述符构造代码需要同步移除该字段；此删除不改变 `stravia:vendor@0.4.0` 的 WIT 布局或 canonical payload 版本。通用 `ProviderSnapshot.model` 仍可用于不涉及 Target 的 Provider 操作，但宿主执行搜索 Target 时始终传入所选模型；旧组件 JSON 中的额外字段不会恢复无模型执行权限。
+- 独立搜索服务以 [Parallel Responses API](https://docs.parallel.ai/responses-api/responses-quickstart) 一类直接交付带引用综合答案的服务为参考，仍接入完整 Search Report 契约，不扩展为仅返回基础检索结果的来源。正式接入必须提供可选择的真实 Provider Model，不自动列入本期交付清单。
 - 外部完整搜索后端按单次独立调用处理，不提供续接，不跨请求保存可用于续接的上游研究会话；即使供应商具有会话能力，本次也不使用。此决定不取消既有 Local 搜索的续接能力。
 - 外部搜索沿用 Route 的选择、重试与 Target 切换策略，由插件提供上游错误分类，宿主决定执行。明确可重试的上游错误可在结果提交前重试或切换；用户取消、参数错误及权限错误不触发。接受可能重复执行与重复消耗额度，不承诺恰好执行一次。
 - 更新允许移除已被使用的能力，必须明确展示受影响绑定。保留原绑定并标记能力不可用，执行时明确失败，不自动换账号、改绑或降级为普通推理；数据兼容时已开始的调用仍由旧版本完成。

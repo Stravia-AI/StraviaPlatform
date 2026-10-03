@@ -360,9 +360,8 @@ async fn create_route(
             display_name: Some("Management Lifecycle Route".into()),
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider_id.into(),
-                model: Some(MODEL_ID.into()),
+                model: MODEL_ID.into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1079,10 +1078,8 @@ async fn incompatible_update_cancels_management_work_and_requires_selective_reco
         provider.id.as_str()
     );
     assert_eq!(
-        retained_route.targets[0]
-            .model()
-            .map(|model| model.as_str()),
-        Some(MODEL_ID)
+        retained_route.targets[0].model().as_str(),
+        MODEL_ID
     );
     assert_eq!(
         allowance_sample_count(directory.path(), &provider.id).await?,

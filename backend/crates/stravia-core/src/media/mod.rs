@@ -141,21 +141,17 @@ pub(crate) async fn route_metadata(
 ) -> MediaRoute {
     let mut targets = Vec::with_capacity(route.targets.len());
     for target in &route.targets {
-        let metadata = if let Some(actual_model) = target.model().map(|model| model.as_str()) {
-            gateway
-                .storage
-                .provider_models()
-                .find(target.provider_id().as_str(), actual_model)
-                .await
-                .ok()
-                .flatten()
-                .map(|record| record.metadata)
-        } else {
-            None
-        };
+        let metadata = gateway
+            .storage
+            .provider_models()
+            .find(target.provider_id().as_str(), target.model().as_str())
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.metadata);
         targets.push(MediaTarget {
             provider_id: target.provider_id().clone().into(),
-            model: target.model().cloned().map(Into::into),
+            model: target.model().clone().into(),
             input_modalities: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.modalities.as_ref())

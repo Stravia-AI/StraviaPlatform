@@ -67,7 +67,7 @@ pub struct ExternalSearchExecution {
     pub response: stravia_vendor_sdk::SearchResponse,
     pub publication: SearchPublicationGuard,
     pub provider_id: String,
-    pub upstream_model: Option<String>,
+    pub upstream_model: String,
     pub target_id: String,
 }
 
@@ -86,7 +86,7 @@ pub trait ExternalSearchHost: Send + Sync {
 #[derive(Clone)]
 pub struct SearchRouteTarget {
     pub provider_id: String,
-    pub model: Option<String>,
+    pub model: String,
     pub enabled: bool,
 }
 #[derive(Clone)]

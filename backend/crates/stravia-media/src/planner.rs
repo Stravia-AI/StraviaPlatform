@@ -365,11 +365,7 @@ fn classify_targets(model: &Route) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut tool_targets = Vec::new();
     for target in &model.targets {
         let supports_image = super::platform::supports_image(&target.input_modalities);
-        let target_key = format!(
-            "{}:{}",
-            target.provider_id,
-            target.model.as_deref().unwrap_or_default()
-        );
+        let target_key = format!("{}:{}", target.provider_id, target.model);
         if supports_image {
             native_targets.push(target_key.clone());
         }
@@ -417,12 +413,12 @@ mod tests {
             targets: vec![
                 crate::host::MediaTarget {
                     provider_id: "native".into(),
-                    model: Some("vision".into()),
+                    model: "vision".into(),
                     input_modalities: vec!["text".into(), "image".into()],
                 },
                 crate::host::MediaTarget {
                     provider_id: "bridge".into(),
-                    model: Some("text".into()),
+                    model: "text".into(),
                     input_modalities: vec!["text".into()],
                 },
             ],

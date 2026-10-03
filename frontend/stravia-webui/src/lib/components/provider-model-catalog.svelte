@@ -57,6 +57,7 @@ import CatalogConfirmations from './provider-model-catalog/confirmations.svelte'
 import CatalogEditorDrawer from './provider-model-catalog/editor-drawer.svelte'
 import CatalogFilterSheet from './provider-model-catalog/filter-sheet.svelte'
 import ManualModelDialog from './provider-model-catalog/manual-model-dialog.svelte'
+import RpmLimit from './provider-model-catalog/rpm-limit.svelte'
 
 interface Props {
   providerId: string
@@ -205,6 +206,13 @@ const providerModelColumns = $derived(
         cellClass: 'whitespace-normal',
         filter: { variant: 'select', ...filterOptions.availability },
       },
+      size: 160,
+    }),
+    providerModelColumnHelper.display({
+      id: 'rpm',
+      header: () => m.rpm_column(),
+      cell: (context) => renderSnippet(providerModelRpmCell, context),
+      meta: { label: () => m.rpm_column(), cellClass: 'whitespace-normal', exportable: false },
       size: 160,
     }),
     providerModelColumnHelper.accessor('source_kind', {
@@ -643,6 +651,10 @@ async function deleteManualModel(): Promise<void> {
   {#if reason}<p class="mt-1 text-xs text-muted-foreground">{reason}</p>{/if}
 {/snippet}
 
+{#snippet providerModelRpmCell(context: DataTableCellContext<ProviderModelSummary>)}
+  <RpmLimit {providerId} modelId={context.row.original.id} />
+{/snippet}
+
 {#snippet providerModelSourceCell(context: DataTableCellContext<ProviderModelSummary>)}
   <Badge variant="outline">
     {context.row.original.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
@@ -899,6 +911,7 @@ async function deleteManualModel(): Promise<void> {
                 >{model.available ? m.model_specification_available() : m.common_unavailable()}</Badge>
               <Badge variant="outline"
                 >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
+              <RpmLimit {providerId} modelId={model.id} showLabel />
               {#if references.length > 0}
                 <a
                   class="inline-flex min-h-10 items-center rounded-md px-2 text-sm font-medium hover:bg-muted"

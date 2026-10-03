@@ -762,9 +762,8 @@ mod tests {
                 balance: Some("traffic_equalization".into()),
                 targets: vec![
                     CreateTarget {
-                        rpm_pool_id: None,
                         provider_id: primary.id.clone(),
-                        model: Some("primary-model".into()),
+                        model: "primary-model".into(),
                         enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
@@ -773,9 +772,8 @@ mod tests {
                         thinking_level_map: Vec::new(),
                     },
                     CreateTarget {
-                        rpm_pool_id: None,
                         provider_id: fallback.id.clone(),
-                        model: Some("fallback-model".into()),
+                        model: "fallback-model".into(),
                         enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,
@@ -801,7 +799,7 @@ mod tests {
         assert_eq!(
             routes[0]
                 .primary_target()
-                .and_then(|target| target.model().map(|model| model.as_str())),
+                .map(|target| target.model().as_str()),
             Some("fallback-model")
         );
         assert_eq!(routes[0].targets.len(), 1);

@@ -509,7 +509,7 @@ async function copyProvider(): Promise<void> {
               {effectiveModelDisplayName(reference.route)}
               {#if logicalModelSecondaryId(reference.route)}
                 · {reference.route.model_id}{/if}
-              · {reference.target.model ?? m.model_editor_provider_only_search_destination()}
+              · {reference.target.model}
             </span>
             <span class="text-xs text-muted-foreground">{m.providers_change_service()}</span>
           </a>

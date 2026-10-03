@@ -197,7 +197,7 @@ impl<'a> From<&'a RouteConfig> for RouteView<'a> {
             default_thinking_level: route.default_thinking_level.as_deref(),
             balance: &route.balance,
             target_provider: primary.map_or("", |target| target.provider_id().as_str()),
-            target_model: primary.and_then(|target| target.model().map(|model| model.as_str())),
+            target_model: primary.map(|target| target.model().as_str()),
             is_enabled: route.is_enabled,
             created_at: &route.created_at,
             supported_thinking_levels: &route.supported_thinking_levels,
@@ -225,7 +225,6 @@ const fn default_target_enabled() -> bool {
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
-    pub rpm_pool_id: Option<String>,
     pub id: super::identity::TargetId,
     pub model_id: super::identity::RouteKey,
     pub destination: super::identity::TargetDestination,
@@ -243,18 +242,17 @@ impl TargetConfig {
         self.destination.provider_id()
     }
 
-    pub fn model(&self) -> Option<&super::identity::UpstreamModelId> {
+    pub fn model(&self) -> &super::identity::UpstreamModelId {
         self.destination.model()
     }
 }
 
 #[derive(Serialize)]
 pub struct TargetView<'a> {
-    pub rpm_pool_id: Option<&'a str>,
     pub id: &'a str,
     pub model_id: &'a str,
     pub provider_id: &'a str,
-    pub model: Option<&'a str>,
+    pub model: &'a str,
     pub enabled: bool,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
@@ -268,10 +266,9 @@ impl<'a> From<&'a TargetConfig> for TargetView<'a> {
     fn from(target: &'a TargetConfig) -> Self {
         Self {
             id: &target.id,
-            rpm_pool_id: target.rpm_pool_id.as_deref(),
             model_id: &target.model_id,
             provider_id: target.provider_id().as_str(),
-            model: target.model().map(|model| model.as_str()),
+            model: target.model().as_str(),
             enabled: target.enabled,
             priority: target.priority,
             first_token_timeout_ms: target.first_token_timeout_ms,
@@ -540,11 +537,8 @@ pub struct CreateRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTarget {
-    #[serde(default)]
-    pub rpm_pool_id: Option<String>,
     pub provider_id: String,
-    /// `None` is a Provider-only full-search Target. `Some` is always non-empty.
-    pub model: Option<String>,
+    pub model: String,
     #[serde(default = "default_target_enabled")]
     pub enabled: bool,
     pub priority: Option<i32>,

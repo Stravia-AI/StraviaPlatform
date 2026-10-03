@@ -104,17 +104,17 @@ def test_rpm_pools_bindings_and_restart(
         status, body = request("GET", f"models/{route_id}")
         assert status == 200, body
         target = body["data"]["targets"][0]
-        config["destinations"] = [{"provider_id": target["provider_id"], "model": target["model"], "rpm_limit": 7}]
+        destination = {"provider_id": target["provider_id"], "model": target["model"], "rpm_limit": None, "rpm_pool_id": "shared"}
+        config["destinations"] = [destination]
         status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
         assert status == 200, body
-        binding = {"provider_id": target["provider_id"], "model": target["model"], "rpm_pool_id": "shared"}
-        status, body = request("PUT", f"models/{route_id}", {"targets": [binding]})
-        assert status == 200, body
-        target_id = body["data"]["targets"][0]["id"]
+        target_id = target["id"]
         invalid = {**config, "pools": []}
         assert "error" in request("PUT", "settings/rpm_admission", {"value": json.dumps(invalid)})[1]
-        assert "error" in request("PUT", f"models/{route_id}", {"targets": [{**binding, "rpm_pool_id": "missing"}]})[1]
+        invalid = {**config, "destinations": [{**destination, "rpm_pool_id": "missing"}]}
+        assert "error" in request("PUT", "settings/rpm_admission", {"value": json.dumps(invalid)})[1]
         for invalid in (
+            {**config, "destinations": [{**destination, "rpm_limit": 7}]},
             {**config, "pools": config["pools"] * 2},
             {**config, "destinations": config["destinations"] * 2},
             {**config, "pools": [{"id": "shared", "name": " ", "rpm_limit": 3}]},
@@ -155,11 +155,11 @@ def test_rpm_pools_bindings_and_restart(
         status, body = request("GET", f"models/{route_id}")
         assert status == 200, body
         assert body["data"]["targets"][0]["id"] == target_id
-        assert body["data"]["targets"][0]["rpm_pool_id"] == "shared"
-        status, body = request("PUT", f"models/{route_id}", {"targets": [{**binding, "rpm_pool_id": None}]})
-        assert status == 200, body
-        assert body["data"]["targets"][0]["rpm_pool_id"] is None
-        status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps({**config, "pools": []})})
+        assert "rpm_pool_id" not in body["data"]["targets"][0]
+        # 目的地解绑与删池在同一配置写入中完成，Route Target 不保存成员关系。
+        config["destinations"] = [{**destination, "rpm_limit": 7, "rpm_pool_id": None}]
+        config["pools"] = []
+        status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
         assert status == 200, body
     finally:
         if process is not None:

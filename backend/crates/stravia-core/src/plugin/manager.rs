@@ -1269,9 +1269,7 @@ async fn binding_impacts(
                 .get(route.model_id.as_str())
                 .cloned()
                 .unwrap_or_default();
-            if target.model().is_none() {
-                required.insert(Capability::Search);
-            } else if required.is_empty()
+            if required.is_empty()
                 || previous_channel
                     .is_some_and(|channel| channel.capabilities.contains(&Capability::Infer))
             {
@@ -1282,16 +1280,10 @@ async fn binding_impacts(
                     && channel.is_some_and(|channel| {
                         channel.capabilities.contains(&capability)
                             && match capability {
-                                Capability::Infer => target.model().is_some(),
-                                Capability::Search => {
-                                    !channel.search_model_required
-                                        || target.model().is_some_and(|model| {
-                                            !model.trim().is_empty() && model.as_str() != "*"
-                                        })
+                                Capability::Search | Capability::MediaImage => {
+                                    let model = target.model().trim();
+                                    !model.is_empty() && model != "*"
                                 }
-                                Capability::MediaImage => target.model().is_some_and(|model| {
-                                    !model.trim().is_empty() && model.as_str() != "*"
-                                }),
                                 _ => true,
                             }
                     });
@@ -1299,7 +1291,7 @@ async fn binding_impacts(
                     impacts.push(PluginBindingImpact {
                         route_id: route.model_id.clone().into(),
                         provider_id: provider.id.clone(),
-                        upstream_model: target.model().cloned().map(Into::into),
+                        upstream_model: target.model().clone().into(),
                         capability: capability.as_str().to_owned(),
                     });
                 }

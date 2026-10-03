@@ -96,8 +96,6 @@ impl<'a> RouteModule<'a> {
     }
 
     pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<RouteConfig> {
-        let _rpm_write = crate::rpm::CONFIG_WRITE.lock().await;
-        self.ensure_rpm_bindings(&input.targets).await?;
         ensure_route_targets_valid(&input.targets)?;
         self.ensure_new_targets_available(&[], &input.targets)
             .await?;
@@ -112,10 +110,8 @@ impl<'a> RouteModule<'a> {
         route_id: &str,
         mut input: UpdateRoute,
     ) -> anyhow::Result<RouteConfig> {
-        let _rpm_write = crate::rpm::CONFIG_WRITE.lock().await;
         let current = self.get(route_id).await?;
         if let Some(targets) = input.targets.as_mut() {
-            self.ensure_rpm_bindings(targets).await?;
             ensure_route_targets_valid(targets)?;
             self.ensure_new_targets_available(&current.targets, targets)
                 .await?;
@@ -126,20 +122,6 @@ impl<'a> RouteModule<'a> {
         self.change_record(route_id, input).await
     }
 
-    async fn ensure_rpm_bindings(&self, targets: &[CreateTarget]) -> anyhow::Result<()> {
-        let value = self
-            .gw
-            .storage
-            .settings()
-            .get(crate::rpm::SETTINGS_KEY)
-            .await?;
-        let config = crate::rpm::RpmConfig::from_setting(value.as_deref())?;
-        for target in targets {
-            config.validate_binding(target.rpm_pool_id.as_deref())?;
-        }
-        Ok(())
-    }
-
     async fn ensure_new_targets_available(
         &self,
         existing: &[TargetConfig],
@@ -147,25 +129,13 @@ impl<'a> RouteModule<'a> {
     ) -> anyhow::Result<()> {
         for target in proposed {
             let provider_id = target.provider_id.trim();
-            let provider_model_id = target
-                .model
-                .as_deref()
-                .map(normalize_model_id)
-                .transpose()?;
+            let provider_model_id = normalize_model_id(&target.model)?;
             if existing.iter().any(|current| {
                 current.provider_id().as_str() == provider_id
-                    && same_target_model(
-                        current.model().map(|model| model.as_str()),
-                        provider_model_id.as_deref(),
-                    )
+                    && same_target_model(current.model().as_str(), &provider_model_id)
             }) {
                 continue;
             }
-            if provider_model_id.is_none() {
-                self.ensure_provider_only_search_target(provider_id).await?;
-                continue;
-            }
-            let provider_model_id = provider_model_id.expect("checked model Target");
             let Some(provider_model) = self
                 .gw
                 .storage
@@ -196,61 +166,6 @@ impl<'a> RouteModule<'a> {
         Ok(())
     }
 
-    async fn ensure_provider_only_search_target(&self, provider_id: &str) -> anyhow::Result<()> {
-        let provider = self.get_provider(provider_id).await?;
-        let vendor_id = provider
-            .vendor
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                coded_error(
-                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
-                    "Provider-only Targets require an installed search Vendor",
-                    serde_json::json!({ "provider_id": provider_id }),
-                )
-            })?;
-        let descriptor = self.gw.vendor_plugins.descriptor(vendor_id).map_err(|_| {
-            coded_error(
-                "PROVIDER_ONLY_TARGET_UNAVAILABLE",
-                "Provider-only Targets require an installed search Vendor",
-                serde_json::json!({ "provider_id": provider_id, "vendor_id": vendor_id }),
-            )
-        })?;
-        let channel_id = provider.channel.as_deref().unwrap_or("default");
-        let channel = descriptor
-            .channels
-            .iter()
-            .find(|channel| channel.id == channel_id)
-            .ok_or_else(|| {
-                coded_error(
-                    "PROVIDER_ONLY_TARGET_UNAVAILABLE",
-                    "Provider channel is not available in the installed Vendor",
-                    serde_json::json!({
-                        "provider_id": provider_id,
-                        "vendor_id": vendor_id,
-                        "channel": channel_id,
-                    }),
-                )
-            })?;
-        if !channel
-            .capabilities
-            .contains(&stravia_vendor_sdk::Capability::Search)
-            || channel.search_model_required
-        {
-            return Err(coded_error(
-                "PROVIDER_ONLY_TARGET_UNAVAILABLE",
-                "Provider channel does not support model-free search",
-                serde_json::json!({
-                    "provider_id": provider_id,
-                    "vendor_id": vendor_id,
-                    "channel": channel_id,
-                }),
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) async fn copy_provider_targets(
         &self,
         original_provider_id: &str,
@@ -271,10 +186,12 @@ impl<'a> RouteModule<'a> {
                 .collect::<Vec<_>>();
 
             for target in &copied_targets {
-                if let Some(model) = target.model().map(|model| model.as_str()) {
-                    self.copy_provider_model(original_provider_id, copied_provider_id, model)
-                        .await?;
-                }
+                self.copy_provider_model(
+                    original_provider_id,
+                    copied_provider_id,
+                    target.model().as_str(),
+                )
+                .await?;
             }
 
             let mut targets = route
@@ -282,13 +199,12 @@ impl<'a> RouteModule<'a> {
                 .iter()
                 .map(|target| CreateTarget {
                     provider_id: target.provider_id().clone().into(),
-                    model: target.model().cloned().map(Into::into),
+                    model: target.model().clone().into(),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -296,13 +212,12 @@ impl<'a> RouteModule<'a> {
                 let (_, model) = target.destination.into_parts();
                 CreateTarget {
                     provider_id: copied_provider_id.to_string(),
-                    model: model.map(Into::into),
+                    model: model.into(),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map: Vec::new(),
                 }
             }));
@@ -408,13 +323,12 @@ impl<'a> RouteModule<'a> {
             } => {
                 let target = CreateTarget {
                     provider_id: provider_id.clone(),
-                    model: Some(provider_model_id.clone()),
+                    model: provider_model_id.clone(),
                     enabled: true,
                     priority: Some(priority),
                     first_token_timeout_ms: Some(first_token_timeout_ms),
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(target_cooldown_ms),
-                    rpm_pool_id: None,
                     thinking_level_map: Vec::new(),
                 };
                 ensure_route_targets_valid(std::slice::from_ref(&target))?;
@@ -439,12 +353,8 @@ impl<'a> RouteModule<'a> {
         if let Some(existing) = existing.as_ref()
             && existing.targets.iter().any(|target| {
                 target.provider_id().as_str() == provider_id
-                    && target
-                        .model()
-                        .map(|model| model.as_str())
-                        .is_some_and(|model| {
-                            model_id_match_key(model) == model_id_match_key(&provider_model_id)
-                        })
+                    && model_id_match_key(target.model().as_str())
+                        == model_id_match_key(&provider_model_id)
             })
         {
             return Ok(existing.clone());
@@ -486,9 +396,8 @@ impl<'a> RouteModule<'a> {
                     balance: Some("traffic_equalization".into()),
                     default_thinking_level: None,
                     targets: vec![CreateTarget {
-                        rpm_pool_id: None,
                         provider_id,
-                        model: Some(provider_model_id),
+                        model: provider_model_id,
                         enabled: true,
                         priority: Some(priority),
                         first_token_timeout_ms: Some(first_token_timeout_ms),
@@ -501,7 +410,7 @@ impl<'a> RouteModule<'a> {
         };
         if existing.targets.iter().any(|target| {
             target.provider_id().as_str() == provider_id
-                && target.model().map(|model| model.as_str()) == Some(provider_model_id.as_str())
+                && target.model().as_str() == provider_model_id.as_str()
         }) {
             return Ok(existing);
         }
@@ -511,25 +420,23 @@ impl<'a> RouteModule<'a> {
             .iter()
             .map(|target| CreateTarget {
                 provider_id: target.provider_id().clone().into(),
-                model: target.model().cloned().map(Into::into),
+                model: target.model().clone().into(),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                rpm_pool_id: target.rpm_pool_id.clone(),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
         targets.push(CreateTarget {
             provider_id,
-            model: Some(provider_model_id),
+            model: provider_model_id,
             enabled: true,
             priority: Some(priority),
             first_token_timeout_ms: Some(first_token_timeout_ms),
             target_retry_budget: Some(target_retry_budget),
             target_cooldown_ms: Some(target_cooldown_ms),
-            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         });
         self.change(
@@ -557,18 +464,16 @@ impl<'a> RouteModule<'a> {
             .iter()
             .filter(|target| {
                 target.provider_id().as_str() != input.provider_id
-                    || target.model().map(|model| model.as_str())
-                        != Some(provider_model_id.as_str())
+                    || target.model().as_str() != provider_model_id.as_str()
             })
             .map(|target| CreateTarget {
                 provider_id: target.provider_id().clone().into(),
-                model: target.model().cloned().map(Into::into),
+                model: target.model().clone().into(),
                 enabled: target.enabled,
                 priority: Some(target.priority),
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
-                rpm_pool_id: target.rpm_pool_id.clone(),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
@@ -652,12 +557,8 @@ impl AdminService {
     }
 }
 
-fn same_target_model(left: Option<&str>, right: Option<&str>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => model_id_match_key(left) == model_id_match_key(right),
-        (None, None) => true,
-        _ => false,
-    }
+fn same_target_model(left: &str, right: &str) -> bool {
+    model_id_match_key(left) == model_id_match_key(right)
 }
 
 fn route_targets_for_update(route: &RouteConfig) -> Vec<CreateTarget> {
@@ -666,13 +567,12 @@ fn route_targets_for_update(route: &RouteConfig) -> Vec<CreateTarget> {
         .iter()
         .map(|target| CreateTarget {
             provider_id: target.provider_id().clone().into(),
-            model: target.model().cloned().map(Into::into),
+            model: target.model().clone().into(),
             enabled: target.enabled,
             priority: Some(target.priority),
             first_token_timeout_ms: Some(target.first_token_timeout_ms),
             target_retry_budget: Some(target.target_retry_budget),
             target_cooldown_ms: Some(target.target_cooldown_ms),
-            rpm_pool_id: target.rpm_pool_id.clone(),
             thinking_level_map: target.thinking_level_map.clone(),
         })
         .collect()

@@ -1029,7 +1029,15 @@ mod tests {
             &target_map(&[]),
         )
         .await;
-        insert_target(&pool, "target-4", "route-1", None, 0, &[]).await;
+        insert_target(
+            &pool,
+            "target-4",
+            "route-1",
+            Some("unrelated-model"),
+            0,
+            &[],
+        )
+        .await;
         let epoch_before = config_epoch(&pool).await.unwrap();
 
         let result = storage
@@ -1094,8 +1102,7 @@ mod tests {
         assert_eq!(low.source, ThinkingMappingSource::Generated);
         assert_eq!(low.control, TargetThinkingControl::Enabled);
 
-        // Unrelated and provider-only Targets stay untouched; the disabled
-        // Route's matched Target was still refreshed in place.
+        // 无关模型的 Target 保持不变；已禁用 Route 的匹配 Target 仍原地刷新。
         let other = target_map_in_db(&pool, "target-3").await;
         assert_eq!(
             map_row(&other, ThinkingLevel::Low).control,

@@ -585,7 +585,6 @@ fn channel(
         consumes_catalog_models: false,
         capabilities,
         model_capabilities: BTreeSet::new(),
-        search_model_required: false,
     }
 }
 

@@ -7,13 +7,7 @@ impl RouteModule<'_> {
         proposed: &mut [CreateTarget],
     ) -> anyhow::Result<()> {
         for target in proposed {
-            let Some(model) = target.model.clone() else {
-                anyhow::ensure!(
-                    target.thinking_level_map.is_empty(),
-                    "Provider-only Targets cannot define a Thinking Level Map"
-                );
-                continue;
-            };
+            let model = target.model.clone();
             let provider_model = self
                 .gw
                 .storage
@@ -24,7 +18,7 @@ impl RouteModule<'_> {
             let provider = self.get_provider(target.provider_id.trim()).await?;
             let current = existing.iter().find(|current| {
                 current.provider_id().as_str() == target.provider_id.trim()
-                    && current.model().map(|model| model.as_str()) == Some(model.as_str())
+                    && current.model().as_str() == model.as_str()
             });
             if let Some(current) = current {
                 if target.thinking_level_map.is_empty() {
@@ -114,13 +108,7 @@ impl RouteModule<'_> {
         targets: &[CreateTarget],
     ) -> anyhow::Result<()> {
         for target in targets {
-            let Some(model) = target.model.as_deref() else {
-                anyhow::ensure!(
-                    target.thinking_level_map.is_empty(),
-                    "Provider-only Targets cannot define a Thinking Level Map"
-                );
-                continue;
-            };
+            let model = target.model.as_str();
             let provider = self.get_provider(target.provider_id.trim()).await?;
             let provider_model = self
                 .gw
@@ -171,10 +159,7 @@ impl RouteModule<'_> {
             .iter()
             .find(|target| target.id == target_id)
             .ok_or_else(|| anyhow::anyhow!("Target not found: {target_id}"))?;
-        let model = target
-            .model()
-            .map(|model| model.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Provider-only Target has no Thinking Level Map"))?;
+        let model = target.model().as_str();
         let provider_model = self
             .gw
             .storage
@@ -195,7 +180,7 @@ impl RouteModule<'_> {
             .iter_mut()
             .find(|candidate| {
                 candidate.provider_id == target.provider_id().as_str()
-                    && candidate.model.as_deref() == target.model().map(|model| model.as_str())
+                    && candidate.model == target.model().as_str()
             })
             .expect("target was loaded from this Route");
         for row in &mut edited.thinking_level_map {

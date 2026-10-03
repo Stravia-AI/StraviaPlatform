@@ -125,8 +125,8 @@ Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`�
 本节是已实施的插件化契约，取代原 Codex 固定 Provider/账号与 upstream Model 的接入方式。详见 [Vendor 插件设计](vendor-plugins.md)。
 
 - 管理员为外部完整搜索绑定 Route，由宿主选择具备完整搜索能力的 Target。Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
-- Target 支持 Provider + 上游模型，也支持仅 Provider 的独立研究服务，不强迫后者建立 Provider Model 或虚假模型 ID。上游 wire 要求的固定标识由插件处理。
-- [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。其固定 model 参数不等于管理员必须选择模型；该服务是设计参考，不自动列入本期正式供应商交付清单。
+- Target 必须绑定 Provider 与非空白的上游模型；所选 Provider Model 必须支持完整搜索，不能省略模型或使用虚假模型绕过能力校验。
+- [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
 - 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。
 - 外部搜索沿用 Route 的选择、重试和 Target 切换策略；插件提供错误分类，宿主在结果提交前对明确可重试的上游错误决定重试或切换。取消、参数错误及权限错误不触发，结果提交后不重放；接受重复执行与重复消耗额度风险。
 - 插件归一答案和引用，宿主继续执行 Search Report 验证、来源策略、平台 Gate、Principal 隔离及交付。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。
@@ -186,7 +186,7 @@ core 保留输入修整、错误映射、准入与异步解析调度；adapter �
 
 ## 9. 验证边界
 
-- 插件化目标：真实 Wasm 经公开搜索入口执行，覆盖同连接多能力、模型型与 Provider-only Target、Route 重试切换、外部续接拒绝与 Local 续接保留；使用本地上游，不调用收费生产服务。
+- 插件化目标：真实 Wasm 经公开搜索入口执行，覆盖同连接多能力、必填上游模型及能力资格、Route 重试切换、外部续接拒绝与 Local 续接保留；使用本地上游，不调用收费生产服务。
 - 能力移除：保留受影响绑定并明确不可用；内置 `base` 自动更新不为能力移除或按格式版本差异重置数据暂停确认；本地包更新和手动恢复仍须确认数据丢弃。兼容在途搜索使用旧版完成，不兼容更新取消并阻止迟到报告提交。
 - Admin API：配置读写、Local/External Route validation、旧字段拒绝；
 - Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；

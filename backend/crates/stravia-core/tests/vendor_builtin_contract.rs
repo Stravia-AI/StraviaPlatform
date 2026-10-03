@@ -242,9 +242,8 @@ async fn provider_route_and_key(
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some(upstream_model.to_string()),
+                model: upstream_model.to_string(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -2078,13 +2077,12 @@ async fn deepseek_builtin_applies_thinking_and_tool_history_on_the_real_wire() -
             stravia_core::db::models::UpdateRoute {
                 targets: Some(vec![stravia_core::db::models::CreateTarget {
                     provider_id: target.provider_id().to_string(),
-                    model: target.model().map(ToString::to_string),
+                    model: target.model().to_string(),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    rpm_pool_id: target.rpm_pool_id.clone(),
                     thinking_level_map,
                 }]),
                 ..Default::default()
@@ -2645,9 +2643,8 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("claude-opus-4.8".into()),
+                model: "claude-opus-4.8".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

@@ -226,7 +226,6 @@ export interface VendorChannelDescriptor {
   consumes_catalog_models?: boolean
   capabilities: VendorCapability[]
   model_capabilities?: string[]
-  search_model_required: boolean
 }
 
 export type VendorConfigFieldKind =

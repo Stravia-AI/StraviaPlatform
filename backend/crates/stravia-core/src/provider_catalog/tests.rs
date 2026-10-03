@@ -100,8 +100,7 @@ fn descriptor_with_catalog(
             "auth": null,
             "protocol": protocol,
             "default_base_url": default_base_url,
-            "capabilities": ["infer"],
-            "search_model_required": false
+            "capabilities": ["infer"]
         }],
         "capabilities": ["infer"],
         "config_groups": [],

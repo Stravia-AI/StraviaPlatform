@@ -200,9 +200,8 @@ async fn protected_responses_router_with_base_url(
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("auth-model".into()),
+                model: "auth-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -786,9 +785,8 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             display_name: None,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("no-tools".into()),
+                model: "no-tools".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,

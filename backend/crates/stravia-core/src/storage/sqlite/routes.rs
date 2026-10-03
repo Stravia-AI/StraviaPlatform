@@ -37,8 +37,7 @@ struct TargetRow {
     id: String,
     model_id: String,
     provider_id: String,
-    model: Option<String>,
-    rpm_pool_id: Option<String>,
+    model: String,
     enabled: bool,
     priority: i32,
     first_token_timeout_ms: i64,
@@ -55,14 +54,13 @@ impl TargetRow {
             model_id: self.model_id.into(),
             destination: crate::db::identity::TargetDestination::new(
                 self.provider_id.into(),
-                self.model.map(Into::into),
+                self.model.into(),
             ),
             enabled: self.enabled,
             priority: self.priority,
             first_token_timeout_ms: self.first_token_timeout_ms,
             target_retry_budget: self.target_retry_budget,
             target_cooldown_ms: self.target_cooldown_ms,
-            rpm_pool_id: self.rpm_pool_id,
             created_at: self.created_at,
             thinking_level_map: self.thinking_level_map.0,
         }
@@ -115,7 +113,7 @@ impl SqliteRouteStore {
         route_storage_id: &str,
     ) -> anyhow::Result<Vec<TargetConfig>> {
         Ok(sqlx::query_as::<_, TargetRow>(
-            "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&mut *connection)
@@ -264,7 +262,7 @@ impl RouteStore for SqliteRouteStore {
 
         if let Some(targets) = route.targets.as_ref() {
             let existing = sqlx::query_as::<_, TargetRow>(
-                "SELECT id, model_id, provider_id, model, rpm_pool_id, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
+                "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
             )
             .bind(&route_storage_id)
             .fetch_all(&mut *tx)
@@ -272,7 +270,7 @@ impl RouteStore for SqliteRouteStore {
             for previous in &existing {
                 if !targets.iter().any(|target| {
                     previous.provider_id == target.provider_id.trim()
-                        && previous.model.as_deref() == target.model.as_deref().map(str::trim)
+                        && previous.model == target.model.trim()
                 }) {
                     sqlx::query("DELETE FROM model_backends WHERE id = ?")
                         .bind(&previous.id)
@@ -286,17 +284,17 @@ impl RouteStore for SqliteRouteStore {
                     .iter()
                     .find(|row| {
                         row.provider_id == target.provider_id.trim()
-                            && row.model.as_deref() == target.model.as_deref().map(str::trim)
+                            && row.model == target.model.trim()
                     })
                     .map(|row| row.id.clone())
                     .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                 sqlx::query(
-                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map, rpm_pool_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider_id = excluded.provider_id, model = excluded.model, enabled = excluded.enabled, priority = excluded.priority, first_token_timeout_ms = excluded.first_token_timeout_ms, target_retry_budget = excluded.target_retry_budget, target_cooldown_ms = excluded.target_cooldown_ms, thinking_level_map = excluded.thinking_level_map, rpm_pool_id = excluded.rpm_pool_id",
+                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider_id = excluded.provider_id, model = excluded.model, enabled = excluded.enabled, priority = excluded.priority, first_token_timeout_ms = excluded.first_token_timeout_ms, target_retry_budget = excluded.target_retry_budget, target_cooldown_ms = excluded.target_cooldown_ms, thinking_level_map = excluded.thinking_level_map",
                 )
                 .bind(id)
                 .bind(&route_storage_id)
                 .bind(target.provider_id.trim())
-                .bind(target.model.as_deref().map(str::trim))
+                .bind(target.model.trim())
                 .bind(target.enabled)
                 .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
                 .bind(
@@ -315,7 +313,6 @@ impl RouteStore for SqliteRouteStore {
                         .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
                 )
                 .bind(sqlx::types::Json(&target.thinking_level_map))
-                .bind(target.rpm_pool_id.as_deref())
                 .execute(&mut *tx)
                 .await?;
             }
@@ -349,12 +346,11 @@ mod tests {
         crate::db::models::CreateTarget {
             enabled: true,
             provider_id: provider_id.into(),
-            model: Some(model.into()),
+            model: model.into(),
             priority: Some(0),
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
-            rpm_pool_id: None,
             thinking_level_map: Vec::new(),
         }
     }
@@ -416,10 +412,7 @@ mod tests {
         assert_eq!(persisted.balance, "traffic_equalization");
         assert_eq!(persisted.targets.len(), 1);
         assert_eq!(persisted.targets[0].provider_id(), "provider-1");
-        assert_eq!(
-            persisted.targets[0].model().map(|model| model.as_str()),
-            Some("working-model")
-        );
+        assert_eq!(persisted.targets[0].model().as_str(), "working-model");
 
         sqlx::query("CREATE TRIGGER reject_target_delete BEFORE DELETE ON model_backends BEGIN SELECT RAISE(FAIL, 'target deleted'); END")
             .execute(&store.pool).await.expect("delete guard");
@@ -443,62 +436,6 @@ mod tests {
             updated.targets[0].created_at,
             persisted.targets[0].created_at
         );
-    }
-
-    #[tokio::test]
-    async fn provider_only_target_round_trips_without_a_model_row() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("SQLite pool");
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await
-            .expect("foreign keys");
-        crate::migrations::migrate_sqlite(&pool, None)
-            .await
-            .expect("migrations");
-        sqlx::query(
-            "INSERT INTO providers (
-                id, name, protocol, base_url, api_key, auth_mode
-             ) VALUES ('research-provider', 'Research', 'open-responses', 'https://example.com', '', 'apikey')",
-        )
-        .execute(&pool)
-        .await
-        .expect("Provider");
-        let store = SqliteRouteStore { pool };
-
-        let route = store
-            .put(PutRoute {
-                id: None,
-                model_id: "research-route".into(),
-                display_name: None,
-                selection_strategy: "traffic_equalization".into(),
-                is_enabled: true,
-                targets: Some(vec![crate::db::models::CreateTarget {
-                    rpm_pool_id: None,
-                    provider_id: "research-provider".into(),
-                    model: None,
-                    enabled: true,
-                    priority: Some(0),
-                    first_token_timeout_ms: None,
-                    target_retry_budget: None,
-                    target_cooldown_ms: None,
-                    thinking_level_map: Vec::new(),
-                }]),
-                default_thinking_level: None,
-            })
-            .await
-            .expect("Provider-only Route");
-
-        assert!(
-            route
-                .primary_target()
-                .is_some_and(|target| target.model().is_none())
-        );
-        assert!(route.targets[0].model().is_none());
-        assert_eq!(route.targets[0].provider_id(), "research-provider");
     }
 
     #[tokio::test]

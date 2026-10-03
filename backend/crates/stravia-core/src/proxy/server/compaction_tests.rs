@@ -154,9 +154,9 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         }).await.unwrap();
         let route = admin.create_model(CreateRoute {
             model_id: "native-publication".into(), display_name: None, balance: None,
-            targets: vec![crate::db::models::CreateTarget { rpm_pool_id: None,
+            targets: vec![crate::db::models::CreateTarget {
                             provider_id: provider.id,
-                            model: Some("upstream-model".into()),
+                            model: "upstream-model".into(),
                             enabled: true,
                             priority: None,
                             first_token_timeout_ms: None,
@@ -336,9 +336,9 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             model_id: "native-ws".into(),
             display_name: None,
             balance: None,
-            targets: vec![crate::db::models::CreateTarget { rpm_pool_id: None,
+            targets: vec![crate::db::models::CreateTarget {
                             provider_id: provider.id,
-                            model: Some("upstream-model".into()),
+                            model: "upstream-model".into(),
                             enabled: true,
                             priority: None,
                             first_token_timeout_ms: None,

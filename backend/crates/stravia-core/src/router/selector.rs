@@ -17,7 +17,7 @@ use stravia_runtime_contract::protocol::ir::ProtocolExt;
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
     pub destination: TargetDestination,
-    pub rpm_pool_id: Option<String>,
+
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
@@ -30,7 +30,7 @@ impl SelectedTarget {
         self.destination.provider_id()
     }
 
-    pub fn model(&self) -> Option<&UpstreamModelId> {
+    pub fn model(&self) -> &UpstreamModelId {
         self.destination.model()
     }
 }
@@ -1120,28 +1120,21 @@ pub fn conversation_identity(request: &AiRequest) -> Option<ConversationIdentity
         })
 }
 
-pub(crate) fn target_key(provider_id: &str, model: Option<&str>) -> String {
-    format!("{provider_id}:{}", model.unwrap_or_default())
+pub(crate) fn target_key(provider_id: &str, model: &str) -> String {
+    format!("{provider_id}:{model}")
 }
 
 pub fn selected_target_key(target: &SelectedTarget) -> String {
-    target_key(
-        target.provider_id().as_str(),
-        target.model().map(UpstreamModelId::as_str),
-    )
+    target_key(target.provider_id().as_str(), target.model().as_str())
 }
 
 fn persisted_target_key(target: &TargetConfig) -> String {
-    target_key(
-        target.provider_id().as_str(),
-        target.model().map(|model| model.as_str()),
-    )
+    target_key(target.provider_id().as_str(), target.model().as_str())
 }
 
 fn to_selected(target: &TargetConfig) -> SelectedTarget {
     SelectedTarget {
         destination: target.destination.clone(),
-        rpm_pool_id: target.rpm_pool_id.clone(),
         priority: target.priority,
         first_token_timeout_ms: target.first_token_timeout_ms,
         target_retry_budget: target.target_retry_budget,
@@ -1170,19 +1163,21 @@ mod tests {
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
-            rpm_pool_id: None,
             created_at: String::new(),
             thinking_level_map: Vec::new(),
         }
     }
 
     #[test]
-    fn target_keys_preserve_model_identity_and_distinguish_provider_only() {
-        assert_eq!(target_key("provider", Some("model")), "provider:model");
-        assert_eq!(target_key("provider", None), "provider:");
+    fn target_keys_preserve_provider_and_model_identity() {
+        assert_eq!(target_key("provider", "model"), "provider:model");
         assert_ne!(
-            target_key("provider", Some("model")),
-            target_key("provider", None)
+            target_key("provider", "model"),
+            target_key("provider", "other-model")
+        );
+        assert_ne!(
+            target_key("provider", "model"),
+            target_key("other-provider", "model")
         );
     }
 

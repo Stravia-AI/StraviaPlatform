@@ -29,8 +29,10 @@ impl Default for RpmConfig {
 #[serde(deny_unknown_fields)]
 pub struct DestinationRpmLimit {
     pub provider_id: String,
-    pub model: Option<String>,
+    pub model: String,
     pub rpm_limit: Option<i32>,
+    #[serde(default)]
+    pub rpm_pool_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,11 +71,9 @@ impl RpmConfig {
                 "provider_id must be nonempty and trimmed"
             );
             anyhow::ensure!(
-                destination
-                    .model
-                    .as_ref()
-                    .is_none_or(|model| !model.trim().is_empty() && model.trim() == model),
-                "model must be nonempty and trimmed or null"
+                !destination.model.trim().is_empty()
+                    && destination.model.trim() == destination.model,
+                "model must be nonempty and trimmed"
             );
             anyhow::ensure!(
                 destination.rpm_limit.is_none_or(|limit| limit > 0),
@@ -100,16 +100,56 @@ impl RpmConfig {
             );
             anyhow::ensure!(pools.insert(&pool.id), "duplicate RPM pool id");
         }
-        Ok(())
-    }
-
-    pub fn validate_binding(&self, pool_id: Option<&str>) -> anyhow::Result<()> {
-        if let Some(pool_id) = pool_id {
-            anyhow::ensure!(
-                self.pools.iter().any(|pool| pool.id == pool_id),
-                "unknown RPM pool: {pool_id}"
-            );
+        for destination in &self.destinations {
+            if let Some(pool_id) = &destination.rpm_pool_id {
+                anyhow::ensure!(
+                    destination.rpm_limit.is_none(),
+                    "destination must not set both rpm_limit and rpm_pool_id"
+                );
+                anyhow::ensure!(pools.contains(pool_id), "unknown RPM pool: {pool_id}");
+            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destination_pool_membership_requires_one_existing_counting_policy() {
+        let mut config = RpmConfig {
+            destinations: vec![DestinationRpmLimit {
+                provider_id: "provider".into(),
+                model: "model".into(),
+                rpm_limit: None,
+                rpm_pool_id: Some("shared".into()),
+            }],
+            pools: vec![RpmPool {
+                id: "shared".into(),
+                name: "Shared".into(),
+                rpm_limit: Some(2),
+            }],
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        config.destinations[0].rpm_limit = Some(1);
+        assert!(config.validate().is_err());
+        config.destinations[0].rpm_limit = None;
+        config.pools.clear();
+        assert!(config.validate().is_err());
+        config.destinations[0].rpm_pool_id = None;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn omitted_destination_pool_deserializes_as_unbound() {
+        let config: RpmConfig = serde_json::from_str(
+            r#"{"destinations":[{"provider_id":"p","model":"m","rpm_limit":1}]}"#,
+        )
+        .unwrap();
+        assert!(config.destinations[0].rpm_pool_id.is_none());
+        config.validate().unwrap();
     }
 }

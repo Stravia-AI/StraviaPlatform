@@ -188,7 +188,7 @@ CREATE TABLE "model_backends" (
     id                     TEXT PRIMARY KEY,
     model_id               TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
     provider_id            TEXT NOT NULL REFERENCES providers(id),
-    model                  TEXT CHECK (model IS NULL OR length(trim(model)) > 0),
+    model                  TEXT NOT NULL CHECK (length(trim(model)) > 0),
     priority               INTEGER NOT NULL DEFAULT 0,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     thinking_level_map     TEXT NOT NULL DEFAULT '[{"level":"off","control":{"type":"hidden"},"source":"generated"},{"level":"minimal","control":{"type":"hidden"},"source":"generated"},{"level":"low","control":{"type":"hidden"},"source":"generated"},{"level":"medium","control":{"type":"hidden"},"source":"generated"},{"level":"high","control":{"type":"hidden"},"source":"generated"},{"level":"xhigh","control":{"type":"hidden"},"source":"generated"},{"level":"max","control":{"type":"hidden"},"source":"generated"}]'
@@ -197,7 +197,7 @@ CREATE TABLE "model_backends" (
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
     target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000,
     enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
-, rpm_pool_id TEXT);
+);
 
 CREATE TABLE model_turn_observations (
     id TEXT PRIMARY KEY,

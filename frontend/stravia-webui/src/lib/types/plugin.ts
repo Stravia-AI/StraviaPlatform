@@ -22,7 +22,7 @@ export interface PluginDataDiscard {
 export interface PluginBindingImpact {
   route_id: string
   provider_id: string
-  upstream_model: string | null
+  upstream_model: string
   capability: string
 }
 

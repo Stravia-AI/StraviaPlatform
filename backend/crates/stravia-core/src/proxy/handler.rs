@@ -153,9 +153,8 @@ mod tests {
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("provider-model".into()),
+                model: "provider-model".into(),
                 enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
@@ -285,13 +284,12 @@ mod tests {
                 }
                 crate::db::models::CreateTarget {
                     provider_id: target.provider_id().clone().into(),
-                    model: target.model().cloned().map(Into::into),
+                    model: target.model().clone().into(),
                     enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    rpm_pool_id: None,
                     thinking_level_map: map,
                 }
             })

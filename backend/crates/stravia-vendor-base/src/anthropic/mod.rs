@@ -45,7 +45,6 @@ fn anthropic_descriptor() -> ProviderDescriptor {
             consumes_catalog_models: false,
             capabilities: capabilities.clone(),
             model_capabilities: BTreeSet::new(),
-            search_model_required: false,
         }],
         capabilities,
         website: None,

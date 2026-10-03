@@ -1090,9 +1090,9 @@ async fn prepare_attempt(
 ) -> Result<PreparedAttempt, AttemptFailure> {
     let gateway = &executor.gateway;
     let target_key = selected_target_key(target);
-    let actual_model = match target.model().map(|model| model.as_str().trim()) {
-        Some("*") => route.model_id.to_string(),
-        Some(model) if !model.is_empty() => model.to_owned(),
+    let actual_model = match target.model().as_str().trim() {
+        "*" => route.model_id.to_string(),
+        model if !model.is_empty() => model.to_owned(),
         _ => {
             return Err(AttemptFailure::reroutable(
                 "provider_model_unavailable",

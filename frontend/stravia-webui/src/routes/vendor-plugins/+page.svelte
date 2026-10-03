@@ -216,13 +216,11 @@ function statusTone(status: string, error: string | null): 'healthy' | 'warning'
 }
 
 function bindingLabel(binding: PluginBindingImpact): string {
-  return binding.upstream_model
-    ? m.vendor_plugins_binding_model_value({
-        route: binding.route_id,
-        provider: binding.provider_id,
-        model: binding.upstream_model,
-      })
-    : m.vendor_plugins_binding_value({ route: binding.route_id, provider: binding.provider_id })
+  return m.vendor_plugins_binding_model_value({
+    route: binding.route_id,
+    provider: binding.provider_id,
+    model: binding.upstream_model,
+  })
 }
 
 function canRestoreBuiltin(plugin: PluginSummary): boolean {
@@ -753,7 +751,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
             </h3>
             {#if plugin.affected_bindings.length > 0}
               <ul class="mt-2 flex flex-col gap-2">
-                {#each plugin.affected_bindings as binding (`${binding.route_id}:${binding.provider_id}:${binding.capability}:${binding.upstream_model ?? ''}`)}
+                {#each plugin.affected_bindings as binding (`${binding.route_id}:${binding.provider_id}:${binding.capability}:${binding.upstream_model}`)}
                   <li class="min-w-0 rounded-lg border bg-card px-3 py-2 text-sm">
                     <span class="font-technical block truncate text-xs">{bindingLabel(binding)}</span>
                     <span class="mt-1 block text-muted-foreground">{capabilityLabel(binding.capability)}</span>
@@ -969,7 +967,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                     {m.vendor_plugins_preview_binding_lost({ count: preview.affected_bindings.length })}
                   </p>
                   <ul class="mt-1 flex flex-col gap-1">
-                    {#each preview.affected_bindings as binding (`${binding.route_id}:${binding.provider_id}:${binding.capability}:${binding.upstream_model ?? ''}`)}
+                    {#each preview.affected_bindings as binding (`${binding.route_id}:${binding.provider_id}:${binding.capability}:${binding.upstream_model}`)}
                       <li class="min-w-0 text-xs">
                         <span class="font-technical break-words">{bindingLabel(binding)}</span>
                         <span class="text-muted-foreground"> · {capabilityLabel(binding.capability)}</span>

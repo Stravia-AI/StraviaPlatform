@@ -13,7 +13,7 @@ pub(crate) mod support;
 /// Static capability eligibility shared by route validation and the final send gate.
 pub(crate) fn validate_target_capability(
     channel: &stravia_vendor_sdk::ChannelDescriptor,
-    model_id: Option<&str>,
+    model_id: &str,
     model: Option<&crate::provider_models::ProviderModelRecord>,
     capability: stravia_vendor_sdk::Capability,
 ) -> anyhow::Result<()> {
@@ -23,15 +23,6 @@ pub(crate) fn validate_target_capability(
         "Target Provider channel does not support {}",
         capability.as_str()
     );
-    let Some(model_id) = model_id else {
-        anyhow::ensure!(
-            !matches!(capability, Capability::Search | Capability::MediaImage)
-                || (capability == Capability::Search && !channel.search_model_required),
-            "Target requires a Provider Model for {}",
-            capability.as_str()
-        );
-        return Ok(());
-    };
     if !matches!(capability, Capability::Search | Capability::MediaImage) {
         anyhow::ensure!(
             model.is_none_or(|model| model.effective_available()),
@@ -40,8 +31,7 @@ pub(crate) fn validate_target_capability(
         return Ok(());
     }
     anyhow::ensure!(
-        !model_id.trim().is_empty()
-            && (capability != Capability::MediaImage || model_id.trim() != "*"),
+        !model_id.trim().is_empty() && model_id.trim() != "*",
         "Target Provider Model is invalid"
     );
     let model = model.ok_or_else(|| anyhow::anyhow!("Target Provider Model is unavailable"))?;

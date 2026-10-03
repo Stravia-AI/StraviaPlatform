@@ -241,7 +241,8 @@ def build_harness(work_dir: Path) -> None:
                             .map(|entry| entry.map(|entry| entry.path()))
                             .collect::<Result<Vec<_>, _>>()?;
                         files.sort();
-                        for file in files.iter().filter(|path| !path.file_name().unwrap().to_string_lossy().starts_with("0009")) {
+                        // 只回放 0009 之前的迁移，模拟升级前的库；后续迁移可能依赖 0009 的结构。
+                        for file in files.iter().take_while(|path| !path.file_name().unwrap().to_string_lossy().starts_with("0009")) {
                             sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(file)?))
                                 .execute(&mut *connection).await?;
                         }
@@ -381,7 +382,7 @@ def build_harness(work_dir: Path) -> None:
                 balance: None,
                 targets: vec![stravia_core::db::models::CreateTarget {
                     provider_id: provider.id.clone(),
-                    model: Some("gpt-4o-mini".to_string()),
+                    model: "gpt-4o-mini".to_string(),
                     enabled: true,
                     priority: None,
                     first_token_timeout_ms: None,
@@ -449,7 +450,7 @@ def build_harness(work_dir: Path) -> None:
                 default_thinking_level: None,
                 targets: Some(vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
-                    model: Some("missing-model".to_string()),
+                    model: "missing-model".to_string(),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: Some(60_000),

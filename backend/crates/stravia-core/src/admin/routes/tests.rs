@@ -79,12 +79,18 @@ fn route_wire_inputs_require_targets_and_reject_legacy_fields() {
     }));
     assert!(current.is_ok());
 
-    let provider_only = serde_json::from_value::<CreateRoute>(json!({
+    let missing_model = serde_json::from_value::<CreateRoute>(json!({
         "model_id": "research",
         "targets": [{"provider_id": "provider", "model": null}]
-    }))
-    .expect("Provider-only Route contract");
-    assert!(provider_only.targets[0].model.is_none());
+    }));
+    assert!(missing_model.is_err());
+    assert!(
+        serde_json::from_value::<CreateRoute>(json!({
+            "model_id": "research",
+            "targets": [{"provider_id": "provider"}]
+        }))
+        .is_err()
+    );
 
     for legacy in ["name", "target_provider", "target_model"] {
         let mut input = json!({"model_id": "client-model", "targets": []});
@@ -135,11 +141,10 @@ fn route_target_wire_input_defaults_enabled_and_accepts_disabled() {
     }))
     .expect("disabled Target");
 
-    let provider_only = serde_json::from_value::<CreateTarget>(json!({
+    let missing_model = serde_json::from_value::<CreateTarget>(json!({
         "provider_id": "research-provider",
         "model": null
-    }))
-    .expect("Provider-only Target");
+    }));
     let blank = serde_json::from_value::<CreateTarget>(json!({
         "provider_id": "provider",
         "model": "   "
@@ -148,7 +153,7 @@ fn route_target_wire_input_defaults_enabled_and_accepts_disabled() {
 
     assert!(enabled.enabled);
     assert!(!disabled.enabled);
-    assert!(provider_only.model.is_none());
+    assert!(missing_model.is_err());
     assert!(ensure_route_targets_valid(&[blank]).is_err());
 }
 
@@ -202,9 +207,8 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -287,12 +291,11 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     let create_target = |model: &str, priority: i32| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: Some(model.into()),
+        model: model.into(),
         priority: Some(priority),
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
-        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
     let route = admin
@@ -368,13 +371,12 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         .await?;
     let target = |model: &str, enabled: bool| CreateTarget {
         provider_id: provider.id.clone(),
-        model: Some(model.into()),
+        model: model.into(),
         enabled,
         priority: Some(if enabled { -1 } else { i32::MAX }),
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
-        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -396,20 +398,18 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         route
             .targets
             .iter()
-            .find(|target| target.model().map(|model| model.as_str()) == Some("upstream-model"))
+            .find(|target| target.model().as_str() == "upstream-model")
             .is_some_and(|target| target.enabled)
     );
     assert!(
         route
             .targets
             .iter()
-            .find(|target| target.model().map(|model| model.as_str()) == Some("standby-model"))
+            .find(|target| target.model().as_str() == "standby-model")
             .is_some_and(|target| !target.enabled)
     );
     assert_eq!(
-        route
-            .primary_target()
-            .and_then(|target| target.model().map(|model| model.as_str())),
+        route.primary_target().map(|target| target.model().as_str()),
         Some("upstream-model")
     );
 
@@ -462,10 +462,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
         second.targets[0].provider_id().as_str(),
         provider.id.as_str()
     );
-    assert_eq!(
-        second.targets[0].model().map(|model| model.as_str()),
-        Some("upstream-model")
-    );
+    assert_eq!(second.targets[0].model().as_str(), "upstream-model");
     assert!(second.targets[0].enabled);
     assert_eq!(second.context_window, Some(200_000));
     assert!(second.supports_image_input);
@@ -526,12 +523,11 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
     let create_target = |model: &str| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: Some(model.into()),
+        model: model.into(),
         priority: None,
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
-        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -547,10 +543,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         })
         .await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(
-        route.targets[0].model().map(|model| model.as_str()),
-        Some("GLM-4.6")
-    );
+    assert_eq!(route.targets[0].model().as_str(), "GLM-4.6");
     // 能力元数据经宽松匹配解析成功
     assert_eq!(route.context_window, Some(131_072));
     assert!(!route.supports_image_input);
@@ -576,12 +569,11 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
     let create_target = |model: &str| CreateTarget {
         enabled: true,
         provider_id: provider.id.clone(),
-        model: Some(model.into()),
+        model: model.into(),
         priority: None,
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
-        rpm_pool_id: None,
         thinking_level_map: Vec::new(),
     };
     let input = |target: CreateTarget| CreateRoute {
@@ -632,10 +624,7 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
 
     let route = routes.get("cased-route").await?;
     assert_eq!(route.targets.len(), 1);
-    assert_eq!(
-        route.targets[0].model().map(|model| model.as_str()),
-        Some("upstream-model")
-    );
+    assert_eq!(route.targets[0].model().as_str(), "upstream-model");
     Ok(())
 }
 
@@ -708,9 +697,8 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
         targets: vec![CreateTarget {
-            rpm_pool_id: None,
             provider_id: provider.id.clone(),
-            model: Some("upstream-model".into()),
+            model: "upstream-model".into(),
             enabled: true,
             priority: None,
             first_token_timeout_ms: None,
@@ -791,9 +779,8 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             balance: None,
 
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id,
-                model: Some("upstream-model".into()),
+                model: "upstream-model".into(),
                 enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
@@ -821,9 +808,8 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("missing-model".into()),
+                model: "missing-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -889,9 +875,8 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("effort-model".into()),
+                model: "effort-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -996,9 +981,8 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("max-effort-model".into()),
+                model: "max-effort-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1080,9 +1064,8 @@ async fn create_toggle_route(
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some(model.into()),
+                model: model.into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1258,9 +1241,8 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
             balance: None,
 
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("custom-toggle-model".into()),
+                model: "custom-toggle-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1353,9 +1335,8 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("gemini-effort-model".into()),
+                model: "gemini-effort-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
@@ -1422,9 +1403,8 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
 
             targets: vec![
                 CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: provider.id.clone(),
-                    model: Some("wide-effort-model".into()),
+                    model: "wide-effort-model".into(),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
@@ -1433,9 +1413,8 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
-                    rpm_pool_id: None,
                     provider_id: provider.id,
-                    model: Some("narrow-effort-model".into()),
+                    model: "narrow-effort-model".into(),
                     enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
@@ -1501,9 +1480,8 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             display_name: None,
             balance: None,
             targets: vec![CreateTarget {
-                rpm_pool_id: None,
                 provider_id: provider.id.clone(),
-                model: Some("toggle-model".into()),
+                model: "toggle-model".into(),
                 enabled: true,
                 priority: None,
                 first_token_timeout_ms: None,
