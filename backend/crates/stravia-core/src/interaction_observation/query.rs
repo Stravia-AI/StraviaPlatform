@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-mod failed;
+pub(super) mod failed;
 
 use sqlx::{FromRow, QueryBuilder, Row};
 

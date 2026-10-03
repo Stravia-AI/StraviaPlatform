@@ -827,6 +827,7 @@ pub struct WebAccessSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, FromRow)]
 pub struct StatsOverview {
+    /// 保留期内的客户端请求数，包括准入前拒绝；内部轮次和重试不重复计数。
     pub total_requests: i64,
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
@@ -835,6 +836,7 @@ pub struct StatsOverview {
     pub total_reasoning_tokens: Option<i64>,
     pub avg_duration_ms: Option<f64>,
     pub avg_first_token_ms: Option<f64>,
+    /// 与「失败的请求」相同的最终失败请求数，不包含恢复成功、取消或中断。
     pub error_count: i64,
 }
 
@@ -843,7 +845,9 @@ pub struct StatsSeries {
     /// Epoch milliseconds of the bucket start, aligned to the requested bucket
     /// size and caller timezone offset.
     pub bucket_start: i64,
+    /// 按客户端请求开始时间分桶的请求数，包括准入前拒绝。
     pub request_count: i64,
+    /// 本桶内最终失败的客户端请求数；同一请求的内部轮次和重试只计一次。
     pub error_count: i64,
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
@@ -867,7 +871,9 @@ pub struct ModelStats {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ProviderStats {
     pub provider: String,
+    /// 涉及该服务的客户端请求数，不按内部轮次或尝试重复计数。
     pub request_count: i64,
+    /// 涉及该服务的最终失败请求数；跨服务失败可分别计入多个服务。
     pub error_count: i64,
     pub avg_duration_ms: Option<f64>,
     /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ净生成耗时。

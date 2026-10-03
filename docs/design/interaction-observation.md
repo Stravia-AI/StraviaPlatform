@@ -88,6 +88,8 @@ WebSocket 同样等待流生产任务的最终结果，再记录成功交付与�
 
 Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 
+- 用量分析总览、时间分桶和 Provider 汇总的错误数与「失败的请求」共用同一请求级查询：包括准入前拒绝，以及终态为 `failed` 且已结束的 Inference Run；排除内部恢复后成功、进行中、单纯取消、断线和中断。按请求开始时间归入窗口和分桶，并排除已过保留期的记录；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示错误；
+- 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。Provider 汇总按请求涉及的服务归属，每个服务内对同一请求去重；没有涉及任何服务的拒绝不归属 Provider，一次跨服务的最终失败可分别计入多个服务，不能将各服务错误数相加当作全局错误数。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
 - 管理面 input 在每个 attempt 上计算 `max(input_tokens - cache_read_tokens, 0)` 后累计；任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 同时计数。缓存写入不在此扣除范围内；
 - output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。概览按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；

@@ -1,6 +1,15 @@
 use super::*;
 
-const FAILED_SELECT: &str = "
+pub(crate) const REQUEST_SELECT: &str = "
+SELECT r.id,'rejection' AS kind,NULL AS run_id,
+COALESCE(r.started_at,r.occurred_at) AS started_at,r.expires_at
+FROM rejected_request_observations r
+UNION ALL
+SELECT r.id,'run' AS kind,r.id AS run_id,r.started_at,r.expires_at
+FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id";
+
+// 用量分析与失败列表共用请求级失败事实，不能从轮次或尝试状态推断请求失败。
+pub(crate) const FAILED_SELECT: &str = "
 SELECT r.id,'rejection' AS kind,COALESCE(r.started_at,r.occurred_at) AS started_at,
 r.duration_ms,r.api_key_id,r.api_key_name,r.request_model AS model,
 (SELECT id FROM models WHERE model_id=r.request_model) AS route_id,
