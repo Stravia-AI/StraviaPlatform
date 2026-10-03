@@ -199,7 +199,7 @@ const test = base.extend<{ management: { origin: string; setupToken: string } }>
   ],
 })
 
-test('real management persists RPM limits, shared pool bindings and failed-save drafts in both locales', async ({
+test('real management persists root and destination RPM limits and queue settings in both locales', async ({
   page,
   context,
   management,
@@ -310,44 +310,21 @@ test('real management persists RPM limits, shared pool bindings and failed-save 
   await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.setViewportSize({ width: 1280, height: 800 })
 
-  await goto('/providers#rpm-pools')
-  const pools = page.locator('section[aria-labelledby="rpm-pools-title"]')
-  await pools.locator('#rpm-new-pool').fill('Browser shared pool')
-  await pools.getByRole('button', { name: 'Create shared pool', exact: true }).click()
-  const poolName = pools.locator('input[id^="rpm-pool-name-"]')
-  const poolLimit = pools.locator('input[id^="rpm-pool-limit-"]')
-  await expect(poolLimit).toHaveAttribute('placeholder', 'Unlimited')
-  await poolLimit.fill('12')
-  const savePools = pools.locator('button[type="submit"]')
-  await savePools.click()
-  await expect(savePools).toBeDisabled()
   const readRpm = async () => JSON.parse(await api<string>(page, '/settings/rpm_admission')) as RpmConfig
-  const pool = (await readRpm()).pools.find((item) => item.name === 'Browser shared pool')!
-  expect(pool.rpm_limit).toBe(12)
+  await goto('/settings')
+  const queue = page.locator('section[aria-labelledby="rpm-wait-title"]')
+  await queue.locator('#rpm-preferred-wait').fill('1500')
+  await queue.locator('#rpm-total-wait').fill('9000')
+  await queue.locator('#rpm-queue-capacity').fill('16')
+  const saveQueue = queue.locator('button[type="submit"]')
+  await saveQueue.click()
+  await expect(saveQueue).toBeDisabled()
+  expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 9000, queue_capacity: 16 })
   await page.reload()
-  await expect(poolName).toHaveValue('Browser shared pool')
-  await expect(poolLimit).toHaveValue('12')
-  await page.screenshot({ path: test.info().outputPath('rpm-pools-en.png'), fullPage: true })
-
-  await poolName.fill('   ')
-  await poolLimit.fill('19')
-  const failedSave = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === '/api/v1/settings/rpm_admission' && response.request().method() === 'PUT',
-  )
-  await savePools.click()
-  expect(await (await failedSave).json()).toHaveProperty('error')
-  await expect(pools.getByRole('alert')).toBeVisible()
-  await expect(poolName).toHaveValue('   ')
-  await expect(poolLimit).toHaveValue('19')
-  expect((await readRpm()).pools.find((item) => item.id === pool.id)).toMatchObject({
-    name: 'Browser shared pool',
-    rpm_limit: 12,
-  })
-  await poolName.fill('Browser shared pool')
-  await poolLimit.fill('12')
-  await savePools.click()
-  await expect(savePools).toBeDisabled()
+  await expect(queue.locator('#rpm-preferred-wait')).toHaveValue('1500')
+  await expect(queue.locator('#rpm-total-wait')).toHaveValue('9000')
+  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('16')
+  await page.screenshot({ path: test.info().outputPath('rpm-queue-en.png'), fullPage: true })
 
   const catalogUrl = `/providers/${encodeURIComponent(provider.id)}?view=models`
   const rpmTrigger = page.locator('.route-desktop-table').getByRole('button', { name: /^RPM limit for rpm-upstream:/ })
@@ -363,28 +340,24 @@ test('real management persists RPM limits, shared pool bindings and failed-save 
   await rpmTrigger.click()
   await rpmDialog.getByLabel('Requests per minute', { exact: true }).fill('30')
   await saveDestination()
-  expect(await readDestination()).toMatchObject({ rpm_limit: 30, rpm_pool_id: null })
+  expect(await readDestination()).toEqual({ provider_id: provider.id, model: 'rpm-upstream', rpm_limit: 30 })
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
-
-  await rpmTrigger.click()
-  await rpmDialog.getByLabel('Count against', { exact: true }).click()
-  await page.getByRole('option', { name: /Browser shared pool/ }).click()
-  await expect(rpmDialog.getByLabel('Requests per minute', { exact: true })).toBeHidden()
-  await saveDestination()
-  expect(await readDestination()).toMatchObject({ rpm_limit: null, rpm_pool_id: pool.id })
   await page.reload()
-  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Pool: Browser shared pool')
-  await goto('/providers#rpm-pools')
-  await expect(pools.getByRole('link', { name: 'Local RPM service / rpm-upstream', exact: true })).toBeVisible()
-
-  // 回到独立限额且留空即为不限，配置中不再保留该目的地条目。
+  await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
+  await goto('/settings')
+  await queue.locator('#rpm-total-wait').fill('10000')
+  await saveQueue.click()
+  await expect(saveQueue).toBeDisabled()
+  expect(await readDestination()).toEqual({ provider_id: provider.id, model: 'rpm-upstream', rpm_limit: 30 })
   await goto(catalogUrl)
   await rpmTrigger.click()
-  await rpmDialog.getByLabel('Count against', { exact: true }).click()
-  await page.getByRole('option', { name: "This model's own limit", exact: true }).click()
+  await expect(rpmDialog.getByLabel('Requests per minute', { exact: true })).toHaveValue('30')
+  await rpmDialog.getByLabel('Requests per minute', { exact: true }).fill('')
   await saveDestination()
   expect(await readDestination()).toBeUndefined()
+  await page.reload()
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: Unlimited')
+  expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 10000, queue_capacity: 16 })
 
   // Switch through the same persisted local preference used by the app.
   await page.evaluate(() => localStorage.setItem('stravia-locale', 'zh-CN'))
@@ -397,11 +370,34 @@ test('real management persists RPM limits, shared pool bindings and failed-save 
   await expect(editor.getByLabel(/RPM/)).toBeVisible()
   expect(await editor.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   await editor.getByRole('button', { name: '取消', exact: true }).click()
-  await goto('/providers#rpm-pools')
-  await expect(poolLimit).toHaveValue('12')
-  await expect(poolLimit).toHaveAttribute('placeholder', '不限')
-  await expect(pools.getByLabel('RPM', { exact: true })).toBeVisible()
-  expect(await pools.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await goto(catalogUrl)
+  const mobileRpmTrigger = page
+    .locator('.route-mobile-list')
+    .getByRole('button', { name: /^rpm-upstream 的 RPM 限额：/ })
+  await expect(mobileRpmTrigger).toHaveAccessibleName('rpm-upstream 的 RPM 限额：不限')
+  await mobileRpmTrigger.click()
+  const mobileLimit = rpmDialog.getByLabel('每分钟请求数', { exact: true })
+  await expect(mobileLimit).toHaveAttribute('placeholder', '不限')
+  await mobileLimit.fill('18')
+  await rpmDialog.getByRole('button', { name: '保存限额', exact: true }).click()
+  await expect(rpmDialog).toBeHidden()
+  await page.reload()
+  await expect(mobileRpmTrigger).toHaveAccessibleName('rpm-upstream 的 RPM 限额：18 RPM')
+  await mobileRpmTrigger.click()
+  await expect(mobileLimit).toHaveValue('18')
+  await mobileLimit.fill('')
+  await rpmDialog.getByRole('button', { name: '保存限额', exact: true }).click()
+  await expect(rpmDialog).toBeHidden()
+  expect(await readDestination()).toBeUndefined()
+  await goto('/settings')
+  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('16')
+  await queue.locator('#rpm-queue-capacity').fill('24')
+  await saveQueue.click()
+  await expect(saveQueue).toBeDisabled()
+  await page.reload()
+  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('24')
+  expect((await readRpm()).queue_capacity).toBe(24)
+  expect(await queue.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-  await page.screenshot({ path: test.info().outputPath('rpm-pools-zh-CN.png'), fullPage: true })
+  await page.screenshot({ path: test.info().outputPath('rpm-queue-zh-CN.png'), fullPage: true })
 })

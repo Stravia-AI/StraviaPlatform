@@ -216,8 +216,42 @@
   "model_editor_discard_changes": "放弃更改",
   "models_display_name": "显示名称",
   "models_client_model_id": "客户端模型 ID",
-  "models_associated_services": "关联服务",
-  "models_no_associated_services": "没有关联服务",
+  "models_destinations_none_available": "没有可用的请求目标",
+  "models_destinations_first_layer_unavailable": "第 1 层不可用",
+  "models_destinations_layers_unavailable": "第 1–{last} 层不可用",
+  "models_destinations_credential_invalid": "凭据失效 {count}",
+  "models_destinations_provider_disabled": "服务已禁用 {count}",
+  "models_destinations_allowance_suspended": "额度暂停 {count}",
+  "models_destinations_multiple": [
+    {
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} 个目标 · {strategy}",
+        "countPlural=other": "{count} 个目标 · {strategy}"
+      }
+    }
+  ],
+  "models_destinations_fallback": [
+    {
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
+      "match": {
+        "layersPlural=one": "另有 {layers} 层后备（{targets} 个目标）",
+        "layersPlural=other": "另有 {layers} 层后备（{targets} 个目标）"
+      }
+    }
+  ],
+  "models_destinations_unavailable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} 个目标不可用",
+        "countPlural=other": "{count} 个目标不可用"
+      }
+    }
+  ],
   "overview_no_traffic_title": "尚无请求流量",
   "overview_configuration_unavailable": "无法读取配置",
   "overview_loading_configuration": "正在加载配置",
@@ -1885,16 +1919,8 @@
   "vendor_plugins_uninstalling": "正在卸载…",
   "vendor_plugins_uninstalled": "供应商插件已卸载。",
   "vendor_plugins_uninstall_failed": "无法卸载插件。请检查错误后重试。",
-  "rpm_pools_help": "让不同服务的上游模型共用一份 RPM 额度。在模型服务的模型清单中为上游模型选择共享池后，它改为计入该池，不再使用自己的限额。RPM 留空表示不限。",
   "rpm_wait_title": "上游 RPM 排队",
   "rpm_wait_help": "达到上游 RPM 限额的请求在此排队等待额度；超过等待时间或队列已满时请求失败。进行中的流式响应不占用队列。",
-  "rpm_pools_title": "共享 RPM 池",
-  "rpm_manage_pools": "管理共享 RPM 池",
-  "rpm_pool_name": "池名称",
-  "rpm_new_pool_name": "新共享池名称",
-  "rpm_members": "加入此池的上游模型",
-  "rpm_no_members": "还没有上游模型加入此池。可在模型服务的模型清单中选择此池。",
-  "rpm_add_pool": "创建共享池",
   "rpm_preferred_wait": "切换目标前等待原目标（毫秒）",
   "rpm_total_wait": "单个请求最长等待（毫秒）",
   "rpm_queue_capacity": "最多排队请求数",
@@ -1903,11 +1929,8 @@
   "rpm_saved": "RPM 设置已保存",
   "rpm_column": "RPM 限额",
   "rpm_value": "{limit} RPM",
-  "rpm_pool_value": "共享池：{name}",
   "rpm_edit_label": "{model} 的 RPM 限额：{value}",
   "rpm_limit_help": "限制 Stravia 在任意 60 秒内向此上游模型发送的请求数。所有使用它的模型共同计数，重试也计入。",
-  "rpm_count_against": "计数方式",
-  "rpm_own_limit": "此模型的独立限额",
   "rpm_requests_per_minute": "每分钟请求数",
   "rpm_save_limit": "保存限额"
 }

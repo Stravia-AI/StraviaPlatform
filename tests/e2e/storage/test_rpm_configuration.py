@@ -17,7 +17,7 @@ from tests.e2e.admin.test_observations import _create_route
 @pytest.mark.e2e
 @pytest.mark.storage
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_old_concurrency_limit_is_not_reinterpreted_as_rpm(
+def test_rpm_migrations_preserve_individual_limits(
     storage_runtime: dict[str, object], backend: str,
 ) -> None:
     if backend == "sqlite":
@@ -33,6 +33,34 @@ def test_old_concurrency_limit_is_not_reinterpreted_as_rpm(
             assert "concurrency_limit" not in {row[1] for row in connection.execute("PRAGMA table_info(api_keys)")}
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute("UPDATE api_keys SET rpm_limit = 0 WHERE id = 'old'")
+            for migration in sorted(directory.glob("*.sql")):
+                if "0010" <= migration.name < "0013":
+                    connection.executescript(migration.read_text(encoding="utf-8"))
+            config = {
+                "preferred_wait_ms": 987, "total_wait_ms": 1234, "queue_capacity": 7,
+                "pools": [
+                    {"id": "limited", "name": "Limited", "rpm_limit": 9},
+                    {"id": "unlimited", "name": "Unlimited", "rpm_limit": None},
+                ],
+                "destinations": [
+                    {"provider_id": "p", "model": "a", "rpm_limit": None, "rpm_pool_id": "limited"},
+                    {"provider_id": "q", "model": "b", "rpm_limit": None, "rpm_pool_id": "limited"},
+                    {"provider_id": "p", "model": "c", "rpm_limit": None, "rpm_pool_id": "unlimited"},
+                    {"provider_id": "p", "model": "d", "rpm_limit": 3, "rpm_pool_id": None},
+                    {"provider_id": "p", "model": "e", "rpm_limit": 5},
+                ],
+            }
+            connection.execute("INSERT INTO settings (name, value) VALUES ('rpm_admission', ?)", (json.dumps(config),))
+            connection.executescript((directory / "0014_remove_shared_rpm_pools.sql").read_text(encoding="utf-8"))
+            expected = {key: value for key, value in config.items() if key != "pools"}
+            expected["destinations"] = [
+                {"provider_id": "p", "model": "a", "rpm_limit": None},
+                {"provider_id": "q", "model": "b", "rpm_limit": None},
+                {"provider_id": "p", "model": "c", "rpm_limit": None},
+                {"provider_id": "p", "model": "d", "rpm_limit": 3},
+                {"provider_id": "p", "model": "e", "rpm_limit": 5},
+            ]
+            assert json.loads(connection.execute("SELECT value FROM settings WHERE name = 'rpm_admission'").fetchone()[0]) == expected
         return
     pg_url = storage_runtime["pg_url"]
     if not pg_url:
@@ -44,6 +72,7 @@ def test_old_concurrency_limit_is_not_reinterpreted_as_rpm(
     try:
         output = action("verify_rpm_migration", **args)
         assert "rpm_migration_clears_old_limit=true" in output
+        assert "rpm_migration_preserves_destination_limits=true" in output
     finally:
         action("drop", **args)
 
@@ -51,7 +80,7 @@ def test_old_concurrency_limit_is_not_reinterpreted_as_rpm(
 @pytest.mark.e2e
 @pytest.mark.storage
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_rpm_pools_bindings_and_restart(
+def test_destination_rpm_limits_and_restart(
     stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
 ) -> None:
     pg_url = storage_runtime["pg_url"]
@@ -98,27 +127,20 @@ def test_rpm_pools_bindings_and_restart(
         assert status == 200, body
         config = json.loads(body["data"])
         assert (config["preferred_wait_ms"], config["total_wait_ms"], config["queue_capacity"]) == (5000, 30000, 128)
-        config["pools"] = [{"id": "shared", "name": "Shared capacity", "rpm_limit": 3}]
-        status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
-        assert status == 200, body
         status, body = request("GET", f"models/{route_id}")
         assert status == 200, body
         target = body["data"]["targets"][0]
-        destination = {"provider_id": target["provider_id"], "model": target["model"], "rpm_limit": None, "rpm_pool_id": "shared"}
+        destination = {"provider_id": target["provider_id"], "model": target["model"], "rpm_limit": 3}
         config["destinations"] = [destination]
         status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
         assert status == 200, body
         target_id = target["id"]
-        invalid = {**config, "pools": []}
-        assert "error" in request("PUT", "settings/rpm_admission", {"value": json.dumps(invalid)})[1]
-        invalid = {**config, "destinations": [{**destination, "rpm_pool_id": "missing"}]}
-        assert "error" in request("PUT", "settings/rpm_admission", {"value": json.dumps(invalid)})[1]
         for invalid in (
-            {**config, "destinations": [{**destination, "rpm_limit": 7}]},
-            {**config, "pools": config["pools"] * 2},
+            {**config, "destinations": [{**destination, "rpm_limit": 0}]},
+            {**config, "destinations": [{**destination, "rpm_limit": -1}]},
             {**config, "destinations": config["destinations"] * 2},
-            {**config, "pools": [{"id": "shared", "name": " ", "rpm_limit": 3}]},
-            {**config, "pools": [{"id": "shared", "name": "Shared", "rpm_limit": 0}]},
+            {**config, "pools": []},
+            {**config, "destinations": [{**destination, "rpm_pool_id": "removed"}]},
             {**config, "preferred_wait_ms": 30001},
             {**config, "queue_capacity": 0},
             {**config, "concurrency_limit": 5},
@@ -149,18 +171,26 @@ def test_rpm_pools_bindings_and_restart(
             status, body = infer()
             assert status == 200, body
         assert len(mock.captured_requests) == 4
+        # 根请求已不限，但目的地发送额度仍限制实际上游请求。
+        config["preferred_wait_ms"] = 0
+        config["total_wait_ms"] = 0
+        status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
+        assert status == 200, body
+        status, body = infer()
+        assert status == 429, body
+        assert len(mock.captured_requests) == 4
         status, body = request("GET", "settings/rpm_admission")
         assert status == 200, body
         assert json.loads(body["data"]) == config
         status, body = request("GET", f"models/{route_id}")
         assert status == 200, body
         assert body["data"]["targets"][0]["id"] == target_id
-        assert "rpm_pool_id" not in body["data"]["targets"][0]
-        # 目的地解绑与删池在同一配置写入中完成，Route Target 不保存成员关系。
-        config["destinations"] = [{**destination, "rpm_limit": 7, "rpm_pool_id": None}]
-        config["pools"] = []
+        config["destinations"] = []
         status, body = request("PUT", "settings/rpm_admission", {"value": json.dumps(config)})
         assert status == 200, body
+        status, body = infer()
+        assert status == 200, body
+        assert len(mock.captured_requests) == 5
     finally:
         if process is not None:
             stop_stravia_server(process, logs)

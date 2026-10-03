@@ -2,7 +2,9 @@ use super::*;
 use crate::router::TargetRuntimeState;
 use std::collections::BTreeMap;
 
-struct ClientModelCapabilities {
+/// 一个 Target 所选 Provider Model 快照中、管理面读取 Route 时需要投影的字段。
+struct TargetModelProjection {
+    name: Option<String>,
     context_window: Option<u64>,
     supports_image_input: bool,
 }
@@ -59,7 +61,7 @@ impl AdminService {
 impl RouteModule<'_> {
     pub(crate) async fn list(&self) -> anyhow::Result<Vec<RouteConfig>> {
         let mut routes = self.gw.storage.routes().list().await?;
-        self.refresh_route_client_capabilities(&mut routes).await?;
+        self.refresh_route_target_projections(&mut routes).await?;
         Ok(routes)
     }
 
@@ -72,7 +74,7 @@ impl RouteModule<'_> {
             .get(&route_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
-        self.refresh_route_client_capabilities(std::slice::from_mut(&mut route))
+        self.refresh_route_target_projections(std::slice::from_mut(&mut route))
             .await?;
         Ok(route)
     }
@@ -219,50 +221,54 @@ impl RouteModule<'_> {
         Ok(())
     }
 
-    pub(super) async fn refresh_route_client_capabilities(
+    pub(super) async fn refresh_route_target_projections(
         &self,
         routes: &mut [RouteConfig],
     ) -> anyhow::Result<()> {
-        let mut capabilities_by_target = BTreeMap::<String, ClientModelCapabilities>::new();
+        let mut projections = BTreeMap::<String, TargetModelProjection>::new();
 
+        // 已禁用 Target 也投影展示名，便于管理面识别；能力汇总仍只统计已启用 Target。
         for route in &mut *routes {
-            for target in route.targets.iter().filter(|target| target.enabled) {
+            for target in &mut route.targets {
                 let model = target.model().as_str();
                 let key = format!("{}\u{0}{model}", target.provider_id());
-                if capabilities_by_target.contains_key(&key) {
-                    continue;
+                if !projections.contains_key(&key) {
+                    let Some(record) = self
+                        .gw
+                        .storage
+                        .provider_models()
+                        .find(target.provider_id().as_str(), model)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    let limits = record.metadata.limit.unwrap_or_default();
+                    let modalities = record.metadata.modalities.unwrap_or_default();
+                    projections.insert(
+                        key.clone(),
+                        TargetModelProjection {
+                            name: normalize_display_name(record.metadata.name.as_deref()),
+                            context_window: limits.context,
+                            supports_image_input: modalities
+                                .input
+                                .iter()
+                                .any(|modality| modality == "image"),
+                        },
+                    );
                 }
-                let Some(record) = self
-                    .gw
-                    .storage
-                    .provider_models()
-                    .find(target.provider_id().as_str(), model)
-                    .await?
-                else {
-                    continue;
-                };
-                let limits = record.metadata.limit.unwrap_or_default();
-                let modalities = record.metadata.modalities.unwrap_or_default();
-                capabilities_by_target.insert(
-                    key,
-                    ClientModelCapabilities {
-                        context_window: limits.context,
-                        supports_image_input: modalities
-                            .input
-                            .iter()
-                            .any(|modality| modality == "image"),
-                    },
-                );
+                target.model_name = projections
+                    .get(&key)
+                    .and_then(|projection| projection.name.clone());
             }
         }
 
         for route in routes {
             route.context_window =
-                common_target_limit(&route.targets, &capabilities_by_target, |capabilities| {
+                common_target_limit(&route.targets, &projections, |capabilities| {
                     capabilities.context_window
                 });
             route.supports_image_input =
-                all_targets_support_image_input(&route.targets, &capabilities_by_target);
+                all_targets_support_image_input(&route.targets, &projections);
         }
         Ok(())
     }
@@ -277,22 +283,22 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 
 fn target_capabilities<'a>(
     target: &TargetConfig,
-    capabilities_by_target: &'a BTreeMap<String, ClientModelCapabilities>,
-) -> Option<&'a ClientModelCapabilities> {
+    projections: &'a BTreeMap<String, TargetModelProjection>,
+) -> Option<&'a TargetModelProjection> {
     let model = target.model().as_str();
-    capabilities_by_target.get(&format!("{}\u{0}{model}", target.provider_id()))
+    projections.get(&format!("{}\u{0}{model}", target.provider_id()))
 }
 
 fn common_target_limit(
     targets: &[TargetConfig],
-    capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
-    select: impl Fn(&ClientModelCapabilities) -> Option<u64>,
+    projections: &BTreeMap<String, TargetModelProjection>,
+    select: impl Fn(&TargetModelProjection) -> Option<u64>,
 ) -> Option<u64> {
     let mut limits = targets
         .iter()
         .filter(|target| target.enabled)
         .map(|target| {
-            target_capabilities(target, capabilities_by_target)
+            target_capabilities(target, projections)
                 .and_then(&select)
                 .filter(|limit| *limit > 0)
         });
@@ -302,14 +308,14 @@ fn common_target_limit(
 
 fn all_targets_support_image_input(
     targets: &[TargetConfig],
-    capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
+    projections: &BTreeMap<String, TargetModelProjection>,
 ) -> bool {
     targets.iter().any(|target| target.enabled)
         && targets
             .iter()
             .filter(|target| target.enabled)
             .all(|target| {
-                target_capabilities(target, capabilities_by_target)
+                target_capabilities(target, projections)
                     .is_some_and(|capabilities| capabilities.supports_image_input)
             })
 }

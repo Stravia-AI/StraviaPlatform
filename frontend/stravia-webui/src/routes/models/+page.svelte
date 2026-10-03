@@ -13,6 +13,13 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { effectiveModelDisplayName, sortLogicalModels } from '$lib/logical-model'
 import { formatSpecificationTokens } from '$lib/model-specification'
+import {
+  formatRouteDestinations,
+  routeDestinationSeverity,
+  summarizeRouteDestinations,
+  type RouteDestinationSummary,
+} from '$lib/route-destinations'
+import { cn } from '$lib/utils'
 import type { Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
@@ -85,11 +92,12 @@ const modelColumns = modelColumnHelper.columns([
     meta: { label: () => m.model_specification_context(), align: 'end' },
     size: 130,
   }),
-  modelColumnHelper.accessor((model) => associatedServicesLabel(model), {
-    id: 'services',
-    header: () => m.models_associated_services(),
-    cell: (context) => renderSnippet(modelServicesCell, context),
-    meta: { label: () => m.models_associated_services() },
+  // 按严重度排序：表格默认顺序已按名称排好，稳定排序使同级保持名称顺序。
+  modelColumnHelper.accessor((model) => routeDestinationSeverity(destinationSummary(model)), {
+    id: 'destinations',
+    header: () => m.models_destinations(),
+    cell: (context) => renderSnippet(modelDestinationsCell, context),
+    meta: { label: () => m.models_destinations() },
     size: 280,
   }),
   modelColumnHelper.accessor('is_enabled', {
@@ -134,14 +142,8 @@ const deletesMediaUnderstandingRoute = $derived(
   Boolean(deleteTarget && mediaUnderstandingQuery.data?.model_id === deleteTarget.id),
 )
 
-function associatedServicesLabel(model: Route): string {
-  return [
-    ...new Set(
-      model.targets
-        .filter((target) => target.enabled)
-        .map((target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id),
-    ),
-  ].join(', ')
+function destinationSummary(model: Route): RouteDestinationSummary {
+  return summarizeRouteDestinations(model, providers)
 }
 
 function openModel(model: Route, event: MouseEvent): void {
@@ -244,13 +246,29 @@ async function deleteModel(): Promise<void> {
   </span>
 {/snippet}
 
-{#snippet modelServicesCell(context: DataTableCellContext<Route>)}
-  {@const services = associatedServicesLabel(context.row.original)}
-  {#if services}
-    <span class="block truncate">{services}</span>
-  {:else}
-    <span class="text-muted-foreground">{m.models_no_associated_services()}</span>
-  {/if}
+{#snippet modelDestinations(model: Route)}
+  {@const summary = destinationSummary(model)}
+  {@const text = formatRouteDestinations(summary)}
+  <div class="min-w-0">
+    <span
+      class={cn(
+        'block truncate',
+        !summary.preferred && 'text-warning',
+        !model.is_enabled && 'text-muted-foreground',
+      )}>{text.primary}</span>
+    {#if text.details.length > 0}
+      <span class="block truncate text-xs text-muted-foreground">
+        {#each text.details as detail, index (detail.text)}
+          {#if index > 0}<span aria-hidden="true"> · </span>{/if}<span
+            class={cn(detail.tone === 'warning' && 'text-warning')}>{detail.text}</span>
+        {/each}
+      </span>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet modelDestinationsCell(context: DataTableCellContext<Route>)}
+  {@render modelDestinations(context.row.original)}
 {/snippet}
 
 {#snippet modelStatusCell(context: DataTableCellContext<Route>)}
@@ -337,9 +355,7 @@ async function deleteModel(): Promise<void> {
                     : formatSpecificationTokens(model.context_window)}
                 </span>
               </p>
-              <p class="mt-1 truncate text-xs text-muted-foreground">
-                {m.models_associated_services()}: {associatedServicesLabel(model) || m.models_no_associated_services()}
-              </p>
+              <div class="mt-1 text-sm">{@render modelDestinations(model)}</div>
               <StatusIndicator
                 class="mt-1"
                 compact

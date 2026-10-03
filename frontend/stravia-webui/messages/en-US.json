@@ -216,8 +216,42 @@
   "model_editor_discard_changes": "Discard changes",
   "models_display_name": "Display name",
   "models_client_model_id": "Client Model ID",
-  "models_associated_services": "Associated services",
-  "models_no_associated_services": "No associated services",
+  "models_destinations_none_available": "No available destination",
+  "models_destinations_first_layer_unavailable": "Layer 1 unavailable",
+  "models_destinations_layers_unavailable": "Layers 1–{last} unavailable",
+  "models_destinations_credential_invalid": "Credential invalid: {count}",
+  "models_destinations_provider_disabled": "Service disabled: {count}",
+  "models_destinations_allowance_suspended": "Allowance paused: {count}",
+  "models_destinations_multiple": [
+    {
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} destination · {strategy}",
+        "countPlural=other": "{count} destinations · {strategy}"
+      }
+    }
+  ],
+  "models_destinations_fallback": [
+    {
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
+      "match": {
+        "layersPlural=one": "{layers} fallback layer ({targets} available)",
+        "layersPlural=other": "{layers} fallback layers ({targets} available)"
+      }
+    }
+  ],
+  "models_destinations_unavailable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} destination unavailable",
+        "countPlural=other": "{count} destinations unavailable"
+      }
+    }
+  ],
   "overview_no_traffic_title": "No request traffic yet",
   "overview_configuration_unavailable": "Configuration unavailable",
   "overview_loading_configuration": "Loading configuration",
@@ -1888,16 +1922,8 @@
   "vendor_plugins_uninstalling": "Uninstalling…",
   "vendor_plugins_uninstalled": "Vendor plugin uninstalled.",
   "vendor_plugins_uninstall_failed": "The plugin could not be uninstalled. Review the error and try again.",
-  "rpm_pools_help": "Let upstream models on different services share one RPM limit. In a model service's model list, choose a pool for an upstream model; it then counts against the pool instead of its own limit. Leave RPM empty for no limit.",
   "rpm_wait_title": "Upstream RPM queue",
   "rpm_wait_help": "Requests that reach an upstream RPM limit wait here for capacity. They fail when the wait time runs out or the queue is full. Active streams do not take queue slots.",
-  "rpm_pools_title": "Shared RPM pools",
-  "rpm_manage_pools": "Manage shared RPM pools",
-  "rpm_pool_name": "Pool name",
-  "rpm_new_pool_name": "New pool name",
-  "rpm_members": "Upstream models in this pool",
-  "rpm_no_members": "No upstream models use this pool yet. Choose it in a model service's model list.",
-  "rpm_add_pool": "Create shared pool",
   "rpm_preferred_wait": "Wait for the current target before switching (ms)",
   "rpm_total_wait": "Maximum wait per request (ms)",
   "rpm_queue_capacity": "Maximum queued requests",
@@ -1906,11 +1932,8 @@
   "rpm_saved": "RPM settings saved",
   "rpm_column": "RPM limit",
   "rpm_value": "{limit} RPM",
-  "rpm_pool_value": "Pool: {name}",
   "rpm_edit_label": "RPM limit for {model}: {value}",
   "rpm_limit_help": "Limits how many requests Stravia sends to this upstream model in any 60-second window. Every model that uses it shares the limit, and retries count.",
-  "rpm_count_against": "Count against",
-  "rpm_own_limit": "This model's own limit",
   "rpm_requests_per_minute": "Requests per minute",
   "rpm_save_limit": "Save limit"
 }

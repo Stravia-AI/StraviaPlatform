@@ -782,7 +782,7 @@ Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小�
 
 SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 始终包含 Provider 与非空白上游模型。所有能力共用这一要求，搜索也不例外；Target 写入不接受缺省、`null` 或空白 `model`。
 
-SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_backends.model` 约束为非空且非空白；所属 Route 和其他 Target 保留，不推导或填入虚假模型。仅有无模型 Target 的 Route 升级后没有可执行 Target，管理员必须重新绑定真实 Provider Model。迁移同时从 `rpm_admission` 中删除无模型目的地，保留其他设置与共享池。
+SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_backends.model` 约束为非空且非空白；所属 Route 和其他 Target 保留，不推导或填入虚假模型。仅有无模型 Target 的 Route 升级后没有可执行 Target，管理员必须重新绑定真实 Provider Model。迁移同时从 `rpm_admission` 中删除无模型目的地；共享池随后由 0013 删除，详见 §8.4。
 
 `targets` 是唯一 Target 写入入口，不接受调用方指定 Target ID；`target_provider` / `target_model` 仅保留为派生读投影。更新省略 `targets` 时，事务完全保留现有 Target 行、身份和策略；显式提交时才原子替换，校验或持久化失败不得留下部分修改。`display_name` 与 `default_thinking_level` 省略表示不改，`null` 表示清除；`targets`、`model_id`、`balance`、`is_enabled` 不接受 `null`。补丁序列化必须省略未提供字段。WebUI 仅修改显示名称时不重新提交 Target 集合。
 
@@ -833,17 +833,17 @@ MCP session、discovery、工具列表等非执行入口不计数。
 
 窗口为单调时间的 `(t - 60s, t]`，恰好满 60 秒的记录已离窗；允许瞬时使用剩余额度，不使用固定发送间隔或令牌桶。`rpm_limit` 缺省／`null` 为不限，正整数为上限，零及负数无效；更新省略保持、`null` 清除、正数设置。入口超限不排队、不运行 Hook 或工具，不增加记录。已准入后失败、取消或完成不退回记录；流仍活跃时记录也会在 60 秒离窗，chunk、token、心跳不重复计数。WebSocket upgrade 不作为执行请求计数，每次独立生成事件分别计根请求；复用客户端或上游连接都不合并请求。配置更新影响后续准入而不取消活跃流；已有受限窗口在改限后保留，从不限改为有限不重建未记录历史。
 
-### 8.4 RPM Pool 发送门禁与配置
+### 8.4 上游目的地 RPM 发送门禁与配置
 
-默认 RPM Pool 以 `(provider_id, upstream model)` 为身份，同目的地跨 Route 共享；目的地必须包含非空白 `model`。目的地的 `rpm_pool_id` 非空时改扣该显式共享池，且自身 `rpm_limit` 必须为 `null`；自身限额与共享池二选一，不双重扣额。`pools` 是池名称与限额的唯一权威来源，成员关系由 `destinations[].rpm_pool_id` 保存，Route Target 不保存池绑定，也不从凭据推测账号关系。容量身份与 `provider_id:model` 的共享健康身份分离；显式共享池不合并冷却、失败计数或凭据失效。
+上游 RPM 以 `(provider_id, upstream model)` 为身份，同目的地跨 Route 共同计数；目的地必须包含非空白 `model`。每个目的地只使用自身 `rpm_limit`，不同目的地之间没有共享额度池，也不从凭据推测账号关系。容量计数与健康状态分离，不改变冷却、失败计数或凭据失效。
 
-管理面的成员关系与目的地自身限额只在对应 Provider 详情模型目录编辑；实例共享池只在 Model services 列表页编辑名称和 RPM，并展示已保存成员。Provider 详情链接到该唯一入口，不编辑池名称或限额；Route 编辑器不提供池配置。Gateway Settings 负责累计等待和队列容量。保存仅合并当前表面实际修改的目的地或池，避免旧草稿覆盖其他表面已保存的配置。
+管理面的目的地自身限额只在对应 Provider 详情模型目录编辑；Route 编辑器不提供 RPM 配置。Gateway Settings 负责累计等待和队列容量。保存仅合并当前表面实际修改的目的地或等待参数，避免旧草稿覆盖其他表面已保存的配置。
 
 Host 在每次实际 HTTP 发送或 WebSocket 逻辑请求发送前原子准入，覆盖正常请求、同 Target 重试、failover、隐藏 Model Turn、能力调用、冷却额外尝试和 Provider Transport 内部重发。握手、连接复用、chunk 与心跳不是新的模型请求。本地准备、未发送取消及等待不预扣额度；已发起的连接／响应失败不退回记录。发送边界重新检查当前额度、授权、可用性、deadline 与取消，防止等待后迟到发送。
 
-Route 缓存发布与发送准入有原子先后顺序：资格读取期间发生的绑定、禁用或配置更新使旧快照失效，不能在更新成功后继续按旧池准入。同一冷却额外尝试或半开探测的并发 transport 调用也只能一个成功占用机会。兼容 Vendor 更新不改变已准入操作的固定 component 能力合同；当前授权、禁用、凭据状态和 Model 可用性仍是门禁。
+Route 缓存发布与发送准入有原子先后顺序：资格读取期间发生的绑定、禁用或配置更新使旧快照失效，不能在更新成功后继续按旧目的地准入。同一冷却额外尝试或半开探测的并发 transport 调用也只能一个成功占用机会。兼容 Vendor 更新不改变已准入操作的固定 component 能力合同；当前授权、禁用、凭据状态和 Model 可用性仍是门禁。
 
-有 Target Continuation、Conversation Affinity、合格 Cache Affinity 或本根已选中依据的原 Target 优先有限等待，即使备用有额度也保留默认 5 秒窗口；内部轮次与重试不重置。优先等待结束后重查候选当前额度，再按既有优先级与调度原子竞争，不沿旧快照扎堆备用。全部候选暂时无额度时等待下一可准入事件；所有池等待共享 RootRequest 的默认 30 秒累计预算且受剩余 deadline 限制。同根切池不重复占队列，默认每实例最多 128 个等待根；取消、deadline、预算耗尽均清理占用，窗口恰在预算到期释放也不能让旧根迟到发送。**128 不是活跃流并发上限**；未设置 RPM 的池没有本地发送速率保护，长流仍可积累在途资源。
+有 Target Continuation、Conversation Affinity、合格 Cache Affinity 或本根已选中依据的原 Target 优先有限等待，即使备用有额度也保留默认 5 秒窗口；内部轮次与重试不重置。优先等待结束后重查候选当前额度，再按既有优先级与调度原子竞争，不沿旧快照扎堆备用。全部候选暂时无额度时等待下一可准入事件；所有目的地等待共享 RootRequest 的默认 30 秒累计预算且受剩余 deadline 限制。同根切换目的地不重复占队列，默认每实例最多 128 个等待根；取消、deadline、预算耗尽均清理占用，窗口恰在预算到期释放也不能让旧根迟到发送。**128 不是活跃流并发上限**；未设置 RPM 的目的地没有本地发送速率保护，长流仍可积累在途资源。
 
 管理认证保护 `GET/PUT /api/v1/settings/rpm_admission`，Desktop 复用 AdminService。GET 返回 `{data: string}`，其中 string 是规范化配置 JSON；PUT 接受 `{value: string}`，string 内的实际 DTO 为：
 
@@ -853,15 +853,14 @@ Route 缓存发布与发送准入有原子先后顺序：资格读取期间发�
   "total_wait_ms": 30000,
   "queue_capacity": 128,
   "destinations": [
-    {"provider_id": "provider-id", "model": "upstream-model", "rpm_limit": null, "rpm_pool_id": "shared-pool"}
-  ],
-  "pools": [
-    {"id": "shared-pool", "name": "Shared capacity", "rpm_limit": null}
+    {"provider_id": "provider-id", "model": "upstream-model", "rpm_limit": null}
   ]
 }
 ```
 
-缺失顶层字段取默认值，`destinations`／`pools` 默认空数组，所有池 RPM 默认不限；目的地 `rpm_pool_id` 缺省或 `null` 表示使用自身限额，未知字段拒绝。`preferred_wait_ms <= total_wait_ms`，总等待须在支持的整数时长内，队列容量必须正数；名称、ID、Provider/model 必须非空且无首尾空白，`model` 可为 `null`。目的地 `(provider_id, model)` 与池 ID 不得重复，限额只能为 `null` 或正整数。保存验证配置内全部目的地的绑定，拒绝删除仍被引用的池或绑定不存在的池；可在同一次保存中解绑并删池，成功持久化后激活配置。WebUI 的 API Key 编辑显示根 RPM，Provider 模型目录编辑目的地成员关系与自身额度，Model services 列表编辑共享池名称与额度，Route 不配置池，Gateway 设置累计等待和队列边界。
+缺失顶层字段取默认值，`destinations` 默认空数组，目的地 RPM 默认不限；未知字段拒绝，包括已删除的 `pools` 与 `rpm_pool_id`。`preferred_wait_ms <= total_wait_ms`，总等待须在支持的整数时长内，队列容量必须正数；Provider/model 必须非空且无首尾空白，`model` 不可为 `null`。目的地 `(provider_id, model)` 不得重复，限额只能为 `null` 或正整数。成功持久化后激活配置。WebUI 的 API Key 编辑显示根 RPM，Provider 模型目录编辑目的地自身额度，Gateway 设置累计等待和队列边界。
+
+SQLite/PostgreSQL `0014_remove_shared_rpm_pools` 删除已保存的池额度与目的地关联，不把池额度复制成独立限额；原池成员恢复不限，原本独立设置的目的地 RPM 与等待／队列参数保留。升级前备份数据库；需要限制原成员时，在对应模型服务的模型清单重新设置 RPM。
 
 本地发送等待耗尽为 `target_rpm_exceeded`（429，可确定恢复时间时附 `Retry-After`）；队列满为 `target_rpm_queue_full`（503，不伪造恢复时间）。`target_rpm_busy` 是发送前额度竞争变化的内部重新选路信号；取消与 deadline 分别保留 `cancelled`／`deadline_exceeded`。明确上游 `Retry-After` 仍是硬门禁，不能缩短重发；已有保留原上游错误的分支不改成普通等待超时。冷却额外尝试及请求错误隔离见 [ADR-0034](../adr/0034-layer-route-target-selection.md)。
 
@@ -955,7 +954,7 @@ Desktop 启动诊断独立于业务存储：Tauri 初始化前写临时启动日
 
 #### API Key RPM 升级
 
-升级前停机并备份完整实例数据与外部 PostgreSQL 数据库，记录需要重新配置的 Key 策略。两后端增量迁移 `0009_rpm_admission` 删除 `concurrency_limit`，新增 `rpm_limit` 并将所有现有 Key 置为 `NULL`，**包括旧非空并发上限；不复制、不估算、不转换旧数值。管理员设置新 RPM 前全部不限**，且不保留任何并发上限。应在重新开放客户端流量前通过 API Key 管理面设置所需 RPM，并按 §8.4 配置目的地／共享池与 Target 绑定。旧字段和旧错误不再接受，客户端配置也需改为新字段。重启保留配置但清空入口与池运行窗口；多实例不共享窗口。回退须恢复升级前备份，不让旧程序打开新 schema。
+升级前停机并备份完整实例数据与外部 PostgreSQL 数据库，记录需要重新配置的 Key 策略。两后端增量迁移 `0009_rpm_admission` 删除 `concurrency_limit`，新增 `rpm_limit` 并将所有现有 Key 置为 `NULL`，**包括旧非空并发上限；不复制、不估算、不转换旧数值。管理员设置新 RPM 前全部不限**，且不保留任何并发上限。应在重新开放客户端流量前通过 API Key 管理面设置所需 RPM，并按 §8.4 配置目的地发送额度与等待边界；0013 删除共享池后，需要重新为原池成员设置所需独立限额。旧字段和旧错误不再接受，客户端配置也需改为新字段。重启保留配置但清空入口与目的地运行窗口；多实例不共享窗口。回退须恢复升级前备份，不让旧程序打开新 schema。
 
 如需同时优化已有 SQLite 历史与 Debug 存储，先停止所有使用源目录的实例，再运行以下命令查看计划：
 
@@ -994,7 +993,7 @@ CREATE TABLE models (
 
 -- Target 列表
 CREATE TABLE model_backends (
-    -- RPM Pool 成员关系保存在 rpm_admission.destinations，不属于 Target
+    -- 目的地 RPM 保存在 rpm_admission.destinations，不属于 Target
     id                     TEXT PRIMARY KEY,
     model_id               TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
     provider_id            TEXT NOT NULL REFERENCES providers(id),
@@ -1172,7 +1171,7 @@ Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}
 
 ### 12.2 Principal admission boundary（当前实现）
 
-每个有效 API Key 建立的 Principal 按严格滑动 60 秒维护根请求 RPM；Proxy、remote compaction 与 MCP `tools/call` 在认证后、Hook 或工具执行前计一次。根内所有轮次、工具和后台执行共享 RootRequest，每次真实发送另经 RPM Pool。入口超限立即 429 与 `Retry-After`，无入口队列；Target 等待有累计预算与实例队列边界，详见 §8.3–8.4。没有活跃执行并发上限或按执行生命周期释放的名额。
+每个有效 API Key 建立的 Principal 按严格滑动 60 秒维护根请求 RPM；Proxy、remote compaction 与 MCP `tools/call` 在认证后、Hook 或工具执行前计一次。根内所有轮次、工具和后台执行共享 RootRequest，每次真实发送另经目的地 RPM。入口超限立即 429 与 `Retry-After`，无入口队列；Target 等待有累计预算与实例队列边界，详见 §8.3–8.4。没有活跃执行并发上限或按执行生命周期释放的名额。
 
 ### 12.3 Fixture 契约测试体系
 

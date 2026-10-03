@@ -21,6 +21,8 @@ export interface Target {
   model_id: string
   provider_id: string
   model: string
+  /** Provider Model 快照中的展示名；未登记时为 null，展示时回退到 `model`。 */
+  model_name?: string | null
   enabled: boolean
   priority: number
   first_token_timeout_ms: number

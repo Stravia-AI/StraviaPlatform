@@ -429,6 +429,63 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 }
 
 #[tokio::test]
+async fn listed_routes_project_provider_model_names_for_every_target() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "standby-model",
+            CreateManualProviderModel {
+                template_id: None,
+                metadata: json!({"id": "standby-model", "name": "Standby"}),
+            },
+        )
+        .await?;
+    let target = |model: &str, enabled: bool| CreateTarget {
+        provider_id: provider.id.clone(),
+        model: model.into(),
+        enabled,
+        priority: None,
+        first_token_timeout_ms: None,
+        target_retry_budget: None,
+        target_cooldown_ms: None,
+        thinking_level_map: Vec::new(),
+    };
+    admin
+        .create_model(CreateRoute {
+            model_id: "named-targets".into(),
+            display_name: None,
+            balance: None,
+            targets: vec![
+                target("upstream-model", true),
+                target("standby-model", false),
+            ],
+            default_thinking_level: None,
+        })
+        .await?;
+
+    let routes = serde_json::to_value(admin.list_models().await?)?;
+    let route = routes
+        .as_array()
+        .and_then(|routes| {
+            routes
+                .iter()
+                .find(|route| route["model_id"] == "named-targets")
+        })
+        .expect("listed Route");
+    let name_of = |model: &str| {
+        route["targets"]
+            .as_array()
+            .and_then(|targets| targets.iter().find(|target| target["model"] == model))
+            .map(|target| target["model_name"].clone())
+    };
+    assert_eq!(name_of("upstream-model"), Some(json!("Upstream Model")));
+    assert_eq!(name_of("standby-model"), Some(json!("Standby")));
+    Ok(())
+}
+
+#[tokio::test]
 async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();

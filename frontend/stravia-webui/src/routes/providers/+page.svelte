@@ -18,7 +18,6 @@ import type { ImageCapabilityDrift, Provider, ProviderDescriptor, Route, VendorC
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderEditor from '$lib/components/provider-editor.svelte'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
-import RpmManagement from '$lib/components/rpm-management.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import AllowanceSuspensionBanner from '$lib/components/allowance-suspension.svelte'
@@ -547,7 +546,6 @@ async function copyProvider(): Promise<void> {
       </div>
     {/if}
   </section>
-  <div id="rpm-pools" class="scroll-mt-20"><RpmManagement poolsOnly /></div>
 </div>
 
 <ProviderEditor bind:open={editorOpen} onSaved={providerSaved} />

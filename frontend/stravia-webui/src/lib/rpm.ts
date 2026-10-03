@@ -1,16 +1,9 @@
 import { admin } from '$lib/admin-client'
 
-export interface RpmPool {
-  id: string
-  name: string
-  rpm_limit: number | null
-}
-
 export interface DestinationRpmLimit {
   provider_id: string
   model: string
   rpm_limit: number | null
-  rpm_pool_id?: string | null
 }
 
 export interface RpmConfig {
@@ -18,7 +11,6 @@ export interface RpmConfig {
   total_wait_ms: number
   queue_capacity: number
   destinations: DestinationRpmLimit[]
-  pools: RpmPool[]
 }
 
 export const rpmQueryKey = ['setting', 'rpm_admission']
@@ -26,7 +18,7 @@ export const rpmQueryKey = ['setting', 'rpm_admission']
 export async function loadRpm(): Promise<RpmConfig> {
   const value = await admin.settings.get('rpm_admission')
   return value === null
-    ? { preferred_wait_ms: 5000, total_wait_ms: 30000, queue_capacity: 128, destinations: [], pools: [] }
+    ? { preferred_wait_ms: 5000, total_wait_ms: 30000, queue_capacity: 128, destinations: [] }
     : (JSON.parse(value) as RpmConfig)
 }
 

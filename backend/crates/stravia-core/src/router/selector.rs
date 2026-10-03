@@ -1169,6 +1169,7 @@ mod tests {
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
             created_at: String::new(),
             thinking_level_map: Vec::new(),
+            model_name: None,
         }
     }
 
