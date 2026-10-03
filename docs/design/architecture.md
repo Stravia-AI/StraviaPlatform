@@ -1123,7 +1123,7 @@ CREATE TABLE provider_oauth_credentials (
 );
 ```
 
-基线 schema 不再包含旧 `request_logs`，Observation schema 与 sequence/index 自初始创建即存在，不做 Generation Chain backfill。没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/series/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
+基线 schema 不再包含旧 `request_logs`，Observation schema 与 sequence/index 自初始创建即存在，不做 Generation Chain backfill。没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的模型用量从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。总览、时间分桶和 Provider 汇总的请求数与错误率分母按客户端请求去重；错误数复用「失败的请求」查询，合并准入前拒绝与最终失败的 Run，排除恢复成功、取消、断线、中断、进行中及已过保留期的记录。窗口和错误分桶按请求开始时间判定，拒绝记录不要求存在 Model Turn；Provider 归属沿用失败列表的「涉及该服务」筛选，每个服务内对同一请求去重，服务间计数不保证可相加。
 
 Observation metadata、文件 manifest 与 Trace segment 共用 `log_retention_days`（默认 7 天）；Debug 原始 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；文件删除先 rename 为 `.deleting-*` 再幂等完成，启动 reconciliation 继续中断删除并回收无 manifest 的孤儿目录。owner rows 清理后删除已无 owner 的目录。
 
