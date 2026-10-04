@@ -311,7 +311,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
     );
     let interaction_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(update) = observations.next().await {
-            if let crate::interaction_observation::ObservationUpdate::Event(event) = update
+            if let crate::interaction_observation::ObservationUpdate::Change(event) = update
                 && event.kind == "run_finished"
             {
                 return event.interaction_id.expect("finished interaction");

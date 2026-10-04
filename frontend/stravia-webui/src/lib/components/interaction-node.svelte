@@ -81,12 +81,15 @@ const usage = $derived([
   </div>
 
   <InteractionPreview
-    text={interaction.visible_tail}
+    text={selected ? (data.outputPreview?.text ?? interaction.visible_tail) : interaction.visible_tail}
     label={m.observation_output_preview()}
     emptyLabel={interaction.client_output_delivered
       ? m.observation_output_delivered_no_preview()
       : m.observation_no_visible_output()}
     {contextLabel}
+    active={selected && data.outputActive}
+    textStart={selected ? data.outputPreview?.start : 0}
+    snapshotKey={data.outputSnapshotKey}
     tail />
 </article>
 <Handle type="source" position={Position.Bottom} class="observation-handle" aria-hidden="true" />

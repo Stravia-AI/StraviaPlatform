@@ -618,7 +618,7 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
         let mut run_finished = false;
         let mut model_turn_finished = false;
         while !run_finished || !model_turn_finished {
-            if let crate::interaction_observation::ObservationUpdate::Event(event) = events
+            if let crate::interaction_observation::ObservationUpdate::Change(event) = events
                 .next()
                 .await
                 .expect("Observation stream remains open")

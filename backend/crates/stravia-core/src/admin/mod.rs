@@ -40,8 +40,10 @@ pub use crate::interaction_observation::{
     DownloadTicket, FailedRequestDetail, FailedRequestPage, FailedRequestQuery,
     FailedRequestSummary, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
     InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot, InteractionSummary,
-    ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
-    RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
+    KnownInteraction, ObservationChange, ObservationEvent, ObservationQueryError,
+    ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery,
+    RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery,
+    RunDetail, TraceManifest, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use provider_connection::{

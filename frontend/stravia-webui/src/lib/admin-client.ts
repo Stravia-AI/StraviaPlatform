@@ -26,6 +26,8 @@ import type {
   GatewayStatus,
   ForestPage,
   ForestQuery,
+  RootChangesQuery,
+  RootChangesPage,
   FailedRequestQuery,
   FailedRequestPage,
   FailedRequestDetail,
@@ -33,7 +35,6 @@ import type {
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
-  InteractionSnapshot,
   DebugState,
   ClearHistoryResult,
   DownloadTicket,
@@ -312,11 +313,7 @@ export const admin = {
         `/observations/failed-requests/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
       ),
     forest: (query: ForestQuery) => request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
-    interactionSummary: (id: string, query: ForestQuery = {}) =>
-      request<InteractionSnapshot>(
-        'GET',
-        `/observations/interactions/${encodeURIComponent(id)}/summary${queryString(query)}`,
-      ),
+    changes: (query: RootChangesQuery) => request<RootChangesPage>('POST', '/observations/interactions/changes', query),
     interaction: (id: string, query: ForestQuery = {}) =>
       request<InteractionDetail>(
         'GET',

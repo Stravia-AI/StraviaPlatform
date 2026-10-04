@@ -8,26 +8,26 @@ use stravia_core::admin::{
 };
 
 pub(super) async fn finished_observation(
+    gateway: &Gateway,
     observations: &mut ObservationStream,
 ) -> anyhow::Result<(String, String)> {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut live = String::new();
         while let Some(update) = observations.next().await {
-            match update {
-                ObservationUpdate::LiveContent(block) => live.push_str(&block.text),
-                ObservationUpdate::Event(event) => {
-                    // 准备阶段失败只有结构化事件，不能仅检查已开始输出的文本块。
-                    live.push_str(&serde_json::to_string(&event)?);
-                    if event.kind == "run_finished" {
-                        return Ok((
-                            event
-                                .interaction_id
-                                .expect("finished run has an interaction"),
-                            live,
-                        ));
-                    }
+            if let ObservationUpdate::Change(event) = update {
+                // 准备阶段失败只有结构化事件，不能仅检查已开始输出的文本块。
+                live.push_str(&serde_json::to_string(&event)?);
+                if event.kind == "run_finished" {
+                    let id = event
+                        .interaction_id
+                        .expect("finished run has an interaction");
+                    let detail = gateway
+                        .admin()
+                        .observation_interaction(&id, Default::default())
+                        .await?;
+                    live.push_str(&serde_json::to_string(&detail)?);
+                    return Ok((id, live));
                 }
-                _ => {}
             }
         }
         anyhow::bail!("observation stream ended before the run finished")

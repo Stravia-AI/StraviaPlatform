@@ -15,11 +15,15 @@ import ObservationLogViewport from '$lib/components/observation-log-viewport.sve
 let {
   detail,
   liveBlocks = [],
+  liveActive = true,
+  liveContentEpoch = 0,
   olderLoading = false,
   onolder,
 }: {
   detail: InteractionDetail
   liveBlocks?: LiveContentBlock[]
+  liveActive?: boolean
+  liveContentEpoch?: number
   olderLoading?: boolean
   onolder?: () => Promise<void>
 } = $props()
@@ -73,13 +77,16 @@ const activities = $derived(observationConversationActivities(detail, liveBlocks
               {#if !user}
                 {#each activities.get(message.id) ?? [] as activity (activity.id)}
                   {#if activity.kind === 'thinking'}
-                    <ObservationActivity {activity} />
+                    <ObservationActivity {activity} {liveActive} {liveContentEpoch} />
                   {/if}
                 {/each}
               {/if}
               <!-- 首次输出前保留流式实例，但不显示空白气泡。 -->
               <div class="bubble" hidden={!message.text}>
-                <StreamingMarkdown text={message.text} active={!user && message.live} />
+                <StreamingMarkdown
+                  text={message.text}
+                  active={!user && message.live && liveActive}
+                  snapshotKey={liveContentEpoch} />
               </div>
               {#if !user}
                 {#each activities.get(message.id) ?? [] as activity (activity.id)}

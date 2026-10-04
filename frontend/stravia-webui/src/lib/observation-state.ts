@@ -30,21 +30,15 @@ export function eventBlockId(event: ObservationEvent): string | undefined {
   return payloadString(payloadRecord(event.payload).block_id)
 }
 
-/** Only the selected history is retained; background live previews have a separate small budget. */
+/** 正文仅保留当前选中作用域，并优先保留最新收到的有界内容。 */
 export function retainLiveBlocks(blocks: LiveContentBlock[], selectedId?: string): LiveContentBlock[] {
   let selectedBytes = 0
-  let previewBytes = 0
-  let previews = 0
   return blocks
     .toReversed()
     .filter((block) => {
-      const bytes = block.text.length * 2
-      if (block.interaction_id === selectedId) {
-        selectedBytes += bytes
-        return selectedBytes <= 8 * 1024 * 1024
-      }
-      previewBytes += bytes
-      return ++previews <= 32 && previewBytes <= 256 * 1024
+      if (block.interaction_id !== selectedId) return false
+      selectedBytes += block.text.length * 2
+      return selectedBytes <= 8 * 1024 * 1024
     })
     .reverse()
 }

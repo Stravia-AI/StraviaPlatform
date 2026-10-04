@@ -24,9 +24,25 @@ manifest 每批最多 200 条，在最多 8 个、随可用处理器确定的 bl
 
 - 仅作信号的事件不再作为独立事件落库：`generation_associated` 并入 admit 事务内的投影写入；`client_output_committed` 只保留 Run 投影列更新；`process_restarted` 不再单独持久化，改由启动恢复在同一事务内修正 run 投影并以 `run_state_changed`（`{"status":"interrupted","reason":"process_restarted"}`）承载，保持 SSE 唤醒与 Bundle 回放可见；`trace_manifest_updated` 删除。
 - 生命周期合并：`usage_confirmed` 并入 `target_attempt_finished` 的 `usage` 字段——attempt 结束前已确认的用量随结束事件落库，失败或中断 attempt 已实际报告的部分用量同样保留，不再持久化独立 `usage_confirmed`。`delivery_finished` 并入 `run_finished` 的 `delivery` 字段（`status`/`reason`/`completed_at`），Run 投影增加 `delivery_completed_at`；早于终态的 usage/delivery 先更新投影，终态合并时保留已收到的部分事实，不因失败或取消清空。用量时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果；迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 usage 事件或易失 usage/reset 协议。`client_output_committed` 布尔投影在终态事务内提交；删除信号事件不引入 `projection_updated` 别名或每事件完整快照。
-- 诊断正文按 Canonical Item 持久化（实现 ADR-0062）：可读 thinking 与客户端可见内容每个 item 一行，新 kind 为 `model_thinking` 与 `client_visible_content`，payload 携带 item 身份、可选 `block_id`、项内 part 序列、汇总 text 与 `complete` 标记，`model_thinking` 另带 model_turn_id/attempt_id。`model_thinking_finished` 不再持久化；可处理的失败或取消把已实际收到的内容标为未完成，不补造未收到的尾部；不周期性写中间快照，进程崩溃允许丢失整个未收口 item，只留 `observation_gap`。未收口内容继续作为易失快照立即实时发布，不带 SSE ID、不推进持久 cursor。实时与持久正文使用同一 Canonical Item 身份构造 `block_id`：客户端内容在 Run 内、thinking 在 attempt 内保持真实 item 顺序身份，身份不因上游 item id 迟到而改变；不同 item 不合并，项内 parts 按 canonical 顺序呈现，实时修订保留累计正文与单调 revision。延迟 WebSocket 的可见内容只从已成功发送给客户端的协议帧累积；可处理的失败、取消或断线只收口已交付的部分并标记 `complete=false`，不把未发送的 provider 前缀或已暂存完整响应补入可见正文。
+- 诊断正文按 Canonical Item 持久化（实现 ADR-0062）：可读 thinking 与客户端可见内容每个 item 一行，新 kind 为 `model_thinking` 与 `client_visible_content`，payload 携带 item 身份、可选 `block_id`、项内 part 序列、汇总 text 与 `complete` 标记，`model_thinking` 另带 model_turn_id/attempt_id。`model_thinking_finished` 不再持久化；可处理的失败或取消把已实际收到的内容标为未完成，不补造未收到的尾部；不周期性写中间快照，进程崩溃允许丢失整个未收口 item，只留 `observation_gap`。未收口内容继续作为选中作用域的累计易失快照发布，首段与结束边界立即处理，中间修订遵循下述有界调度，不带 SSE ID、不推进持久 cursor。实时与持久正文使用同一 Canonical Item 身份构造 `block_id`：客户端内容在 Run 内、thinking 在 attempt 内保持真实 item 顺序身份，身份不因上游 item id 迟到而改变；不同 item 不合并，项内 parts 按 canonical 顺序呈现，实时修订保留累计正文与单调 revision。延迟 WebSocket 的可见内容只从已成功发送给客户端的协议帧累积；可处理的失败、取消或断线只收口已交付的部分并标记 `complete=false`，不把未发送的 provider 前缀或已暂存完整响应补入可见正文。
 - `client_tool_result` 去重改以 Generation Chain 为准：父节点已核验时只从该节点的 client delta 捕获本次新增的工具结果，不再回放保存整段窗口；不复制父节点完整窗口；没有已核验父节点时不从父历史推断工具结果。
 - `observation_events.payload` 与 Turn Chain 存储共用同一二进制 storage codec（布局见 [ADR-0076](0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)：固定 14 字节 trailer，codec、零 dict_id、原始长度与版本；至少 128B 且 body 更小时采用带 checksum 的 zstd-3，线程本地上下文复用），SQL 查询用到的 JSON 字段提升为列：`tool_id`（client_tool_handoff/client_tool_result）与 `operation_id`（compaction_operation），其余内容不留列。旧 zip 文本编码在转换时一次性解码，不再产生。索引同步收敛：删除未被查询使用的 `observation_events_expiry_idx`；`observation_events_rejection_idx` 改为 `WHERE rejection_id IS NOT NULL` 部分索引；工具调用索引由 `json_extract` 表达式改为 `(run_id, tool_id, sequence DESC)` 部分索引。
+
+## 有界实时通信补充决策
+
+本补充明确替代原「未收口内容立即实时发布」的每次中间修订即时承诺：后端以固定首次截止的最多 100ms 窗口发布变化 block 的最新累计修订，第一段及完成、失败、取消边界立即处理；连续输入不能滚动延后截止。只替换易失预览，慢消费者的旧 block 修订可由最新修订替代，持久变化通知和 gap/恢复信号不得被正文积压吞掉。全文构造与发送编码不在每个原始 delta 上执行，推理和下游转发不等待观察调度。
+
+五项降本一并实施：按 root 合并摘要刷新，并分别合并详情增量与失败列表；批量读取 Debug flags；真正限制易失正文发布；分离全局轻量通知与选中 Interaction 正文；常规按 root 返回变化节点和明确移除结果。全局 `observation` 使用安全元数据 `ObservationChange`，保留持久 sequence，但不广播正文或完整 payload；选中 `/interactions/{id}/live` 先给当前累计快照，再无遗漏订阅，并以无持久 ID 的 `live_finished` 立即收口展示。Canonical Item 持久化、稳定 block 身份、part 顺序、累计正文、单调 revision、完整生命周期事实与易失/持久水位区别均不变。
+
+公开管理 `/interactions/{id}/summary` 及前端客户端接口干净删除，不保留 alias；选中及失败请求跳转读取 Interaction detail 并使用既有 root reveal。内部 store summary 保留为选中详情的组成，不再作为独立 HTTP 消费契约。
+
+ForestQuery 增加可选且默认关闭的 `live_window`；实时 forest/changes 仍验证时间跨度，但不以查询上界排除时钟差或在途新增活动，历史固定窗口保持上界。root 移除原因按 `deleted > filter > window` 判定；已知历史 root 仅迁出窗口时仍返回变化摘要、只移除物理缺失成员，筛选失效则不能沿迁出语义保留。未知窗口外 root 不返回摘要。
+
+持久事件 allocator/sequence 单调且已提交 ID 不重用，清历史或到期回收不重置分配器；查询 `snapshot_sequence` 是同一读取事务内仍保留的已提交事实水位，不是分配器位置。forest、root changes 与详情摘要使用一致数据库快照，以保留事件的已提交 MAX 为水位，空历史为 0；PostgreSQL 非事务 `last_value` 可包含未提交分配，绝不能作为视图水位。清理或 reset 后的 fresh snapshot 可以降低，不承诺跨重建单调。前端通过新 view epoch 重建并拒绝旧 epoch 结果，在成功前保留可用旧数据及明确恢复状态，失败显式 Retry；成功接受较低/零权威水位并替换旧基线，不保留幽灵节点。这不改变持久事实排序、正文 revision 或 Canonical Item 边界。
+
+Workspace 最多合并等待 100ms，`StreamingMarkdown` 最多追赶 300ms，与后端 100ms 共用最多 500ms 主动调度等待预算；外部 I/O、计算和实际渲染服务时间另测，不宣称端到端 500ms。首尾立即，历史/重连快照、替换、终态与 reduced-motion 直接显示已收到内容。动画只覆盖选中正文、展开 Thinking 与复用同一订阅的选中卡片输出。
+
+差量基线包含成员水位、matched 与 Debug 状态；必须更新受 root 筛选影响的兄弟状态，区分删除、筛选退出和时间窗迁移，不重发未变化兄弟。无法证明差量或重放完整时显式 reset 并重建权威视图。请求在途变化、查询失败的待处理状态与可见恢复、selection epoch、分页和历史迁出遵循 [观测设计 §9–10](../design/interaction-observation.md)。批量 Debug 判定仍读本实例文件索引，不变成共享事实或 TTL 缓存。此次补充不新增依赖或 schema，不改变认证、脱敏、Wire Capture、Bundle、Confirmed Upstream Usage、失败分类、单实例范围或「观察失败不影响推理」。
 
 ## Considered options
 

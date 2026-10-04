@@ -1041,14 +1041,20 @@ def test_history_cleanup_expires_event_cursor_without_rewinding_sequence(
                 }
                 empty = _forest(env, model=route_id)
                 assert empty["roots"] == []
-                assert empty["snapshot_sequence"] == old_sequence
+                status, rejections = http_request(
+                    "GET",
+                    f"{env['admin']}/api/v1/observations/rejections",
+                    headers=env["auth"],
+                )
+                assert status == 200, rejections
+                assert rejections["data"]["items"] == []
 
                 reset = _sse_event(env, old_sequence - 1)
                 assert reset["event"] == "reset_required"
-                assert reset["data"] == {
-                    "reset_required": True,
-                    "snapshot_sequence": old_sequence,
-                }
+                assert reset["data"]["reset_required"] is True
+                # Purging rows does not rewind the persistent stream allocator.
+                # A forest watermark instead describes surviving committed rows.
+                assert reset["data"]["snapshot_sequence"] >= old_sequence
 
                 status, response = _proxy(
                     env,
@@ -1060,7 +1066,11 @@ def test_history_cleanup_expires_event_cursor_without_rewinding_sequence(
                 replacement = _wait_for(
                     "post-cleanup Interaction", lambda: _route_interactions(env, route_id)
                 )[0]
-                assert _detail(env, replacement["id"])["snapshot_sequence"] > old_sequence
+                detail = _detail(env, replacement["id"])
+                replacement_sequences = [
+                    event["sequence"] for run in detail["runs"] for event in run["events"]
+                ]
+                assert min(replacement_sequences) > old_sequence
             finally:
                 stop_stravia_server(process, logs)
     finally:

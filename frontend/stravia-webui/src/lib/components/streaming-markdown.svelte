@@ -2,26 +2,40 @@
 import { untrack } from 'svelte'
 import MarkdownContent from '$lib/components/markdown-content.svelte'
 
-let { text, active = false }: { text: string; active?: boolean } = $props()
+let {
+  text,
+  active = false,
+  textStart = 0,
+  snapshotKey = 0,
+}: { text: string; active?: boolean; textStart?: number; snapshotKey?: number } = $props()
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+// 与后端发布 100ms、工作区合并 100ms 共用 500ms 主动等待预算。
+const REVEAL_BUDGET_MS = 300
 let received = untrack(() => text)
+let receivedStart = untrack(() => textStart)
+let currentSnapshot = untrack(() => snapshotKey)
 let displayed = $state(received)
 let visibleEnd = received.length
 let lastVisibleStart = segmenter.segment(received).containing(Math.max(0, visibleEnd - 1))?.index ?? 0
 let pending: { start: number; end: number }[] = []
 let cursor = 0
 let frame: number | null = null
+let deadlineTimer: ReturnType<typeof setTimeout> | null = null
 let lastTime = 0
 let credit = 0
 let rate = 1 / 25
+let deadline = 0
 let reducedMotion = false
 
 function cancelFrame() {
   if (frame !== null) cancelAnimationFrame(frame)
+  if (deadlineTimer !== null) clearTimeout(deadlineTimer)
   frame = null
+  deadlineTimer = null
   credit = 0
   lastTime = 0
+  deadline = 0
 }
 
 function flush() {
@@ -36,6 +50,11 @@ function flush() {
 
 function reveal(now: number) {
   frame = null
+  if (now >= deadline) {
+    flush()
+    return
+  }
+  rate = Math.max(rate, (pending.length - cursor) / Math.max(1, deadline - lastTime))
   credit += (now - lastTime) * rate
   lastTime = now
   const count = Math.min(pending.length - cursor, Math.floor(credit))
@@ -56,18 +75,32 @@ function reveal(now: number) {
   }
 }
 
-function synchronize(next: string, animate: boolean) {
-  const append = next.startsWith(received)
-  const changed = next !== received
+function synchronize(next: string, animate: boolean, snapshot: number, start: number) {
+  const dropped = start - receivedStart
+  const append =
+    dropped === 0
+      ? next.startsWith(received)
+      : dropped > 0 &&
+        dropped < received.length &&
+        start + next.length > receivedStart + received.length &&
+        next.startsWith(received.slice(dropped))
+  const changed = next !== received || start !== receivedStart
+  const initial = received.length === 0
+  const restored = currentSnapshot !== snapshot
+  currentSnapshot = snapshot
   received = next
-  if (!animate || reducedMotion || !append) {
+  receivedStart = start
+  if (!animate || reducedMotion || document.hidden || !append || initial || restored) {
     flush()
     return
   }
   if (!changed) return
+  // 尾窗滑动只退役已裁掉的前缀，追加仍使用同一轮剩余预算。
+  visibleEnd = Math.max(0, visibleEnd - dropped)
+  lastVisibleStart = Math.max(0, lastVisibleStart - dropped)
+  displayed = received.slice(0, visibleEnd)
 
-  // Re-segment from the last visible grapheme: a new chunk can extend it with
-  // a combining mark, variation selector, ZWJ sequence, or surrogate pair.
+  // 新片段可能延长末尾 grapheme；从该边界重新分段，避免拆开组合字符或 emoji。
   pending = []
   cursor = 0
   for (const segment of segmenter.segment(received.slice(lastVisibleStart))) {
@@ -89,13 +122,15 @@ function synchronize(next: string, animate: boolean) {
     return
   }
 
-  // Preserve a readable cadence for small deltas; a bulk append catches up
-  // within roughly 400ms rather than building a seconds-long replay queue.
-  rate = Math.max(rate, pending.length / 400)
+  // 持续追加不能延后本轮截止；大批正文用剩余预算自适应追赶。
   if (frame === null) {
     lastTime = performance.now()
+    deadline = lastTime + REVEAL_BUDGET_MS
+    // 帧边界可能晚于截止；固定 timer 收尾，不为持续追加重置预算。
+    deadlineTimer = setTimeout(flush, REVEAL_BUDGET_MS)
     frame = requestAnimationFrame(reveal)
   }
+  rate = Math.max(rate, pending.length / Math.max(1, deadline - performance.now()))
 }
 
 $effect(() => {
@@ -115,9 +150,13 @@ $effect(() => {
 $effect(() => {
   const next = text
   const animate = active
+  const snapshot = snapshotKey
+  const start = textStart
   // Only incoming props drive this effect, never the animation's own state.
-  untrack(() => synchronize(next, animate))
+  untrack(() => synchronize(next, animate, snapshot, start))
 })
 </script>
+
+<svelte:document onvisibilitychange={() => flush()} />
 
 <MarkdownContent text={displayed} />

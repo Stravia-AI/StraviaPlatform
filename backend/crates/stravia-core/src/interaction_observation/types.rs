@@ -461,6 +461,7 @@ pub struct ObservationEvent {
 #[derive(Debug, Clone)]
 pub enum ObservationUpdate {
     Event(ObservationEvent),
+    Change(ObservationChange),
     ResetRequired {
         snapshot_sequence: i64,
     },
@@ -473,6 +474,46 @@ pub enum ObservationUpdate {
         run_id: String,
         reason: String,
     },
+    LiveFinished {
+        interaction_id: String,
+        run_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationChange {
+    pub sequence: i64,
+    pub occurred_at: i64,
+    pub interaction_id: Option<String>,
+    pub root_id: Option<String>,
+    pub run_id: Option<String>,
+    pub rejection_id: Option<String>,
+    pub kind: String,
+    pub boundary: bool,
+}
+
+impl ObservationChange {
+    pub(super) fn from_event(event: ObservationEvent, root_id: Option<String>) -> Self {
+        let boundary = matches!(
+            event.kind.as_str(),
+            "run_admitted"
+                | "run_finished"
+                | "run_state_changed"
+                | "client_visible_content"
+                | "model_thinking"
+                | "request_rejected"
+        );
+        Self {
+            sequence: event.sequence,
+            occurred_at: event.occurred_at,
+            interaction_id: event.interaction_id,
+            root_id,
+            run_id: event.run_id,
+            rejection_id: event.rejection_id,
+            kind: event.kind,
+            boundary,
+        }
+    }
 }
 
 /// 未提交的观察内容；revision 不得用作持久化 SSE cursor。
@@ -503,6 +544,8 @@ pub enum ObservationQueryError {
 pub struct ForestQuery {
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
+    #[serde(default)]
+    pub live_window: bool,
     pub anchor_at: Option<i64>,
     pub window_index: Option<u32>,
     pub cursor: Option<String>,
@@ -563,6 +606,44 @@ pub struct ForestPage {
     pub root_total: i64,
     pub next_cursor: Option<String>,
     pub snapshot_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootChangesQuery {
+    pub filters: ForestQuery,
+    pub roots: Vec<RootChangesBaseline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootChangesBaseline {
+    pub root_id: String,
+    pub after_sequence: i64,
+    pub known_interactions: Vec<KnownInteraction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownInteraction {
+    pub id: String,
+    pub last_event_sequence: i64,
+    pub matched: bool,
+    pub debug_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootChangesPage {
+    pub snapshot_sequence: i64,
+    pub root_total: i64,
+    pub reset_required: bool,
+    pub changes: Vec<RootChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootChange {
+    pub root_id: String,
+    pub last_active_at: i64,
+    pub interactions: Vec<InteractionSummary>,
+    pub removed_interaction_ids: Vec<String>,
+    pub removal_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

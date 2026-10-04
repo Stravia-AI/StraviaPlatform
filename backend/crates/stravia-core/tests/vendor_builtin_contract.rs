@@ -2350,7 +2350,7 @@ async fn command_code_admin_option_reaches_initialization_and_inference_headers(
             .iter()
             .any(|request| request.path.contains("generate"))
     );
-    let (interaction_id, _) = finished_observation(&mut observations).await?;
+    let (interaction_id, _) = finished_observation(&gateway, &mut observations).await?;
     let records = observation_bundle_records(&gateway, &interaction_id).await?;
     let generated_records = records
         .iter()

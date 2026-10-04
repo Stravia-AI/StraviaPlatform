@@ -71,6 +71,7 @@ export interface ObservationEvent {
 }
 
 export interface ForestQuery {
+  live_window?: boolean
   start_at?: number
   end_at?: number
   anchor_at?: number
@@ -84,10 +85,19 @@ export interface ForestQuery {
   min_tokens?: number
 }
 
+export interface ObservationOutputPreview {
+  text: string
+  /** 完整已接收输出中的 UTF-16 起点；尾窗滑动无需保留或复制前文。 */
+  start: number
+}
+
 export interface InteractionNodeData extends Record<string, unknown> {
   interaction: InteractionSummary
   onSelectedPath: boolean
   subdued: boolean
+  outputPreview?: ObservationOutputPreview
+  outputActive?: boolean
+  outputSnapshotKey?: number
 }
 
 export interface InteractionSummary {
@@ -129,6 +139,39 @@ export interface ForestPage {
   snapshot_sequence: number
 }
 
+export interface RootChangesQuery {
+  filters: ForestQuery
+  roots: {
+    root_id: string
+    after_sequence: number
+    known_interactions: Pick<InteractionSummary, 'id' | 'last_event_sequence' | 'matched' | 'debug_status'>[]
+  }[]
+}
+
+export interface RootChangesPage {
+  snapshot_sequence: number
+  root_total: number
+  reset_required: boolean
+  changes: {
+    root_id: string
+    last_active_at: number
+    interactions: InteractionSummary[]
+    removed_interaction_ids: string[]
+    removal_reason: 'deleted' | 'filter' | 'window' | null
+  }[]
+}
+
+export interface ObservationChange {
+  sequence: number
+  occurred_at: number
+  interaction_id: string | null
+  root_id: string | null
+  run_id: string | null
+  rejection_id: string | null
+  kind: string
+  boundary: boolean
+}
+
 export interface TraceManifest {
   trace_id: string
   enabled: boolean
@@ -156,12 +199,6 @@ export interface RunDetail {
   usage: ConfirmedUsage
   events: ObservationEvent[]
   trace: TraceManifest | null
-}
-
-export interface InteractionSnapshot {
-  interaction: InteractionSummary
-  root: ForestRoot
-  snapshot_sequence: number
 }
 
 export interface LiveContentBlock {
@@ -225,8 +262,10 @@ export interface DownloadTicket {
 }
 
 export type ObservationStreamUpdate =
-  | { type: 'event'; event: ObservationEvent }
-  | { type: 'reset_required'; snapshot_sequence: number }
+  { type: 'event'; event: ObservationChange } | { type: 'reset_required'; snapshot_sequence: number }
+
+export type ObservationLiveUpdate =
   | { type: 'live_content'; block: LiveContentBlock }
   | { type: 'live_snapshot'; blocks: LiveContentBlock[] }
   | { type: 'live_gap'; interaction_id: string; run_id: string; reason: string }
+  | { type: 'live_finished'; interaction_id: string; run_id: string }

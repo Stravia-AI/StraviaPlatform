@@ -56,7 +56,7 @@ async fn wait_for_observed_run_finish(
                 .expect("Observation stream remains open");
             if matches!(
                 event,
-                crate::interaction_observation::ObservationUpdate::Event(event)
+                crate::interaction_observation::ObservationUpdate::Change(event)
                     if event.kind == "run_finished"
             ) {
                 break;

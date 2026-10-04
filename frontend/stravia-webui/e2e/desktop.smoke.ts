@@ -1,4 +1,5 @@
 import { createServer } from 'node:net'
+import { createServer as createProvider } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import type { AddressInfo } from 'node:net'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -105,6 +106,239 @@ describe('Stravia desktop smoke', () => {
   before(async () => {
     await browser.tauri.switchWindow('main')
     await $('a[href="/vendor-plugins"]').waitForExist({ timeout: 180_000 })
+  })
+
+  it('switches and closes real selected scopes and zero-output diagnostics through native authenticated HTTP', async () => {
+    await browser.execute(() => localStorage.setItem('stravia-locale', 'en-US'))
+    await browser.refresh()
+    await browser.tauri.switchWindow('main')
+    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const suffix = Date.now().toString(36)
+    const models = [`native-rejected-a-${suffix}`, `native-rejected-b-${suffix}`]
+    const key = (await adminRequest(port, '/api-keys', {
+      method: 'POST',
+      body: JSON.stringify({ name: `Native observation ${suffix}`, model_ids: [] }),
+    })) as { id: string; key: string }
+    const upstream = createProvider((request, response) => {
+      if (request.method === 'GET' && request.url?.endsWith('/models')) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({
+            object: 'list',
+            data: [{ id: 'synthetic', object: 'model', created: 1, owned_by: 'synthetic' }],
+          }),
+        )
+        return
+      }
+      let text = ''
+      request.on('data', (chunk) => {
+        text += chunk.toString()
+      })
+      request.on('end', () => {
+        const payload = JSON.parse(text) as { stream?: boolean; messages: Array<{ content: string }> }
+        if (payload.stream) {
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          const chunk = (delta: object, finish_reason: string | null, usage?: object) => ({
+            id: 'native-synthetic',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'synthetic',
+            choices: [{ index: 0, delta, finish_reason }],
+            ...(usage ? { usage } : {}),
+          })
+          response.end(
+            `data: ${JSON.stringify(chunk({ role: 'assistant', content: payload.messages.at(-1)?.content }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop', { prompt_tokens: 600, completion_tokens: 12000, total_tokens: 12600 }))}\n\ndata: [DONE]\n\n`,
+          )
+          return
+        }
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({
+            id: 'native-synthetic',
+            object: 'chat.completion',
+            created: 1,
+            model: 'synthetic',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: payload.messages.at(-1)?.content },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 600, completion_tokens: 12000, total_tokens: 12600 },
+          }),
+        )
+      })
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    const upstreamPort = (upstream.address() as AddressInfo).port
+    let serviceId: string | undefined
+    let modelId: string | undefined
+    try {
+      const service = createdResource(
+        await adminRequest(port, '/providers', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: `Native observation provider ${suffix}`,
+            source: {
+              type: 'custom',
+              vendor: 'custom',
+              channel: 'default',
+              protocol: 'openai-compatible',
+              base_url: `http://127.0.0.1:${upstreamPort}`,
+            },
+            credential: { type: 'api_key', value: 'synthetic-only' },
+            vendor_options: {},
+          }),
+        }),
+        'Provider',
+      )
+      serviceId = service.id
+      await adminRequest(port, `/providers/${service.id}/models`, {
+        method: 'POST',
+        body: JSON.stringify({ model_id: 'synthetic', metadata: { name: 'Native observation model' } }),
+      })
+      const route = createdResource(
+        await adminRequest(port, '/models', {
+          method: 'POST',
+          body: JSON.stringify({
+            model_id: `native-observation-${suffix}`,
+            display_name: 'Native observation',
+            targets: [{ provider_id: service.id, model: 'synthetic' }],
+          }),
+        }),
+        'Model',
+      )
+      modelId = route.id
+      const members: Array<{ id: string; content: string }> = []
+      for (const content of ['Native selected A', 'Native selected B']) {
+        const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', Authorization: `Bearer ${key.key}` },
+          body: JSON.stringify({ model: `native-observation-${suffix}`, messages: [{ role: 'user', content }] }),
+        })
+        expect(response.ok).toBe(true)
+        let id: string | undefined
+        await browser.waitUntil(
+          async () => {
+            const forest = (await adminRequest(
+              port,
+              `/observations/interactions?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30&model=${route.id}`,
+            )) as { roots: Array<{ interactions: Array<{ id: string; status: string }> }> }
+            id = forest.roots
+              .flatMap((root) => root.interactions)
+              .find((item) => item.status === 'completed' && !members.some((previous) => previous.id === item.id))?.id
+            return Boolean(id)
+          },
+          { timeoutMsg: 'Native inference did not persist its completed observation' },
+        )
+        members.push({ id: id!, content })
+      }
+      await $('a[href="/logs"]').click()
+      await $('button[aria-label="Load and show all chains"]').waitForEnabled()
+      await browser.execute(() => {
+        const scopes: Array<{ id: string; status?: number; sse: boolean; aborted: boolean }> = []
+        const original = window.fetch.bind(window)
+        Object.assign(window, { nativeObservationScopes: scopes })
+        window.fetch = (input, init) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+          const id = /\/observations\/interactions\/([^/]+)\/live(?:\?|$)/.exec(url)?.[1]
+          const result = original(input, init)
+          if (!id) return result
+          const scope = { id, sse: false, aborted: false, status: undefined as number | undefined }
+          scopes.push(scope)
+          const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+          signal?.addEventListener('abort', () => (scope.aborted = true), { once: true })
+          return result.then((response) => {
+            scope.status = response.status
+            scope.sse = response.headers.get('content-type')?.includes('text/event-stream') ?? false
+            return response
+          })
+        }
+      })
+      let previous: { id: string; content: string } | undefined
+      for (const content of ['Native selected A', 'Native selected B']) {
+        const selected = members.find((member) => member.content === content)
+        expect(selected).toBeDefined()
+        await $('button[aria-label="Load and show all chains"]').click()
+        await $(`.svelte-flow__node[data-id="${selected!.id}"] h3`).click()
+        const reopened = await $('[aria-label="Observation details"]')
+        await expect(reopened.$('[role="log"]')).toHaveText(expect.stringContaining(content))
+        await browser.waitUntil(
+          () =>
+            browser.execute((id) => {
+              const scopes = (
+                window as unknown as {
+                  nativeObservationScopes: Array<{ id: string; status?: number; sse: boolean; aborted: boolean }>
+                }
+              ).nativeObservationScopes
+              return scopes.some((scope) => scope.id === id && scope.status === 200 && scope.sse && !scope.aborted)
+            }, selected!.id),
+          { timeoutMsg: 'Native selected scope did not open through authenticated HTTP' },
+        )
+        if (previous) {
+          await expect(reopened.$('[role="log"]')).not.toHaveText(expect.stringContaining(previous.content))
+          await browser.waitUntil(
+            () =>
+              browser.execute((id) => {
+                const scopes = (
+                  window as unknown as { nativeObservationScopes: Array<{ id: string; aborted: boolean }> }
+                ).nativeObservationScopes
+                return scopes.some((scope) => scope.id === id && scope.aborted)
+              }, previous!.id),
+            { timeoutMsg: 'Switching the native selection did not abort the previous actual HTTP body scope' },
+          )
+        }
+        previous = selected
+      }
+      const selectedDetails = await $('[aria-label="Observation details"]')
+      await selectedDetails.$('button[aria-label="Close"]').click()
+      await browser.waitUntil(
+        () =>
+          browser.execute(() => {
+            const scopes = (window as unknown as { nativeObservationScopes: Array<{ aborted: boolean }> })
+              .nativeObservationScopes
+            return scopes.every((scope) => scope.aborted)
+          }),
+        { timeoutMsg: 'Closing the native inspector did not abort its actual HTTP body scope' },
+      )
+      await expect(selectedDetails).not.toExist()
+      for (const model of models) {
+        const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', Authorization: `Bearer ${key.key}` },
+          body: JSON.stringify({ model, input: 'isolated native synthetic request' }),
+        })
+        expect(response.ok).toBe(false)
+      }
+      await browser.waitUntil(
+        async () => {
+          const failures = (await adminRequest(
+            port,
+            `/observations/failed-requests?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
+          )) as { items: Array<{ model: string | null }> }
+          return models.every((model) => failures.items.some((item) => item.model === model))
+        },
+        { timeoutMsg: 'Native rejected requests did not persist both diagnostic records' },
+      )
+      await $('a[href="/logs"]').click()
+      await $('button=Failed Requests').click()
+      for (const model of models) {
+        const row = await $(`//tr[contains(normalize-space(), "${model}")]`)
+        await row.$('button').click()
+        const inspector = await $('[aria-label="Observation details"]')
+        await expect(inspector).toHaveText(expect.stringContaining(model))
+        await inspector.$('button[aria-label="Close"]').click()
+        await expect(inspector).not.toExist()
+      }
+    } finally {
+      upstream.closeAllConnections()
+      if (upstream.listening)
+        await new Promise<void>((resolve, reject) => upstream.close((error) => (error ? reject(error) : resolve())))
+      await adminRequest(port, `/api-keys/${key.id}`, { method: 'DELETE' })
+      if (modelId) await adminRequest(port, `/models/${modelId}`, { method: 'DELETE' })
+      if (serviceId) await adminRequest(port, `/providers/${serviceId}`, { method: 'DELETE' })
+    }
   })
 
   it('shows the native browser chooser and retains an invalid path draft without saving it', async () => {

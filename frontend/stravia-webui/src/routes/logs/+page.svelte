@@ -17,7 +17,8 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatCompactCount, formatLogTime } from '$lib/format'
 import { effectiveModelDisplayName } from '$lib/logical-model'
 import { observationStatusLabel } from '$lib/observation-labels'
-import { navigateToBundle, subscribeToObservations } from '$lib/observation-stream'
+import { observationOutputPreview } from '$lib/observation-conversation'
+import { navigateToBundle, subscribeToInteractionLive, subscribeToObservations } from '$lib/observation-stream'
 import {
   isValidObservationRange,
   OBSERVATION_MIN_TOKEN_STOPS,
@@ -65,22 +66,34 @@ const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: ad
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
 
-const ws = new ObservationWorkspace(admin.observations, subscribeToObservations, {
-  focusLatest: async () => {
-    await tick()
-    await canvas?.focusLatest()
+const ws = new ObservationWorkspace(
+  admin.observations,
+  subscribeToObservations,
+  {
+    focusLatest: async () => {
+      await tick()
+      await canvas?.focusLatest()
+    },
+    focusNode: async (id) => {
+      await tick()
+      await canvas?.focusNode(id)
+    },
+    fitAfterAllLoaded: async () => {
+      await tick()
+      await canvas?.fitAfterAllLoaded()
+    },
+    onError: (error) => toast.error(localizeBackendErrorMessage(error)),
   },
-  focusNode: async (id) => {
-    await tick()
-    await canvas?.focusNode(id)
-  },
-  fitAfterAllLoaded: async () => {
-    await tick()
-    await canvas?.fitAfterAllLoaded()
-  },
-  onError: (error) => toast.error(localizeBackendErrorMessage(error)),
-})
+  subscribeToInteractionLive,
+)
 
+const selectedOutputPreview = $derived(
+  ws.interactionDetail
+    ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks)
+    : ws.selectedInteraction
+      ? { text: ws.selectedInteraction.visible_tail, start: 0 }
+      : undefined,
+)
 const selectedFilterModel = $derived(modelsQuery.data?.find((item) => item.id === ws.modelFilter))
 const draftStartMs = $derived(new Date(draftStart).getTime())
 const draftEndMs = $derived(new Date(draftEnd).getTime())
@@ -296,9 +309,14 @@ async function downloadBundle(): Promise<void> {
 
     {#if ws.activeTab === 'interactions'}
       <div class="canvas-stage">
-        {#if ws.loading}
+        {#if ws.loadError && ws.canvasRoots.length > 0}
+          <div class="canvas-refresh-error">
+            <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
+          </div>
+        {/if}
+        {#if ws.loading && ws.canvasRoots.length === 0}
           <div class="stage-state"><p>{m.observation_loading_chains()}</p></div>
-        {:else if ws.loadError}
+        {:else if ws.loadError && ws.canvasRoots.length === 0}
           <div class="stage-state">
             <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
           </div>
@@ -329,6 +347,9 @@ async function downloadBundle(): Promise<void> {
               bind:this={canvas}
               roots={ws.canvasRoots}
               selectedId={ws.selectedInteraction?.id}
+              {selectedOutputPreview}
+              selectedOutputActive={ws.selectedLiveActive}
+              liveContentEpoch={ws.liveContentEpoch + ws.liveTerminalEpoch}
               selectedPath={ws.selectedPath}
               loadingMore={ws.loadingMore}
               nextCursor={ws.nextCursor}
@@ -349,6 +370,10 @@ async function downloadBundle(): Promise<void> {
             portalTarget={fullscreen ? workspaceEl : undefined}
             interaction={ws.interactionDetail}
             liveBlocks={ws.selectedLiveBlocks}
+            liveActive={ws.selectedLiveActive}
+            liveContentEpoch={ws.liveContentEpoch + ws.liveTerminalEpoch}
+            error={ws.detailError ? localizeBackendErrorMessage(ws.detailError) : undefined}
+            onretry={() => void ws.refreshSelectedDetail()}
             liveGap={ws.liveGaps.includes(ws.selectedInteraction.id)}
             liveCapacity={ws.liveCapacityGaps.includes(ws.selectedInteraction.id)}
             olderLoading={ws.olderLoading}
@@ -397,7 +422,7 @@ async function downloadBundle(): Promise<void> {
             portalTarget={fullscreen ? workspaceEl : undefined}
             failure={ws.failureDetail}
             error={ws.failureDetailError ? localizeBackendErrorMessage(ws.failureDetailError) : undefined}
-            onretry={() => ws.selectedFailure && void ws.selectFailure(ws.selectedFailure)}
+            onretry={() => void ws.refreshSelectedDetail()}
             oninteraction={ws.failureDetail?.request.interaction_id
               ? () => void ws.openFailureInteraction()
               : undefined}
@@ -631,6 +656,13 @@ async function downloadBundle(): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+.canvas-refresh-error {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  right: 0;
+  left: 0;
 }
 .stage-state {
   display: grid;

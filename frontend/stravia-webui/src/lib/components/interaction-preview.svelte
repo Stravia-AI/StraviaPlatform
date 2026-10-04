@@ -1,5 +1,6 @@
 <script lang="ts">
 import MarkdownContent from '$lib/components/markdown-content.svelte'
+import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import { tick } from 'svelte'
 import * as Tooltip from '$lib/components/ui/tooltip'
 
@@ -9,7 +10,19 @@ let {
   emptyLabel,
   contextLabel = '',
   tail = false,
-}: { text: string | null; label: string; emptyLabel: string; contextLabel?: string; tail?: boolean } = $props()
+  active = false,
+  textStart = 0,
+  snapshotKey = 0,
+}: {
+  text: string | null
+  label: string
+  emptyLabel: string
+  contextLabel?: string
+  tail?: boolean
+  active?: boolean
+  textStart?: number
+  snapshotKey?: number
+} = $props()
 let open = $state(false)
 let pinned = $state(false)
 let trigger = $state<HTMLButtonElement | null>(null)
@@ -47,11 +60,15 @@ async function handleKeydown(event: KeyboardEvent) {
 }
 </script>
 
-{#snippet markdown()}
+{#snippet markdown(animate: boolean)}
   <div class="preview-markdown" style:--markdown-first-margin={contextLabel ? '0.35rem' : '0'}>
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
     {#if text}
-      <MarkdownContent {text} />
+      {#if tail}
+        <StreamingMarkdown {text} active={animate} {textStart} {snapshotKey} />
+      {:else}
+        <MarkdownContent {text} />
+      {/if}
     {:else if !contextLabel}
       {emptyLabel}
     {/if}
@@ -85,7 +102,7 @@ async function handleKeydown(event: KeyboardEvent) {
     {#snippet child({ props })}
       <button {...props} aria-describedby={open ? contentId : undefined}>
         <div class={['preview-viewport', tail ? 'tail-preview' : 'input-preview', !text && 'text-muted-foreground']}>
-          {@render markdown()}
+          {@render markdown(active)}
         </div>
       </button>
     {/snippet}
@@ -121,7 +138,7 @@ async function handleKeydown(event: KeyboardEvent) {
       aria-label={label}
       tabindex="-1">
       <p class="preview-label">{label}</p>
-      {@render markdown()}
+      {@render markdown(active && open)}
     </div>
   </Tooltip.Content>
 </Tooltip.Root>

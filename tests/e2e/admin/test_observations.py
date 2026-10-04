@@ -642,7 +642,7 @@ def test_failed_request_mixed_history_uses_start_time_and_keyset_pages(admin_env
 
 @pytest.mark.e2e
 @pytest.mark.admin
-@pytest.mark.parametrize("resource", ["interactions", "rejections", "failed-requests", "interactions/missing/summary"])
+@pytest.mark.parametrize("resource", ["interactions", "rejections", "failed-requests", "interactions/changes"])
 @pytest.mark.parametrize("bounds", [
     {"start_at": 1_000},
     {"end_at": 2_000},
@@ -654,8 +654,9 @@ def test_observation_explicit_range_rejects_invalid_bounds(
     admin_env: dict[str, Any], resource: str, bounds: dict[str, int],
 ) -> None:
     status, body = http_request(
-        "GET",
+        "POST" if resource == "interactions/changes" else "GET",
         f"{admin_env['admin']}/api/v1/observations/{resource}?{urlencode(bounds)}",
+        payload={"filters": bounds, "roots": []} if resource == "interactions/changes" else None,
         headers=admin_env["auth"],
     )
     assert status == 400, body
@@ -818,9 +819,16 @@ def _sse_event(
     env: dict[str, Any],
     after: int,
     accept: Callable[[dict[str, Any]], bool] | None = None,
+    *,
+    interaction_id: str | None = None,
 ) -> dict[str, Any]:
+    path = (
+        f"/api/v1/observations/interactions/{interaction_id}/live"
+        if interaction_id is not None
+        else f"/api/v1/observations/events?after={after}"
+    )
     request = Request(
-        f"{env['admin']}/api/v1/observations/events?after={after}",
+        f"{env['admin']}{path}",
         headers=env["auth"],
     )
     with urlopen(request, timeout=5.0) as response:
@@ -853,7 +861,13 @@ def _sse_event(
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_observation_live_snapshot_has_no_durable_event_id(admin_env: dict[str, Any]) -> None:
-    snapshot = _sse_event(admin_env, _forest(admin_env)["snapshot_sequence"])
+    route_id, api_key = _create_route(admin_env, "observation-scoped-snapshot")
+    status, body = _proxy(admin_env, api_key, "observation-scoped-snapshot",
+                          [{"role": "user", "content": "synthetic snapshot"}])
+    assert status == 200, body
+    interaction = _wait_for("scoped snapshot interaction",
+                           lambda: next(iter(_route_interactions(admin_env, route_id)), None))
+    snapshot = _sse_event(admin_env, 0, interaction_id=interaction["id"])
     assert snapshot["event"] == "live_snapshot"
     assert snapshot["id"] == ""
     assert isinstance(snapshot["data"]["blocks"], list)
@@ -935,6 +949,11 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert replay["event"] == "observation"
     assert int(replay["id"]) == replay["data"]["sequence"]
     assert replay["data"]["sequence"] > before
+    assert "payload" not in replay["data"]
+    assert "text" not in replay["data"]
+    assert replay["data"]["interaction_id"] == summary["id"]
+    assert replay["data"]["root_id"] == summary["root_id"]
+    assert isinstance(replay["data"]["boundary"], bool)
 
     for path in ("/api/v1/logs", "/api/v1/logs/removed"):
         status, _ = http_request("GET", f"{admin_env['admin']}{path}", headers=admin_env["auth"])
@@ -991,8 +1010,9 @@ def test_observation_resources_require_admin_and_rejections_invent_no_principal(
 ) -> None:
     protected = (
         "/api/v1/observations/interactions",
-        "/api/v1/observations/interactions/missing/summary",
+        "/api/v1/observations/interactions/missing",
         "/api/v1/observations/interactions/missing/events",
+        "/api/v1/observations/interactions/missing/live",
         "/api/v1/observations/rejections",
         "/api/v1/observations/failed-requests",
         "/api/v1/observations/failed-requests/run/missing",
@@ -1003,6 +1023,17 @@ def test_observation_resources_require_admin_and_rejections_invent_no_principal(
     for path in protected:
         status, _ = http_request("GET", f"{admin_env['admin']}{path}", timeout=1.0)
         assert status == 401
+    status, _ = http_request(
+        "POST", f"{admin_env['admin']}/api/v1/observations/interactions/changes",
+        payload={"filters": {"anchor_at": int(time.time() * 1000), "window_index": 0},
+                 "roots": []},
+        headers={
+            key: value for key, value in admin_env["auth"].items()
+            if key.lower() not in {"cookie", "authorization"}
+        },
+        timeout=1.0,
+    )
+    assert status == 401
 
     status, _ = http_request(
         "POST",
@@ -2169,27 +2200,19 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
             {"model": "missing-route", "start_at": last_active_at, "end_at": last_active_at + 1},
         ):
             suffix = urlencode(query)
-            status, snapshot_body = http_request(
-                "GET",
-                f"{admin_env['admin']}/api/v1/observations/interactions/{selected_id}/summary?{suffix}",
-                headers=admin_env["auth"],
-            )
-            assert status == 200, snapshot_body
-            snapshot = snapshot_body["data"]
             status, filtered_detail_body = http_request(
                 "GET",
                 f"{admin_env['admin']}/api/v1/observations/interactions/{selected_id}?{suffix}",
                 headers=admin_env["auth"],
             )
             assert status == 200, filtered_detail_body
-            assert set(snapshot) == {"interaction", "root", "snapshot_sequence"}
-            assert snapshot["interaction"] == filtered_detail_body["data"]["interaction"]
-            assert snapshot["root"] == filtered_detail_body["data"]["root"]
+            snapshot = filtered_detail_body["data"]
+            assert snapshot["interaction"]["id"] == selected_id
             assert [item["id"] for item in snapshot["root"]["interactions"]] == [
                 item["id"] for item in context
             ]
             assert snapshot["root"]["interactions"][1]["parent_interaction_id"] == context[0]["id"]
-            assert large_tool_result not in json.dumps(snapshot)
+            assert large_tool_result not in json.dumps(snapshot["root"])
             assert all(
                 event["sequence"] <= snapshot["snapshot_sequence"]
                 for item in snapshot["root"]["interactions"]
@@ -2200,7 +2223,7 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
 
     status, missing_body = http_request(
         "GET",
-        f"{admin_env['admin']}/api/v1/observations/interactions/missing/summary",
+        f"{admin_env['admin']}/api/v1/observations/interactions/missing",
         headers=admin_env["auth"],
     )
     assert status == 404, missing_body
@@ -2293,7 +2316,6 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
     assert cleared["data"]["deleted_interactions"] >= 1
     assert cleared["data"]["deleted_rejections"] >= 1
     after_clear = _forest(admin_env, model=route_id)
-    assert after_clear["snapshot_sequence"] == old_sequence
     assert after_clear["roots"] == []
     status, rejections = http_request(
         "GET",
@@ -2305,7 +2327,10 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
 
     reset = _sse_event(admin_env, old_sequence + 1)
     assert reset["event"] == "reset_required"
-    assert reset["data"]["snapshot_sequence"] == old_sequence
+    assert reset["data"]["reset_required"] is True
+    # The stream cursor uses the persistent allocator; the forest snapshot
+    # covers surviving committed rows, including unrelated active history.
+    assert reset["data"]["snapshot_sequence"] >= old_sequence
 
     status, response = _proxy(
         admin_env,
@@ -2317,4 +2342,8 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
     replacement = _wait_for(
         "post-clear Interaction", lambda: _route_interactions(admin_env, route_id)
     )[0]
-    assert _detail(admin_env, replacement["id"])["snapshot_sequence"] > old_sequence
+    replacement_detail = _detail(admin_env, replacement["id"])
+    replacement_sequences = [
+        event["sequence"] for run in replacement_detail["runs"] for event in run["events"]
+    ]
+    assert min(replacement_sequences) > old_sequence

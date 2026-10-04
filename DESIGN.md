@@ -509,6 +509,7 @@ Lucide 图标使用 16px 为常规尺寸，跟随文字颜色；图标只辅助�
 
 - 动效快速、机械、可预测：140ms 用于控件与导航反馈，200ms 用于侧栏宽度；避免纯装饰动效、连续呼吸、视差、弹簧和大幅位移。
 - `prefers-reduced-motion: reduce` 下动画和过渡降至 0.01ms、迭代一次，并关闭平滑滚动。
+- 请求记录的逐字呈现复用 `StreamingMarkdown`，仅作用于选中详情正文、展开的 Thinking 和选中卡片输出预览，按完整 Unicode grapheme 追加；输入、用量、工具结构化数据与未选卡片不动画。追赶最多 300ms，与后端 100ms 发布和 Workspace 100ms 刷新共享 500ms 主动等待预算，而非端到端延迟保证；大量追加自适应追平，不建立固定字速积压。首段尽快可见；历史、重连/作用域快照、非追加替换、终态及 reduced motion 直接同步已收到内容，不制造未收到的尾部。隐藏、卸载或离开选中表面取消动画积压，恢复不重播历史；保留安全 Markdown 与手动暂停跟随的阅读位置，不增加正文订阅。通信和恢复契约集中见 [`docs/design/interaction-observation.md`](docs/design/interaction-observation.md)。
 - 所有交互必须键盘可达并有清晰 focus-visible；图标按钮提供 aria-label；页面、导航、表格、状态和浮层使用原生语义优先。
 - 交互命中区目标至少 40×40px。文本缩放、320px 宽度和中英文切换后不得遮挡关键操作。
 

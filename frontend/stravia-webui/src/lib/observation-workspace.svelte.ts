@@ -5,6 +5,7 @@ import {
   type ObservationWorkspaceHooks,
   type ObservationWorkspaceSnapshot,
   type ObservationWorkspaceSubscribe,
+  type ObservationWorkspaceSubscribeLive,
 } from '$lib/observation-workspace'
 import type {
   BundleResourceKind,
@@ -60,6 +61,10 @@ export class ObservationWorkspace {
   detailLoading = $state(false)
   olderLoading = $state(false)
   selectedLiveBlocks = $state.raw<LiveContentBlock[]>([])
+  liveContentEpoch = $state(0)
+  selectedLiveActive = $state(false)
+  liveTerminalEpoch = $state(0)
+  detailError = $state.raw<unknown>()
   liveGaps = $state.raw<string[]>([])
   liveCapacityGaps = $state.raw<string[]>([])
   streamConnected = $state(false)
@@ -83,10 +88,12 @@ export class ObservationWorkspace {
     api: ObservationWorkspaceApi,
     subscribe: ObservationWorkspaceSubscribe,
     hooks: ObservationWorkspaceHooks,
+    subscribeLive: ObservationWorkspaceSubscribeLive,
   ) {
     this.#controller = new ObservationWorkspaceController({
       api,
       subscribe,
+      subscribeLive,
       hooks,
       onSnapshot: (snapshot) => this.#applySnapshot(snapshot),
     })
@@ -151,6 +158,10 @@ export class ObservationWorkspace {
     this.detailLoading = snapshot.detailLoading
     this.olderLoading = snapshot.olderLoading
     this.selectedLiveBlocks = snapshot.selectedLiveBlocks
+    this.liveContentEpoch = snapshot.liveContentEpoch
+    this.selectedLiveActive = snapshot.selectedLiveActive
+    this.liveTerminalEpoch = snapshot.liveTerminalEpoch
+    this.detailError = snapshot.detailError
     this.liveGaps = snapshot.liveGaps
     this.liveCapacityGaps = snapshot.liveCapacityGaps
     this.streamConnected = snapshot.streamConnected

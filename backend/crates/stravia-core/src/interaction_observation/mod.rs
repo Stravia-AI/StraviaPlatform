@@ -285,12 +285,11 @@ impl InteractionObservation {
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
         self.inner.store.query_forest(q).await
     }
-    pub(crate) async fn get_interaction_summary(
+    pub(crate) async fn query_root_changes(
         &self,
-        id: &str,
-        filters: ForestQuery,
-    ) -> anyhow::Result<Option<InteractionSnapshot>> {
-        self.inner.store.get_interaction_summary(id, filters).await
+        query: RootChangesQuery,
+    ) -> anyhow::Result<RootChangesPage> {
+        self.inner.store.query_root_changes(query).await
     }
     pub(crate) async fn get_interaction(
         &self,
@@ -467,12 +466,33 @@ impl InteractionObservation {
     }
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
-        let live_content = Arc::clone(&self.inner.live_content);
         let mut live = self.inner.updates.subscribe();
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
-            let min = store.min_sequence().await.ok().flatten();
-            let max = store.max_sequence().await.unwrap_or(0);
+            let max = match store.max_sequence().await {
+                Ok(max) => max,
+                Err(error) => {
+                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription sequence unavailable");
+                    let _ = tx
+                        .send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: 0,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let min = match store.min_sequence().await {
+                Ok(min) => min,
+                Err(error) => {
+                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription cursor unavailable");
+                    let _ = tx
+                        .send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: max,
+                        })
+                        .await;
+                    return;
+                }
+            };
             if after > max
                 || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
             {
@@ -484,21 +504,17 @@ impl InteractionObservation {
                 return;
             }
             let mut last = after;
-            if replay_to(&store, &tx, &mut last, max).await.is_err() {
+            let mut roots = HashMap::new();
+            if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
+                if tx.is_closed() {
+                    return;
+                }
+                tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription replay unavailable");
                 let _ = tx
                     .send(ObservationUpdate::ResetRequired {
                         snapshot_sequence: max,
                     })
                     .await;
-                return;
-            }
-            if tx
-                .send(ObservationUpdate::LiveSnapshot {
-                    blocks: live_content.snapshot(),
-                })
-                .await
-                .is_err()
-            {
                 return;
             }
             loop {
@@ -508,17 +524,19 @@ impl InteractionObservation {
                             continue;
                         }
                         if event.sequence > last.saturating_add(1) {
-                            if replay_to(&store, &tx, &mut last, event.sequence)
-                                .await
-                                .is_err()
-                                || last < event.sequence
-                            {
+                            let replay =
+                                replay_to(&store, &tx, &mut last, event.sequence, &mut roots).await;
+                            if let Err(error) = &replay {
+                                if tx.is_closed() {
+                                    return;
+                                }
+                                tracing::warn!(cause=%writer::redacted_persist_cause(error), "observation subscription recovery unavailable");
+                            }
+                            if replay.is_err() || last < event.sequence {
                                 let _ = tx
                                     .send(ObservationUpdate::ResetRequired {
-                                        snapshot_sequence: store
-                                            .max_sequence()
-                                            .await
-                                            .unwrap_or(last),
+                                        snapshot_sequence: subscription_sequence(&store, last)
+                                            .await,
                                     })
                                     .await;
                                 return;
@@ -526,17 +544,37 @@ impl InteractionObservation {
                             continue;
                         }
                         last = event.sequence;
-                        if tx.send(ObservationUpdate::Event(event)).await.is_err() {
+                        if let Err(error) = send_change(&store, &tx, event, &mut roots).await {
+                            if tx.is_closed() {
+                                return;
+                            }
+                            tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation change lookup unavailable");
+                            let _ = tx
+                                .send(ObservationUpdate::ResetRequired {
+                                    snapshot_sequence: subscription_sequence(&store, last).await,
+                                })
+                                .await;
                             return;
                         }
                     }
-                    Ok(update) => {
-                        if tx.send(update).await.is_err() {
+                    Ok(ObservationUpdate::ResetRequired { snapshot_sequence }) => {
+                        if tx
+                            .send(ObservationUpdate::ResetRequired { snapshot_sequence })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
+                    Ok(
+                        ObservationUpdate::Change(_)
+                        | ObservationUpdate::LiveContent(_)
+                        | ObservationUpdate::LiveSnapshot { .. }
+                        | ObservationUpdate::LiveGap { .. }
+                        | ObservationUpdate::LiveFinished { .. },
+                    ) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let snapshot = store.max_sequence().await.unwrap_or(max);
+                        let snapshot = subscription_sequence(&store, max).await;
                         let _ = tx
                             .send(ObservationUpdate::ResetRequired {
                                 snapshot_sequence: snapshot,
@@ -549,6 +587,9 @@ impl InteractionObservation {
             }
         });
         Box::pin(ReceiverStream::new(rx))
+    }
+    pub(crate) fn subscribe_live(&self, interaction_id: String) -> ObservationStream {
+        self.inner.live_content.subscribe(interaction_id)
     }
     pub(crate) async fn issue_bundle_ticket(
         &self,
@@ -631,11 +672,22 @@ impl InteractionObservation {
     }
 }
 
+async fn subscription_sequence(store: &ObservationStore, fallback: i64) -> i64 {
+    match store.max_sequence().await {
+        Ok(sequence) => sequence,
+        Err(error) => {
+            tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation reset sequence unavailable");
+            fallback
+        }
+    }
+}
+
 async fn replay_to(
     store: &ObservationStore,
     sender: &mpsc::Sender<ObservationUpdate>,
     last: &mut i64,
     through: i64,
+    roots: &mut HashMap<String, String>,
 ) -> anyhow::Result<()> {
     while *last < through {
         let before = *last;
@@ -644,16 +696,44 @@ async fn replay_to(
                 break;
             }
             *last = event.sequence;
-            sender
-                .send(ObservationUpdate::Event(event))
-                .await
-                .map_err(|_| anyhow::anyhow!("observation subscriber closed"))?;
+            send_change(store, sender, event, roots).await?;
         }
         if *last == before {
             break;
         }
     }
     Ok(())
+}
+
+async fn send_change(
+    store: &ObservationStore,
+    sender: &mpsc::Sender<ObservationUpdate>,
+    event: ObservationEvent,
+    roots: &mut HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let root_id = match event.interaction_id.as_deref() {
+        Some(id) => {
+            if roots.len() >= 2048 {
+                roots.clear();
+            }
+            if let Some(root) = roots.get(id) {
+                Some(root.clone())
+            } else {
+                let root = store.observation_root_id(id).await?;
+                if let Some(root) = &root {
+                    roots.insert(id.to_owned(), root.clone());
+                }
+                root
+            }
+        }
+        None => None,
+    };
+    sender
+        .send(ObservationUpdate::Change(ObservationChange::from_event(
+            event, root_id,
+        )))
+        .await
+        .map_err(|_| anyhow::anyhow!("observation subscriber closed"))
 }
 
 #[derive(Default)]
@@ -1672,6 +1752,8 @@ fn record_trace_observed_at(
 
 #[cfg(test)]
 mod snapshot_tests {
+    use std::time::Duration;
+
     use serde_json::Value;
 
     fn visible_item(id: &str, text: &str) -> RunEvent {
@@ -1800,6 +1882,75 @@ mod snapshot_tests {
                 },
                 facts,
             )
+    }
+
+    #[tokio::test]
+    async fn fixed_publish_deadline_coalesces_revisions_without_stale_scope_snapshot()
+    -> anyhow::Result<()> {
+        use futures::{FutureExt, StreamExt};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "publish-budget", facts(Vec::new()));
+        observation.flush().await?;
+        let interaction: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='publish-budget'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mut selected = observation.subscribe_live(interaction.clone());
+        assert!(matches!(
+            selected.next().await,
+            Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty()
+        ));
+        let delta = |text: &str| RunEvent::ClientVisibleContentDelta {
+            item_ordinal: 0,
+            part_index: (false, 0),
+            text: text.into(),
+        };
+        run.record(delta("seed "));
+        observation.flush().await?;
+        assert!(matches!(
+            selected.next().await,
+            Some(ObservationUpdate::LiveContent(block)) if block.text == "seed "
+        ));
+
+        // Admission/database work finishes before controlling the publication clock.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(100)).await;
+        observation.flush().await?;
+        let started = tokio::time::Instant::now();
+        run.record(delta("middle "));
+        observation.flush().await?;
+        assert!(selected.next().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(40)).await;
+        run.record(delta("newest "));
+        observation.flush().await?;
+        let mut switched = observation.subscribe_live(interaction);
+        assert!(matches!(
+            switched.next().await,
+            Some(ObservationUpdate::LiveSnapshot { blocks })
+                if blocks[0].text == "seed middle newest "
+        ));
+        assert!(selected.next().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(59)).await;
+        observation.flush().await?;
+        assert!(selected.next().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        observation.flush().await?;
+        assert!(matches!(
+            selected.next().now_or_never(),
+            Some(Some(ObservationUpdate::LiveContent(block)))
+                if block.text == "seed middle newest "
+        ));
+        let wait = started.elapsed();
+        assert_eq!(wait, Duration::from_millis(100));
+        println!("backend_publish_wait_ms={}", wait.as_millis());
+        tokio::time::resume();
+        drop(run);
+        observation.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test]
