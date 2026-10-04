@@ -990,6 +990,7 @@
   "provider_model_catalog_unsaved_changes_warning": "Your model details have not been saved. Availability changes were applied immediately and will remain in effect.",
   "provider_model_catalog_model_details_restored_service": "Model details restored from the service.",
   "provider_model_catalog_model_details_saved": "Model details saved.",
+  "provider_model_catalog_saved_refresh_failed": "Model changes were saved, but related data could not be refreshed.",
   "provider_model_catalog_model_route_created": "Created model {id}.",
   "provider_model_catalog_model_target_added": "Added this service to model {id}.",
   "provider_model_catalog_model_usage": "Model usage",

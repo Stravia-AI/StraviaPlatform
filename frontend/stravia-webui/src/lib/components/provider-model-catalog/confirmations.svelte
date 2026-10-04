@@ -15,23 +15,25 @@ interface Props {
   saving: boolean
   onKeepEditing: () => void
   onDiscard: () => void
+  onDeleteOpenChange: (open: boolean) => void
   onDelete: () => void
 }
 
 let {
-  discardOpen = $bindable(false),
-  deleteOpen = $bindable(false),
+  discardOpen = false,
+  deleteOpen = false,
   detail,
   references,
   routeReferencesReady,
   saving,
   onKeepEditing,
   onDiscard,
+  onDeleteOpenChange,
   onDelete,
 }: Props = $props()
 </script>
 
-<AlertDialog.Root bind:open={discardOpen}>
+<AlertDialog.Root bind:open={() => discardOpen, (open) => !open && onKeepEditing()}>
   <AlertDialog.Content>
     <AlertDialog.Header>
       <AlertDialog.Title>{m.provider_model_catalog_discard_unsaved_model_changes()}</AlertDialog.Title>
@@ -45,8 +47,8 @@ let {
   </AlertDialog.Content>
 </AlertDialog.Root>
 
-<AlertDialog.Root bind:open={deleteOpen}>
-  <AlertDialog.Content>
+<AlertDialog.Root bind:open={() => deleteOpen, onDeleteOpenChange}>
+  <AlertDialog.Content onEscapeKeydown={(event: KeyboardEvent) => saving && event.preventDefault()}>
     <AlertDialog.Header>
       <AlertDialog.Title>
         {m.provider_model_catalog_delete_value({ id: detail?.metadata.name || detail?.id || m.common_model() })}
@@ -74,7 +76,7 @@ let {
       </div>
     {/if}
     <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Cancel disabled={saving}>{m.common_cancel()}</AlertDialog.Cancel>
       <AlertDialog.Action variant="destructive" disabled={saving || !routeReferencesReady} onclick={onDelete}>
         {m.provider_model_catalog_remove_list()}
       </AlertDialog.Action>

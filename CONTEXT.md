@@ -399,6 +399,11 @@ _避免使用_：Provider Offering、Catalog Model
 Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照，可以表示纯媒体生成模型，不以具备聊天能力为前提。它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target；模型身份与其支持的能力相互区分。
 _避免使用_：Provider Model Override、Catalog Model
 
+## Provider Model Editing
+
+Provider Model Editing 是管理面针对一个 Provider Model 的当前详情与未提交规格形成的临时编辑上下文，也涵盖尚未保存的手动模型草稿。它不是持久化的 Model Snapshot State，不改变 Selection Policy 与 Destination RPM 各自独立生效的含义。
+_避免使用_：Provider Connection Draft、持久化模型快照、跨模型草稿缓存
+
 ## Model Snapshot State
 
 Model Snapshot State 表达 Provider Model 规格快照的来源与编辑状态：尚未登记、已从明确来源导入、或已经管理员编辑。未知规格保持未知；普通同步不能覆盖已导入或人工修正的规格。它不同于发现方式、当前是否提供模型以及 Selection Policy。

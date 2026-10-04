@@ -14,24 +14,26 @@ interface Props {
   models: CanonicalModelSummary[]
   modelsPending: boolean
   preparing: boolean
+  onOpenChange: (open: boolean) => void
   onSelect: (templateId: string) => void
   onClear: () => void
   onContinue: () => void
 }
 
 let {
-  open = $bindable(false),
+  open = false,
   templateId = $bindable(''),
   models,
   modelsPending,
   preparing,
+  onOpenChange,
   onSelect,
   onClear,
   onContinue,
 }: Props = $props()
 </script>
 
-<Dialog.Root bind:open>
+<Dialog.Root bind:open={() => open, onOpenChange}>
   <Dialog.Layout>
     {#snippet header()}
       <Dialog.Title>{m.provider_model_catalog_add_model_manually_label()}</Dialog.Title>
@@ -48,12 +50,12 @@ let {
         ariaLabel={m.provider_model_catalog_search_model()}
         searchAriaLabel={m.provider_model_catalog_search_model()}
         clearAriaLabel={m.provider_model_catalog_clear_selected_model()}
-        disabled={modelsPending}
+        disabled={modelsPending || preparing}
         {onSelect}
         {onClear} />
     </Field.Field>
     {#snippet footer()}
-      <Button variant="outline" onclick={() => (open = false)}>{m.common_cancel()}</Button>
+      <Button variant="outline" onclick={() => onOpenChange(false)}>{m.common_cancel()}</Button>
       <Button onclick={onContinue} disabled={preparing || !templateId.trim()}>
         {#if preparing}<Spinner data-icon="inline-start" />{/if}{m.provider_model_catalog_continue()}
       </Button>

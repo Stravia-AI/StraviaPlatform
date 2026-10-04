@@ -990,6 +990,7 @@
   "provider_model_catalog_unsaved_changes_warning": "模型信息尚未保存；可用状态的更改已立即生效，并会继续保留。",
   "provider_model_catalog_model_details_restored_service": "已从服务恢复模型信息。",
   "provider_model_catalog_model_details_saved": "模型信息已保存。",
+  "provider_model_catalog_saved_refresh_failed": "模型更改已保存，但相关数据未能刷新。",
   "provider_model_catalog_model_route_created": "已创建模型 {id}。",
   "provider_model_catalog_model_target_added": "已将此服务添加到模型 {id}。",
   "provider_model_catalog_model_usage": "模型使用情况",

@@ -1,7 +1,8 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { goto } from '$app/navigation'
-import { resolve } from '$app/paths'
+import { beforeNavigate, goto } from '$app/navigation'
+import { base, resolve } from '$app/paths'
+import type { Pathname } from '$app/types'
 import { page } from '$app/state'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet, type ColumnFiltersState } from '@tanstack/svelte-table'
@@ -9,14 +10,15 @@ import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal'
-import { tick } from 'svelte'
+import { onDestroy, tick } from 'svelte'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { SvelteURLSearchParams } from 'svelte/reactivity'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { modelIdFromCatalogId } from '$lib/catalog-model-id'
+import { ProviderModelEditing } from '$lib/provider-model-editing.svelte'
+import type { ProviderModelEditingOperation } from '$lib/provider-model-editing'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatTime } from '$lib/format'
 import { formatSpecificationTokens } from '$lib/model-specification'
@@ -29,14 +31,7 @@ import {
   type SpecificationFilter,
 } from '$lib/model-specification-filter'
 import ModelSpecificationFilter from '$lib/components/model-specification-filter.svelte'
-import type {
-  Route,
-  PreparedProviderModel,
-  ProviderModelDetail,
-  ProviderModelSelectionPolicy,
-  ProviderModelSummary,
-  ProviderModelSyncSummary,
-} from '$lib/types'
+import type { Route, ProviderModelSelectionPolicy, ProviderModelSummary, ProviderModelSyncSummary } from '$lib/types'
 import ProviderModelEditor from '$lib/components/provider-model-editor.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -87,27 +82,14 @@ let columnFilters = $state<ColumnFiltersState>([
   },
 ])
 let filtersOpen = $state(false)
-let selectedDetail = $state<ProviderModelDetail>()
-let draft = $state(false)
-let drawerOpen = $state(false)
-let loadingDetail = $state(false)
-let detailError = $state<unknown>()
-let saving = $state(false)
-let dirty = $state(false)
-let pendingAction = $state<() => void | Promise<void>>()
-let discardOpen = $state(false)
-let discarding = $state(false)
-let closingDrawer = $state(false)
 let manualOpen = $state(false)
 let manualTemplateId = $state('')
-let preparingManual = $state(false)
-let deleteOpen = $state(false)
 let syncing = $state(false)
 let syncSummary = $state<ProviderModelSyncSummary>()
 let lastSyncedAt = $state<Date>()
-let loadedQueryModel = $state('')
 let editor = $state<{ submit: () => void }>()
 let addingRouteModelId = $state('')
+let internalNavigation = false
 
 const modelsQuery = createQuery(() => ({
   queryKey: ['provider-models', providerId],
@@ -118,6 +100,21 @@ const canonicalModelsQuery = createQuery(() => ({
   queryFn: () => admin.catalog.canonicalModels(),
 }))
 const canonicalModels = $derived(canonicalModelsQuery.data?.models ?? [])
+const editing = new ProviderModelEditing({
+  api: admin.providers,
+  navigate: updateModelQuery,
+  refresh: refreshModelData,
+  settleEditor: tick,
+  onSuccess: (operation: ProviderModelEditingOperation) => {
+    if (operation === 'save') toast.success(m.provider_model_catalog_model_details_saved())
+    else if (operation === 'reimport') toast.success(m.provider_model_catalog_model_details_restored_service())
+    else if (operation === 'delete') toast.success(m.provider_model_catalog_manually_added_model_removed())
+  },
+  onError: (error: unknown, phase: string) => {
+    if (phase !== 'refresh') toast.error(localizeBackendErrorMessage(error))
+  },
+})
+const modelEditing = $derived(editing.state)
 const displayedSyncedAt = $derived(syncedAt ?? lastSyncedAt)
 const displayedSyncSummary = $derived(syncedSummary ?? syncSummary)
 const models = $derived(modelsQuery.data?.models ?? [])
@@ -149,7 +146,7 @@ const activeFilterCount = $derived(
     specificationFilterCount(specificationFilter),
 )
 const hasActiveFilters = $derived(Boolean(search.trim()) || activeFilterCount > 0)
-const selectedReferences = $derived(selectedDetail ? modelReferences(selectedDetail.id) : [])
+const selectedReferences = $derived(modelEditing.detail ? modelReferences(modelEditing.detail.id) : [])
 const tableLabels = $derived(getDataTableLabels())
 const providerModelColumnHelper = createDataTableColumnHelper<ProviderModelSummary>()
 const filterOptions = $derived(catalogFilterOptions())
@@ -252,14 +249,25 @@ function getProviderModelRowId(model: ProviderModelSummary): string {
 }
 
 $effect(() => {
-  if (
-    requestedModelId &&
-    requestedModelId !== loadedQueryModel &&
-    models.some((model) => model.id === requestedModelId)
-  ) {
-    void loadDetail(requestedModelId)
-  }
+  void editing.select(providerId, requestedModelId)
 })
+
+beforeNavigate((navigation) => {
+  if (internalNavigation) return
+  if (!modelEditing.busy && !modelEditing.dirty) return
+  navigation.cancel()
+  // SvelteKit 对卸载取消使用原生提示；页内导航复用同一丢弃确认。
+  if (navigation.willUnload || modelEditing.busy || !navigation.to) return
+  const { pathname, search, hash } = navigation.to.url
+  const destination = resolve(`${pathname.slice(base.length)}${search}${hash}` as Pathname)
+  const delta = navigation.type === 'popstate' ? navigation.delta : null
+  editing.requestLeave(() => {
+    if (delta != null) window.history.go(delta)
+    else return goto(destination)
+  })
+})
+
+onDestroy(() => editing.dispose())
 
 function modelReferences(modelId: string): Array<{ route: Route; target: Route['targets'][number] }> {
   return routes.flatMap((route) =>
@@ -349,81 +357,36 @@ function availabilityReason(model: ProviderModelSummary): string | null {
   return m.provider_model_catalog_service_no_longer_offers_model()
 }
 
-function requestGuard(action: () => void | Promise<void>): void {
-  if (!dirty) {
-    void action()
-    return
-  }
-  pendingAction = action
-  discardOpen = true
-}
-
-async function confirmDiscard(): Promise<void> {
-  const action = pendingAction
-  pendingAction = undefined
-  discardOpen = false
-  discarding = true
-  dirty = false
-  await tick()
-  if (action) await action()
-}
-
 async function updateModelQuery(modelId?: string): Promise<void> {
   const search = new SvelteURLSearchParams(page.url.searchParams)
   if (modelId) search.set('model', modelId)
   else search.delete('model')
-  await goto(resolve(`/providers/${encodeURIComponent(providerId)}?${search}`), {
-    replaceState: true,
-    noScroll: true,
-    keepFocus: true,
-  })
-}
-
-async function loadDetail(modelId: string): Promise<void> {
-  loadingDetail = true
-  discarding = false
-  detailError = undefined
-  loadedQueryModel = modelId
+  internalNavigation = true
   try {
-    selectedDetail = await admin.providers.model(providerId, modelId)
-    draft = false
-    dirty = false
-    drawerOpen = false
-  } catch (error) {
-    detailError = error
-    toast.error(localizeBackendErrorMessage(error))
+    await goto(resolve(`/providers/${encodeURIComponent(providerId)}?${search}`), {
+      replaceState: true,
+      noScroll: true,
+      keepFocus: true,
+    })
   } finally {
-    loadingDetail = false
+    internalNavigation = false
   }
 }
 
-function requestClose(): void {
-  requestGuard(async () => {
-    closingDrawer = true
-    selectedDetail = undefined
-    draft = false
-    detailError = undefined
-    await updateModelQuery()
-    loadedQueryModel = ''
-    drawerOpen = false
-    await tick()
-    closingDrawer = false
-    discarding = false
-  })
+async function refreshModelData(operation: ProviderModelEditingOperation): Promise<void> {
+  const requests: Array<Promise<unknown>> = [modelsQuery.refetch({ throwOnError: true })]
+  if (operation !== 'reimport') {
+    requests.push(queryClient.invalidateQueries({ queryKey: ['models'] }, { throwOnError: true }))
+  }
+  if (operation === 'save') {
+    requests.push(queryClient.invalidateQueries({ queryKey: ['providers'] }, { throwOnError: true }))
+  }
+  // 等所有关联读取收口再解锁，首个失败不能留下未观察的刷新任务。
+  const results = await Promise.allSettled(requests)
+  const failure = results.find((result) => result.status === 'rejected')
+  if (failure?.status === 'rejected') throw failure.reason
 }
 
-function handleDrawerOpen(nextOpen: boolean): void {
-  if (nextOpen) {
-    drawerOpen = true
-  } else if (closingDrawer) {
-    drawerOpen = false
-  } else if (dirty) {
-    drawerOpen = true
-    requestClose()
-  } else {
-    requestClose()
-  }
-}
 async function syncModels(): Promise<void> {
   if (onSync) {
     syncing = true
@@ -451,28 +414,21 @@ async function syncModels(): Promise<void> {
 }
 
 function requestSync(): void {
-  requestGuard(syncModels)
+  editing.requestLeave(syncModels)
 }
 
 async function prepareManualModel(): Promise<void> {
   const templateId = manualTemplateId.trim()
   if (!templateId) return
-  preparingManual = true
-  try {
-    selectedDetail = preparedDetail(
-      await admin.providers.prepareModel(providerId, modelIdFromCatalogId(templateId), templateId),
+  if (
+    await editing.prepareManual(
+      providerId,
+      templateId,
+      models.map((model) => model.id),
     )
-    draft = !models.some((model) => model.id === selectedDetail?.id)
-    dirty = false
-    drawerOpen = draft
+  ) {
     manualOpen = false
     manualTemplateId = ''
-    loadedQueryModel = selectedDetail.id
-    await updateModelQuery(selectedDetail.id)
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    preparingManual = false
   }
 }
 
@@ -482,117 +438,6 @@ function selectManualTemplate(templateId: string): void {
 
 function clearManualTemplate(): void {
   manualTemplateId = ''
-}
-
-function preparedDetail(prepared: PreparedProviderModel): ProviderModelDetail {
-  return {
-    ...prepared,
-    snapshot_state: {
-      type: 'edited',
-      source: prepared.snapshot_state.type === 'imported' ? prepared.snapshot_state.source : null,
-    },
-    available: true,
-    source_kind: 'manual',
-    can_reimport: false,
-    selection_policy: 'auto',
-    revision: 0,
-    created_at: '',
-    updated_at: '',
-  }
-}
-
-async function saveModel(metadataJson: string): Promise<void> {
-  if (!selectedDetail) return
-  const wasDraft = draft
-  saving = true
-  try {
-    const templateId =
-      selectedDetail.snapshot_state.type === 'edited' && selectedDetail.snapshot_state.source?.type === 'canonical'
-        ? selectedDetail.snapshot_state.source.model_id
-        : undefined
-    const saved = draft
-      ? await admin.providers.createManualModel(providerId, selectedDetail.id, metadataJson, templateId)
-      : await admin.providers.updateModel(providerId, selectedDetail.id, metadataJson, selectedDetail.revision)
-    selectedDetail = saved
-    draft = false
-    if (wasDraft) drawerOpen = false
-    dirty = false
-    await Promise.all([
-      modelsQuery.refetch(),
-      queryClient.invalidateQueries({ queryKey: ['models'] }),
-      queryClient.invalidateQueries({ queryKey: ['providers'] }),
-    ])
-    toast.success(m.provider_model_catalog_model_details_saved())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    saving = false
-  }
-}
-
-async function updateSelection(policy: ProviderModelSelectionPolicy): Promise<void> {
-  if (!selectedDetail || selectedDetail.selection_policy === policy) return
-  saving = true
-  try {
-    const updated = await admin.providers.updateModelSelection(
-      providerId,
-      selectedDetail.id,
-      policy,
-      selectedDetail.revision,
-    )
-    selectedDetail.selection_policy = updated.selection_policy
-    selectedDetail.available = updated.available
-    selectedDetail.revision = updated.revision
-    await Promise.all([modelsQuery.refetch(), queryClient.invalidateQueries({ queryKey: ['models'] })])
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    saving = false
-  }
-}
-
-async function reimportModel(): Promise<void> {
-  if (!selectedDetail) return
-  saving = true
-  try {
-    selectedDetail = await admin.providers.reimportModel(providerId, selectedDetail.id, selectedDetail.revision)
-    dirty = false
-    await modelsQuery.refetch()
-    toast.success(m.provider_model_catalog_model_details_restored_service())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    saving = false
-  }
-}
-
-function requestReimport(): void {
-  requestGuard(reimportModel)
-}
-
-function requestDelete(): void {
-  requestGuard(() => {
-    deleteOpen = true
-  })
-}
-
-async function deleteManualModel(): Promise<void> {
-  if (!selectedDetail || selectedDetail.source_kind !== 'manual') return
-  saving = true
-  try {
-    await admin.providers.deleteManualModel(providerId, selectedDetail.id)
-    deleteOpen = false
-    drawerOpen = false
-    selectedDetail = undefined
-    loadedQueryModel = ''
-    await Promise.all([modelsQuery.refetch(), queryClient.invalidateQueries({ queryKey: ['models'] })])
-    await updateModelQuery()
-    toast.success(m.provider_model_catalog_manually_added_model_removed())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    saving = false
-  }
 }
 </script>
 
@@ -738,32 +583,44 @@ async function deleteManualModel(): Promise<void> {
   {/if}
 {/snippet}
 
-{#if requestedModelId && !draft}
+{#if modelEditing.refreshError}
+  <RequestFailure
+    message={m.provider_model_catalog_saved_refresh_failed()}
+    retry={() => editing.refresh()}
+    retrying={modelEditing.busy}>
+    <p class="text-sm text-muted-foreground">{localizeBackendErrorMessage(modelEditing.refreshError)}</p>
+  </RequestFailure>
+{/if}
+
+{#if (modelEditing.modelId || requestedModelId) && !modelEditing.draft}
   <section class="route-section" aria-labelledby="provider-model-editor-title">
-    {#if loadingDetail || modelsQuery.isPending}
+    {#if modelEditing.loading || modelEditing.preparing || modelsQuery.isPending}
       <div class="grid min-h-72 place-items-center"><Spinner /></div>
-    {:else if detailError || !selectedDetail}
+    {:else if modelEditing.readError || !modelEditing.detail}
       <RequestFailure
-        message={detailError ? localizeBackendErrorMessage(detailError) : m.backend_error_catalog_model_not_found()}
-        retry={detailError ? () => loadDetail(requestedModelId) : undefined}
-        retrying={loadingDetail}>
-        <Button variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
+        message={modelEditing.readError
+          ? localizeBackendErrorMessage(modelEditing.readError)
+          : m.backend_error_catalog_model_not_found()}
+        retry={modelEditing.readError ? () => editing.retry() : undefined}
+        retrying={modelEditing.loading}>
+        <Button variant="outline" onclick={() => editing.close()} disabled={modelEditing.busy}
+          >{m.common_cancel()}</Button>
       </RequestFailure>
     {:else}
       <div class="route-section-header">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <h2 id="provider-model-editor-title" class="route-section-title break-all text-balance">
-              {selectedDetail.metadata.name || selectedDetail.id}
+              {modelEditing.detail.metadata.name || modelEditing.detail.id}
             </h2>
-            <Badge variant={selectedDetail.available ? 'secondary' : 'outline'}>
-              {selectedDetail.available ? m.model_specification_available() : m.common_unavailable()}
+            <Badge variant={modelEditing.detail.available ? 'secondary' : 'outline'}>
+              {modelEditing.detail.available ? m.model_specification_available() : m.common_unavailable()}
             </Badge>
             <Badge variant="outline">
-              {selectedDetail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
+              {modelEditing.detail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
             </Badge>
           </div>
-          <p class="route-section-description break-all font-technical">{selectedDetail.id}</p>
+          <p class="route-section-description break-all font-technical">{modelEditing.detail.id}</p>
         </div>
         <DropdownMenu.Root>
           <DropdownMenu.Trigger>
@@ -773,6 +630,7 @@ async function deleteManualModel(): Promise<void> {
                 variant="ghost"
                 size="icon"
                 class="size-10"
+                disabled={modelEditing.busy}
                 aria-label={m.provider_model_catalog_model_actions()}><MoreHorizontalIcon /></Button>
             {/snippet}
           </DropdownMenu.Trigger>
@@ -782,17 +640,17 @@ async function deleteManualModel(): Promise<void> {
                 onSelect={() =>
                   void goto(
                     resolve(
-                      `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(selectedDetail!.id)}`,
+                      `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(modelEditing.detail!.id)}`,
                     ),
                   )}>
                 {m.provider_model_catalog_use_new_model()}
               </DropdownMenu.Item>
-              {#if selectedDetail.can_reimport}
-                <DropdownMenu.Item onSelect={requestReimport}
+              {#if modelEditing.detail.can_reimport}
+                <DropdownMenu.Item onSelect={() => editing.requestReimport()}
                   >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
               {:else}
                 <DropdownMenu.Separator />
-                <DropdownMenu.Item variant="destructive" onSelect={requestDelete}
+                <DropdownMenu.Item variant="destructive" onSelect={() => editing.requestDelete()}
                   >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
               {/if}
             </DropdownMenu.Group>
@@ -802,25 +660,25 @@ async function deleteManualModel(): Promise<void> {
       <div>
         <ProviderModelEditor
           bind:this={editor}
-          detail={selectedDetail}
-          {draft}
-          onSave={(metadataJson: string) => void saveModel(metadataJson)}
-          onSelectionChange={(policy: ProviderModelSelectionPolicy) => void updateSelection(policy)}
-          onDirtyChange={(value: boolean) => {
-            if (!discarding) dirty = value
-          }} />
+          detail={modelEditing.detail}
+          draft={modelEditing.draft}
+          disabled={modelEditing.busy}
+          onSave={(metadataJson: string) => void editing.save(metadataJson)}
+          onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
+          onDirtyChange={(value: boolean) => editing.markDirty(value)} />
       </div>
-      {#key selectedDetail.id}
+      {#key modelEditing.detail.id}
         <section class="flex min-w-0 flex-col gap-4 border-t pt-4" aria-labelledby="provider-model-rpm-title">
           <h3 id="provider-model-rpm-title" class="text-sm font-semibold">{m.rpm_column()}</h3>
-          <RpmForm {providerId} modelId={selectedDetail.id} />
+          <RpmForm {providerId} modelId={modelEditing.detail.id} />
         </section>
       {/key}
       <div
         class="sticky bottom-0 z-20 mt-2 flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-        <Button variant="outline" class="min-h-10" onclick={requestClose}>{m.common_cancel()}</Button>
-        <Button class="min-h-10" onclick={() => editor?.submit()} disabled={saving}>
-          {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}
+        <Button variant="outline" class="min-h-10" onclick={() => editing.close()} disabled={modelEditing.busy}
+          >{m.common_cancel()}</Button>
+        <Button class="min-h-10" onclick={() => editor?.submit()} disabled={modelEditing.busy}>
+          {#if modelEditing.busy}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}
         </Button>
       </div>
     {/if}
@@ -973,36 +831,39 @@ async function deleteManualModel(): Promise<void> {
   onClear={clearFilters} />
 
 <ManualModelDialog
-  bind:open={manualOpen}
+  open={manualOpen}
+  onOpenChange={(open: boolean) => {
+    manualOpen = open
+    if (!open && modelEditing.preparing) editing.close()
+  }}
   bind:templateId={manualTemplateId}
   models={canonicalModels}
   modelsPending={canonicalModelsQuery.isPending}
-  preparing={preparingManual}
+  preparing={modelEditing.preparing}
   onSelect={selectManualTemplate}
   onClear={clearManualTemplate}
   onContinue={() => void prepareManualModel()} />
 
 <CatalogEditorDrawer
-  bind:open={drawerOpen}
-  detail={selectedDetail}
-  {draft}
-  loading={loadingDetail}
-  {saving}
-  onOpenChange={handleDrawerOpen}
-  onClose={requestClose}
-  onSave={(metadataJson: string) => void saveModel(metadataJson)}
-  onSelectionChange={(policy: ProviderModelSelectionPolicy) => void updateSelection(policy)}
-  onDirtyChange={(value: boolean) => {
-    if (!discarding) dirty = value
-  }} />
+  open={modelEditing.drawerOpen}
+  detail={modelEditing.detail}
+  draft={modelEditing.draft}
+  loading={modelEditing.loading}
+  saving={modelEditing.busy}
+  onOpenChange={(open: boolean) => editing.setDrawerOpen(open)}
+  onClose={() => editing.close()}
+  onSave={(metadataJson: string) => void editing.save(metadataJson)}
+  onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
+  onDirtyChange={(value: boolean) => editing.markDirty(value)} />
 
 <CatalogConfirmations
-  bind:discardOpen
-  bind:deleteOpen
-  detail={selectedDetail}
+  discardOpen={modelEditing.discardOpen}
+  deleteOpen={modelEditing.deleteOpen}
+  detail={modelEditing.detail}
   references={selectedReferences}
   {routeReferencesReady}
-  {saving}
-  onKeepEditing={() => (pendingAction = undefined)}
-  onDiscard={() => void confirmDiscard()}
-  onDelete={() => void deleteManualModel()} />
+  saving={modelEditing.busy}
+  onKeepEditing={() => editing.keepEditing()}
+  onDiscard={() => void editing.confirmDiscard()}
+  onDeleteOpenChange={(open: boolean) => editing.setDeleteOpen(open)}
+  onDelete={() => void editing.delete()} />

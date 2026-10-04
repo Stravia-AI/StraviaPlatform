@@ -22,7 +22,7 @@ interface Props {
 }
 
 let {
-  open = $bindable(false),
+  open = false,
   detail,
   draft,
   loading,
@@ -37,10 +37,13 @@ let {
 let editor = $state<{ submit: () => void }>()
 </script>
 
-<Sheet.Root bind:open {onOpenChange}>
+<Sheet.Root bind:open={() => open, onOpenChange}>
   <Sheet.Content
     side="right"
     class="provider-model-drawer w-full! max-w-none! gap-0 overflow-hidden p-0 sm:max-w-[960px]!"
+    closeDisabled={saving}
+    onEscapeKeydown={(event: KeyboardEvent) => saving && event.preventDefault()}
+    onInteractOutside={(event: { preventDefault(): void }) => saving && event.preventDefault()}
     closeLabel={m.provider_model_catalog_close_model_editor()}>
     {#if detail}
       <Sheet.Header class="border-b pr-14">
@@ -59,11 +62,18 @@ let editor = $state<{ submit: () => void }>()
         {#if loading}
           <div class="grid min-h-72 place-items-center"><Spinner /></div>
         {:else}
-          <ProviderModelEditor bind:this={editor} {detail} {draft} {onSave} {onSelectionChange} {onDirtyChange} />
+          <ProviderModelEditor
+            bind:this={editor}
+            {detail}
+            {draft}
+            disabled={saving}
+            {onSave}
+            {onSelectionChange}
+            {onDirtyChange} />
         {/if}
       </div>
       <Sheet.Footer class="route-overlay-footer justify-between sm:justify-between">
-        <Button variant="outline" onclick={onClose}>{m.common_cancel()}</Button>
+        <Button variant="outline" onclick={onClose} disabled={saving}>{m.common_cancel()}</Button>
         <Button onclick={() => editor?.submit()} disabled={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}
           {m.common_add_model()}

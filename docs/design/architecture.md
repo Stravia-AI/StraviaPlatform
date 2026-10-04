@@ -912,6 +912,16 @@ Canonical Model 只用作一次性模板：客户端 Route ID 落在 `models.mod
 
 `GET/POST /api/v1/providers/{provider_id}/models` 分别列出 Provider Model 与创建手动模型，`POST /models/sync` 执行 discovery 对账。单模型详情、编辑、选择策略、re-import 和手动删除使用 `/api/v1/providers/{provider_id}/model` 及其子资源，并通过 `model` query 或 `model_id` body 字段传递可包含 `/` 的模型 ID。`SelectionPolicy` 的 `auto`、`force_enabled`、`force_disabled` 与 discovery presence、生命周期共同计算 Effective Availability，只影响新 Target 资格；已有 Target 不因 missing 或 deprecated 被自动删除。删除 Provider 会在存储事务内摘除其 Target、删除空 Route，并把仍有 Target 的 Route 主目标更新为剩余的第一项。
 
+### 9.3 Provider Model Editing
+
+WebUI 的 `frontend/stravia-webui/src/lib/provider-model-editing.ts` 是 Provider Model Editing 的深模块。它只拥有一个当前编辑上下文：详情读取归属、尚未保存的手动模型、规格脏状态与待确认离开动作，以及保存、Selection Policy、re-import、删除和相关刷新编排。`.svelte.ts` adapter 发布单一响应式快照；页面和抽屉调用操作 interface，不维护可写的详情副本、读取代次或另一套写入锁。这个上下文不持久化、不缓存跨模型草稿，也不改变 Core 的 revision、Model Snapshot State 或事务规则。
+
+切换模型立即移除上一模型的表单并进入新模型的加载或错误状态。切换 Provider、关闭、取消准备和组件销毁均废弃旧读取；迟到的成功、失败和结束回调不能覆盖当前详情、清除当前加载状态或报告过时错误。手动模板准备失败保留目录与模板选择，允许用户选择另一个模板；若准备出的 ID 已存在，读取该 Provider Model 的已保存详情与 revision，不用模板覆盖已保存规格。
+
+未提交规格离开前统一确认，覆盖模型切换、关闭手动抽屉、页内 URL 导航、浏览器 Back/Forward 和需要丢弃规格的 re-import。保留编辑不执行待定动作；确认丢弃先用已确认 metadata 的新副本重置表单，等待 editor 更新，再执行唯一待定动作。视图仍拥有 `goto`、浏览器历史恢复、焦点、对话框、toast 和 DOM；字段编辑、验证及 metadata 序列化继续由已有 editor 负责，不引入通用编辑框架。
+
+模型写入和相关刷新收敛前，禁止重复写入、规格编辑、关闭和页内导航。重新加载页面或卸载只能使用浏览器原生离开提示，不能取消后端已经接受的写入。写入成功先接受返回详情与 revision，再刷新相关列表；刷新失败明确表示更改已保存，Retry 只重读，不重复提交写入。删除成功后先清空编辑上下文，刷新或导航失败不能复活已删除详情。Selection Policy 独立生效，更新可用状态、策略和 revision，但保留规格 metadata 引用与未提交字段；Destination RPM 表单和目录内联编辑仍使用各自既有 seam，不并入这个写入上下文。
+
 ---
 
 ## 10. 存储与数据层

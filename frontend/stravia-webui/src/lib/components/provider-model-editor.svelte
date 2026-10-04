@@ -31,6 +31,7 @@ import { inputValue } from '$lib/utils.js'
 interface Props {
   detail: ProviderModelDetail
   draft?: boolean
+  disabled?: boolean
   onSave: (metadataJson: string) => void
   onSelectionChange: (policy: ProviderModelSelectionPolicy) => void
   onDirtyChange?: (dirty: boolean) => void
@@ -51,7 +52,7 @@ const priceFields: Array<{ key: PriceField; label: () => string }> = [
   { key: 'cache_read', label: m.provider_model_field_cache_read },
   { key: 'cache_write', label: m.provider_model_field_cache_write },
 ]
-let { detail, draft = false, onSave, onSelectionChange, onDirtyChange }: Props = $props()
+let { detail, draft = false, disabled = false, onSave, onSelectionChange, onDirtyChange }: Props = $props()
 let metadata = $state<ProviderModelMetadata>({})
 let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
 let structuralErrors = $state<string[]>([])
@@ -59,9 +60,10 @@ let customEffort = $state('')
 let extensionsOpen = $state(false)
 let errorAlert = $state<HTMLDivElement>()
 let initialFingerprint = $state('')
-let editorRoot = $state<HTMLDivElement>()
+let editorRoot = $state<HTMLFieldSetElement>()
 
 const extensionEntries = $derived(Object.entries(detail.extensions ?? {}))
+const confirmedMetadata = $derived(detail.metadata)
 const currentFingerprint = $derived(fingerprint())
 const dirty = $derived(Boolean(initialFingerprint) && currentFingerprint !== initialFingerprint)
 
@@ -81,7 +83,7 @@ $effect.pre(() => {
 })
 
 $effect(() => {
-  const snapshot = $state.snapshot(detail.metadata)
+  const snapshot = $state.snapshot(confirmedMetadata)
   const nextMetadata = structuredClone(snapshot)
   if (nextMetadata.reasoning_efforts) {
     nextMetadata.reasoning_efforts = normalizeProviderModelEfforts(nextMetadata.reasoning_efforts)
@@ -163,6 +165,7 @@ function removeTier(index: number): void {
 }
 
 export function submit(): void {
+  if (disabled) return
   const result = buildProviderModelMetadataJson(detail.id, $state.snapshot(metadata), $state.snapshot(cost))
   structuralErrors = result.errors
   const { json } = result
@@ -170,7 +173,7 @@ export function submit(): void {
 }
 </script>
 
-<div bind:this={editorRoot} class="@container/model-editor flex min-w-0 flex-col gap-5">
+<fieldset bind:this={editorRoot} {disabled} class="@container/model-editor flex min-w-0 flex-col gap-5">
   {#if !draft}
     <Field.Group class="rounded-xl bg-muted/30 p-4">
       <Field.Field orientation="horizontal" class="[&>[data-slot=field-layout]]:flex-wrap">
@@ -181,6 +184,7 @@ export function submit(): void {
         </Field.Content>
         <Select.Root
           type="single"
+          {disabled}
           value={detail.selection_policy}
           onValueChange={(value: string) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
           <Select.Trigger
@@ -257,6 +261,7 @@ export function submit(): void {
               </Field.Label>
               <Select.Root
                 type="multiple"
+                {disabled}
                 bind:value={
                   () => metadata.modalities?.[target] ?? [], (values: string[]) => setModalityValues(target, values)
                 }>
@@ -319,7 +324,7 @@ export function submit(): void {
     <Field.Field orientation="vertical">
       <Field.Label for="provider-model-reasoning-efforts" class="sr-only"
         >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
-      <Select.Root type="multiple" bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
+      <Select.Root type="multiple" {disabled} bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
         <Select.Trigger id="provider-model-reasoning-efforts" class="w-full min-w-0" data-effort-values-select>
           <span class="truncate"
             >{metadata.reasoning_efforts?.length
@@ -446,4 +451,4 @@ export function submit(): void {
         </ul></Alert.Description>
     </Alert.Root>
   {/if}
-</div>
+</fieldset>
