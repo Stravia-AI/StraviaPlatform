@@ -53,10 +53,15 @@ stravia/
 │           ├── model_turn/       # Model Turn Executor deep module（crate-private）
 │           │   ├── mod.rs            # execute(TurnInput) interface / Live + InMemory adapters
 │           │   ├── live.rs           # 授权、router::selection 与 Wasm Vendor 尝试循环
+│           │   ├── live/
+│           │   │   ├── lifecycle.rs  # 单次 Vendor operation、事件接收/drain 与输出推进
+│           │   │   ├── lifecycle/precommit.rs # 16 MiB buffer、提交分类与边界测试
+│           │   │   └── tests.rs      # attempt deadline 与 Thinking Replay 契约
 │           │   ├── capability.rs     # Vendor capability 执行与 canonical event bridge
 │           │   ├── provider/mod.rs   # 通用尝试观测；无 native Provider transport
 │           │   ├── support.rs
-│           │   └── tests.rs
+│           │   ├── tests.rs          # Executor 共用 fixtures 与其余行为测试
+│           │   └── tests/            # publication / recovery / compaction 契约
 │           ├── reversible_redaction/ # 凭据保护的设置/观测 Host Adapter 与 SQL 集成回归
 │           ├── generation_chain/ # Generation Chain Write deep module（crate-private）
 │           │   ├── mod.rs            # GenerationChain / Write interface
@@ -347,7 +352,7 @@ inference_run::execute(RunInput)（一次性 crate-private interface）
          ├─ Vendor Plugin 经受控 host transport 执行（HTTP/SSE 或 Responses WebSocket）
               ├─ 两种 transport 均归一为 canonical AiResponse / AiStreamDelta
               ├─ 按原始 Provider 视图记录引用与续接证明，再还原回答及工具参数
-              └─ 仅 retryable provider 失败且尚无客户端可见输出时切换 Target
+              └─ 仅 retryable provider 失败且尚未提交首个 canonical 输出时切换 Target
          └─ 内部终态 gate：还原尾部 delta → 当前共享引用发布 → 唯一 Completed
               ├─ 取消 / deadline 可抢占读取和发布等待，已发布映射不回滚
               └─ gate 拥有 Model Turn 终态观测，上游 attempt / usage 保持独立真实
@@ -378,6 +383,12 @@ Inference Run module（同一 run 持有 HookRuntime run state 与跨 round 状�
     ▼
 DeliveryAdapter → ProtocolPair client encode（non-stream JSON / stream SSE / Responses WebSocket events）
 ```
+
+Model Turn Executor 的 private `live/lifecycle.rs` 集中事件与输出推进。`OutputLifecycle` 的生命周期覆盖所选 Target 的 recovery 循环，独占 canonical 输出提交进度、streamed 事实、一次性 ready 通知、attempt reservation 与最后发布的 Vendor Publication Fence；driver 只查询提交进度，不逐字段改写输出状态。每次调用创建新的 `Operation`，由同一事件处理行为接收运行中事件并 drain operation 返回后的事件，独占 emitted-delta、precommit 与 pending failure。首次输出计时仍归属当前 `AttemptObservation`，不会因共享输出 owner 而升格为整轮的全局时间。
+
+`Operation` 同时拥有单次 Vendor 调用的上下文装配、reprepare、发送准入接入、请求媒体 materialize 与 typed 响应的 Provider proof 应用，使 guest 执行和事件消费保持一个完整生命周期。这些动作使用 driver 选定的 Target、固定 execution lease 与既有策略；RPM 准入仍由发送门禁裁决，recovery 的资格、预算和请求选择仍由 driver 裁决，不形成第二个策略 owner。
+
+`Operation` 在发布媒体 delta 前执行现有 normalization，precommit 保留每个事件的原 fence 与顺序，并沿用 16 MiB 占用估算和精确边界；committing delta 释放 buffer，不额外占用 pre-output 预算。runtime `Completed` / `Compacted` 通知不发布成功终态，typed return 仍为权威结果。无 plugin delta 时先规范化完整响应，再合成 canonical delta；typed terminal 使用同一输出 owner 发布。driver 保留 retry、认证恢复、Thinking Replay、Target Continuation、健康与最终策略 accounting，成功 accounting 后由输出 owner 完成 reservation 与 ready 通知。现有还原与映射发布 gate 保持独立；Executor 的 canonical 输出提交不等于 Client Output Commit，也不接管客户端 Delivery。
 
 管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；生成和 embeddings 这两类推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
 

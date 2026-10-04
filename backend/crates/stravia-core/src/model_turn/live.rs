@@ -11,8 +11,10 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use tracing::Instrument;
 
+mod lifecycle;
+use lifecycle::OutputLifecycle;
+
 use super::provider::AttemptObservation;
-use super::support::ai_response_to_deltas;
 use super::{
     CanonicalEvent, ModelTurn, ModelTurnAuthorization, ModelTurnError, ModelTurnExecutor,
     TargetIdentity, TurnInput, VendorPublication,
@@ -21,13 +23,11 @@ use crate::Gateway;
 use crate::error::GatewayError;
 use crate::interaction_observation::RunEvent;
 use crate::plugin::execution::PreparedVendorExecution;
-use crate::plugin::{
-    VendorCallContext, VendorEvent, VendorExecution, VendorPublicationFence, VendorRequest,
-};
+use crate::plugin::{VendorCallContext, VendorExecution, VendorPublicationFence};
 use crate::proxy::security::Security;
 use crate::router::{
-    AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RouteAttemptReservation,
-    RoutePolicyState, SelectedTarget, selected_target_key,
+    AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
+    SelectedTarget, selected_target_key,
 };
 use crate::router::{ContinuationLookup, ContinuationTarget};
 use stravia_runtime_contract::Deadline;
@@ -37,10 +37,10 @@ use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 use stravia_runtime_contract::thinking::ThinkingLevel;
-use stravia_vendor_runtime::{RuntimeError, RuntimeEvent};
+use stravia_vendor_runtime::RuntimeError;
 use stravia_vendor_sdk::{
-    AiErrorKind, Capability, ErrorKind, OperationOutput, TRANSPORT_PREFERENCE_METADATA_KEY,
-    TransportFailure, TransportPreference,
+    AiErrorKind, Capability, ErrorKind, TRANSPORT_PREFERENCE_METADATA_KEY, TransportFailure,
+    TransportPreference,
 };
 
 #[derive(Clone)]
@@ -1636,144 +1636,6 @@ struct VendorPublishedResult {
 }
 
 const VENDOR_OUTPUT_BUFFER_SIZE: usize = 32;
-const PRECOMMIT_BUFFER_BUDGET: usize = 16 * 1024 * 1024;
-// 包含事件槽及 Vec 初始/倍增预留空间；预算是保守占用估算，不是进程 RSS。
-const PRECOMMIT_EVENT_OVERHEAD: usize =
-    4 * std::mem::size_of::<(AiStreamDelta, VendorPublicationFence)>();
-
-// 每个 JSON 对象条目的固定占用：键、值槽以及稀疏占用的 map 节点/索引，按 (String, Value)
-// 的 4 倍保守估算。过大的值会让 schema 密集的 `tools` 回显（大量小键）在真实体积远低于
-// 预算时被拒绝。
-const JSON_OBJECT_ENTRY_OVERHEAD: usize = 4 * std::mem::size_of::<(String, serde_json::Value)>();
-
-#[derive(Default)]
-struct PrecommitBuffer {
-    events: Vec<(AiStreamDelta, VendorPublicationFence)>,
-    bytes: usize,
-}
-
-impl PrecommitBuffer {
-    /// A committing delta is accepted regardless of its size: it releases the
-    /// buffered metadata instead of extending the precommit window.
-    fn push(
-        &mut self,
-        delta: AiStreamDelta,
-        publication: VendorPublicationFence,
-    ) -> Result<bool, AttemptFailure> {
-        let commits = is_first_output(&delta) || is_terminal_delta(&delta);
-        if !commits {
-            let bytes = PRECOMMIT_EVENT_OVERHEAD.saturating_add(precommit_payload_bytes(&delta));
-            if bytes > PRECOMMIT_BUFFER_BUDGET.saturating_sub(self.bytes) {
-                return Err(AttemptFailure::terminal(
-                    "vendor_event_limit_exceeded",
-                    "Vendor pre-output event buffer exceeded its 16 MiB budget",
-                ));
-            }
-            self.bytes += bytes;
-        }
-        self.events.push((delta, publication));
-        Ok(commits)
-    }
-
-    fn take(&mut self) -> Vec<(AiStreamDelta, VendorPublicationFence)> {
-        self.bytes = 0;
-        std::mem::take(&mut self.events)
-    }
-}
-
-/// Count owned payloads without producing a second serialized copy. Fixed
-/// event/fence storage is charged by `push`; capacity accounts for reserved but
-/// unused String/Vec bytes. JSON objects reserve a conservative per-entry
-/// allowance for their map nodes/index in addition to keys and child values.
-fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
-    use AiStreamDelta as D;
-    match delta {
-        D::MessageStart { id, model } => id.capacity().saturating_add(model.capacity()),
-        D::ResponseMetadata { metadata } => json_payload_bytes(metadata),
-        D::TextDelta(text)
-        | D::RefusalDelta(text)
-        | D::ThinkingDelta(text)
-        | D::ThinkingSignature(text) => text.capacity(),
-        D::TextDeltaWithMetadata {
-            text,
-            logprobs,
-            obfuscation,
-            ..
-        } => text
-            .capacity()
-            .saturating_add(
-                logprobs
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<serde_json::Value>()),
-            )
-            .saturating_add(
-                logprobs
-                    .iter()
-                    .map(json_payload_bytes)
-                    .fold(0usize, usize::saturating_add),
-            )
-            .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
-        D::RefusalDeltaWithIndex { text, .. } => text.capacity(),
-        D::ThinkingDeltaWithMetadata {
-            text, obfuscation, ..
-        }
-        | D::ReasoningSummaryDelta {
-            text, obfuscation, ..
-        } => text
-            .capacity()
-            .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
-        D::Unknown { raw } => raw.capacity(),
-        D::ProtectedThinkingStart { .. } | D::Usage(_) => 0,
-        // These variants always commit, and are never subject to this budget.
-        D::ToolCallStart { .. }
-        | D::ToolCallDelta { .. }
-        | D::ToolCallComplete { .. }
-        | D::ItemDone { .. }
-        | D::ResponseTerminal { .. }
-        | D::Done { .. }
-        | D::StreamError { .. }
-        | D::UnexpectedEof => 0,
-    }
-}
-
-fn json_payload_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(text) => text.capacity(),
-        // The workspace enables serde_json's arbitrary_precision feature: a
-        // Number can own a large decimal String, not merely an inline float.
-        serde_json::Value::Number(number) => {
-            struct CountBytes(usize);
-            impl std::io::Write for CountBytes {
-                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                    self.0 = self.0.saturating_add(bytes.len());
-                    Ok(bytes.len())
-                }
-                fn flush(&mut self) -> std::io::Result<()> {
-                    Ok(())
-                }
-            }
-            let mut count = CountBytes(0);
-            serde_json::to_writer(&mut count, number).expect("counting writer cannot fail");
-            count.0.saturating_mul(2) // allow for String spare capacity
-        }
-        serde_json::Value::Array(values) => values
-            .capacity()
-            .saturating_mul(std::mem::size_of::<serde_json::Value>())
-            .saturating_add(
-                values
-                    .iter()
-                    .map(json_payload_bytes)
-                    .fold(0usize, usize::saturating_add),
-            ),
-        serde_json::Value::Object(values) => values.iter().fold(0usize, |bytes, (key, value)| {
-            bytes
-                .saturating_add(JSON_OBJECT_ENTRY_OVERHEAD)
-                .saturating_add(key.capacity())
-                .saturating_add(json_payload_bytes(value))
-        }),
-        _ => 0,
-    }
-}
 
 struct VendorOutputStream {
     inner: Pin<Box<dyn Stream<Item = Result<CanonicalEvent, ModelTurnError>> + Send>>,
@@ -2026,11 +1888,17 @@ async fn drive_vendor_attempt(
     terminal_output: tokio::sync::mpsc::OwnedPermit<VendorPublishedResult>,
     ready: tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>,
 ) {
-    let mut ready = Some(ready);
-    let mut committed = false;
-    let mut streamed = false;
-    let mut last_publication = None;
-    let mut reservation: Option<RouteAttemptReservation> = None;
+    let mut lifecycle = OutputLifecycle::new(
+        &gateway,
+        &principal,
+        &parent_cancellation,
+        &operation_cancellation,
+        &deadline,
+        &policy,
+        &target,
+        &output,
+        ready,
+    );
     let mut continuation_fallback = prepared.continuation_fallback.take();
     let mut request = prepared.request.clone();
     let mut auth_recovered = false;
@@ -2052,27 +1920,10 @@ async fn drive_vendor_attempt(
             prepared.first_token_timed_out.clone(),
         );
         let mut first_token_ms = None;
-        let outcome = run_vendor_operation(
-            &gateway,
-            &principal,
-            &parent_cancellation,
-            &operation_cancellation,
-            deadline.clone(),
-            &mut prepared,
-            &policy,
-            &target,
-            &mut reservation,
-            &request,
-            &attempt,
-            &output,
-            &mut ready,
-            &mut committed,
-            &mut streamed,
-            &mut last_publication,
-            &mut first_token_ms,
-        )
-        .instrument(attempt.span())
-        .await;
+        let outcome = lifecycle
+            .run(&mut prepared, &request, &attempt, &mut first_token_ms)
+            .instrument(attempt.span())
+            .await;
         let outcome = if let Some(error) = prepared.send_failure.lock().take() {
             let error = error.model_error();
             let mut failure = AttemptFailure::terminal(&error.code, &error.message);
@@ -2105,19 +1956,17 @@ async fn drive_vendor_attempt(
                     biased;
                     _ = publication.cancelled() => {
                         finish_vendor_failure(
+                            &mut lifecycle,
+                            &policy,
+                            &target,
+                            &gateway,
                             AttemptFailure::terminal(
                                 "cancelled",
                                 "Vendor result can no longer be published",
                             ),
-                            committed,
                             &attempt,
                             terminal_output,
-                            last_publication.as_ref(),
-                            &mut ready,
                             failure_observer.as_ref(),
-                            &policy,
-                            &target,
-                            &gateway,
                             prepared.attempt_credential_version,
                         )
                         .await;
@@ -2134,124 +1983,58 @@ async fn drive_vendor_attempt(
                     let failure =
                         AttemptFailure::terminal("output_media_ingest_failed", error.to_string());
                     finish_vendor_failure(
-                        failure,
-                        committed,
-                        &attempt,
-                        terminal_output,
-                        last_publication.as_ref(),
-                        &mut ready,
-                        failure_observer.as_ref(),
+                        &mut lifecycle,
                         &policy,
                         &target,
                         &gateway,
+                        failure,
+                        &attempt,
+                        terminal_output,
+                        failure_observer.as_ref(),
                         prepared.attempt_credential_version,
                     )
                     .await;
                     return;
                 }
-                if !committed && reservation.is_none() {
-                    reservation = Some(policy.state.reservation(
-                        policy.context.clone(),
-                        selected_target_key(&target),
-                        policy.epoch,
-                        policy.probe,
-                    ));
-                }
                 let usage = response.usage.clone();
-                attempt.confirm_usage(&usage);
-                let first_commit = !committed;
-                let first_token_ms = *first_token_ms.get_or_insert_with(|| attempt.elapsed_ms());
-                let published = send_vendor_output(
-                    &output,
-                    &publication,
-                    &parent_cancellation,
-                    &operation_cancellation,
-                    &deadline,
-                    Ok(CanonicalEvent::Completed(response)),
-                )
-                .await;
-                match published {
-                    Ok(()) => {
-                        if first_commit {
-                            attempt.record_first_token();
-                        }
-                        gateway.cache_affinity.record_success(
-                            &principal,
-                            &route_id,
-                            &canonical_request,
-                            &prepared.route.target_id,
-                            &usage,
-                        );
-                        policy.record_success(&target);
-                        if let Some(reservation) = reservation.take() {
-                            reservation.complete();
-                        }
-
-                        if first_commit && let Some(ready) = ready.take() {
-                            let _ = ready.send(Ok(VendorDriverReady { streamed }));
-                        }
-                        attempt.finish("completed", None, None, Some(first_token_ms));
-                    }
-                    Err(error) => {
-                        attempt.finish("interrupted", None, Some(error.code.clone()), None);
-                        if first_commit && let Some(ready) = ready.take() {
-                            let _ = ready
-                                .send(Err(AttemptFailure::terminal(error.code, error.message)));
-                        }
-                    }
+                let published = lifecycle
+                    .publish_terminal(
+                        VendorTerminal::Infer(response, publication),
+                        &attempt,
+                        &mut first_token_ms,
+                    )
+                    .await;
+                if let Some(first_token_ms) = published {
+                    gateway.cache_affinity.record_success(
+                        &principal,
+                        &route_id,
+                        &canonical_request,
+                        &prepared.route.target_id,
+                        &usage,
+                    );
+                    policy.record_success(&target);
+                    lifecycle.complete();
+                    attempt.finish("completed", None, None, Some(first_token_ms));
                 }
                 return;
             }
             Ok(VendorTerminal::Compact(response, publication)) => {
-                if !committed && reservation.is_none() {
-                    reservation = Some(policy.state.reservation(
-                        policy.context.clone(),
-                        selected_target_key(&target),
-                        policy.epoch,
-                        policy.probe,
-                    ));
-                }
-                if let Some(usage) = &response.usage {
-                    attempt.confirm_usage(usage);
-                }
-                let first_commit = !committed;
-                let first_token_ms = *first_token_ms.get_or_insert_with(|| attempt.elapsed_ms());
-                let published = send_vendor_output(
-                    &output,
-                    &publication,
-                    &parent_cancellation,
-                    &operation_cancellation,
-                    &deadline,
-                    Ok(CanonicalEvent::Compacted(Box::new(response))),
-                )
-                .await;
-                match published {
-                    Ok(()) => {
-                        if first_commit {
-                            attempt.record_first_token();
-                        }
-                        policy.record_success(&target);
-                        if let Some(reservation) = reservation.take() {
-                            reservation.complete();
-                        }
-
-                        if first_commit && let Some(ready) = ready.take() {
-                            let _ = ready.send(Ok(VendorDriverReady { streamed }));
-                        }
-                        attempt.finish("completed", None, None, Some(first_token_ms));
-                    }
-                    Err(error) => {
-                        attempt.finish("interrupted", None, Some(error.code.clone()), None);
-                        if first_commit && let Some(ready) = ready.take() {
-                            let _ = ready
-                                .send(Err(AttemptFailure::terminal(error.code, error.message)));
-                        }
-                    }
+                let published = lifecycle
+                    .publish_terminal(
+                        VendorTerminal::Compact(response, publication),
+                        &attempt,
+                        &mut first_token_ms,
+                    )
+                    .await;
+                if let Some(first_token_ms) = published {
+                    policy.record_success(&target);
+                    lifecycle.complete();
+                    attempt.finish("completed", None, None, Some(first_token_ms));
                 }
                 return;
             }
             Err(failure)
-                if !committed
+                if !lifecycle.committed()
                     && failure.error.code == "protected_reasoning_rejected"
                     && prepared.allow_recovery
                     && protected_reasoning_recovery < 2 =>
@@ -2282,23 +2065,21 @@ async fn drive_vendor_attempt(
                     continue;
                 }
                 finish_vendor_failure(
-                    failure,
-                    false,
-                    &attempt,
-                    terminal_output,
-                    last_publication.as_ref(),
-                    &mut ready,
-                    failure_observer.as_ref(),
+                    &mut lifecycle,
                     &policy,
                     &target,
                     &gateway,
+                    failure,
+                    &attempt,
+                    terminal_output,
+                    failure_observer.as_ref(),
                     prepared.attempt_credential_version,
                 )
                 .await;
                 return;
             }
             Err(failure)
-                if !committed
+                if !lifecycle.committed()
                     && failure.error.code == "provider_auth_error"
                     && prepared.allow_recovery
                     && prepared.can_refresh_auth
@@ -2346,20 +2127,18 @@ async fn drive_vendor_attempt(
                 // 这里只在恢复根本没跑起来（被取消/超时中断）时抑制标记——
                 // 中断不是凭据证据。
                 finish_vendor_failure(
+                    &mut lifecycle,
+                    &policy,
+                    &target,
+                    &gateway,
                     AttemptFailure::terminal(
                         "provider_auth_error",
                         "Vendor authentication recovery failed",
                     )
                     .upstream_origin(),
-                    false,
                     &attempt,
                     terminal_output,
-                    last_publication.as_ref(),
-                    &mut ready,
                     failure_observer.as_ref(),
-                    &policy,
-                    &target,
-                    &gateway,
                     if recovery_interrupted {
                         None
                     } else {
@@ -2370,7 +2149,7 @@ async fn drive_vendor_attempt(
                 return;
             }
             Err(failure)
-                if !committed
+                if !lifecycle.committed()
                     && failure.error.code == "continuation_unavailable"
                     && continuation_fallback.is_some() =>
             {
@@ -2385,7 +2164,7 @@ async fn drive_vendor_attempt(
                 request = continuation_fallback.take().expect("checked fallback");
             }
             Err(failure)
-                if !committed
+                if !lifecycle.committed()
                     && failure.error.code == "continuation_not_found"
                     && prepared.allow_recovery
                     && target.target_retry_budget > i32::from(auth_recovered)
@@ -2404,16 +2183,14 @@ async fn drive_vendor_attempt(
             }
             Err(failure) => {
                 finish_vendor_failure(
-                    failure,
-                    committed,
-                    &attempt,
-                    terminal_output,
-                    last_publication.as_ref(),
-                    &mut ready,
-                    failure_observer.as_ref(),
+                    &mut lifecycle,
                     &policy,
                     &target,
                     &gateway,
+                    failure,
+                    &attempt,
+                    terminal_output,
+                    failure_observer.as_ref(),
                     prepared.attempt_credential_version,
                 )
                 .await;
@@ -2432,412 +2209,6 @@ enum VendorTerminal {
         stravia_runtime_contract::protocol::ir::NativeCompactionResponse,
         VendorPublicationFence,
     ),
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_vendor_operation(
-    gateway: &Gateway,
-    principal: &stravia_runtime_contract::Principal,
-    parent_cancellation: &stravia_runtime_contract::CancellationToken,
-    operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: Deadline,
-    prepared: &mut PreparedAttempt,
-    policy: &AttemptRoutePolicy,
-    target: &SelectedTarget,
-    reservation: &mut Option<RouteAttemptReservation>,
-    request: &AiRequest,
-    attempt: &AttemptObservation,
-    output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
-    ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
-    committed: &mut bool,
-    streamed: &mut bool,
-    last_publication: &mut Option<VendorPublicationFence>,
-    first_token_ms: &mut Option<i64>,
-) -> Result<VendorTerminal, AttemptFailure> {
-    prepared
-        .upstream_state
-        .store(UPSTREAM_NOT_STARTED, Ordering::Release);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
-    let mut context = VendorCallContext::new(operation_cancellation.clone(), deadline.clone());
-    let send_admission = crate::rpm::SendAdmission {
-        admission: gateway.rpm_admission.clone(),
-        root: prepared.root_request.clone(),
-        key: crate::rpm::DestinationKey::for_target(target),
-        cancellation: operation_cancellation.clone(),
-        deadline: deadline.clone(),
-        failure: prepared.send_failure.clone(),
-        sent: prepared.sent.clone(),
-        upstream_state: Some(prepared.upstream_state.clone()),
-        eligibility: Some(crate::rpm::runtime::SendEligibility {
-            storage: gateway.storage.clone(),
-            routes: gateway.model_cache.clone(),
-            admitted_component: prepared.pinned_execution.pinned_component(),
-            admitted_provider_id: prepared.pinned_execution.descriptor().provider_id.clone(),
-            route_id: prepared.route.model_id.clone(),
-            target: target.destination.clone(),
-            principal: principal.clone(),
-            authorization: prepared.authorization,
-            health: policy.state.clone(),
-            target_key: selected_target_key(target),
-            epoch: policy.epoch,
-            single_attempt: policy.probe,
-            capability: if prepared.compact {
-                stravia_vendor_sdk::Capability::Compact
-            } else {
-                stravia_vendor_sdk::Capability::Infer
-            },
-            requires_video: request_contains_video(request),
-            requires_image: request
-                .meta
-                .media_routing
-                .as_ref()
-                .is_some_and(|plan| plan.mode == MediaRoutingMode::Native),
-        }),
-    };
-    context.send_admission = Some(send_admission.clone());
-    context.root_request = prepared.root_request.clone();
-    context.events = Some(event_tx);
-    context.observer = prepared.observer.clone();
-    context.model_turn_id = Some(prepared.model_turn_id.clone());
-    context.attempt_id = Some(attempt.id.clone());
-    context.client_headers = prepared.client_headers.clone();
-    context.metadata = prepared.metadata.clone();
-    context.websocket_affinity = prepared.websocket_affinity.clone();
-    context.response_continuation_available = prepared.response_continuation_available.clone();
-
-    let kind = if prepared.compact {
-        stravia_vendor_sdk::Operation::Compact
-    } else {
-        stravia_vendor_sdk::Operation::Infer
-    };
-    let execution_handle = match prepared.execution.take() {
-        Some(execution) => execution,
-        None => {
-            let mut execution = gateway
-                .prepare_vendor_execution_with_lease(
-                    &prepared.pinned_execution,
-                    &prepared.route.provider_id,
-                    Some(&prepared.actual_model),
-                    kind,
-                    &context,
-                )
-                .await
-                .map_err(|_| {
-                    if operation_cancellation.is_cancelled() || deadline.is_exceeded() {
-                        AttemptFailure::terminal(
-                            interruption_error(&deadline).code,
-                            interruption_error(&deadline).message,
-                        )
-                    } else {
-                        AttemptFailure::reroutable(
-                            "provider_unavailable",
-                            "Vendor execution could not be reprepared",
-                        )
-                    }
-                })?;
-            gateway
-                .select_vendor_protocol(&mut execution, request, &context)
-                .await
-                .map_err(classify_vendor_error)?;
-            execution
-        }
-    };
-    prepared.attempt_credential_version = Some(execution_handle.credential_version());
-    let connection_changed = execution_handle.protocol().trim() != prepared.protocol_hint
-        || target_namespace(
-            &prepared.route.provider_id,
-            &execution_handle.descriptor().provider_id,
-            execution_handle.provider(),
-            execution_handle.oauth_connection_id(),
-            &prepared.route.target_id,
-            &prepared.actual_model,
-            execution_handle.use_proxy(),
-        ) != prepared.namespace;
-    if connection_changed {
-        return Err(if *committed {
-            AttemptFailure::terminal(
-                "vendor_snapshot_changed",
-                "Vendor compatibility changed after output publication began",
-            )
-        } else {
-            AttemptFailure::reroutable(
-                "vendor_snapshot_changed",
-                "Vendor compatibility changed while repreparing the operation",
-            )
-        });
-    }
-
-    let mut request = request.clone();
-    request.model.clone_from(&prepared.dispatch_model);
-    crate::media::ingest::materialize_request(
-        gateway,
-        principal,
-        &mut request,
-        prepared.route.egress,
-    )
-    .await
-    .map_err(|error| AttemptFailure::terminal("attachment_delivery_failed", error.to_string()))?;
-    let vendor_request = if prepared.compact {
-        VendorRequest::Compact(request)
-    } else {
-        VendorRequest::Infer(request)
-    };
-    let compact = prepared.compact;
-    let execution = gateway.execute_prepared_vendor(execution_handle, vendor_request, context);
-    tokio::pin!(execution);
-    let mut operation_result = None;
-    let mut pending_failure = None;
-    let mut precommit = PrecommitBuffer::default();
-    let mut emitted_delta = false;
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = parent_cancellation.cancelled() => {
-                operation_cancellation.cancel();
-                let interruption = interruption_error(&deadline);
-                return Err(if interruption.code == "deadline_exceeded"
-                    && prepared.upstream_state.load(Ordering::Acquire)
-                        & UPSTREAM_FAILURE_MASK
-                        == UPSTREAM_STARTED
-                {
-                    AttemptFailure::upstream(
-                        stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
-                        None,
-                        interruption.code,
-                        interruption.message,
-                        None,
-                    )
-                } else {
-                    AttemptFailure::terminal(interruption.code, interruption.message)
-                });
-            }
-            () = deadline.wait() => {
-                operation_cancellation.cancel();
-                return Err(if prepared.upstream_state.load(Ordering::Acquire)
-                    & UPSTREAM_FAILURE_MASK
-                    == UPSTREAM_STARTED
-                {
-                    AttemptFailure::upstream(
-                        stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
-                        None,
-                        "deadline_exceeded",
-                        "Model Turn deadline exceeded",
-                        None,
-                    )
-                } else {
-                    AttemptFailure::terminal(
-                        "deadline_exceeded",
-                        "Model Turn deadline exceeded",
-                    )
-                });
-            }
-            _ = output.closed() => {
-                operation_cancellation.cancel();
-                return Err(AttemptFailure::terminal("cancelled", "Model Turn consumer disconnected"));
-            }
-            event = event_rx.recv() => match event {
-                Some(event) => process_runtime_event(
-                    event,
-                    gateway,
-                    principal,
-                    attempt,
-                    output,
-                    parent_cancellation,
-                    operation_cancellation,
-                    &deadline,
-                    ready,
-                    committed,
-                    streamed,
-                    policy,
-                    target,
-                    reservation,
-                    &mut emitted_delta,
-                    &mut precommit,
-                    &mut pending_failure,
-                    last_publication,
-                    first_token_ms,
-                    prepared.preserve_upstream_error,
-                    &prepared.upstream_state,
-                ).await?,
-                None => break,
-            },
-            result = &mut execution => {
-                mark_upstream_operation_finished(&prepared.upstream_state, &result, &deadline);
-                operation_result = Some(result);
-                break;
-            }
-        }
-    }
-
-    if operation_result.is_none() {
-        let result = execution.await;
-        mark_upstream_operation_finished(&prepared.upstream_state, &result, &deadline);
-        operation_result = Some(result);
-    }
-    while let Some(event) = event_rx.recv().await {
-        process_runtime_event(
-            event,
-            gateway,
-            principal,
-            attempt,
-            output,
-            parent_cancellation,
-            operation_cancellation,
-            &deadline,
-            ready,
-            committed,
-            streamed,
-            policy,
-            target,
-            reservation,
-            &mut emitted_delta,
-            &mut precommit,
-            &mut pending_failure,
-            last_publication,
-            first_token_ms,
-            prepared.preserve_upstream_error,
-            &prepared.upstream_state,
-        )
-        .await?;
-    }
-    if let Some(error) = send_admission.failure.lock().take() {
-        let error = error.model_error();
-        let mut failure = AttemptFailure::terminal(&error.code, &error.message);
-        failure.error = Box::new(error);
-        return Err(failure);
-    }
-    if let Some(failure) = pending_failure {
-        return Err(failure);
-    }
-    let VendorExecution {
-        output: result,
-        publication,
-        protocol,
-    } = operation_result
-        .expect("operation result")
-        .map_err(|error| {
-            classify_vendor_operation_error(error, &prepared.upstream_state, &deadline)
-        })?;
-    if protocol.trim() != prepared.protocol_hint {
-        return Err(if *committed {
-            AttemptFailure::terminal(
-                "vendor_snapshot_changed",
-                "Vendor compatibility changed after output publication began",
-            )
-        } else {
-            AttemptFailure::reroutable(
-                "vendor_snapshot_changed",
-                "Vendor compatibility changed while preparing the operation",
-            )
-        });
-    }
-
-    match (compact, result) {
-        (false, OperationOutput::Infer(response)) => {
-            if prepared.request.meta.redaction.has_provider_proof() {
-                // 上游画像不含宿主解析出的 Target control，证明仍需保留本轮实际派发的控制。
-                let target_control = prepared.request.reasoning.target_control.take();
-                let effective_controls =
-                    crate::generation_chain::apply_provider_effective_response(
-                        &mut prepared.request,
-                        &response,
-                    )
-                    .is_some();
-                prepared.request.reasoning.target_control = target_control;
-                if effective_controls {
-                    prepared
-                        .request
-                        .meta
-                        .redaction
-                        .observe_provider_controls(&prepared.request);
-                }
-            }
-            if !emitted_delta {
-                // Synthetic deltas are observable and may become persisted history before the
-                // terminal response is consumed. Externalize output media first so neither path
-                // can publish provider bytes instead of the stable Artifact Reference.
-                let mut projected = response.as_ref().clone();
-                let normalization = tokio::select! {
-                    biased;
-                    _ = parent_cancellation.cancelled() => {
-                        operation_cancellation.cancel();
-                        return Err(AttemptFailure::terminal(
-                            interruption_error(&deadline).code,
-                            interruption_error(&deadline).message,
-                        ));
-                    }
-                    () = deadline.wait() => {
-                        operation_cancellation.cancel();
-                        return Err(AttemptFailure::terminal(
-                            "deadline_exceeded",
-                            "Model Turn deadline exceeded",
-                        ));
-                    }
-                    result = crate::media::ingest::normalize_response(
-                        gateway,
-                        principal,
-                        &mut projected,
-                        operation_cancellation,
-                    ) => result,
-                };
-                normalization.map_err(|error| {
-                    AttemptFailure::terminal("output_media_ingest_failed", error.to_string())
-                })?;
-                let deltas = ai_response_to_deltas(&projected)
-                    .into_iter()
-                    .map(|delta| (delta, publication.clone()))
-                    .collect();
-                commit_vendor_stream(
-                    deltas,
-                    false,
-                    attempt,
-                    output,
-                    parent_cancellation,
-                    operation_cancellation,
-                    &deadline,
-                    ready,
-                    committed,
-                    streamed,
-                    policy,
-                    target,
-                    reservation,
-                    &mut precommit,
-                    last_publication,
-                    first_token_ms,
-                )
-                .await?;
-            } else if !*committed {
-                commit_vendor_stream(
-                    Vec::new(),
-                    true,
-                    attempt,
-                    output,
-                    parent_cancellation,
-                    operation_cancellation,
-                    &deadline,
-                    ready,
-                    committed,
-                    streamed,
-                    policy,
-                    target,
-                    reservation,
-                    &mut precommit,
-                    last_publication,
-                    first_token_ms,
-                )
-                .await?;
-            }
-            Ok(VendorTerminal::Infer(response, publication))
-        }
-        (true, OperationOutput::Compact(response)) => {
-            Ok(VendorTerminal::Compact(response, publication))
-        }
-        _ => Err(AttemptFailure::terminal(
-            "vendor_output_invalid",
-            "Vendor plugin returned an output for the wrong operation",
-        )),
-    }
 }
 
 fn mark_upstream_operation_finished(
@@ -2885,284 +2256,15 @@ fn classify_vendor_operation_error(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_runtime_event(
-    vendor_event: VendorEvent,
-    gateway: &Gateway,
-    principal: &stravia_runtime_contract::Principal,
-    attempt: &AttemptObservation,
-    output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
-    parent_cancellation: &stravia_runtime_contract::CancellationToken,
-    operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: &Deadline,
-    ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
-    committed: &mut bool,
-    streamed: &mut bool,
-    policy: &AttemptRoutePolicy,
-    target: &SelectedTarget,
-    reservation: &mut Option<RouteAttemptReservation>,
-    emitted_delta: &mut bool,
-    precommit: &mut PrecommitBuffer,
-    pending_failure: &mut Option<AttemptFailure>,
-    last_publication: &mut Option<VendorPublicationFence>,
-    first_token_ms: &mut Option<i64>,
-    preserve_upstream_error: bool,
-    upstream_state: &AtomicU8,
-) -> Result<(), AttemptFailure> {
-    vendor_event.publication.ensure_current().map_err(|_| {
-        AttemptFailure::terminal("cancelled", "Vendor result can no longer be published")
-    })?;
-    let VendorEvent { event, publication } = vendor_event;
-    match event {
-        RuntimeEvent::UpstreamStarted => {
-            // 插件事件可能先于 Host RPM 准入；只有宿主实际发送才能标记开始。
-        }
-        RuntimeEvent::Delta(mut delta) => {
-            let _local_work = UpstreamLocalWork::begin(upstream_state, deadline.clone());
-            if matches!(&delta, AiStreamDelta::ItemDone { .. }) {
-                let normalization = tokio::select! {
-                    biased;
-                    _ = parent_cancellation.cancelled() => {
-                        operation_cancellation.cancel();
-                        return Err(AttemptFailure::terminal(
-                            interruption_error(deadline).code,
-                            interruption_error(deadline).message,
-                        ));
-                    }
-                    () = deadline.wait() => {
-                        operation_cancellation.cancel();
-                        return Err(AttemptFailure::terminal(
-                            "deadline_exceeded",
-                            "Model Turn deadline exceeded",
-                        ));
-                    }
-                    result = crate::media::ingest::normalize_stream_delta(
-                        gateway,
-                        principal,
-                        &mut delta,
-                        operation_cancellation,
-                    ) => result,
-                };
-                normalization.map_err(|error| {
-                    AttemptFailure::terminal("output_media_ingest_failed", error.to_string())
-                })?;
-            }
-            *emitted_delta = true;
-            *streamed = true;
-            if !*committed {
-                if matches!(
-                    delta,
-                    AiStreamDelta::StreamError { .. } | AiStreamDelta::UnexpectedEof
-                ) {
-                    *pending_failure = Some(stream_delta_failure(&delta, preserve_upstream_error));
-                    return Ok(());
-                }
-                let commits = precommit.push(delta, publication)?;
-                if commits {
-                    commit_vendor_stream(
-                        Vec::new(),
-                        true,
-                        attempt,
-                        output,
-                        parent_cancellation,
-                        operation_cancellation,
-                        deadline,
-                        ready,
-                        committed,
-                        streamed,
-                        policy,
-                        target,
-                        reservation,
-                        precommit,
-                        last_publication,
-                        first_token_ms,
-                    )
-                    .await?;
-                }
-            } else {
-                observe_and_send_delta(
-                    delta,
-                    &publication,
-                    attempt,
-                    VendorOutputDelivery {
-                        output,
-                        parent_cancellation,
-                        operation_cancellation,
-                        deadline,
-                    },
-                    last_publication,
-                )
-                .await?;
-            }
-        }
-        RuntimeEvent::Completed | RuntimeEvent::Compacted => {
-            // The typed return value is authoritative and is fenced by
-            // execute_vendor after the guest has returned. Event terminals are
-            // deliberately held rather than published early.
-        }
-        RuntimeEvent::Failed {
-            kind,
-            message,
-            upstream_status,
-        } => {
-            pending_failure
-                .get_or_insert_with(|| classify_vendor_kind(kind, upstream_status, Some(message)));
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn commit_vendor_stream(
-    deltas: Vec<(AiStreamDelta, VendorPublicationFence)>,
-    emitted_by_plugin: bool,
-    attempt: &AttemptObservation,
-    output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
-    parent_cancellation: &stravia_runtime_contract::CancellationToken,
-    operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: &Deadline,
-    ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
-    committed: &mut bool,
-    streamed: &mut bool,
-    policy: &AttemptRoutePolicy,
-    target: &SelectedTarget,
-    reservation: &mut Option<RouteAttemptReservation>,
-    precommit: &mut PrecommitBuffer,
-    last_publication: &mut Option<VendorPublicationFence>,
-    first_token_ms: &mut Option<i64>,
-) -> Result<(), AttemptFailure> {
-    let first_commit = !*committed;
-    if first_commit && reservation.is_none() {
-        *reservation = Some(policy.state.reservation(
-            policy.context.clone(),
-            selected_target_key(target),
-            policy.epoch,
-            policy.probe,
-        ));
-    }
-    let mut buffered = precommit.take();
-    buffered.extend(deltas);
-    for (index, (delta, publication)) in buffered.into_iter().enumerate() {
-        observe_and_send_delta(
-            delta,
-            &publication,
-            attempt,
-            VendorOutputDelivery {
-                output,
-                parent_cancellation,
-                operation_cancellation,
-                deadline,
-            },
-            last_publication,
-        )
-        .await?;
-        if first_commit && index == 0 {
-            attempt.record_first_token();
-            *first_token_ms = Some(attempt.elapsed_ms());
-            *committed = true;
-            if let Some(ready) = ready.take() {
-                let _ = ready.send(Ok(VendorDriverReady {
-                    streamed: *streamed || emitted_by_plugin,
-                }));
-            }
-        }
-    }
-    Ok(())
-}
-
-struct VendorOutputDelivery<'a> {
-    output: &'a tokio::sync::mpsc::Sender<VendorPublishedResult>,
-    parent_cancellation: &'a stravia_runtime_contract::CancellationToken,
-    operation_cancellation: &'a stravia_runtime_contract::CancellationToken,
-    deadline: &'a Deadline,
-}
-
-async fn observe_and_send_delta(
-    delta: AiStreamDelta,
-    publication: &VendorPublicationFence,
-    attempt: &AttemptObservation,
-    delivery: VendorOutputDelivery<'_>,
-    last_publication: &mut Option<VendorPublicationFence>,
-) -> Result<(), AttemptFailure> {
-    attempt.observe_delta(&delta);
-    send_vendor_output(
-        delivery.output,
-        publication,
-        delivery.parent_cancellation,
-        delivery.operation_cancellation,
-        delivery.deadline,
-        Ok(CanonicalEvent::Delta(delta)),
-    )
-    .await
-    .map_err(|error| AttemptFailure::terminal(error.code, error.message))?;
-    *last_publication = Some(publication.clone());
-    Ok(())
-}
-
-async fn send_vendor_output(
-    output: &tokio::sync::mpsc::Sender<VendorPublishedResult>,
-    publication: &VendorPublicationFence,
-    parent_cancellation: &stravia_runtime_contract::CancellationToken,
-    operation_cancellation: &stravia_runtime_contract::CancellationToken,
-    deadline: &Deadline,
-    event: Result<CanonicalEvent, ModelTurnError>,
-) -> Result<(), ModelTurnError> {
-    let permit = tokio::select! {
-        biased;
-        _ = publication.cancelled() => {
-            return Err(ModelTurnError::new("cancelled", "Vendor result can no longer be published"));
-        }
-        _ = parent_cancellation.cancelled() => {
-            operation_cancellation.cancel();
-            return Err(interruption_error(deadline));
-        }
-        () = deadline.wait() => {
-            operation_cancellation.cancel();
-            return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"));
-        }
-        permit = output.reserve() => permit.map_err(|_| {
-            operation_cancellation.cancel();
-            ModelTurnError::new("cancelled", "Model Turn consumer disconnected")
-        })?,
-    };
-    let guard = publication.write_fence().await.map_err(|_| {
-        ModelTurnError::new("cancelled", "Vendor result can no longer be published")
-    })?;
-    permit.send(VendorPublishedResult {
-        result: event,
-        publication: publication.clone(),
-    });
-    drop(guard);
-    Ok(())
-}
-
-async fn send_vendor_terminal_error(
-    permit: tokio::sync::mpsc::OwnedPermit<VendorPublishedResult>,
-    publication: &VendorPublicationFence,
-    error: ModelTurnError,
-) -> Result<(), ModelTurnError> {
-    let guard = publication.terminal_write_fence().await.map_err(|_| {
-        ModelTurnError::new("cancelled", "Vendor result can no longer be published")
-    })?;
-    drop(permit.send(VendorPublishedResult {
-        result: Err(error),
-        publication: publication.clone(),
-    }));
-    drop(guard);
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn finish_vendor_failure(
+    lifecycle: &mut OutputLifecycle<'_>,
+    policy: &AttemptRoutePolicy,
+    target: &SelectedTarget,
+    gateway: &Gateway,
     mut failure: AttemptFailure,
-    committed: bool,
     attempt: &AttemptObservation,
     terminal_output: tokio::sync::mpsc::OwnedPermit<VendorPublishedResult>,
-    publication: Option<&VendorPublicationFence>,
-    ready: &mut Option<tokio::sync::oneshot::Sender<Result<VendorDriverReady, AttemptFailure>>>,
     observer: Option<&crate::interaction_observation::RunObserver>,
-    policy: &AttemptRoutePolicy,
-    target: &SelectedTarget,
-    gateway: &Gateway,
     credential_version: Option<crate::db::models::ProviderCredentialVersion>,
 ) {
     // ADR-0073：上游确认的凭据拒绝 → 持久化 Provider 失效。OAuth 恢复路径
@@ -3176,33 +2278,23 @@ async fn finish_vendor_failure(
             .mark_provider_credential_invalid(target.provider_id().as_str(), version)
             .await;
     }
-    if committed && failure.is_upstream() && failure.error.code == "upstream_error" {
+    if lifecycle.committed() && failure.is_upstream() && failure.error.code == "upstream_error" {
         failure.error.code = "upstream_stream_error".into();
         failure.error.message = "Vendor upstream stream error".into();
     }
     let status = failure.diagnostic.status_code;
     let code = failure.error.code.clone();
-    if committed {
-        if failure.is_upstream()
-            && failure.error.code != "deadline_exceeded"
-            && !request_level_failure(&failure)
-        {
-            policy.record_failure(target, failure.retry_after);
-        }
-        attempt.finish("failed", status, Some(code), None);
-        let error = failure.finish(observer);
-        if let Some(publication) = publication
-            && let Err(error) =
-                send_vendor_terminal_error(terminal_output, publication, error).await
-        {
-            tracing::debug!(code = %error.code, "Vendor terminal failure publication revoked");
-        }
-    } else {
-        attempt.finish("failed", status, Some(code), None);
-        if let Some(ready) = ready.take() {
-            let _ = ready.send(Err(failure));
-        }
+    if lifecycle.committed()
+        && failure.is_upstream()
+        && failure.error.code != "deadline_exceeded"
+        && !request_level_failure(&failure)
+    {
+        policy.record_failure(target, failure.retry_after);
     }
+    attempt.finish("failed", status, Some(code), None);
+    lifecycle
+        .publish_failure(failure, terminal_output, observer)
+        .await;
 }
 
 fn classify_vendor_error(error: anyhow::Error) -> AttemptFailure {
@@ -3413,33 +2505,6 @@ fn request_level_failure(failure: &AttemptFailure) -> bool {
             AiError::is_request_error_evidence(kind, failure.error.upstream_body.as_deref())
                 || AiError::is_request_error_evidence(kind, diagnostic.as_ref())
         })
-}
-
-fn is_first_output(delta: &AiStreamDelta) -> bool {
-    match delta {
-        AiStreamDelta::TextDelta(text)
-        | AiStreamDelta::RefusalDelta(text)
-        | AiStreamDelta::ThinkingDelta(text) => !text.is_empty(),
-        AiStreamDelta::TextDeltaWithMetadata { text, .. }
-        | AiStreamDelta::RefusalDeltaWithIndex { text, .. }
-        | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
-        | AiStreamDelta::ReasoningSummaryDelta { text, .. } => !text.is_empty(),
-        AiStreamDelta::ToolCallStart { .. }
-        | AiStreamDelta::ToolCallDelta { .. }
-        | AiStreamDelta::ToolCallComplete { .. }
-        | AiStreamDelta::ItemDone { .. } => true,
-        _ => false,
-    }
-}
-
-fn is_terminal_delta(delta: &AiStreamDelta) -> bool {
-    matches!(
-        delta,
-        AiStreamDelta::StreamError { .. }
-            | AiStreamDelta::UnexpectedEof
-            | AiStreamDelta::Done { .. }
-            | AiStreamDelta::ResponseTerminal { .. }
-    )
 }
 
 fn target_namespace(
@@ -3656,700 +2721,4 @@ fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        AttemptDeadlineGuard, PRECOMMIT_BUFFER_BUDGET, PrecommitBuffer, UPSTREAM_FINISHED,
-        UPSTREAM_NOT_STARTED, UPSTREAM_STARTED, UpstreamLocalWork, VendorDriverHandle,
-        strip_rejected_protected_reasoning, thinking_authority,
-    };
-    use crate::history_marker::{
-        ReasoningRejections, ThinkingProvenance, ThinkingSource, protected_payload_digests,
-    };
-    use crate::plugin::{VendorOperationTracker, VendorPublicationFence};
-    use crate::router::{RoutePolicyState, TargetRuntimeState};
-    use std::sync::{Arc, atomic::AtomicU8};
-    use std::time::{Duration, Instant};
-    use stravia_runtime_contract::Deadline;
-    use stravia_runtime_contract::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-        OPEN_RESPONSES_2026_04_24,
-    };
-    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, AiStreamDelta};
-
-    fn publication() -> VendorPublicationFence {
-        let operation = VendorOperationTracker::default()
-            .begin("buffer-test")
-            .unwrap();
-        operation.publication_fence(
-            stravia_runtime_contract::CancellationToken::new(),
-            Deadline::from_now(Duration::from_secs(60)),
-        )
-    }
-
-    #[test]
-    fn metadata_beyond_32_events_preserves_order_and_publication_fences() {
-        let first = publication();
-        let second = publication();
-        let mut buffer = PrecommitBuffer::default();
-        for index in 0..70 {
-            let fence = if index % 2 == 0 { &first } else { &second };
-            assert!(
-                !buffer
-                    .push(
-                        AiStreamDelta::ResponseMetadata {
-                            metadata: serde_json::json!({"model": format!("model-{index}")}),
-                        },
-                        fence.clone(),
-                    )
-                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-            );
-        }
-        assert!(
-            buffer
-                .push(AiStreamDelta::TextDelta("answer".into()), first.clone())
-                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-        );
-        let events = buffer.take();
-        assert_eq!(events.len(), 71);
-        for (index, (delta, fence)) in events.iter().take(70).enumerate() {
-            let AiStreamDelta::ResponseMetadata { metadata } = delta else {
-                panic!("metadata event out of order");
-            };
-            assert_eq!(metadata["model"], format!("model-{index}"));
-            assert!(fence.same_activity(if index % 2 == 0 { &first } else { &second }));
-        }
-        assert!(matches!(&events[70].0, AiStreamDelta::TextDelta(text) if text == "answer"));
-        assert!(events[70].1.same_activity(&first));
-    }
-
-    #[test]
-    fn precommit_budget_accepts_exact_boundary_and_rejects_one_byte_more() {
-        let fixed = super::PRECOMMIT_EVENT_OVERHEAD;
-        let payload = PRECOMMIT_BUFFER_BUDGET - fixed;
-        let mut buffer = PrecommitBuffer::default();
-        let mut raw = String::with_capacity(payload);
-        raw.push('x');
-        assert_eq!(raw.capacity(), payload);
-        assert!(
-            !buffer
-                .push(AiStreamDelta::Unknown { raw }, publication())
-                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-        );
-        let failure = buffer
-            .push(
-                AiStreamDelta::ProtectedThinkingStart { index: 0 },
-                publication(),
-            )
-            .unwrap_err();
-        assert_eq!(failure.error.code, "vendor_event_limit_exceeded");
-        assert_eq!(buffer.take().len(), 1);
-
-        let mut oversized = PrecommitBuffer::default();
-        let mut raw = String::with_capacity(payload + 1);
-        raw.push('x');
-        assert_eq!(raw.capacity(), payload + 1);
-        assert_eq!(
-            oversized
-                .push(AiStreamDelta::Unknown { raw }, publication())
-                .unwrap_err()
-                .error
-                .code,
-            "vendor_event_limit_exceeded"
-        );
-        assert!(oversized.take().is_empty());
-    }
-
-    #[test]
-    fn nested_json_and_logprobs_consume_the_precommit_budget() {
-        let values = vec![serde_json::Value::Null; PRECOMMIT_BUFFER_BUDGET / 16];
-        let mut buffer = PrecommitBuffer::default();
-        assert_eq!(
-            buffer
-                .push(
-                    AiStreamDelta::ResponseMetadata {
-                        metadata: serde_json::Value::Array(values),
-                    },
-                    publication(),
-                )
-                .unwrap_err()
-                .error
-                .code,
-            "vendor_event_limit_exceeded"
-        );
-        assert!(buffer.take().is_empty());
-
-        assert_eq!(
-            buffer
-                .push(
-                    AiStreamDelta::ResponseMetadata {
-                        metadata: serde_json::json!({
-                            "payload": "x".repeat(PRECOMMIT_BUFFER_BUDGET)
-                        }),
-                    },
-                    publication(),
-                )
-                .unwrap_err()
-                .error
-                .code,
-            "vendor_event_limit_exceeded"
-        );
-
-        let mut buffer = PrecommitBuffer::default();
-        assert_eq!(
-            buffer
-                .push(
-                    AiStreamDelta::TextDeltaWithMetadata {
-                        text: String::new(),
-                        logprobs: vec![serde_json::Value::Null; PRECOMMIT_BUFFER_BUDGET / 16],
-                        obfuscation: None,
-                        output_index: None,
-                        content_index: None,
-                    },
-                    publication(),
-                )
-                .unwrap_err()
-                .error
-                .code,
-            "vendor_event_limit_exceeded"
-        );
-    }
-
-    #[test]
-    fn schema_dense_response_metadata_stays_within_the_precommit_budget() {
-        // Codex echoes the full `tools` schema in response.created. A schema is
-        // key-dense but small; realistic tool collections must fit even when
-        // their conservative storage estimate exceeds the former 1 MiB budget.
-        let properties: serde_json::Map<String, serde_json::Value> = (0..2000)
-            .map(|index| {
-                (
-                    format!("property_{index}"),
-                    serde_json::json!({"type": "string", "description": "x".repeat(40)}),
-                )
-            })
-            .collect();
-        let metadata = serde_json::json!({
-            "tools": [{"type": "function", "name": "tool", "parameters": {
-                "type": "object",
-                "properties": properties,
-            }}]
-        });
-        let mut buffer = PrecommitBuffer::default();
-        assert!(
-            !buffer
-                .push(
-                    AiStreamDelta::ResponseMetadata {
-                        metadata: metadata.clone(),
-                    },
-                    publication(),
-                )
-                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-        );
-        assert!(
-            buffer
-                .push(AiStreamDelta::TextDelta("answer".into()), publication())
-                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-        );
-        let events = buffer.take();
-        assert!(
-            matches!(&events[0].0, AiStreamDelta::ResponseMetadata { metadata: actual } if actual == &metadata)
-        );
-        assert!(matches!(&events[1].0, AiStreamDelta::TextDelta(text) if text == "answer"));
-    }
-
-    #[test]
-    fn first_output_and_normal_terminal_commit_even_with_a_full_buffer() {
-        for delta in [
-            AiStreamDelta::TextDelta("answer".repeat(PRECOMMIT_BUFFER_BUDGET)),
-            AiStreamDelta::Done {
-                stop_reason: "done".repeat(PRECOMMIT_BUFFER_BUDGET),
-            },
-        ] {
-            let mut buffer = PrecommitBuffer::default();
-            let fixed = super::PRECOMMIT_EVENT_OVERHEAD;
-            let mut raw = String::with_capacity(PRECOMMIT_BUFFER_BUDGET - fixed);
-            raw.push('x');
-            assert!(
-                !buffer
-                    .push(AiStreamDelta::Unknown { raw }, publication())
-                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-            );
-            assert!(
-                buffer
-                    .push(delta, publication())
-                    .unwrap_or_else(|failure| panic!("{}", failure.error.code))
-            );
-            let events = buffer.take();
-            assert_eq!(events.len(), 2);
-            assert!(matches!(&events[0].0, AiStreamDelta::Unknown { .. }));
-            assert!(
-                matches!(&events[1].0, AiStreamDelta::TextDelta(text) if text.starts_with("answer"))
-                    || matches!(&events[1].0, AiStreamDelta::Done { stop_reason } if stop_reason.starts_with("done"))
-            );
-        }
-    }
-
-    #[test]
-    fn thinking_provenance_trusts_signing_scope_not_target_wiring() {
-        let target = ThinkingSource {
-            namespace: "target-namespace".into(),
-            protocol: Some(ANTHROPIC_MESSAGES_2023_06_01.into()),
-            actual_model: "target-model".into(),
-            target_id: "target-id".into(),
-            authority: Some("deployment-a".into()),
-        };
-        let native = AiItem::thinking("reasoning", Some("signature".into()));
-        let stamped = |source: ThinkingSource| {
-            let mut item = native.clone();
-            source.stamp_item(&mut item);
-            item
-        };
-        let other_scope = ThinkingSource {
-            authority: Some("deployment-b".into()),
-            ..target.clone()
-        };
-        let gemini = ThinkingSource {
-            protocol: Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.into()),
-            ..target.clone()
-        };
-        let plugin = ThinkingSource {
-            protocol: Some("acme/custom-wire".into()),
-            ..target.clone()
-        };
-        let mut malformed = native.clone();
-        malformed.meta = Some(
-            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
-                serde_json::json!({"__stravia_thinking_source": "invalid"}),
-            ),
-        );
-        let cases = [
-            (
-                "no provenance record",
-                &target,
-                native.clone(),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "malformed record",
-                &target,
-                malformed,
-                ThinkingProvenance::Foreign,
-            ),
-            (
-                // 路由 Target、代理或选项不同，只要签发作用域相同仍可证明。
-                "same scope, different Target wiring",
-                &target,
-                stamped(ThinkingSource {
-                    namespace: "other-namespace".into(),
-                    actual_model: "other-model".into(),
-                    target_id: "other-target".into(),
-                    ..target.clone()
-                }),
-                ThinkingProvenance::Verified,
-            ),
-            (
-                "same protocol, other deployment or credential",
-                &target,
-                stamped(other_scope.clone()),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "same protocol family under an alias",
-                &target,
-                stamped(ThinkingSource {
-                    protocol: Some("anthropic-messages".into()),
-                    ..other_scope.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "other protocol",
-                &target,
-                stamped(ThinkingSource {
-                    protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
-                    ..other_scope.clone()
-                }),
-                ThinkingProvenance::Foreign,
-            ),
-            (
-                "plugin protocol against a known protocol",
-                &target,
-                stamped(ThinkingSource {
-                    protocol: Some("acme/custom-wire".into()),
-                    ..other_scope.clone()
-                }),
-                ThinkingProvenance::Foreign,
-            ),
-            (
-                "same plugin protocol identity",
-                &plugin,
-                stamped(ThinkingSource {
-                    authority: Some("deployment-b".into()),
-                    ..plugin.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "record without protocol",
-                &target,
-                stamped(ThinkingSource {
-                    protocol: None,
-                    ..other_scope.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "model change on a protocol without model binding",
-                &target,
-                stamped(ThinkingSource {
-                    actual_model: "other-model".into(),
-                    ..other_scope.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "Gemini model change",
-                &gemini,
-                stamped(ThinkingSource {
-                    actual_model: "other-model".into(),
-                    authority: Some("deployment-b".into()),
-                    ..gemini.clone()
-                }),
-                ThinkingProvenance::Foreign,
-            ),
-            (
-                "Gemini same model, other deployment",
-                &gemini,
-                stamped(ThinkingSource {
-                    authority: Some("deployment-b".into()),
-                    ..gemini.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "legacy record with the same namespace",
-                &target,
-                stamped(ThinkingSource {
-                    authority: None,
-                    ..target.clone()
-                }),
-                ThinkingProvenance::Verified,
-            ),
-            (
-                "legacy record with another namespace",
-                &target,
-                stamped(ThinkingSource {
-                    namespace: "other-namespace".into(),
-                    authority: None,
-                    ..target.clone()
-                }),
-                ThinkingProvenance::Unknown,
-            ),
-            (
-                "legacy record with another namespace and protocol",
-                &target,
-                stamped(ThinkingSource {
-                    namespace: "other-namespace".into(),
-                    protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
-                    authority: None,
-                    ..target.clone()
-                }),
-                ThinkingProvenance::Foreign,
-            ),
-        ];
-        let rejections = ReasoningRejections::default();
-        for (case, current, item, expected) in &cases {
-            assert_eq!(current.provenance(item, &rejections), *expected, "{case}");
-        }
-
-        // 被当前签发作用域拒绝过的载荷一律剥离，包括本可证明同源的载荷；
-        // 其它签发作用域不受影响。
-        rejections.record(
-            "deployment-a",
-            protected_payload_digests(std::slice::from_ref(&native)),
-        );
-        let verified = stamped(target.clone());
-        assert_eq!(
-            target.provenance(&verified, &rejections),
-            ThinkingProvenance::Foreign
-        );
-        assert_eq!(
-            target.provenance(&native, &rejections),
-            ThinkingProvenance::Foreign
-        );
-        assert_eq!(
-            other_scope.provenance(&native, &rejections),
-            ThinkingProvenance::Unknown
-        );
-        let unrelated = AiItem::thinking("reasoning", Some("other-signature".into()));
-        assert_eq!(
-            target.provenance(&unrelated, &rejections),
-            ThinkingProvenance::Unknown
-        );
-    }
-
-    #[test]
-    fn rejected_protected_reasoning_strips_unverified_before_verified() {
-        let source = ThinkingSource {
-            namespace: "target-namespace".into(),
-            protocol: Some(ANTHROPIC_MESSAGES_2023_06_01.into()),
-            actual_model: "target-model".into(),
-            target_id: "target-id".into(),
-            authority: Some("deployment-a".into()),
-        };
-        let mut verified = AiItem::thinking("own reasoning", Some("own-signature".into()));
-        verified.role = stravia_runtime_contract::protocol::ir::Role::Assistant;
-        source.stamp_item(&mut verified);
-        let mut unknown = AiItem::thinking("client reasoning", Some("client-signature".into()));
-        unknown.role = stravia_runtime_contract::protocol::ir::Role::Assistant;
-        let signatures = |request: &AiRequest| {
-            request
-                .items
-                .iter()
-                .filter_map(|item| item.thinking_ref().and_then(|(_, signature)| signature))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        let rejections = ReasoningRejections::default();
-        let mut request = AiRequest::new("model", vec![verified.clone(), unknown]);
-        let mut stage = 0;
-
-        assert!(strip_rejected_protected_reasoning(
-            &mut request,
-            &mut stage,
-            &source,
-            &rejections
-        ));
-        assert_eq!(stage, 1);
-        assert_eq!(signatures(&request), vec!["own-signature"]);
-
-        assert!(strip_rejected_protected_reasoning(
-            &mut request,
-            &mut stage,
-            &source,
-            &rejections
-        ));
-        assert_eq!(stage, 2);
-        assert!(signatures(&request).is_empty());
-
-        // 只有已证实载荷时直接进入全剥离，不浪费一次重试。
-        let mut request = AiRequest::new("model", vec![verified]);
-        let mut stage = 0;
-        assert!(strip_rejected_protected_reasoning(
-            &mut request,
-            &mut stage,
-            &source,
-            &rejections
-        ));
-        assert_eq!(stage, 2);
-        assert!(signatures(&request).is_empty());
-    }
-
-    #[test]
-    fn thinking_authority_changes_only_with_signing_scope() {
-        let provider = stravia_vendor_sdk::ProviderSnapshot {
-            provider_id: "provider".into(),
-            channel: "default".into(),
-            base_url: "https://api.example.test".into(),
-            protocol: ANTHROPIC_MESSAGES_2023_06_01.to_string(),
-            options: Default::default(),
-            credentials: [("api_key".to_string(), serde_json::json!("key-a"))].into(),
-            model: None,
-            model_metadata: None,
-            client_headers: Vec::new(),
-            operation_metadata: Default::default(),
-        };
-        let anthropic = ANTHROPIC_MESSAGES_2023_06_01.to_string();
-        let base = thinking_authority(&anthropic, &provider, None, "model-a");
-
-        let mut rewired = provider.clone();
-        rewired.provider_id = "other-provider".into();
-        rewired
-            .options
-            .insert("zdr".into(), serde_json::json!(true));
-        assert_eq!(
-            thinking_authority(&anthropic, &rewired, None, "model-b"),
-            base
-        );
-
-        let mut moved = provider.clone();
-        moved.base_url = "https://other.example.test".into();
-        assert_ne!(
-            thinking_authority(&anthropic, &moved, None, "model-a"),
-            base
-        );
-        let mut rekeyed = provider.clone();
-        rekeyed
-            .credentials
-            .insert("api_key".into(), serde_json::json!("key-b"));
-        assert_ne!(
-            thinking_authority(&anthropic, &rekeyed, None, "model-a"),
-            base
-        );
-        assert_ne!(
-            thinking_authority(&anthropic, &provider, Some("connection"), "model-a"),
-            base
-        );
-
-        let gemini = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.to_string();
-        assert_ne!(
-            thinking_authority(&gemini, &provider, None, "model-a"),
-            thinking_authority(&gemini, &provider, None, "model-b")
-        );
-    }
-
-    fn armed_deadline_guard(
-        state: &RoutePolicyState,
-        deadline: Deadline,
-        upstream_state: bool,
-    ) -> AttemptDeadlineGuard {
-        AttemptDeadlineGuard {
-            state: state.clone(),
-            target_key: "provider:model".into(),
-            epoch: 0,
-            retry_budget: 0,
-            cooldown_ms: 120_000,
-            deadline,
-            upstream_state: Arc::new(AtomicU8::new(if upstream_state {
-                UPSTREAM_STARTED
-            } else {
-                UPSTREAM_NOT_STARTED
-            })),
-            armed: true,
-        }
-    }
-
-    #[tokio::test]
-    async fn expired_armed_guard_records_an_upstream_failure() {
-        let state = RoutePolicyState::default();
-        let deadline = Deadline::from_now(Duration::from_millis(20));
-        let pending = {
-            let state = state.clone();
-            let deadline = deadline.clone();
-            async move {
-                let _guard = armed_deadline_guard(&state, deadline, true);
-                std::future::pending::<()>().await
-            }
-        };
-        while !deadline.is_exceeded() {
-            tokio::task::yield_now().await;
-        }
-        let _ = tokio::time::timeout(Duration::from_millis(50), pending).await;
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::CoolingDown
-        );
-    }
-
-    #[tokio::test]
-    async fn expired_live_driver_drop_cools_target_for_next_selection() {
-        let state = RoutePolicyState::default();
-        let cancellation = stravia_runtime_contract::CancellationToken::new();
-        let handle = VendorDriverHandle {
-            join: Some(tokio::spawn(std::future::pending::<()>())),
-            cancellation: cancellation.clone(),
-            publication_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            deadline_guard: Some(armed_deadline_guard(
-                &state,
-                Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-                true,
-            )),
-        };
-        drop(handle);
-        assert!(cancellation.is_cancelled());
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::CoolingDown
-        );
-    }
-
-    #[tokio::test]
-    async fn dropped_armed_guard_does_not_record_user_cancel() {
-        let state = RoutePolicyState::default();
-        let pending = {
-            let state = state.clone();
-            async move {
-                let _guard = armed_deadline_guard(
-                    &state,
-                    Deadline::from_now(Duration::from_secs(3600)),
-                    true,
-                );
-                std::future::pending::<()>().await
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_millis(10), pending).await;
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-
-    #[test]
-    fn expired_guard_before_provider_send_does_not_record_failure() {
-        let state = RoutePolicyState::default();
-        drop(armed_deadline_guard(
-            &state,
-            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-            false,
-        ));
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-
-    #[test]
-    fn expired_local_delivery_keeps_target_available_for_next_selection() {
-        let state = RoutePolicyState::default();
-        let guard = armed_deadline_guard(
-            &state,
-            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-            true,
-        );
-        {
-            let _local_work = UpstreamLocalWork::begin(
-                &guard.upstream_state,
-                Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-            );
-        }
-        drop(guard);
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-
-    #[test]
-    fn expired_guard_after_upstream_completion_keeps_target_available_for_next_selection() {
-        let state = RoutePolicyState::default();
-        let guard = armed_deadline_guard(
-            &state,
-            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-            true,
-        );
-        guard.upstream_state.store(
-            UPSTREAM_STARTED | UPSTREAM_FINISHED,
-            std::sync::atomic::Ordering::Release,
-        );
-        drop(guard);
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-
-    #[test]
-    fn disarmed_deadline_guard_does_not_record_failure() {
-        let state = RoutePolicyState::default();
-        let mut guard = armed_deadline_guard(
-            &state,
-            Deadline::fixed(Instant::now() - Duration::from_secs(1)),
-            true,
-        );
-        guard.disarm();
-        drop(guard);
-        assert_eq!(
-            state.target_status("provider:model").state,
-            TargetRuntimeState::Available
-        );
-    }
-}
+mod tests;

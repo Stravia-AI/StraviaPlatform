@@ -372,6 +372,13 @@ impl VendorGuest for LifecycleContractVendor {
         let status = response.status()?;
         let body = read_http_body(&response, 1024 * 1024)?;
         if status == 404 && mode == "continuation" {
+            host.emit_delta(&AiStreamDelta::MessageStart {
+                id: "discarded-operation".into(),
+                model: "discarded-model".into(),
+            })?;
+            host.emit_delta(&AiStreamDelta::ResponseMetadata {
+                metadata: serde_json::json!({"discarded_operation": true}),
+            })?;
             return Err(PluginError {
                 kind: ErrorKind::ContinuationNotFound,
                 message: "fixture continuation is no longer available".into(),
