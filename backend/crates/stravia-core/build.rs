@@ -22,6 +22,11 @@ fn main() -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").context("missing CARGO_MANIFEST_DIR")?,
     );
+    // sqlx::migrate! 只跟踪已有文件；目录跟踪确保新增迁移也触发重新嵌入。
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("migrations").display()
+    );
     let root = manifest_dir
         .ancestors()
         .nth(3)

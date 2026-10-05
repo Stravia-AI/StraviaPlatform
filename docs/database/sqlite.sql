@@ -607,9 +607,11 @@ CREATE INDEX idx_turn_chain_expiry ON turn_chain_nodes(expires_at);
 
 CREATE INDEX idx_turn_chain_node_contents_content_id ON turn_chain_node_contents(principal, content_id);
 
+CREATE INDEX idx_turn_chain_node_contents_node ON turn_chain_node_contents(node_id, principal);
+
 CREATE UNIQUE INDEX idx_turn_chain_node_principal ON turn_chain_nodes(id,principal);
 
-CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id);
+CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id, principal, kind);
 
 CREATE INDEX idx_turn_chain_principal_kind ON turn_chain_nodes(principal,kind);
 

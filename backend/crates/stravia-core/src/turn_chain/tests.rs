@@ -6,6 +6,101 @@ fn principal(id: &str) -> Principal {
 }
 
 #[tokio::test]
+async fn large_retention_sweep_preserves_live_history_and_native_login() {
+    let pool = crate::test_support::migrated_sqlite_pool()
+        .await
+        .expect("SQLite database");
+    let store = SqlTurnChainStore::sqlite(pool.clone(), Arc::new(tokio::sync::Mutex::new(())));
+    let owner = principal("retention-owner");
+    let live = TurnNodeId::response();
+    let payload = serde_json::json!({"effective_system": "shared instructions ".repeat(100)});
+    store
+        .commit(TurnCommit {
+            id: live.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: payload.clone(),
+            idle_ttl: Duration::from_secs(3600),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("live history");
+    // 复制真实 envelope 和引用，构造同一 Principal 下大量独立的到期节点。
+    sqlx::query(
+        "WITH RECURSIVE expired(n) AS (
+             SELECT 1 UNION ALL SELECT n+1 FROM expired WHERE n<8000
+         )
+         INSERT INTO turn_chain_nodes
+             (id, kind, parent_id, principal, payload_version, payload,
+              created_at, expires_at, storage_format)
+         SELECT 'expired-' || n, kind, NULL, principal, payload_version, payload,
+                created_at, 0, storage_format
+         FROM expired CROSS JOIN turn_chain_nodes WHERE id=?",
+    )
+    .bind(live.as_str())
+    .execute(&pool)
+    .await
+    .expect("expired history");
+    sqlx::query(
+        "INSERT INTO turn_chain_node_contents (node_id, principal, content_id)
+         SELECT n.id, r.principal, r.content_id
+         FROM turn_chain_nodes n CROSS JOIN turn_chain_node_contents r
+         WHERE n.expires_at=0 AND r.node_id=?",
+    )
+    .bind(live.as_str())
+    .execute(&pool)
+    .await
+    .expect("shared history references");
+
+    {
+        let mut connection = pool.acquire().await.expect("maintenance connection");
+        // 用 SQLite 指令预算捕获二次方级外键扫描，不依赖机器速度或墙钟超时。
+        let mut remaining = 3000_u32;
+        connection
+            .lock_handle()
+            .await
+            .expect("SQLite handle")
+            .set_progress_handler(1000, move || {
+                remaining = remaining.saturating_sub(1);
+                remaining > 0
+            });
+    }
+    let swept = store.sweep_expired().await;
+    {
+        let mut connection = pool.acquire().await.expect("maintenance connection");
+        connection
+            .lock_handle()
+            .await
+            .expect("SQLite handle")
+            .remove_progress_handler();
+    }
+    assert_eq!(
+        swept.expect("retention must not monopolize the writer"),
+        8000
+    );
+    let history = store
+        .materialize(&owner, TurnNodeKind::Response, &live)
+        .await
+        .expect("live history remains available");
+    assert_eq!(history[0].payload, payload);
+
+    let auth = crate::admin::identity::AdminAuth::new(Arc::new(
+        crate::storage::SqliteStorage::from_pool(pool),
+    ));
+    auth.ensure_native_admin().await.expect("native identity");
+    let session = auth.login_native().await.expect("native login after sweep");
+    assert_eq!(
+        auth.authenticate(&session.access_token)
+            .await
+            .expect("native session remains authenticated")
+            .role,
+        "admin"
+    );
+}
+
+#[tokio::test]
 async fn committed_root_materializes_through_the_public_store_interface() {
     let store: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let id = TurnNodeId::agent();

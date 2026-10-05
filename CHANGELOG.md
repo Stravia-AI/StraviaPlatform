@@ -50,6 +50,8 @@
 
 ### Fixed
 
+- Fixed quadratic SQLite history-retention foreign-key scans that could hold the writer lock long enough to fail administrator session creation and background writes. SQLite/PostgreSQL migration `0015_history_retention_indexes` adds complete node-reference and parent-edge indexes without changing history, authentication, retention periods, or database timeouts.
+- Core builds now track the migration directory, so adding a migration triggers re-embedding during incremental Desktop and Server builds instead of silently shipping the previous migration list.
 - Plugin loading now reuses live immutable compilations of identical bytes within the same Engine and coalesces concurrent compilation of the same component. The bounded cache uses weak references; every load still checks imports and freshly reads and validates its descriptor, without sharing guest state or extending retired-version lifetimes.
 - Desktop Connect smoke checks now observe actual native clipboard contents and incrementally written configuration instead of transient success-toast wording.
 - Local matrix test executables now have isolated cached copies, so later targeted Cargo runs cannot invalidate them by rewriting shared build outputs. Native Chrome fixture scenarios run serially within their test binary while the rest of the matrix remains parallel. Source and compiler freshness checks, test coverage, product timeouts, and the five-minute limit remain unchanged.

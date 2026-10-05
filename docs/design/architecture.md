@@ -950,6 +950,8 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 
+Core 的 `build.rs` 显式跟踪整个 `migrations/` 目录，使新增迁移也能触发增量构建重新嵌入；仅依赖 `sqlx::migrate!` 对已有文件的跟踪不能发现新增文件。`0015_history_retention_indexes` 在两后端将父边索引扩展为 `(parent_id, principal, kind)`，并增加内容引用的 `(node_id, principal)` 索引，使外键删除检查按完整关系定位，避免清理每个节点时反复扫描同一 Principal 的全部历史并长时间占用 SQLite 写锁。迁移只调整索引，不改变历史、保留期、身份或会话契约。
+
 迁移仍由单一数据库连接持有互斥锁并按阶段执行 SQL，不并发 schema 变更或 SQLite 写事务。历史每批最多 100 个节点，按节点 ID 游标推进并集中读取旧引用；JSON 还原、摘要、envelope 编码和批次唯一内容压缩交给有界 blocking worker。观测每批最多 200 条，旧表在转换期间建立 `(run_id, sequence)` 索引，生命周期合并只查询对应事件种类；批量解码与 manifest 导出使用同样的有界并发，worker 数随可用处理器确定，最多 8 个。事件合并按 sequence 串行执行，同批中被合并修改的旧行必须重读，不能把过期快照写回。每批数据库改动原子提交，失败只回滚当前批次，重启继续未完成数据；所有转换成功后才清理旧结构。日志记录迁移阶段、累计完成条数与总耗时，不记录历史正文、身份或诊断路径。
 
 启动与 migration 的内部进度统一由 `stravia-core::startup_progress` 提供：`report(phase, label, completed, total)` 发布当前阶段快照，同时写结构化日志；`observe_startup(observer, future)` 在调用任务的 Tokio task-local scope 内连接宿主观察者。没有观察者时仅记录日志，多个启动任务不共用全局 sink。`phase` 是稳定操作代码，`label` 是不含敏感数据的静态英文回退文案，计数只属于当前阶段；未知总量使用 `None`，未来迁移可直接复用同一接口。SQLx schema runner 保持原样，仅报告执行阶段，不猜测单条 SQL 或总体启动百分比。

@@ -1469,6 +1469,13 @@ CREATE INDEX idx_turn_chain_node_contents_content_id ON public.turn_chain_node_c
 
 
 --
+-- Name: idx_turn_chain_node_contents_node; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_turn_chain_node_contents_node ON public.turn_chain_node_contents USING btree (node_id, principal);
+
+
+--
 -- Name: idx_turn_chain_node_principal; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1479,7 +1486,7 @@ CREATE UNIQUE INDEX idx_turn_chain_node_principal ON public.turn_chain_nodes USI
 -- Name: idx_turn_chain_parent; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_turn_chain_parent ON public.turn_chain_nodes USING btree (parent_id);
+CREATE INDEX idx_turn_chain_parent ON public.turn_chain_nodes USING btree (parent_id, principal, kind);
 
 
 --
