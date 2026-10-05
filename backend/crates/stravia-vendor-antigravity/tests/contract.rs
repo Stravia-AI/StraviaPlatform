@@ -124,9 +124,25 @@ async fn upstream(
         "/v1internal/operations/account-onboarding" => {
             json!({"name":"operations/account-onboarding","done":true,"response":{"cloudaicompanionProject":"test-project"}})
         }
-        "/v1internal:fetchAvailableModels" => json!({"models":{
+        "/v1internal:fetchAvailableModels" => json!({
+            "defaultAgentModelId": "gemini-3.8-flash-high",
+            "agentModelSorts":[{"groups":[{"modelIds":[
+                "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
+                "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"
+            ]}]}],
+            "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
+            "imageGenerationModelIds": ["gemini-3.1-flash-image"],
+            "models":{
             "account-model":{"displayName":"Account model","supportsImages":true,"maxTokens":131072},
-            "hidden-model":{"isInternal":true}
+            "hidden-model":{"isInternal":true},
+            "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
+            "gemini-3.1-pro-high":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
+            "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","supportsThinking":true},
+            "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true},
+            "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true},
+            "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true},
+            "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
+            "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
         }}),
         "/v1internal:retrieveUserQuotaSummary" => {
             json!({"groups":[{"displayName":"Gemini","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7,"resetTime":"2026-01-01T00:00:00Z"}]}],"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7}]})
@@ -375,7 +391,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
-        ["account-model"]
+        ["account-model", "gemini-3.1-pro", "gemini-3.8-flash"]
     );
     let OperationOutput::Allowance(quota) = run(
         &runtime,
@@ -587,6 +603,114 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             );
         }
     }
+    for (family, effort, expected) in [
+        ("gemini-3.1-pro", None, "gemini-pro-agent"),
+        ("gemini-3.1-pro", Some("low"), "gemini-3.1-pro-low"),
+        ("gemini-3.1-pro", Some("high"), "gemini-pro-agent"),
+        ("gemini-3.8-flash", Some("low"), "gemini-3.8-flash-low"),
+        (
+            "gemini-3.8-flash",
+            Some("medium"),
+            "gemini-3.8-flash-medium",
+        ),
+        ("gemini-3.8-flash", Some("high"), "gemini-3.8-flash-high"),
+    ] {
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == family)
+            .unwrap();
+        let mut selected_provider = provider.clone();
+        selected_provider.model = Some(model.id.clone());
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            id: Some(model.id.clone()),
+            family: model.family.clone(),
+            selector: model.selector.clone(),
+            extensions: BTreeMap::from([(
+                "antigravity".into(),
+                model.metadata["antigravity"].clone(),
+            )]),
+            ..Default::default()
+        });
+        let mut selected_request = request.clone();
+        selected_request.reasoning.target_control =
+            effort.map(
+                |value| stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                    value: value.into(),
+                },
+            );
+        let OperationOutput::Infer(output) = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: selected_provider,
+                request: selected_request,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("family inference");
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(envelope["model"], expected);
+        if effort.is_some() {
+            assert!(
+                envelope
+                    .pointer("/request/generationConfig/thinkingConfig")
+                    .is_none()
+            );
+        }
+    }
+    {
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == "gemini-3.1-pro")
+            .unwrap();
+        let mut selected_provider = provider.clone();
+        selected_provider.model = Some(model.id.clone());
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([(
+                "antigravity".into(),
+                model.metadata["antigravity"].clone(),
+            )]),
+            ..Default::default()
+        });
+        let mut selected_request = request.clone();
+        selected_request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "medium".into(),
+            },
+        );
+        let before = fixture.received.lock().len();
+        let error = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: selected_provider,
+                request: selected_request,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            stravia_vendor_runtime::RuntimeError::Plugin {
+                kind: ErrorKind::Invalid,
+                ..
+            }
+        ));
+        assert_eq!(fixture.received.lock().len(), before);
+    }
     fixture.truncated.store(true, Ordering::Relaxed);
     let error = run(
         &runtime,
@@ -615,7 +739,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         matches!(&error, stravia_vendor_runtime::RuntimeError::Plugin { kind, .. } if kind.model_error_kind()==Some(AiErrorKind::RateLimitError))
     );
     println!(
-        "Antigravity Wasm + loopback HTTP: OAuth PKCE/state/manual exchange/refresh; async project; account catalog; shared quota 30%; strict wire filter; SSE text/tool signature; truncated/429 errors: OK"
+        "Antigravity Wasm + loopback HTTP: OAuth PKCE/state/manual exchange/refresh; async project; Agent-only families; default/low/medium/high request IDs; unsupported effort rejected before HTTP; shared quota 30%; strict wire filter; SSE text/tool signature; truncated/429 errors: OK"
     );
     server.abort();
 }

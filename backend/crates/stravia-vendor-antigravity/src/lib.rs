@@ -2,6 +2,7 @@ mod allowance;
 mod auth;
 mod catalog;
 mod client;
+mod selector;
 mod wire;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
