@@ -22,6 +22,7 @@
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = command-code`、channel `default`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
 | `stravia-vendor-claudecode` | `claude-code` / `dedicated` | `provider_id = claude-code`、`catalog_id = anthropic`、channel `oauth`。 |
+| `stravia-vendor-antigravity` | `antigravity` / `dedicated` | `provider_id = antigravity`、无目录映射、channel `oauth`；模型与额度来自登录账号。 |
 
 ### Cline Pass 接入
 
@@ -47,6 +48,20 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 - 模型发现读取 `/v1/models`；额度监控读取 `/api/oauth/usage`，呈现 5 小时、每周、按模型的每周窗口与额外用量。
 - HTTP 429 同时明确报告代表额度窗口为 `five_hour` 或 `seven_day`、对应窗口 `rejected` 且使用率为有限值并达到 100%，以及额外用量 `rejected`、原因为 `org_level_disabled` 时，按 `QuotaExceeded` 交给宿主直接切换 Target；缺失、未知或互相不匹配的证据，以及普通请求限流，仍保留既有分类。该判定由共享 HTTP 错误解析执行，不改变状态码或 `Retry-After`。已安装的独立 `claude-code` 插件需导入重建的插件包才能获得此分类修复，单独更新宿主不会替换已安装插件。
 - 以订阅 OAuth 令牌在 Claude Code 以外的客户端调用可能违反 Anthropic 使用条款并导致账号受限；上游对客户端形态的校验可能随 Claude Code 版本变化而失效。
+
+### Antigravity CLI 接入
+
+Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 Gemini API-key 身份。运行 `task build:vendors:all` 后，本地导入 `target/vendor-plugins-all/manifest.json` 中对应的 Wasm；发布附件沿用 `stravia-vendor-antigravity-v{version}.wasm` 命名。
+
+1. 添加 **Antigravity** 模型服务，选择 OAuth。浏览器授权后，从 Google 网站复制授权码并粘贴到界面的秘密输入框；不监听 loopback 端口。如果网站回调没有显示授权码，但跳转地址已有 `code` 参数，只提交该参数解码后的授权码，不提交整个回调 URL。
+2. 保存连接并同步账号模型。项目异步接入未完成时，保留凭据与 operation，后续真实发现请求检查一次进度并明确报告 pending；不猜 project/tier 或自动重试。
+3. 将发现的模型绑定到 Route。额度页读取账号共享池、剩余比例和重置时间；缺失额度不显示为零，未知窗口保留，disabled 不自动等于 exhausted。
+
+OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/auth`、`https://oauth2.googleapis.com/token`、固定网站回调 `https://antigravity.google/oauth-callback` 与 consumer 七个 scope。宿主通用契约允许 `AuthorizationCode + callback=None + manual_input.type=text`，有效模式为 `manual`、listener 为 `not_required`；缺少手动 text 输入的无 callback 授权码描述符仍拒绝。现有 WebUI 按描述符渲染，不增加供应商分支。
+
+推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头只由插件构造 Bearer、JSON Content-Type 与已核对的 CLI User-Agent；不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON 和真实签名保留，不制造签名或伪成功。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
+
+已在隔离 Server 中通过默认 Edge 完成真实 Google OAuth，并用 `gemini-3.5-flash-lite` 验证四种客户端协议各三轮上下文与第三轮 SSE 终态；Responses 使用 `previous_response_id`，Gemini 保留真实签名。四协议还分别通过同步工具调用后流式回填、流式工具调用后同步回填：客户端执行声明的整数加法工具，并校验模型逐字返回工具生成的随机 receipt，确认工具结果实际进入下一轮。此验证不覆盖内置平台工具或 MCP。真实额度 API 与 Edge 额度页的四个共享窗口、剩余/已用切换和重置时间一致。这仅证明测试账号当时可用，不保证其它账号资格、全部模型或未来可用性。第三方 OAuth 使用可能违反 Google 条款并导致账号暂停或终止；私有协议与客户端识别也可能变化。固定 Linux/amd64 User-Agent 不代表复刻了原生 TLS、HTTP 或 JSON 序列化指纹。专属插件要求支持网站回调后手动授权码的 Stravia 版本，单独导入到旧宿主不能获得该流程；工具回放修复同样需要更新宿主与重建的独立插件。
 
 ### Provider 图标标识
 
@@ -106,6 +121,8 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 
 - Vendor Plugin 的自定义协议仅用于上游接入，不开放客户端入口注册。
 - 插件可以自定义上游请求、响应及流式编解码，包括 Devin Connect-RPC / protobuf，但必须接收与产出宿主规定的 canonical 语义。
+- Command Code 的 NDJSON 信封不提供原生响应 ID；其 codec 在首个有效事件前产出一次 canonical `MessageStart`，由宿主绑定 Generation Chain 身份。Responses 客户端收到的 `response.id` 与保存的续接节点一致，流式响应后的 `previous_response_id` 可回放原始思考与工具结果。
+- Devin 的 indexed 思考项可在 Connect EndStream 才封口，晚于同一响应的正文和工具调用。宿主保留该思考项开始时的正文前/后位置，不以封口时的位置改写 Marker 载体；实时交付与最终历史投影使用同一个 Marker，继续校验顺序并保留原始思考。
 - 插件不得注册任意 HTTP 路由、客户端认证方式或 MCP 工具；安装供应商插件不等于对外提供该供应商的原生服务入口。
 - 宿主决定对外开放的客户端协议，仍可引用共享标准 codec 库；增加新的客户端协议需要宿主支持，不通过 Vendor Plugin 安装隐式开放。
 - 无法表示的任务语义必须显式拒绝，不允许绕过 canonical 契约直接透传客户端流量。

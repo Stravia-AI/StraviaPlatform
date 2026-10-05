@@ -25,6 +25,7 @@ impl GoogleResponseParser {
         let content_obj = candidate.and_then(|c| c.get("content"));
 
         let mut items = Vec::new();
+        let mut has_tool_calls = false;
 
         if let Some(parts) = content_obj
             .and_then(|c| c.get("parts"))
@@ -70,6 +71,7 @@ impl GoogleResponseParser {
                         .filter(|id| !id.trim().is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+                    has_tool_calls = true;
                     items.push(AiItem::function_call(ToolCall {
                         id: (call_id).into(),
                         name,
@@ -90,6 +92,7 @@ impl GoogleResponseParser {
             .and_then(|c| c.get("finishReason"))
             .and_then(|v| v.as_str())
             .map(|r| match r {
+                "STOP" if has_tool_calls => "tool_calls".to_string(),
                 "STOP" => "stop".to_string(),
                 "MAX_TOKENS" => "length".to_string(),
                 other => other.to_lowercase(),
@@ -204,6 +207,7 @@ struct NativeStreamCursor {
     index: usize,
     next_index: usize,
     text: String,
+    has_tool_calls: bool,
 }
 
 impl NativeStreamCursor {
@@ -320,6 +324,10 @@ fn parse_gemini_chunk(
                     thought_signature,
                     extra,
                 } if extra.is_empty() => {
+                    // 空 thought 占位没有内容或签名；建项会使实时序号与完成项错位。
+                    if text.is_empty() && thought_signature.is_none() {
+                        continue;
+                    }
                     if thought.unwrap_or(false) || thought_signature.is_some() {
                         cursor.begin(NativeStreamKind::Thinking, deltas);
                         if !text.is_empty() {
@@ -356,6 +364,7 @@ fn parse_gemini_chunk(
                         .id
                         .clone()
                         .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+                    cursor.has_tool_calls = true;
                     deltas.push(AiStreamDelta::ToolCallStart {
                         index,
                         id: id.clone(),
@@ -462,6 +471,7 @@ fn parse_gemini_chunk(
     if let Some(reason) = candidate.and_then(|candidate| candidate.finish_reason.as_deref()) {
         cursor.close_text(deltas, None);
         let normalized = match reason {
+            "STOP" if cursor.has_tool_calls => "tool_calls",
             "STOP" => "stop",
             "MAX_TOKENS" => "length",
             other => other,
@@ -714,7 +724,7 @@ impl GoogleStreamFormatter {
                 }
                 AiStreamDelta::Done { stop_reason } => {
                     let gemini_reason = match stop_reason.as_str() {
-                        "stop" => "STOP",
+                        "stop" | "tool_calls" => "STOP",
                         "length" => "MAX_TOKENS",
                         other => other,
                     };

@@ -60,45 +60,47 @@ fn encodes_tools_without_type_and_aliases_names() {
 }
 
 #[test]
-fn parses_ndjson_stream_events() {
+fn streamed_response_keeps_the_generation_chain_identity() {
     let mut parser = CommandCodeStreamParser::new();
-    let deltas = parser
-        .parse_chunk(
-            "{\"type\":\"text-delta\",\"text\":\"hello\"}\n\
-             {\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":3,\"outputTokens\":5}}\n",
-        )
-        .unwrap();
-    assert!(matches!(&deltas[0], AiStreamDelta::TextDelta(text) if text == "hello"));
-    assert!(matches!(
-        deltas[1],
-        AiStreamDelta::Usage(Usage {
-            total_tokens: 8,
-            ..
-        })
-    ));
-    assert!(matches!(&deltas[2], AiStreamDelta::Done { stop_reason } if stop_reason == "stop"));
-    assert!(parser.finish().unwrap().is_empty());
-}
-
-#[test]
-fn ignores_live_envelope_events() {
-    let mut parser = CommandCodeStreamParser::new();
-    let deltas = parser
+    let mut deltas = parser
         .parse_chunk(
             "{\"type\":\"start\"}\n\
-             {\"type\":\"start-step\"}\n\
-             {\"type\":\"reasoning-start\",\"id\":\"r1\"}\n\
-             {\"type\":\"reasoning-delta\",\"id\":\"r1\",\"text\":\"think\"}\n\
-             {\"type\":\"reasoning-end\",\"id\":\"r1\"}\n\
-             {\"type\":\"finish-step\"}\n\
-             {\"type\":\"finish\",\"finishReason\":\"length\",\"totalUsage\":{\"inputTokens\":1,\"outputTokens\":2}}\n\
-             {\"type\":\"provider-metadata\"}\n",
+             {\"type\":\"reasoning-delta\",\"text\":\"Use the addition tool.\"}\n\
+             {\"type\":\"tool-call\",\"toolCallId\":\"call-add\",\"toolName\":\"add_integers\",\"input\":{\"a\":17,\"b\":25}}\n\
+             {\"type\":\"finish-step\",\"finishReason\":\"tool-calls\",\"usage\":{\"inputTokens\":3,\"outputTokens\":5}}\n",
         )
         .unwrap();
-    assert!(matches!(&deltas[0], AiStreamDelta::ThinkingDelta(text) if text == "think"));
-    assert!(matches!(&deltas[1], AiStreamDelta::Usage(_)));
-    assert!(matches!(&deltas[2], AiStreamDelta::Done { stop_reason } if stop_reason == "length"));
-    assert!(parser.finish().unwrap().is_empty());
+    deltas.extend(parser.finish().unwrap());
+    // 宿主只在 MessageStart 上绑定已分配的 Generation Chain ID。
+    for delta in &mut deltas {
+        if let AiStreamDelta::MessageStart { id, model } = delta {
+            *id = "response-bound".into();
+            *model = "logical-model".into();
+        }
+    }
+    let endpoint = stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
+        .bind(endpoint, endpoint)
+        .unwrap();
+    let (_, mut encoder) = pair.stream().unwrap().into_parts();
+    let events = encoder.encode_deltas(&deltas).unwrap();
+    let completed = events
+        .iter()
+        .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+        .find(|body| body["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(completed["response"]["id"], "response-bound");
+    let call = completed["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert_eq!(call["call_id"], "call-add");
+    assert_eq!(
+        serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+        json!({"a": 17, "b": 25})
+    );
 }
 
 // 上游对每个工具调用同时发 `tool-input-*` 流式事件与裸 `tool-call` 完整回显

@@ -638,18 +638,28 @@ struct ResolutionContext<'a> {
 async fn materialize_parsed_item(
     store: &dyn HistoryMarkerStore,
     principal: &Principal,
-    original: AiItem,
+    mut original: AiItem,
     atoms: Vec<CarrierAtom>,
     request_marker_references: &HashSet<String>,
     context: &mut ResolutionContext<'_>,
 ) -> Result<(), HistoryMarkerError> {
     let mut meta = original.meta.clone();
+    let mut remaining_calls = original.tool_calls.take().unwrap_or_default();
     for atom in atoms {
         match atom {
             CarrierAtom::Visible(block) => {
-                context
-                    .resolved_items
-                    .push(client_fragment(&original, block, &mut meta));
+                // 同一 item 的 tool_use 与 canonical call 是镜像，拆分后仍须同项保存。
+                let tool_calls = if let ContentBlock::ToolUse { id, .. } = &block {
+                    remaining_calls
+                        .iter()
+                        .position(|call| &call.id == id)
+                        .map(|index| vec![remaining_calls.remove(index)])
+                } else {
+                    None
+                };
+                let mut fragment = client_fragment(&original, block, &mut meta);
+                fragment.tool_calls = tool_calls;
+                context.resolved_items.push(fragment);
             }
             CarrierAtom::Projection {
                 reference,
@@ -719,15 +729,12 @@ async fn materialize_parsed_item(
         }
     }
 
-    let has_tool_calls = original
-        .tool_calls
-        .as_ref()
-        .is_some_and(|calls| !calls.is_empty());
+    let has_tool_calls = !remaining_calls.is_empty();
     if has_tool_calls || original.tool_call_id.is_some() {
         context.resolved_items.push(AiItem {
             role: original.role,
             content: MessageContent::Text(String::new()),
-            tool_calls: has_tool_calls.then_some(original.tool_calls.unwrap_or_default()),
+            tool_calls: has_tool_calls.then_some(remaining_calls),
             tool_call_id: original.tool_call_id,
             meta,
         });

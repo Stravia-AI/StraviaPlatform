@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn gemini_tool_call_stop_is_anthropic_tool_use() {
+    let pair = crate::transform::ProtocolTransform::global()
+        .bind(
+            stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01,
+            stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        )
+        .expect("Anthropic/Gemini protocol pair");
+    let response = pair
+        .decode_response(serde_json::json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{
+                    "functionCall": {"id": "call_add", "name": "add", "args": {"a": 17, "b": 25}}
+                }]},
+                "finishReason": "STOP"
+            }]
+        }))
+        .expect("decode Gemini tool call");
+    let output = pair
+        .encode_response(&response)
+        .expect("encode Anthropic tool call");
+    assert_eq!(output["content"][0]["type"], "tool_use");
+    assert_eq!(output["stop_reason"], "tool_use");
+}
+
+#[test]
+fn gemini_tool_call_stop_stream_survives_later_text_and_terminal_chunk() {
+    for (finish_reason, expected) in [("STOP", "tool_calls"), ("MAX_TOKENS", "length")] {
+        let mut parser = GoogleStreamParser::new();
+        parser
+            .parse_chunk(&format!(
+                "data: {}\n\n",
+                serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [{
+                    "functionCall": {"id": "call_add", "name": "add", "args": {"a": 17, "b": 25}}
+                }]}}]})
+            ))
+            .expect("parse tool call");
+        parser
+            .parse_chunk(&format!(
+                "data: {}\n\n",
+                serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [{
+                    "text": "Waiting for the tool."
+                }]}}]})
+            ))
+            .expect("parse later text");
+        let terminal = parser
+            .parse_chunk(&format!(
+                "data: {}\n\n",
+                serde_json::json!({"candidates": [{"finishReason": finish_reason}]})
+            ))
+            .expect("parse terminal chunk");
+        assert!(terminal.iter().any(|delta| matches!(
+            delta,
+            AiStreamDelta::Done { stop_reason } if stop_reason == expected
+        )));
+    }
+}
+
+#[test]
 fn thinking_replay_gemini_tool_signature_output_round_trip() {
     let endpoint = stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let pair = crate::transform::ProtocolTransform::global()
@@ -42,6 +100,12 @@ fn thinking_replay_gemini_tool_signature_stream_round_trip() {
     let mut formatter = GoogleStreamFormatter::new();
     let mut events = formatter.format_deltas(&deltas[..start]);
     events.extend(formatter.format_deltas(&deltas[start..]));
+    let terminal = events
+        .iter()
+        .map(|event| serde_json::from_str::<Value>(&event.data).expect("event JSON"))
+        .find(|body| body["candidates"][0].get("finishReason").is_some())
+        .expect("Gemini terminal event");
+    assert_eq!(terminal["candidates"][0]["finishReason"], "STOP");
     let parts = events
         .iter()
         .map(|event| serde_json::from_str::<Value>(&event.data).expect("event JSON"))

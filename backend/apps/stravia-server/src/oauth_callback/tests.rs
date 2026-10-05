@@ -218,6 +218,50 @@ fn auth_candidate(vendor_id: &str, channel: &str, base_url: &str) -> AuthSession
 }
 
 #[tokio::test]
+async fn hosted_callback_uses_manual_code_without_opening_a_listener() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "antigravity").await?;
+    let manager = OAuthCallbackManager::new(gateway.clone());
+    let session = manager
+        .init_session(
+            auth_candidate(
+                "antigravity",
+                "oauth",
+                "https://daily-cloudcode-pa.googleapis.com",
+            ),
+            OAuthCallbackMode::Auto,
+            None,
+        )
+        .await?;
+    let status = gateway
+        .admin()
+        .get_oauth_session_status(&session.session_id)
+        .await?;
+    let value = serde_json::to_value(&status)?;
+    assert_eq!(value["callback_mode"], "manual");
+    assert_eq!(value["listener_state"], "not_required");
+    assert!(
+        session
+            .auth_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://accounts.google.com/o/oauth2/auth?"))
+    );
+    assert!(
+        manager
+            .inner
+            .active
+            .lock()
+            .await
+            .get(&session.session_id)
+            .unwrap()
+            .shutdown
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_sessions_keep_independent_listener_lifetimes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;

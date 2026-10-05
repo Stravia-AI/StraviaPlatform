@@ -1053,6 +1053,118 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
 }
 
 #[tokio::test]
+async fn resolver_keeps_tool_use_mirrors_with_their_fragments() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                source: None,
+                block: ContentBlock::Thinking {
+                    thinking: "protected reasoning".into(),
+                    signature: Some("opaque-signature".into()),
+                },
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let mirrored_call = ToolCall {
+        id: "call-mirrored".into(),
+        name: "sum".into(),
+        arguments: r#"{"a":17,"b":25}"#.into(),
+    };
+    let unmatched_call = call("call-unmatched");
+    let tool_use = ContentBlock::ToolUse {
+        id: mirrored_call.id.clone(),
+        name: mirrored_call.name.clone(),
+        input: serde_json::json!({"a": 17, "b": 25}),
+        cache_control: Some(stravia_runtime_contract::protocol::ir::CacheControl::ephemeral()),
+    };
+    let trailing = ContentBlock::Text {
+        text: "after tool use".into(),
+        cache_control: None,
+    };
+    let mut item = AiItem::thinking(render_history_marker(&marker), None);
+    let MessageContent::Blocks(blocks) = &mut item.content else {
+        panic!("thinking item must contain blocks");
+    };
+    blocks.extend([tool_use.clone(), trailing.clone()]);
+    // 无对应 block 的 call 位于镜像之前，确保 fallback 不依赖列表顺序。
+    item.tool_calls = Some(vec![unmatched_call.clone(), mirrored_call.clone()]);
+    let mut request = AiRequest::new("model", vec![item]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_thinking_segments, 1);
+    assert_eq!(request.items.len(), 4);
+    assert_eq!(
+        request.items[0].thinking_ref(),
+        Some(("protected reasoning", Some("opaque-signature")))
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items[1].content).unwrap(),
+        serde_json::to_value(MessageContent::Blocks(vec![tool_use])).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items[1].tool_calls).unwrap(),
+        serde_json::to_value(Some(vec![mirrored_call])).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items[2].content).unwrap(),
+        serde_json::to_value(MessageContent::Blocks(vec![trailing])).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items[3].tool_calls).unwrap(),
+        serde_json::to_value(Some(vec![unmatched_call])).unwrap()
+    );
+    assert_eq!(
+        request
+            .items
+            .iter()
+            .flat_map(|item| item.tool_calls.iter().flatten())
+            .map(|call| call.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-mirrored", "call-unmatched"]
+    );
+
+    let endpoint = stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
+        .bind(endpoint, endpoint)
+        .expect("Gemini protocol pair");
+    let encoded = pair
+        .encode_request(&request)
+        .expect("encode restored history");
+    let wire_calls = encoded.body["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|content| content["parts"].as_array().unwrap())
+        .filter_map(|part| part.get("functionCall"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wire_calls
+            .iter()
+            .map(|call| call["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["call-mirrored", "call-unmatched"]
+    );
+    assert_eq!(wire_calls[0]["args"], serde_json::json!({"a": 17, "b": 25}));
+}
+
+#[tokio::test]
 async fn resolver_strips_mismatched_delimiters_without_retyping_visible_bytes() {
     let store = sqlite_store().await;
     let owner = principal("owner");

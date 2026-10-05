@@ -1,0 +1,6 @@
+{
+  "channel_oauth": "Antigravity OAuth",
+  "channel_description": "Use Antigravity subscription models and monitor account quota.",
+  "authorization_code": "Authorization code",
+  "authorization_description": "Sign in through Google, then paste the code displayed by the Antigravity callback page. Third-party OAuth access may violate Google's terms and lead to account suspension."
+}

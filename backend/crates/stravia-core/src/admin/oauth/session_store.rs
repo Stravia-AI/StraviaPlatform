@@ -82,14 +82,16 @@ impl AdminService {
             stravia_vendor_sdk::AuthFlow::DeviceCode => AuthScheme::OAuthDeviceCode,
             stravia_vendor_sdk::AuthFlow::Manual => AuthScheme::SetupToken,
         };
-        let listener_state =
-            if auth_descriptor.flow != stravia_vendor_sdk::AuthFlow::AuthorizationCode {
-                "not_required".to_string()
-            } else if options.callback_mode == OAuthCallbackMode::Auto {
-                "listening".to_string()
-            } else {
-                "not_started".to_string()
-            };
+        let listener_state = if auth_descriptor.flow
+            != stravia_vendor_sdk::AuthFlow::AuthorizationCode
+            || auth_descriptor.callback.is_none()
+        {
+            "not_required".to_string()
+        } else if options.callback_mode == OAuthCallbackMode::Auto {
+            "listening".to_string()
+        } else {
+            "not_started".to_string()
+        };
         let verification_uri = verification_uri.or_else(|| auth_url.clone());
         let session = AuthSession {
             callback_mode: options.callback_mode,

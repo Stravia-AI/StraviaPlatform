@@ -1,0 +1,6 @@
+{
+  "channel_oauth": "Antigravity OAuth",
+  "channel_description": "使用 Antigravity 订阅模型并监控账户额度。",
+  "authorization_code": "授权码",
+  "authorization_description": "通过 Google 登录后，粘贴 Antigravity 回调页面显示的授权码。第三方 OAuth 接入可能违反 Google 条款并导致账号暂停。"
+}

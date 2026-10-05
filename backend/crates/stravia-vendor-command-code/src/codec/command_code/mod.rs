@@ -855,6 +855,7 @@ fn content_block_name(block: &ContentBlock) -> &'static str {
 
 pub struct CommandCodeStreamParser {
     buffer: String,
+    started: bool,
     done: bool,
     saw_finish_signal: bool,
     finish_reason: String,
@@ -874,6 +875,7 @@ impl CommandCodeStreamParser {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
+            started: false,
             done: false,
             saw_finish_signal: false,
             finish_reason: "stop".into(),
@@ -921,6 +923,14 @@ impl CommandCodeStreamParser {
             return Ok(());
         }
         let value: Value = serde_json::from_str(trimmed).context("parse Command Code NDJSON")?;
+        if !self.started {
+            self.started = true;
+            // 原生信封没有响应 ID；宿主通过 MessageStart 绑定续接节点身份。
+            deltas.push(AiStreamDelta::MessageStart {
+                id: String::new(),
+                model: String::new(),
+            });
+        }
         match value
             .get("type")
             .and_then(Value::as_str)

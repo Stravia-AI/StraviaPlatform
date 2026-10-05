@@ -472,6 +472,7 @@ impl ProtectedPreviewCarrier {
 
 struct LiveProtectedPreview {
     marker: HistoryMarker,
+    post_text: bool,
     carrier: Option<ProtectedPreviewCarrier>,
     ordinal: usize,
     canonical_text: String,
@@ -743,7 +744,15 @@ impl ClientProjectionSession {
         if self.early_thinking.contains_key(&output_index) {
             return Err(HistoryMarkerError::InvalidPayload);
         }
-        let post_text = self.state.post_text_started();
+        // 权威项可能在正文之后才封口；Marker 的载体仍属于思考开始时的位置。
+        let post_text = self
+            .state
+            .pre_text_protected_previews
+            .get(&output_index)
+            .map_or_else(
+                || self.state.post_text_started(),
+                |preview| preview.post_text,
+            );
         let reserved = self.state.reserved_thinking_marker(output_index).cloned();
         let preview_started = self.state.thinking_preview_started(output_index);
         let markers = self
@@ -779,7 +788,11 @@ impl ClientProjectionSession {
             }
         }
         for marker in &markers {
-            marker_deltas.push(self.state.marker_delta(render_history_marker(marker)));
+            marker_deltas.push(marker_delta_for(
+                self.state.openai_compatible,
+                post_text,
+                render_history_marker(marker),
+            ));
         }
         if !markers.is_empty() {
             self.early_thinking.insert(
@@ -1857,7 +1870,10 @@ impl ProjectionState {
             | AiStreamDelta::ReasoningSummaryDelta { .. })
                 if self.needs_thinking_marker =>
             {
-                if !self.openai_compatible || !self.post_text_started {
+                if self.pre_text_protected_previews.contains_key(&output_index)
+                    || !self.openai_compatible
+                    || !self.post_text_started
+                {
                     self.begin_protected_thinking(output_index);
                     return self.project_protected_delta(output_index, delta);
                 }
@@ -1904,6 +1920,7 @@ impl ProjectionState {
                 .entry(output_index)
                 .or_insert_with(|| LiveProtectedPreview {
                     marker: crate::history_marker::reserve_thinking_marker(),
+                    post_text: self.post_text_started,
                     carrier: None,
                     ordinal: 0,
                     canonical_text: String::new(),
@@ -1919,7 +1936,10 @@ impl ProjectionState {
         if !self.needs_thinking_marker {
             return vec![delta];
         }
-        if self.openai_compatible && self.post_text_started {
+        if self.openai_compatible
+            && self.post_text_started
+            && !self.pre_text_protected_previews.contains_key(&output_index)
+        {
             return self.project_delta(output_index, delta);
         }
         let preview = self
@@ -2576,6 +2596,153 @@ mod tests {
             crate::history_marker::history_marker_references(&canonical.items),
             live_references
         );
+    }
+
+    #[tokio::test]
+    async fn indexed_thinking_closes_after_text_and_tool_without_duplicate_marker() {
+        for ingress in [
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ] {
+            let (_, store, principal) =
+                projection_session_fixture("interleaved-thinking-owner").await;
+            let mut session =
+                ClientProjectionSession::new(Arc::clone(&store), principal.clone(), ingress);
+            let source = replay_source(
+                stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+                "deepseek-model",
+            );
+            session.begin_model_leg(
+                ThinkingCarrierFacts {
+                    indexed: true,
+                    may_be_protected: true,
+                    stream_unprotected_summaries: false,
+                },
+                Vec::new(),
+                Some(source.clone()),
+            );
+            let original =
+                AiItem::reasoning(Vec::new(), vec!["Use the addition tool.".into()], None);
+            let call = stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "call-add".into(),
+                name: "add_integers".into(),
+                arguments: "{\"a\":17,\"b\":25}".into(),
+            };
+            let mut live = Vec::new();
+            for deltas in [
+                vec![
+                    AiStreamDelta::MessageStart {
+                        id: "response-bound".into(),
+                        model: "logical-model".into(),
+                    },
+                    AiStreamDelta::ProtectedThinkingStart { index: 0 },
+                    AiStreamDelta::ThinkingDeltaWithMetadata {
+                        text: "Use the ".into(),
+                        obfuscation: None,
+                        output_index: Some(0),
+                        content_index: Some(0),
+                    },
+                ],
+                vec![
+                    AiStreamDelta::TextDeltaWithMetadata {
+                        text: " \n".into(),
+                        logprobs: Vec::new(),
+                        obfuscation: None,
+                        output_index: Some(1),
+                        content_index: Some(0),
+                    },
+                    AiStreamDelta::ThinkingDeltaWithMetadata {
+                        text: "addition tool.".into(),
+                        obfuscation: None,
+                        output_index: Some(0),
+                        content_index: Some(0),
+                    },
+                ],
+                vec![
+                    AiStreamDelta::ToolCallStart {
+                        index: 2,
+                        id: call.id.to_string(),
+                        name: call.name.clone(),
+                    },
+                    AiStreamDelta::ToolCallDelta {
+                        index: 2,
+                        arguments: call.arguments.clone(),
+                    },
+                ],
+                vec![
+                    AiStreamDelta::ItemDone {
+                        index: 1,
+                        item: AiItem::output_text(" \n"),
+                    },
+                    AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: original.clone(),
+                    },
+                    AiStreamDelta::ToolCallComplete {
+                        index: 2,
+                        tool_call: call.clone(),
+                    },
+                    AiStreamDelta::ItemDone {
+                        index: 2,
+                        item: AiItem::function_call(call.clone()),
+                    },
+                ],
+            ] {
+                for batch in session.project_live_deltas(deltas, false).await.unwrap() {
+                    live.extend_from_slice(batch.deltas());
+                    session
+                        .report_delivery(batch, ProjectionDelivery::Sent)
+                        .await
+                        .unwrap();
+                }
+            }
+            let rendered = text_of(
+                &live
+                    .into_iter()
+                    .filter(|delta| {
+                        matches!(
+                            delta,
+                            AiStreamDelta::ThinkingDelta(_)
+                                | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+                                | AiStreamDelta::ReasoningSummaryDelta { .. }
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(rendered.matches(HISTORY_MARKER_PREFIX).count(), 1);
+            let mut response = AiResponse::new("response-bound", "logical-model");
+            response.items = vec![
+                original.clone(),
+                AiItem::output_text(" \n"),
+                AiItem::function_call(call),
+            ];
+            let staged = session
+                .project_staged(&mut response, &[])
+                .await
+                .expect("settle delayed thinking");
+            session
+                .report_delivery(staged, ProjectionDelivery::Sent)
+                .await
+                .expect("deliver settled thinking");
+            let mut replay = stravia_runtime_contract::protocol::ir::AiRequest::new(
+                "deepseek-model",
+                vec![AiItem::thinking(rendered, None)],
+            );
+            crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
+                .await
+                .unwrap();
+            let thoughts = replay
+                .items
+                .iter()
+                .filter(|item| is_thinking_item(item))
+                .collect::<Vec<_>>();
+            assert_eq!(thoughts.len(), 1);
+            assert_eq!(
+                serde_json::to_value(&thoughts[0].content).unwrap(),
+                serde_json::to_value(&original.content).unwrap()
+            );
+            assert_eq!(ThinkingSource::from_item(thoughts[0]), Some(source));
+        }
     }
 
     #[tokio::test]

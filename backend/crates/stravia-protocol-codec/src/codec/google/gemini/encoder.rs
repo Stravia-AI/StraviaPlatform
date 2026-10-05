@@ -311,22 +311,34 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
             let name = call_names
                 .get(call_id)
                 .ok_or_else(|| anyhow::anyhow!("Gemini tool result references unknown call_id"))?;
-            let mut function_response = serde_json::json!({
-                "id": call_id,
-                "name": name,
-                "response": {"result": msg.content.to_text()}
-            });
-            let mut parts = Vec::new();
-            for block in blocks
+            if blocks
                 .iter()
-                .filter(|block| !matches!(block, ContentBlock::Text { .. }))
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
             {
-                append_content_parts_for_gemini(&mut parts, block, call_names);
+                // 原生工具结果已携带 JSON 响应，不能再作为媒体嵌套进空文本响应。
+                let mut parts = Vec::new();
+                for block in blocks {
+                    append_content_parts_for_gemini(&mut parts, block, call_names);
+                }
+                parts
+            } else {
+                let mut function_response = serde_json::json!({
+                    "id": call_id,
+                    "name": name,
+                    "response": {"result": msg.content.to_text()}
+                });
+                let mut parts = Vec::new();
+                for block in blocks
+                    .iter()
+                    .filter(|block| !matches!(block, ContentBlock::Text { .. }))
+                {
+                    append_content_parts_for_gemini(&mut parts, block, call_names);
+                }
+                if !parts.is_empty() {
+                    function_response["parts"] = Value::Array(parts);
+                }
+                vec![serde_json::json!({"functionResponse": function_response})]
             }
-            if !parts.is_empty() {
-                function_response["parts"] = Value::Array(parts);
-            }
-            vec![serde_json::json!({"functionResponse": function_response})]
         }
         MessageContent::Blocks(blocks) => {
             let mut parts = Vec::new();
