@@ -13,6 +13,7 @@
 
 ### Changed
 
+- DataTable now keeps its state and callbacks in one owner while private header, row, and paginator components handle rendering. Existing capabilities, public Props, bindings, callback order, and the single-table DOM structure remain unchanged.
 - Model Turn Executor now owns event reception, post-operation draining, pre-output buffering, readiness, and canonical publication progress in one private lifecycle module. Output state survives eligible recovery while each operation starts with fresh buffering; retry and Target policy remain in the driver. The public interface, transport adapters, 16 MiB buffer budget, event order, and completion contract are unchanged.
 - Vendor SDK WASI interfaces now use 0.2.12. The host accepts stable 0.2.x versions of the existing restricted interface set, including mixed patch imports, so compatible installed plugins do not require rebuilding. Prereleases and other major/minor versions remain rejected; required functions and resource types must still match the host. The `stravia:vendor@0.4.0` contract is unchanged; filesystem, raw sockets, and WASI HTTP imports remain forbidden.
 - **Breaking:** Removed the standalone observation `/interactions/{id}/summary` management endpoint and client API. Selected interaction details and failure-to-chain navigation now use the interaction detail resource and existing root reveal; internal summary reads remain part of detail construction.

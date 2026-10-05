@@ -20,36 +20,22 @@ import {
 } from '@tanstack/svelte-table'
 import { onMount, type Snippet } from 'svelte'
 import { ScrollArea } from 'bits-ui'
-import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
-import ArrowLeftToLineIcon from '@lucide/svelte/icons/arrow-left-to-line'
-import ArrowRightToLineIcon from '@lucide/svelte/icons/arrow-right-to-line'
-import ArrowUpDownIcon from '@lucide/svelte/icons/arrow-up-down'
-import ArrowUpIcon from '@lucide/svelte/icons/arrow-up'
-import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
-import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left'
-import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
-import ChevronUpIcon from '@lucide/svelte/icons/chevron-up'
-import CheckIcon from '@lucide/svelte/icons/check'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import FunnelXIcon from '@lucide/svelte/icons/funnel-x'
-import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
-import PencilIcon from '@lucide/svelte/icons/pencil'
 import SearchIcon from '@lucide/svelte/icons/search'
-import XIcon from '@lucide/svelte/icons/x'
 
 import { cn } from '$lib/utils.js'
 import { Button } from '$lib/components/ui/button'
-import { Checkbox } from '$lib/components/ui/checkbox'
 import * as Empty from '$lib/components/ui/empty'
-import { Input } from '$lib/components/ui/input'
 import * as InputGroup from '$lib/components/ui/input-group'
-import * as Pagination from '$lib/components/ui/pagination'
-import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import { Spinner } from '$lib/components/ui/spinner'
 import * as Table from '$lib/components/ui/table'
 import ColumnMenu from './column-menu.svelte'
-import FilterMenu from './filter-menu.svelte'
+import Paginator from './paginator.svelte'
+import TableHeader from './table-header.svelte'
+import TableRow from './table-row.svelte'
+import type { DataTableRenderStyles, RenderedRow } from './render-types.js'
 import { exportDataTableCsv } from './export.js'
 import { parseDataTableState, serializeDataTableState } from './state-persistence.js'
 import { dataTableVirtualRange } from './virtual-rows.js'
@@ -80,8 +66,6 @@ import {
   type DataTableExportOptions,
   type DataTableVirtualScrollOptions,
 } from './data-table.js'
-
-type PaginationPageItem = { key: string } & ({ type: 'page'; value: number } | { type: 'ellipsis' })
 
 interface Props {
   data: TData[]
@@ -188,14 +172,6 @@ interface Props {
   columnPinning?: ColumnPinningState
   columnSizing?: ColumnSizingState
   rowPinning?: RowPinningState
-}
-
-interface RenderedRow {
-  row: DataTableRow<TData>
-  region: 'top' | 'center' | 'bottom'
-  regionIndex: number
-  regionCount: number
-  rowIndex: number
 }
 
 const allFilterValue = '__data_table_all_values__'
@@ -590,21 +566,21 @@ const rowRegions = $derived.by(() => {
   const center = table.getCenterRows()
   const bottom = table.getBottomRows()
   return {
-    top: top.map((row, regionIndex): RenderedRow => ({
+    top: top.map((row, regionIndex): RenderedRow<TData> => ({
       row,
       region: 'top',
       regionIndex,
       regionCount: top.length,
       rowIndex: regionIndex,
     })),
-    center: center.map((row, regionIndex): RenderedRow => ({
+    center: center.map((row, regionIndex): RenderedRow<TData> => ({
       row,
       region: 'center',
       regionIndex,
       regionCount: center.length,
       rowIndex: top.length + regionIndex,
     })),
-    bottom: bottom.map((row, regionIndex): RenderedRow => ({
+    bottom: bottom.map((row, regionIndex): RenderedRow<TData> => ({
       row,
       region: 'bottom',
       regionIndex,
@@ -680,7 +656,9 @@ function columnInlineStyle(
   return declarations.length > 0 ? declarations.join(';') : undefined
 }
 
-function pinnedRowStyle(item: RenderedRow): string | undefined {
+const styles: DataTableRenderStyles<TData> = { columnLabel, alignClass, sizeClass, columnInlineStyle }
+
+function pinnedRowStyle(item: RenderedRow<TData>): string | undefined {
   if (item.region === 'center') return undefined
   const headerOffset = stickyHeader ? headerBlockHeight : 0
   if (item.region === 'top') {
@@ -690,7 +668,7 @@ function pinnedRowStyle(item: RenderedRow): string | undefined {
   return `position:sticky;bottom:${reverseIndex * rowHeight}px;z-index:5;background:var(--background)`
 }
 
-function renderedRowStyle(item: RenderedRow): string | undefined {
+function renderedRowStyle(item: RenderedRow<TData>): string | undefined {
   const declarations = pinnedRowStyle(item)?.split(';').filter(Boolean) ?? []
   const customStyle = rowStyle?.(item.row)
   if (customStyle) declarations.push(customStyle)
@@ -975,6 +953,10 @@ function handleRowKeydown(event: KeyboardEvent, row: DataTableRow<TData>, index:
   }
 }
 
+function startColumnDrag(columnId: string): void {
+  draggedColumnId = columnId
+}
+
 function handleColumnDrop(targetId: string): void {
   if (!draggedColumnId || draggedColumnId === targetId) return
   const order = table.getAllLeafColumns().map((column) => column.id)
@@ -985,6 +967,10 @@ function handleColumnDrop(targetId: string): void {
   order.splice(targetIndex, 0, source)
   table.setColumnOrder(order)
   draggedColumnId = undefined
+}
+
+function startRowDrag(rowId: string): void {
+  draggedRowId = rowId
 }
 
 function handleRowDrop(target: DataTableRow<TData>): void {
@@ -1093,290 +1079,43 @@ $effect(() => {
 })
 </script>
 
-{#snippet standardDataRow(item: RenderedRow, rowIndex: number)}
-  <Table.Row
-    class={cn(
-      'border-border/50',
-      stripedRows && 'even:bg-muted/30',
-      contextMenuSelection === item.row.id && 'bg-muted',
-      (selectionMode !== 'none' || onRowClick) && 'cursor-pointer',
-      reorderableRows && !item.row.getIsGrouped() && 'group/data-row',
-      rowClass?.(item.row),
-    )}
-    style={renderedRowStyle(item)}
-    data-state={item.row.getIsSelected() ? 'selected' : undefined}
-    data-context-menu-selected={contextMenuSelection === item.row.id ? '' : undefined}
-    data-data-table-row-index={rowIndex}
-    aria-selected={selectionMode === 'none' ? undefined : item.row.getIsSelected()}
-    tabindex={selectionMode === 'none' ? undefined : 0}
-    onclick={(event: MouseEvent) => handleRowClick(event, item.row)}
-    ondblclick={(event: MouseEvent) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
-    oncontextmenu={(event: MouseEvent) => handleRowContextMenu(event, item.row)}
-    onkeydown={(event: KeyboardEvent) => handleRowKeydown(event, item.row, rowIndex)}
-    ondragover={reorderableRows ? (event: DragEvent) => event.preventDefault() : undefined}
-    ondrop={reorderableRows ? () => handleRowDrop(item.row) : undefined}>
-    {#if reorderableRows}
-      <Table.Cell class={cn('w-10', sizeClass('cell'), showGridlines && 'border-e')}>
-        {#if !item.row.getIsGrouped()}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            draggable="true"
-            aria-label={resolvedLabels.reorderRow(rowIndex + 1)}
-            ondragstart={() => (draggedRowId = item.row.id)}
-            onclick={(event: MouseEvent) => event.stopPropagation()}>
-            <GripVerticalIcon />
-          </Button>
-        {/if}
-      </Table.Cell>
-    {/if}
-    {#if hasSelectionControl}
-      <Table.Cell class={cn('w-10', sizeClass('cell'), showGridlines && 'border-e')}>
-        <Checkbox
-          disabled={!item.row.getCanSelect()}
-          aria-label={resolvedLabels.selectRow(rowIndex + 1)}
-          bind:checked={() => item.row.getIsSelected(), (value) => item.row.toggleSelected(Boolean(value))}
-          onclick={(event: MouseEvent) => event.stopPropagation()} />
-      </Table.Cell>
-    {/if}
-    {#if hasExpansionControl}
-      <Table.Cell class={cn('w-10', sizeClass('cell'), showGridlines && 'border-e')}>
-        {#if item.row.getCanExpand()}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={item.row.getIsExpanded()
-              ? resolvedLabels.collapseRow(rowIndex + 1)
-              : resolvedLabels.expandRow(rowIndex + 1)}
-            onclick={(event: MouseEvent) => {
-              event.stopPropagation()
-              item.row.toggleExpanded()
-            }}>
-            {#if item.row.getIsExpanded()}<ChevronUpIcon />{:else}<ChevronDownIcon />{/if}
-          </Button>
-        {/if}
-      </Table.Cell>
-    {/if}
-    {#if hasEditControl}
-      <Table.Cell class={cn('w-20 p-0', showGridlines && 'border-e')}>
-        <div class="flex items-center justify-center">
-          {#if editingRows[item.row.id]}
-            <Button
-              variant="ghost"
-              size="icon"
-              class="size-10"
-              aria-label={resolvedLabels.saveRow(rowIndex + 1)}
-              onclick={(event: MouseEvent) => {
-                event.stopPropagation()
-                saveRowEdit(item.row)
-              }}>
-              <CheckIcon class="size-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="size-10"
-              aria-label={resolvedLabels.cancelRowEdit(rowIndex + 1)}
-              onclick={(event: MouseEvent) => {
-                event.stopPropagation()
-                cancelRowEdit(item.row)
-              }}>
-              <XIcon class="size-4" />
-            </Button>
-          {:else}
-            <Button
-              variant="ghost"
-              size="icon"
-              class="size-10"
-              aria-label={resolvedLabels.editRow(rowIndex + 1)}
-              onclick={(event: MouseEvent) => {
-                event.stopPropagation()
-                startRowEdit(item.row)
-              }}>
-              <PencilIcon class="size-4" />
-            </Button>
-          {/if}
-        </div>
-      </Table.Cell>
-    {/if}
-    {#each item.row.getVisibleCells() as cell (cell.id)}
-      {#if !cell.getIsCovered()}
-        <Table.Cell
-          rowspan={cell.getRowSpan()}
-          colspan={cell.getColSpan()}
-          style={columnInlineStyle(cell.column)}
-          class={cn(
-            sizeClass('cell'),
-            showGridlines && 'border-e last:border-e-0',
-            alignClass(cell.column),
-            cell.column.columnDef.meta?.cellClass,
-            cellClass?.(cell),
-          )}
-          tabindex={editMode === 'cell' && cellEditor && !cell.row.getIsGrouped() ? 0 : undefined}
-          aria-label={editMode === 'cell' && cellEditor && !cell.row.getIsGrouped()
-            ? resolvedLabels.editCell(columnLabel(cell.column), rowIndex + 1)
-            : undefined}
-          ondblclick={editMode === 'cell' && cellEditor
-            ? (event: MouseEvent) => {
-                event.stopPropagation()
-                startCellEdit(cell)
-              }
-            : undefined}
-          onkeydown={editMode === 'cell' && cellEditor
-            ? (event: KeyboardEvent) => {
-                if (event.target === event.currentTarget && event.key === 'Enter') {
-                  event.preventDefault()
-                  startCellEdit(cell)
-                }
-              }
-            : undefined}>
-          {#if cellEditor && !cell.getIsGrouped() && ((editMode === 'cell' && editingCell?.rowId === item.row.id && editingCell.columnId === cell.column.id) || (editMode === 'row' && editingRows[item.row.id]))}
-            {@render cellEditor(
-              cell,
-              editMode === 'cell' ? () => saveCellEdit(cell) : () => saveRowEdit(item.row),
-              editMode === 'cell' ? () => cancelCellEdit(cell) : () => cancelRowEdit(item.row),
-            )}
-          {:else if cell.getIsGrouped()}
-            <div class="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={item.row.getIsExpanded()
-                  ? resolvedLabels.collapseRow(rowIndex + 1)
-                  : resolvedLabels.expandRow(rowIndex + 1)}
-                onclick={(event: MouseEvent) => {
-                  event.stopPropagation()
-                  item.row.toggleExpanded()
-                }}>
-                {#if item.row.getIsExpanded()}<ChevronUpIcon />{:else}<ChevronDownIcon />{/if}
-              </Button>
-              <FlexRender {cell} />
-              <span class="text-xs text-muted-foreground">({item.row.subRows.length})</span>
-            </div>
-          {:else}
-            <FlexRender {cell} />
-          {/if}
-        </Table.Cell>
-      {/if}
-    {/each}
-  </Table.Row>
-  {#if expandedContent && item.row.getIsExpanded() && !item.row.getIsGrouped()}
-    <Table.Row class="hover:bg-transparent">
-      <Table.Cell colspan={renderedColumnCount} class={cn('whitespace-normal bg-muted/20', sizeClass('cell'))}>
-        {@render expandedContent(item.row)}
-      </Table.Cell>
-    </Table.Row>
-  {/if}
-{/snippet}
-
-{#snippet dataRow(item: RenderedRow, rowIndex: number)}
-  {#if groupRow && item.row.getIsGrouped()}
-    <Table.Row
-      class={cn(
-        'border-border/50',
-        contextMenuSelection === item.row.id && 'bg-muted',
-        (selectionMode !== 'none' || onRowClick) && 'cursor-pointer',
-        rowClass?.(item.row),
-      )}
-      style={renderedRowStyle(item)}
-      data-state={item.row.getIsSelected() ? 'selected' : undefined}
-      data-context-menu-selected={contextMenuSelection === item.row.id ? '' : undefined}
-      data-data-table-row-index={rowIndex}
-      aria-selected={selectionMode === 'none' ? undefined : item.row.getIsSelected()}
-      tabindex={selectionMode === 'none' ? undefined : 0}
-      onclick={(event: MouseEvent) => handleRowClick(event, item.row)}
-      ondblclick={(event: MouseEvent) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
-      oncontextmenu={(event: MouseEvent) => handleRowContextMenu(event, item.row)}
-      onkeydown={(event: KeyboardEvent) => handleRowKeydown(event, item.row, rowIndex)}>
-      <Table.Cell colspan={renderedColumnCount} class="whitespace-normal p-0">
-        {@render groupRow(item.row)}
-      </Table.Cell>
-    </Table.Row>
-  {:else}
-    {@render standardDataRow(item, rowIndex)}
-  {/if}
-{/snippet}
-
-{#snippet paginatorControls()}
-  <div class="flex flex-wrap items-center justify-end gap-3" data-slot="data-table-paginator">
-    <div class="flex items-center gap-2">
-      <span class="text-sm text-muted-foreground">{resolvedLabels.rowsPerPage}</span>
-      <Select.Root
-        type="single"
-        bind:value={() => String(pagination.pageSize), (value) => table.setPageSize(Number(value))}>
-        <Select.Trigger class="h-10 w-20" aria-label={resolvedLabels.rowsPerPage}>{pagination.pageSize}</Select.Trigger>
-        <Select.Content>
-          <Select.Group>
-            {#each pageSizeOptions as option (option)}
-              <Select.Item value={String(option)} label={String(option)}>{option}</Select.Item>
-            {/each}
-          </Select.Group>
-        </Select.Content>
-      </Select.Root>
-    </div>
-    <span class="min-w-24 text-center text-sm text-muted-foreground tabular-nums">
-      {resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}
-    </span>
-    <Pagination.Root
-      class="mx-0 w-auto"
-      count={table.getRowCount()}
-      perPage={pagination.pageSize}
-      bind:page={() => pagination.pageIndex + 1, (page) => table.setPageIndex(page - 1)}
-      aria-label={resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}>
-      {#snippet children({ pages, currentPage }: { pages: PaginationPageItem[]; currentPage: number })}
-        <Pagination.Content class="flex-wrap">
-          <Pagination.Item>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              class="size-10"
-              aria-label={resolvedLabels.firstPage}
-              disabled={!table.getCanPreviousPage()}
-              onclick={() => table.firstPage()}>
-              <ArrowLeftToLineIcon />
-            </Button>
-          </Pagination.Item>
-          <Pagination.Item>
-            <Pagination.Previous aria-label={resolvedLabels.previousPage} disabled={!table.getCanPreviousPage()}>
-              <ChevronLeftIcon />
-            </Pagination.Previous>
-          </Pagination.Item>
-          {#each pages as page (page.key)}
-            <Pagination.Item>
-              {#if page.type === 'ellipsis'}
-                <Pagination.Ellipsis />
-              {:else}
-                <Pagination.Link
-                  {page}
-                  isActive={currentPage === page.value}
-                  aria-label={resolvedLabels.pageStatus((page as { value: number }).value, pageCount)}>
-                  {page.value}
-                </Pagination.Link>
-              {/if}
-            </Pagination.Item>
-          {/each}
-          <Pagination.Item>
-            <Pagination.Next aria-label={resolvedLabels.nextPage} disabled={!table.getCanNextPage()}>
-              <ChevronRightIcon />
-            </Pagination.Next>
-          </Pagination.Item>
-          <Pagination.Item>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              class="size-10"
-              aria-label={resolvedLabels.lastPage}
-              disabled={!table.getCanNextPage()}
-              onclick={() => table.lastPage()}>
-              <ArrowRightToLineIcon />
-            </Button>
-          </Pagination.Item>
-        </Pagination.Content>
-      {/snippet}
-    </Pagination.Root>
-  </div>
+{#snippet dataRow(item: RenderedRow<TData>)}
+  <TableRow
+    {item}
+    rowIndex={item.rowIndex}
+    {styles}
+    {resolvedLabels}
+    {stripedRows}
+    {contextMenuSelection}
+    {selectionMode}
+    clickable={Boolean(onRowClick)}
+    {reorderableRows}
+    {hasSelectionControl}
+    {hasExpansionControl}
+    {hasEditControl}
+    {showGridlines}
+    {editMode}
+    {editingRows}
+    {editingCell}
+    {renderedColumnCount}
+    {cellEditor}
+    {expandedContent}
+    {groupRow}
+    {rowClass}
+    {cellClass}
+    {onRowDoubleClick}
+    {renderedRowStyle}
+    {handleRowClick}
+    {handleRowContextMenu}
+    {handleRowKeydown}
+    {handleRowDrop}
+    {startRowDrag}
+    {startCellEdit}
+    {saveCellEdit}
+    {cancelCellEdit}
+    {startRowEdit}
+    {saveRowEdit}
+    {cancelRowEdit} />
 {/snippet}
 
 <div
@@ -1425,7 +1164,7 @@ $effect(() => {
     </div>
   {/if}
   {#if paginator && (paginatorPosition === 'top' || paginatorPosition === 'both')}
-    {@render paginatorControls()}
+    <Paginator {table} {pagination} {resolvedLabels} {pageSizeOptions} {pageCount} />
   {/if}
 
   <ScrollArea.Root
@@ -1446,219 +1185,42 @@ $effect(() => {
           tableClass,
         )}>
         {#if caption}<Table.Caption>{caption}</Table.Caption>{/if}
-        <Table.Header
+        <TableHeader
           bind:ref={headerElement}
-          class={cn(
-            'bg-[var(--data-table-header-background)] shadow-[0_1px_0_var(--border)] [&_[data-slot=table-head]]:bg-[var(--data-table-header-background)] [&_[data-slot=table-head]]:text-[0.8rem] [&_[data-slot=table-head]]:text-muted-foreground',
-            stickyHeader && 'sticky top-0 z-20',
-          )}>
-          {#each headerGroups as headerGroup, headerRowIndex (headerGroup.id)}
-            <Table.Row class="border-border/50 hover:bg-transparent">
-              {#if headerRowIndex === 0}
-                {#if reorderableRows}
-                  <Table.Head
-                    rowspan={controlRowSpan}
-                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
-                    <span class="sr-only">{resolvedLabels.reorderRow(0)}</span>
-                  </Table.Head>
-                {/if}
-                {#if hasSelectionControl}
-                  <Table.Head
-                    rowspan={controlRowSpan}
-                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
-                    <Checkbox
-                      aria-label={resolvedLabels.selectAllRows}
-                      indeterminate={table.getIsSomePageRowsSelected() && !table.getIsAllPageRowsSelected()}
-                      bind:checked={
-                        () => table.getIsAllPageRowsSelected(),
-                        (value) => table.toggleAllPageRowsSelected(Boolean(value))
-                      } />
-                  </Table.Head>
-                {/if}
-                {#if hasExpansionControl}
-                  <Table.Head
-                    rowspan={controlRowSpan}
-                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')} />
-                {/if}
-                {#if hasEditControl}
-                  <Table.Head
-                    rowspan={controlRowSpan}
-                    class={cn('w-20', sizeClass('head'), showGridlines && 'border-e')}>
-                    <span class="sr-only">{resolvedLabels.editRow(0)}</span>
-                  </Table.Head>
-                {/if}
-              {/if}
-              {#each headerGroup.headers as header (header.id)}
-                <Table.Head
-                  colspan={header.colSpan}
-                  rowspan={header.rowSpan}
-                  draggable={reorderableColumns && header.column.columns.length === 0}
-                  aria-sort={header.column.getIsSorted() === 'asc'
-                    ? 'ascending'
-                    : header.column.getIsSorted() === 'desc'
-                      ? 'descending'
-                      : header.column.getCanSort()
-                        ? 'none'
-                        : undefined}
-                  aria-label={reorderableColumns ? resolvedLabels.reorderColumn(columnLabel(header.column)) : undefined}
-                  style={columnInlineStyle(header.column, true)}
-                  class={cn(
-                    'relative',
-                    sizeClass('head'),
-                    showGridlines && 'border-e last:border-e-0',
-                    alignClass(header.column),
-                    header.column.columnDef.meta?.headerClass,
-                    reorderableColumns && header.column.columns.length === 0 && 'cursor-grab active:cursor-grabbing',
-                  )}
-                  ondragstart={reorderableColumns ? () => (draggedColumnId = header.column.id) : undefined}
-                  ondragover={reorderableColumns ? (event: DragEvent) => event.preventDefault() : undefined}
-                  ondrop={reorderableColumns ? () => handleColumnDrop(header.column.id) : undefined}>
-                  {#if !header.isPlaceholder}
-                    {@const filter = header.column.columnDef.meta?.filter}
-                    <div
-                      class={cn(
-                        'flex min-w-0 items-center gap-1',
-                        header.column.columnDef.meta?.align === 'end' ? 'justify-end' : 'justify-between',
-                      )}>
-                      {#if header.column.getCanSort()}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          class={cn(
-                            'group/sort -mx-2 min-w-0 gap-1.5 px-2 text-inherit',
-                            header.column.getIsSorted() && 'text-foreground',
-                            header.column.columnDef.meta?.align === 'end' && 'ms-auto',
-                          )}
-                          aria-label={sortAriaLabel(header.column)}
-                          onclick={header.column.getToggleSortingHandler()}>
-                          <FlexRender {header} />
-                          {#if header.column.getIsSorted() === 'asc'}
-                            <ArrowUpIcon data-icon="inline-end" />
-                          {:else if header.column.getIsSorted() === 'desc'}
-                            <ArrowDownIcon data-icon="inline-end" />
-                          {:else}
-                            <ArrowUpDownIcon
-                              data-icon="inline-end"
-                              class="opacity-40 transition-opacity group-hover/sort:opacity-100 group-focus-visible/sort:opacity-100" />
-                          {/if}
-                          {#if sortMode === 'multiple' && header.column.getSortIndex() >= 0}
-                            <span class="font-technical text-[0.65rem] text-muted-foreground"
-                              >{header.column.getSortIndex() + 1}</span>
-                          {/if}
-                        </Button>
-                      {:else}
-                        <FlexRender {header} />
-                      {/if}
-                      {#if filterDisplay === 'menu' && filter && header.column.columns.length === 0}
-                        <FilterMenu
-                          column={header.column}
-                          {filter}
-                          draft={filterDraft}
-                          labels={resolvedLabels}
-                          columnName={columnLabel(header.column)}
-                          open={openFilterColumnId === header.column.id}
-                          {allFilterValue}
-                          selectOptions={selectFilterOptions(header.column)}
-                          textMatchModes={textFilterMatchModes(filter)}
-                          onOpenChange={(open: boolean) => setFilterMenuOpen(header.column, filter, open)}
-                          onUpdateOperator={updateFilterOperator}
-                          onUpdateConstraint={updateFilterConstraint}
-                          onAddConstraint={() => addFilterConstraint(filter)}
-                          onRemoveConstraint={removeFilterConstraint}
-                          onUpdateNumber={updateDraftNumberFilter}
-                          onClear={() => clearColumnFilter(header.column)}
-                          onApply={() => applyColumnFilter(header.column)} />
-                      {/if}
-                    </div>
-                    {#if resizableColumns && header.column.getCanResize()}
-                      <button
-                        type="button"
-                        aria-label={resolvedLabels.resizeColumn(columnLabel(header.column))}
-                        class={cn(
-                          'absolute inset-y-0 w-2 cursor-col-resize touch-none select-none outline-none after:absolute after:inset-y-1 after:start-1/2 after:w-px after:bg-transparent hover:after:bg-border/80 focus-visible:after:w-0.5 focus-visible:after:bg-ring',
-                          header.column.id === visibleLeafColumns[visibleLeafColumns.length - 1]?.id
-                            ? 'end-0 after:hidden'
-                            : '-end-1',
-                          header.column.getIsResizing() && 'after:w-0.5 after:bg-ring',
-                        )}
-                        onmousedown={header.getResizeHandler()}
-                        ontouchstart={header.getResizeHandler()}
-                        onkeydown={(event) => resizeColumnByKeyboard(event, header.column)}
-                        ondblclick={() => header.column.resetSize()}></button>
-                    {/if}
-                  {/if}
-                </Table.Head>
-              {/each}
-            </Table.Row>
-          {/each}
-          {#if filterDisplay === 'row'}
-            <Table.Row class="border-border/50 hover:bg-transparent">
-              {#each visibleLeafColumns as column (column.id)}
-                {@const filter = column.columnDef.meta?.filter}
-                <Table.Head
-                  style={columnInlineStyle(column, true)}
-                  class={cn(sizeClass('head'), showGridlines && 'border-e last:border-e-0')}>
-                  {#if filter?.variant === 'text'}
-                    <Input
-                      class="h-8 min-w-28"
-                      value={(column.getFilterValue() as string | undefined) ?? ''}
-                      placeholder={filter.placeholder ?? columnLabel(column)}
-                      aria-label={filter.placeholder ?? columnLabel(column)}
-                      oninput={(event: Event) =>
-                        column.setFilterValue((event.currentTarget as HTMLInputElement).value || undefined)} />
-                  {:else if filter?.variant === 'select'}
-                    <Select.Root
-                      type="single"
-                      bind:value={
-                        () => (column.getFilterValue() as string | undefined) ?? allFilterValue,
-                        (value) => column.setFilterValue(value === allFilterValue ? undefined : value)
-                      }>
-                      <Select.Trigger class="h-8 min-w-28">
-                        {filter.options?.find((option) => option.value === column.getFilterValue())?.label ??
-                          (column.getFilterValue() == null
-                            ? (filter.allLabel ?? resolvedLabels.allValues)
-                            : (column.getFilterValue() as string))}
-                      </Select.Trigger>
-                      <Select.Content>
-                        <Select.Group>
-                          <Select.Item value={allFilterValue} label={filter.allLabel ?? resolvedLabels.allValues}>
-                            {filter.allLabel ?? resolvedLabels.allValues}
-                          </Select.Item>
-                          {#each selectFilterOptions(column) as option (option.value)}
-                            <Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
-                          {/each}
-                        </Select.Group>
-                      </Select.Content>
-                    </Select.Root>
-                  {:else if filter?.variant === 'number-range'}
-                    {@const range =
-                      (column.getFilterValue() as [number | undefined, number | undefined] | undefined) ?? []}
-                    <div class="flex min-w-48 gap-1">
-                      <Input
-                        class="h-8 min-w-20"
-                        type="number"
-                        value={range[0] ?? ''}
-                        placeholder={filter.minPlaceholder ?? resolvedLabels.minimum}
-                        aria-label={filter.minPlaceholder ?? resolvedLabels.minimum}
-                        oninput={(event: Event) =>
-                          updateNumberFilter(column, 0, (event.currentTarget as HTMLInputElement).value)} />
-                      <Input
-                        class="h-8 min-w-20"
-                        type="number"
-                        value={range[1] ?? ''}
-                        placeholder={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                        aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                        oninput={(event: Event) =>
-                          updateNumberFilter(column, 1, (event.currentTarget as HTMLInputElement).value)} />
-                    </div>
-                  {:else if filter?.variant === 'custom'}
-                    {@render filter.content(column.getFilterValue(), (value) => column.setFilterValue(value))}
-                  {/if}
-                </Table.Head>
-              {/each}
-            </Table.Row>
-          {/if}
-        </Table.Header>
+          {table}
+          {headerGroups}
+          {visibleLeafColumns}
+          {styles}
+          {resolvedLabels}
+          {showGridlines}
+          {stickyHeader}
+          {reorderableRows}
+          {hasSelectionControl}
+          {hasExpansionControl}
+          {hasEditControl}
+          {controlRowSpan}
+          {reorderableColumns}
+          {sortMode}
+          {filterDisplay}
+          {filterDraft}
+          {openFilterColumnId}
+          {allFilterValue}
+          {resizableColumns}
+          {startColumnDrag}
+          {sortAriaLabel}
+          {handleColumnDrop}
+          {resizeColumnByKeyboard}
+          {selectFilterOptions}
+          {updateNumberFilter}
+          {clearColumnFilter}
+          {applyColumnFilter}
+          {setFilterMenuOpen}
+          {textFilterMatchModes}
+          {updateFilterOperator}
+          {updateFilterConstraint}
+          {addFilterConstraint}
+          {removeFilterConstraint}
+          {updateDraftNumberFilter} />
         <Table.Body>
           {#if loading && renderedRows.length === 0}
             {#each skeletonKeys as key (key)}
@@ -1670,7 +1232,7 @@ $effect(() => {
             {/each}
           {:else if renderedRows.length > 0}
             {#each rowRegions.top as item (`top:${item.row.id}`)}
-              {@render dataRow(item, item.rowIndex)}
+              {@render dataRow(item)}
             {/each}
             {#if virtualTopPadding > 0}
               <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
@@ -1678,7 +1240,7 @@ $effect(() => {
               </Table.Row>
             {/if}
             {#each visibleCenterRows as item (`center:${item.row.id}`)}
-              {@render dataRow(item, item.rowIndex)}
+              {@render dataRow(item)}
             {/each}
             {#if virtualBottomPadding > 0}
               <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
@@ -1686,7 +1248,7 @@ $effect(() => {
               </Table.Row>
             {/if}
             {#each rowRegions.bottom as item (`bottom:${item.row.id}`)}
-              {@render dataRow(item, item.rowIndex)}
+              {@render dataRow(item)}
             {/each}
           {:else}
             <Table.Row class="hover:bg-transparent">
@@ -1764,7 +1326,7 @@ $effect(() => {
       {/if}
       {#if footer}{@render footer(table)}{/if}
       {#if paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')}
-        {@render paginatorControls()}
+        <Paginator {table} {pagination} {resolvedLabels} {pageSizeOptions} {pageCount} />
       {/if}
     </div>
   {/if}
