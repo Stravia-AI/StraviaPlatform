@@ -439,7 +439,7 @@ def _create_api_key(env: dict[str, str], model_id: str, name: str) -> dict[str, 
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_rpm_burst_rejection_and_shared_upstream_pool(admin_env: dict[str, Any]) -> None:
+def test_rpm_burst_rejection_and_shared_destination_limit(admin_env: dict[str, Any]) -> None:
     with _model_probe_endpoint() as (origin, received):
         provider = _create_probe_provider(
             admin_env, "RPM admission", None, base_url=origin, use_proxy=False,
@@ -469,35 +469,49 @@ def test_rpm_burst_rejection_and_shared_upstream_pool(admin_env: dict[str, Any])
         assert sorted(result[0] for result in results) == [200, 200, 429], results
         rejection = next(result for result in results if result[0] == 429)
         assert 1 <= int(rejection[1]["retry-after"]) <= 60, rejection
+        assert json.loads(rejection[2])["error"]["type"] == "STRAVIA_RPM_LIMIT", rejection
         assert len(received) == 2, received
         assert infer(key["key"])[0] == 429
         assert len(received) == 2, "rejected entrance reached upstream"
         assert infer(other["key"])[0] == 200
         assert len(received) == 3
 
-        # 新启用上游池只记录启用后的发送，入口清除限额不返还已经受限的窗口。
+        # 新启用 Provider/model 目的地限额只记录启用后的发送，与 Principal 根请求限额独立。
         status, body = http_request("PUT", key_url, {"rpm_limit": None}, admin_env["auth"])
-        assert status == 200, body
+        assert status == 200 and body["data"]["rpm_limit"] is None, body
         config_url = f"{admin_env['admin']}/api/v1/settings/rpm_admission"
         status, previous = http_request("GET", config_url, headers=admin_env["auth"])
         assert status == 200, previous
         config = {
             "preferred_wait_ms": 0, "total_wait_ms": 0, "queue_capacity": 128,
             "destinations": [{"provider_id": provider, "model": "probe-model", "rpm_limit": 1}],
-            "pools": [],
         }
         try:
             status, body = http_request("PUT", config_url, {"value": json.dumps(config)}, admin_env["auth"])
-            assert status == 200, body
+            assert status == 200 and body == {"ok": True}, body
+            status, body = http_request("GET", config_url, headers=admin_env["auth"])
+            assert status == 200 and json.loads(body["data"]) == config, body
             assert infer(key["key"])[0] == 200
             limited = infer(other["key"])
             assert limited[0] == 429, limited
             assert 1 <= int(limited[1]["retry-after"]) <= 60, limited
             assert json.loads(limited[2])["error"]["code"] == "target_rpm_exceeded", limited
-            assert len(received) == 4, "Target RPM rejection reached upstream"
+            assert len(received) == 4, "Destination RPM rejection reached upstream"
+            # 重载同一限额不能返还目的地已发送的窗口额度。
+            status, body = http_request("PUT", config_url, {"value": json.dumps(config)}, admin_env["auth"])
+            assert status == 200 and body == {"ok": True}, body
+            limited = infer(key["key"])
+            assert limited[0] == 429, limited
+            assert 1 <= int(limited[1]["retry-after"]) <= 60, limited
+            assert json.loads(limited[2])["error"]["code"] == "target_rpm_exceeded", limited
+            assert len(received) == 4, "reloaded destination limit returned spent allowance"
         finally:
             status, body = http_request("PUT", config_url, {"value": previous["data"]}, admin_env["auth"])
-            assert status == 200, body
+            assert status == 200 and body == {"ok": True}, body
+        status, body = http_request("GET", config_url, headers=admin_env["auth"])
+        assert status == 200 and json.loads(body["data"]) == json.loads(previous["data"]), body
+        assert infer(other["key"])[0] == 200
+        assert len(received) == 5, "restored destination configuration did not resume upstream sends"
 
 
 @pytest.mark.e2e

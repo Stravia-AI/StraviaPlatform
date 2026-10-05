@@ -1,10 +1,11 @@
 import { createServer } from 'node:net'
 import { createServer as createProvider } from 'node:http'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import type { AddressInfo } from 'node:net'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 import { $, browser, expect } from '@wdio/globals'
 
@@ -592,6 +593,10 @@ describe('Stravia desktop smoke', () => {
   })
 
   it('writes Codex global configuration incrementally from the actual Connect page', async () => {
+    await browser.execute(() => {
+      localStorage.setItem('stravia-locale', 'en-US')
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    })
     const runRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
     const codexHome = process.env.CODEX_HOME
     if (!runRoot || !codexHome) throw new Error('Desktop smoke isolation directories were not configured')
@@ -698,19 +703,53 @@ describe('Stravia desktop smoke', () => {
 
       // 原生剪贴板拒绝未聚焦的文档；window.focus() 不能突破 Windows 前台锁，由驱动在宿主进程内激活窗口才可靠。
       await browser.maximizeWindow()
+      const renderedConfiguration = await browser.execute(() => {
+        const preview = document.querySelector('pre.route-code-plane')
+        if (!preview?.textContent) throw new Error('Connect configuration preview was empty')
+        return preview.textContent
+      })
       await copyConfiguration.click()
-      await expect($('//*[@data-sonner-toast and contains(., "Copied to clipboard")]')).toBeDisplayed()
+      await browser.waitUntil(
+        async () => {
+          // 原生读取器内比较，避免输出剪贴板内容或测试密钥；只统一 Windows CRLF，不丢弃其他空白。
+          const { stdout } = await promisify(execFile)(
+            'powershell.exe',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-STA',
+              '-Command',
+              '$ErrorActionPreference = \'Stop\'; $actual = [string](Get-Clipboard -Raw); $expected = $env:STRAVIA_EXPECTED_CLIPBOARD; $actual.Replace("`r`n", "`n") -ceq $expected.Replace("`r`n", "`n")',
+            ],
+            { windowsHide: true, env: { ...process.env, STRAVIA_EXPECTED_CLIPBOARD: renderedConfiguration } },
+          )
+          return stdout.trim() === 'True'
+        },
+        { timeout: 10_000, timeoutMsg: 'native clipboard did not contain the rendered configuration' },
+      )
 
       await writeConfiguration.click()
-      await expect($('//*[@data-sonner-toast and contains(., "Configuration written for Codex")]')).toBeDisplayed()
-
-      // WDIO 运行于 Node，借用已有 Bun 解析 TOML，不固定序列化器的引号格式。
-      const writtenConfig: unknown = JSON.parse(
-        execFileSync('bun', ['-e', 'process.stdout.write(JSON.stringify(Bun.TOML.parse(await Bun.stdin.text())))'], {
-          input: await readFile(configPath, 'utf8'),
-          encoding: 'utf8',
-        }),
+      let writtenConfig: unknown
+      await browser.waitUntil(
+        async () => {
+          // WDIO 运行于 Node，复用 Bun TOML parser，避免把完成状态或用户配置保留绑定到序列化文案。
+          writtenConfig = JSON.parse(
+            execFileSync(
+              'bun',
+              ['-e', 'process.stdout.write(JSON.stringify(Bun.TOML.parse(await Bun.stdin.text())))'],
+              { input: await readFile(configPath, 'utf8'), encoding: 'utf8' },
+            ),
+          )
+          // 已存在的文件不代表写入完成；等增量服务记录出现后再核验原有用户配置。
+          if (typeof writtenConfig !== 'object' || writtenConfig === null || !('model_providers' in writtenConfig)) {
+            return false
+          }
+          const providers = writtenConfig.model_providers
+          return typeof providers === 'object' && providers !== null && 'stravia' in providers
+        },
+        { timeout: 10_000, timeoutMsg: 'Codex configuration did not receive the Stravia provider' },
       )
+
       expect(writtenConfig).toMatchObject({
         model: 'user-current-model',
         approval_policy: 'never',

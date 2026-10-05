@@ -173,11 +173,13 @@ async function runRustBinaries(binaries: RustBinary[], requireLocalIgnored: bool
             externallyGated: ignored.filter((name) => !Object.hasOwn(localIgnored, name)),
           })
           if (selected.length > 0) {
+            // 每个 Chrome 场景启动独立原生进程；与 WebUI/桌面并行时，避免同一测试二进制再同时冷启动四组浏览器。
+            const localThreads = selected.some((name) => name.startsWith('browser::tests::chrome_')) ? 1 : rustThreads
             await run(`${label}-local-ignored`, [
               binary.executable,
               '--ignored',
               '--exact',
-              `--test-threads=${rustThreads}`,
+              `--test-threads=${localThreads}`,
               ...selected,
             ])
           }

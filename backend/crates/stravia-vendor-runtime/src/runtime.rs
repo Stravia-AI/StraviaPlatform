@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use stravia_vendor_sdk::{
     AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationInput, OperationOutput,
     ProviderSnapshot, VendorDescriptor,
 };
+use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -25,7 +27,7 @@ pub struct LoadedPlugin {
 }
 
 struct LoadedVersion {
-    component: Component,
+    component: Arc<Component>,
     descriptor: VendorDescriptor,
     identity: String,
 }
@@ -82,7 +84,15 @@ impl OperationScope {
 #[derive(Clone)]
 pub struct VendorRuntime {
     engine: Engine,
+    compiled: Arc<Mutex<VecDeque<CompiledEntry>>>,
 }
+
+struct CompiledEntry {
+    digest: [u8; 32],
+    component: Arc<AsyncMutex<Weak<Component>>>,
+}
+
+const MAX_COMPILED_ENTRIES: usize = 16;
 
 impl VendorRuntime {
     pub fn new() -> Result<Self, LoadError> {
@@ -91,18 +101,77 @@ impl VendorRuntime {
         engine_config.consume_fuel(true);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            compiled: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMPILED_ENTRIES))),
+        })
     }
 
-    /// Compile, import-check, instantiate, and validate a component without
-    /// mutating any installed version. The returned `LoadedPlugin` owns an Arc
-    /// to this exact compiled component, so active operations remain pinned.
+    async fn compiled_component(
+        &self,
+        digest: &[u8; 32],
+        bytes: &[u8],
+    ) -> Result<Arc<Component>, LoadError> {
+        let slot = {
+            let mut entries = self
+                .compiled
+                .lock()
+                .map_err(|_| LoadError::InvalidComponent("component cache lock poisoned".into()))?;
+            if let Some(index) = entries.iter().position(|entry| entry.digest == *digest) {
+                let entry = entries.remove(index).expect("located compiled entry");
+                let slot = Arc::clone(&entry.component);
+                entries.push_back(entry);
+                Some(slot)
+            } else {
+                if entries.len() == MAX_COMPILED_ENTRIES {
+                    // Do not evict an in-flight identity's single-flight slot.
+                    if let Some(index) = entries
+                        .iter()
+                        .position(|entry| Arc::strong_count(&entry.component) == 1)
+                    {
+                        entries.remove(index);
+                    }
+                }
+                if entries.len() < MAX_COMPILED_ENTRIES {
+                    let slot = Arc::new(AsyncMutex::new(Weak::new()));
+                    entries.push_back(CompiledEntry {
+                        digest: *digest,
+                        component: Arc::clone(&slot),
+                    });
+                    Some(slot)
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(slot) = slot else {
+            return self.compile_component(bytes);
+        };
+        // Only callers compiling the same identity wait here. The Engine-local
+        // metadata lock is released before compilation; other bytes run independently.
+        let mut cached = slot.lock().await;
+        if let Some(component) = cached.upgrade() {
+            return Ok(component);
+        }
+        let component = self.compile_component(bytes)?;
+        *cached = Arc::downgrade(&component);
+        Ok(component)
+    }
+
+    fn compile_component(&self, bytes: &[u8]) -> Result<Arc<Component>, LoadError> {
+        Component::from_binary(&self.engine, bytes)
+            .map(Arc::new)
+            .map_err(|error| LoadError::InvalidComponent(error.to_string()))
+    }
+
+    /// Compile (or reuse a live Engine-local compilation), import-check,
+    /// freshly instantiate, and validate a component without mutating any
+    /// installed version. Only immutable compilation is shared; validation is
+    /// repeated on every load. Active operations pin this exact component.
     pub async fn load(&self, bytes: &[u8]) -> Result<LoadedPlugin, LoadError> {
-        let identity = stravia_runtime_contract::identifier::encode_digest(
-            &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes),
-        );
-        let component = Component::from_binary(&self.engine, bytes)
-            .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
+        let digest = stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes);
+        let identity = stravia_runtime_contract::identifier::encode_digest(&digest);
+        let component = self.compiled_component(&digest, bytes).await?;
         self.validate_imports(&component)?;
         let descriptor = self.read_descriptor(&component).await?;
         descriptor

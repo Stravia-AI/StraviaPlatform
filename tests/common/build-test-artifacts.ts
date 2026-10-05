@@ -187,10 +187,13 @@ if (checking) {
         )
           continue
         seen.add(artifact.executable)
-        const file = statSync(artifact.executable)
+        // 定向 Cargo 测试会改写共享目录；缓存必须保留本 feature graph 的独立可执行副本。
+        const destination = join(directory, basename(artifact.executable))
+        copyFileSync(artifact.executable, destination)
+        const file = statSync(destination)
         artifacts.push({
           name: artifact.target.name,
-          executable: artifact.executable,
+          executable: destination,
           size: file.size,
           mtimeMs: file.mtimeMs,
         })
