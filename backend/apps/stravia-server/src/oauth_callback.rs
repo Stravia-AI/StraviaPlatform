@@ -128,6 +128,30 @@ impl OAuthCallbackManager {
             }
             AuthFlow::AuthorizationCode => {
                 let manual_callback_allowed = auth.manual_input.is_some();
+                if auth.callback.is_none() {
+                    anyhow::ensure!(
+                        auth.manual_input.as_ref().is_some_and(|input| {
+                            input.input_type == stravia_core::auth::AuthManualInputType::Text
+                        }),
+                        "authorization-code channel without a listener requires manual code input"
+                    );
+                    let init = self
+                        .inner
+                        .gateway
+                        .admin()
+                        .init_oauth_session(
+                            candidate,
+                            OAuthSessionStartOptions {
+                                callback_mode: OAuthCallbackMode::Manual,
+                                redirect_uri: String::new(),
+                                listener_port: None,
+                                fallback_reason: None,
+                            },
+                        )
+                        .await?;
+                    self.track(&init.session_id, None).await;
+                    return Ok(init);
+                }
                 let callback = auth.callback.ok_or_else(|| {
                     anyhow::anyhow!("authorization-code channel has no callback policy")
                 })?;

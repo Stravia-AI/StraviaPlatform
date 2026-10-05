@@ -566,7 +566,14 @@ impl ProviderDescriptor {
             }
             if let Some(auth) = &ch.auth {
                 let callback_expected = matches!(auth.flow, AuthFlow::AuthorizationCode);
-                if callback_expected != auth.callback.is_some()
+                // 网站回调后复制授权码的流程仍是 OAuth；不为它伪造本地监听器。
+                let manual_code = callback_expected
+                    && auth.callback.is_none()
+                    && auth
+                        .manual_input
+                        .as_ref()
+                        .is_some_and(|input| input.input_type == AuthManualInputType::Text);
+                if (callback_expected != auth.callback.is_some() && !manual_code)
                     || (matches!(auth.flow, AuthFlow::Manual) && auth.manual_input.is_none())
                     || (matches!(auth.flow, AuthFlow::DeviceCode) && auth.manual_input.is_some())
                     || auth.manual_input.as_ref().is_some_and(|input| {
@@ -837,6 +844,35 @@ pub enum DescriptorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_code_without_listener_requires_manual_text_input() {
+        let mut profile = provider("antigravity");
+        profile.channels[0]
+            .capabilities
+            .insert(Capability::AuthOauth);
+        profile.capabilities.insert(Capability::AuthOauth);
+        profile.channels[0].auth = Some(AuthDescriptor {
+            flow: AuthFlow::AuthorizationCode,
+            callback: None,
+            manual_input: Some(AuthManualInput {
+                input_type: AuthManualInputType::Text,
+                label: LocalizedText::english("Authorization code"),
+                description: None,
+                secret: true,
+            }),
+        });
+        assert!(profile.validate().is_ok());
+        profile.channels[0].auth.as_mut().unwrap().manual_input = None;
+        assert!(profile.validate().is_err());
+        profile.channels[0].auth.as_mut().unwrap().manual_input = Some(AuthManualInput {
+            input_type: AuthManualInputType::CallbackUrl,
+            label: LocalizedText::english("Callback URL"),
+            description: None,
+            secret: true,
+        });
+        assert!(profile.validate().is_err());
+    }
 
     fn provider(provider_id: &str) -> ProviderDescriptor {
         let capabilities = BTreeSet::from([Capability::Infer]);

@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn native_function_responses_round_trip_business_json_and_parallel_call_ids() {
+    for responses in [
+        serde_json::json!([{
+            "functionResponse": {
+                "id": "call_sum", "name": "sum",
+                "response": {"sum": 42, "receipt": "synthetic-receipt-sum"}
+            }
+        }]),
+        serde_json::json!([
+            {"functionResponse": {
+                "id": "call_lookup", "name": "lookup",
+                "response": {"found": true, "receipt": "synthetic-receipt-lookup"}
+            }},
+            {"functionResponse": {
+                "id": "call_sum", "name": "sum",
+                "response": {"sum": 42, "receipt": "synthetic-receipt-sum"}
+            }}
+        ]),
+    ] {
+        let request = crate::codec::google::gemini::decoder::GoogleDecoder
+            .decode_request(serde_json::json!({
+                "model": "gemini-model",
+                "contents": [
+                    {"role": "model", "parts": [
+                        {"functionCall": {
+                            "id": "call_sum", "name": "sum", "args": {"a": 17, "b": 25}
+                        }},
+                        {"functionCall": {
+                            "id": "call_lookup", "name": "lookup", "args": {"key": "value"}
+                        }}
+                    ]},
+                    {"role": "user", "parts": responses.clone()}
+                ]
+            }))
+            .expect("decode native Gemini tool results");
+
+        let (body, _) = GoogleEncoder
+            .encode_request(&request)
+            .expect("encode native Gemini tool results");
+
+        assert_eq!(body["contents"][1]["role"], "user");
+        assert_eq!(body["contents"][1]["parts"], responses);
+    }
+}
+
+#[test]
+fn text_and_multimodal_tool_outputs_keep_existing_response_envelopes() {
+    let call_names = HashMap::from([("call_sum", "sum")]);
+    for (content, expected) in [
+        (
+            MessageContent::Text("{\"sum\":42}".into()),
+            serde_json::json!({
+                "id": "call_sum", "name": "sum", "response": {"result": "{\"sum\":42}"}
+            }),
+        ),
+        (
+            MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "image result".into(),
+                    cache_control: None,
+                },
+                ContentBlock::Image {
+                    source: MediaSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "synthetic-image".into(),
+                    },
+                    detail: None,
+                    cache_control: None,
+                },
+            ]),
+            serde_json::json!({
+                "id": "call_sum", "name": "sum", "response": {"result": "image result"},
+                "parts": [{"inlineData": {"mimeType": "image/png", "data": "synthetic-image"}}]
+            }),
+        ),
+    ] {
+        let message = AiItem {
+            role: Role::Tool,
+            content,
+            tool_calls: None,
+            tool_call_id: Some("call_sum".into()),
+            meta: None,
+        };
+        let encoded = encode_content(&message, &call_names).expect("encode tool result");
+        assert_eq!(
+            encoded,
+            serde_json::json!({"role": "user", "parts": [{"functionResponse": expected}]})
+        );
+    }
+}
+
+#[test]
 fn chat_history_and_responses_tool_result_keep_gemini_call_pairing() {
     let response = crate::codec::openai::compatible::stream::OpenAIResponseParser
         .parse_response(serde_json::json!({

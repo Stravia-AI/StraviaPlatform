@@ -2417,6 +2417,97 @@ fn open_responses_client_rejects_unrepresentable_tool_output_blocks() {
 }
 
 #[test]
+fn google_empty_thought_does_not_shift_streamed_text_and_late_signature() {
+    let mut decoder = ProtocolTransform::global()
+        .decode_stream(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        .unwrap();
+    let mut accumulator = crate::accumulator::StreamResponseAccumulator::default();
+    for chunk in [
+        json!({"candidates": [{"content": {"parts": [{"thought": true, "text": ""}]}}]}),
+        json!({"candidates": [{"content": {"parts": [{"text": "STREAM_OK"}]}}]}),
+        json!({"candidates": [{"content": {"parts": [{"text": "", "thoughtSignature": "real-signature"}]}, "finishReason": "STOP"}]}),
+    ] {
+        for delta in decoder
+            .decode_chunk(format!("data: {chunk}\n\n").as_bytes())
+            .unwrap()
+        {
+            accumulator.apply_with_identity(&delta);
+        }
+    }
+    for delta in decoder.finish().unwrap() {
+        accumulator.apply_with_identity(&delta);
+    }
+    let (response, ordinals) = accumulator.into_ai_response_with_ordinals();
+    assert_eq!(ordinals, [0, 1]);
+    assert_eq!(response.items[0].output_text_ref(), Some("STREAM_OK"));
+    assert_eq!(
+        response.items[1].thinking_ref(),
+        Some(("", Some("real-signature")))
+    );
+}
+
+#[test]
+fn aggregated_google_stream_keeps_metadata_out_of_four_protocol_content() {
+    let mut decoder = ProtocolTransform::global()
+        .decode_stream(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        .unwrap();
+    let mut accumulator = crate::accumulator::StreamResponseAccumulator::default();
+    for chunk in [
+        json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "REA"}]}}],
+            "modelVersion": "gemini-3.5-flash-lite",
+            "responseId": "google-live-response",
+            "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}
+        }),
+        json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "DY"}]}, "finishReason": "STOP"}],
+            "modelVersion": "gemini-3.5-flash-lite",
+            "responseId": "google-live-response",
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 2, "totalTokenCount": 9}
+        }),
+    ] {
+        let frame = format!("data: {chunk}\n\n");
+        accumulator.apply_all(&decoder.decode_chunk(frame.as_bytes()).unwrap());
+    }
+    accumulator.apply_all(&decoder.finish().unwrap());
+    let response = accumulator.into_ai_response();
+    assert_eq!(response.items[0].output_text_ref(), Some("READY"));
+    assert!(
+        response
+            .items
+            .iter()
+            .all(|item| item.unknown_ref().is_none())
+    );
+    assert_eq!(response.usage.prompt_tokens, 7);
+    assert_eq!(response.usage.completion_tokens, 2);
+
+    for ingress in [
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        OPEN_RESPONSES_2026_04_24,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ] {
+        let pair = ProtocolTransform::global()
+            .bind(ingress, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+            .unwrap();
+        let encoded = pair.encode_response(&response).unwrap();
+        let text = match ingress {
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 => &encoded["choices"][0]["message"]["content"],
+            OPEN_RESPONSES_2026_04_24 => &encoded["output"][0]["content"][0]["text"],
+            ANTHROPIC_MESSAGES_2023_06_01 => &encoded["content"][0]["text"],
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA => {
+                assert_eq!(encoded["responseId"], "google-live-response");
+                assert_eq!(encoded["modelVersion"], "gemini-3.5-flash-lite");
+                assert_eq!(encoded["usageMetadata"]["totalTokenCount"], 9);
+                &encoded["candidates"][0]["content"]["parts"][0]["text"]
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(text, "READY");
+    }
+}
+
+#[test]
 fn canonical_google_stream_metadata_is_advisory_but_unknown_items_are_not() {
     let pair = ProtocolTransform::global()
         .bind(

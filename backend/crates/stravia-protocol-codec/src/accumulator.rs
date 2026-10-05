@@ -37,6 +37,7 @@ pub struct StreamResponseAccumulator {
     pub id: String,
     pub model: String,
     response_metadata: Option<serde_json::Value>,
+    google_response_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     items: Vec<AccumulatedItem>,
     tool_calls: Vec<Option<ToolCall>>,
     completed_items: BTreeMap<usize, AiItem>,
@@ -357,11 +358,20 @@ impl StreamResponseAccumulator {
                 }
             }
             AiStreamDelta::Unknown { raw } => {
-                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(raw)
-                    && raw.get("__open_responses_event").is_none()
-                {
-                    self.items
-                        .push(AccumulatedItem::Unknown(AiItem::unknown(raw)));
+                if let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(raw) {
+                    if let Some(metadata) = raw
+                        .get_mut("__google_response_metadata")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        // Gemini metadata 属于响应，不参与内容项或正文分片的排序。
+                        let target = self.google_response_metadata.get_or_insert_default();
+                        for (key, value) in std::mem::take(metadata) {
+                            target.entry(key).or_insert(value);
+                        }
+                    } else if raw.get("__open_responses_event").is_none() {
+                        self.items
+                            .push(AccumulatedItem::Unknown(AiItem::unknown(raw)));
+                    }
                 }
             }
         }
@@ -396,6 +406,7 @@ impl StreamResponseAccumulator {
             id,
             model,
             response_metadata,
+            google_response_metadata,
             items,
             tool_calls,
             completed_items,
@@ -498,6 +509,12 @@ impl StreamResponseAccumulator {
         }
         resp.stop_reason = stop_reason;
         resp.usage = usage;
+        if let Some(metadata) = google_response_metadata {
+            resp.vendor.ingress.insert(
+                "__google_response_metadata".into(),
+                serde_json::Value::Object(metadata),
+            );
+        }
         if let Some(metadata) = response_metadata {
             resp.vendor
                 .ingress

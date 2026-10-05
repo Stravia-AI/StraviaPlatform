@@ -139,6 +139,7 @@ const localIgnored: Record<string, true> = {
   discovery_lists_only_free_models: true,
   authorization_code_exchange_fills_identity_from_bootstrap: true,
   inference_is_sent_in_claude_code_shape_and_tool_names_round_trip: true,
+  oauth_and_inference_enforce_native_wire_at_real_http_boundary: true,
   no_code_continuation_error_requires_requested_id_before_response_created: true,
   affinity_and_account_headers_follow_actual_codex_frames: true,
   large_reasoning_signature_completes: true,
