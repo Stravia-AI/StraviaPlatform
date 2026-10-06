@@ -533,6 +533,8 @@ Request Hook 完成后、首次 Target 选择前，`CacheAffinity` 对每个 can
 
 ### 4.8 Generation Chain 与 Responses response-chain
 
+Responses 的跨协议 Thinking Preview 与其 History Marker 属于同一个合成 reasoning carrier。流式交付与非流式交付生成相同的客户端 Item 边界，Generation Chain 保存的客户端历史必须与实际交付一致；独立 reasoning Item、原生 summary/content part 的身份及受保护载荷仍分别保存。该规则不合并全局相邻消息、不放宽严格前缀核验，也不重写已保存的节点或 Observation。回放时 Marker 恢复权威原始载荷，Preview 不再重复进入执行历史。
+
 `stage` 在进程内登记待提交屏障，按 Principal、精确客户端历史前缀、显式父 ID 或 item reference 匹配后续请求。父发现与物化先等待相关写入结束，再读取 durable history，避免客户端已收到终止事件而 SQL 尚未提交时错连旧父。屏障不是历史事实源，不提前发布节点；失败和取消释放等待但不形成可续接历史。无关分支与其他 Principal 不等待，dispatcher 的既有取消和 deadline 覆盖真实的 begin/compaction 等待。该机制不提供跨进程的提交协调。
 
 Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Gateway 在进程内以按字节上限淘汰的 LRU Generation Materialization Cache 加速读取；它以共享不可变对象保存精确物化的 execution context，缓存命中只复制共享引用，不在锁内复制整段历史；构造可变请求时再复制所需字段。缓存大小通过流式序列化计数估算，不分配用于计量的完整 JSON 缓冲；条目仍受原有字节上限与 TTL 限制，缓存不是历史事实源。重启或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
@@ -806,6 +808,10 @@ SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_ba
 客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；客户端未提供任何推理指令时才继承 Route 的可选默认档位。先按既有策略选择 Target，再以原请求档位在该 Target 的非 Hidden Thinking Level Map 中匹配：精确档位优先，否则优先向上选择最近档位，无更高档位时才向下选择最近档位，并生成 protocol-native control。off 并非禁止向上匹配；不同 Target 的实际档位可以不同。每次 failover 都从原请求档位重新匹配，不沿用上一个 Target 的实际档位。若选中 Target 全部 Mapping 为 Hidden，客户端显式档位跳过该 Target 并尝试可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续。Route 的 Supported Thinking Levels 由所有已启用 Target 的非 Hidden Mapping 并集派生，供管理面、模型发现及客户端配置导出展示至少一个已启用 Target 支持的等级，不钳制执行，也不决定 Target 准入。无已启用 Target 时集合为空；等级按 off、minimal、low、medium、high、xhigh、max 排序且不重复。`GET /v1/models` 仅在并集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control；客户端配置导出使用该并集，字段与导出格式不变。
 
 按 Provider Model `reasoning_efforts` 中明确登记的值生成 Thinking Level Map；缺失或空列表生成全 Hidden，不根据开关、预算或旧功能标志猜测档位。自定义 Effort 保留在规格中，但未知值不映射到猜测的 Canonical Thinking Level。新生成的 Generated 行若无法由 Provider 协议表达，则降级为 Hidden；用户显式提交的不可写 Control 仍按 `THINKING_CONTROL_UNREPRESENTABLE` 拒绝。Target 的显式开关与预算控制及真实协议编码保留。
+
+Thinking Summary 的可见性与 Thinking Level 分离。未显式指定摘要时，仅在已确认支持的发送路径启用原生摘要：Responses 使用 `reasoning.summary=auto`，Gemini 使用 `includeThoughts=true`；原生 Anthropic 在已经启用的 thinking 上使用 `display=summarized`，Claude Code 还可依据已有 `ModelProfile.always_on()` 处理隐式开启的型号。原生 Anthropic 未指定 thinking 且没有权威隐式开启信息时，不猜测型号、不通过新增 adaptive 控制改变推理强度。未知能力的 Messages 兼容适配器和其它自然输出路径不添加摘要字段或提示词。
+
+显式 `omitted`、`none`、`disabled`、`hidden`、`includeThoughts=false` 和原始 `off` 意图优先于摘要默认值；原始 `off` 即使按既有档位策略向上匹配，也不因此自动请求摘要。最终 Target control 为 Disabled 时不补入默认摘要。可表达的显式摘要格式保留；Hidden Mapping 仍只表示档位映射不可选，不是摘要隐藏设置。摘要指令不变成推理强度，不改变 Route 默认档位的适用条件、预算、选择器、重试或 failover。Antigravity 的 family selector 仅消费强度字段，保留独立的 `includeThoughts`。
 
 ### 8.2 API Token 模型
 

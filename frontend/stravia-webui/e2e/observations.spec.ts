@@ -2658,9 +2658,9 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    // Run 摘要只用有有效耗时的完成尝试计算速度；另一尝试缺少耗时，其输出不计入。
+    // 任一完成尝试缺少耗时，Run 汇总速度即未知；完整计时的单次尝试仍展示自身速度。
     const runRow = diagnostics.locator('button[data-run="run-interaction-cinder"]')
-    await expect(runRow.getByTitle('Token speed', { exact: true })).toHaveText('100 tok/s')
+    await expect(runRow.getByTitle('Token speed', { exact: true })).toHaveText('– tok/s')
     await runRow.click()
     await expect(diagnostics.locator('.stream-row[data-sequence="12"]')).toContainText('100 tok/s')
     const groups = diagnostics.locator('button[data-group="tools"]')

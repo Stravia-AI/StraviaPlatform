@@ -795,6 +795,12 @@ fn assert_anthropic_standard_request(body: &Value) {
     assert_eq!(body["tools"][0]["name"], "lookup");
 }
 
+fn assert_native_anthropic_summary_request(body: &Value) {
+    assert_anthropic_standard_request(body);
+    assert_eq!(body["thinking"]["display"], "summarized");
+    assert_eq!(body["output_config"]["effort"], "high");
+}
+
 fn assert_gemini_standard_request(body: &Value) {
     assert_eq!(
         body.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
@@ -1093,6 +1099,21 @@ async fn custom_profile_standard_protocols_preserve_tools_thinking_usage_and_ter
             }),
             request_assertion: assert_gemini_standard_request,
         },
+        StandardCase {
+            name: "native-anthropic-summary",
+            vendor: "anthropic",
+            protocol: "anthropic-messages",
+            response: json!({
+                "id": "msg-native-summary", "model": "upstream-model", "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "because", "signature": "test-signature"},
+                    {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {"key": "answer"}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 4}
+            }),
+            request_assertion: assert_native_anthropic_summary_request,
+        },
     ];
 
     for case in cases {
@@ -1101,15 +1122,19 @@ async fn custom_profile_standard_protocols_preserve_tools_thinking_usage_and_ter
             local_upstream(1, move |_| MockResponse::json(response_fixture.clone())).await?;
         let (_directory, gateway) = gateway().await?;
         let profile = gateway.admin().vendor_metadata(case.vendor)?;
-        assert!(
-            profile.channels[0]
-                .protocols
-                .iter()
-                .any(|option| option.value == case.protocol),
-            "{} must offer {} through the merged Custom profile",
-            case.vendor,
-            case.protocol
-        );
+        if case.vendor == "custom" {
+            assert!(
+                profile.channels[0]
+                    .protocols
+                    .iter()
+                    .any(|option| option.value == case.protocol),
+                "{} must offer {} through the merged Custom profile",
+                case.vendor,
+                case.protocol
+            );
+        } else {
+            assert_eq!(profile.channels[0].protocol.as_deref(), Some(case.protocol));
+        }
         let (route, token) = provider_route_and_key(&gateway, case.name, ProviderSourceInput::Custom { vendor: case.vendor.to_string(), channel: "default".to_string(), protocol: Some(case.protocol.to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey {
             value: "test-standard-key".into(),
         }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}))

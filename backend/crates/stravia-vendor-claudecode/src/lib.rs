@@ -227,6 +227,11 @@ fn infer(
         device_id: credential(provider, auth::DEVICE_ID),
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
+    thinking::preserve_implicit_summary_intent(
+        &mut encoded.body,
+        &caps,
+        request.reasoning.display.as_deref(),
+    );
     let shaped = request::shape(encoded.body, client_version, &identity, &caps, || {
         fallback_session_id(provider)
     })

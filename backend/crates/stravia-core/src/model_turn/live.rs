@@ -1203,6 +1203,13 @@ async fn prepare_attempt(
 
     // 每次尝试都从原请求解析，避免前一个 Target 的钳制结果污染 failover。
     let mut provider_request = input.request.clone();
+    // Preserve the client's original off intent across the existing upward mapping.
+    // This only suppresses automatic summaries; it does not change intensity resolution.
+    if provider_request.reasoning.level == Some(ThinkingLevel::Off)
+        && provider_request.reasoning.display.is_none()
+    {
+        provider_request.reasoning.display = Some("omitted".into());
+    }
     let mut default_level_applied = false;
     // 与 generation_chain 的继承判定一致：任何显式推理指令都阻止默认档介入。
     if !provider_request.reasoning.enabled

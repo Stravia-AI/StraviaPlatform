@@ -37,7 +37,7 @@ from tests.common.helpers import (
 
 def _create_route(
     env: dict[str, Any], name: str, *, retry_budget: int | None = None,
-    first_token_timeout_ms: int | None = None,
+    first_token_timeout_ms: int | None = None, protocol: str = "openai-compatible",
 ) -> tuple[str, str]:
     status, body = http_request(
         "POST",
@@ -48,7 +48,7 @@ def _create_route(
                 "type": "custom",
                 "vendor": "custom",
                 "channel": "default",
-                "protocol": "openai-compatible",
+                "protocol": protocol,
                 "base_url": env["mock"],
             },
             "credential": {"type": "api_key", "value": "upstream-secret"},

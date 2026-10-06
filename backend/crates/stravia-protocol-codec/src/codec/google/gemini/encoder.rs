@@ -146,13 +146,14 @@ impl GoogleEncoder {
             }
             Some(ResponseFormat::Text) | None => {}
         }
+        let mut thinking_config = serde_json::json!({});
         if let Some(control) = req.reasoning.target_control.as_ref() {
-            let thinking_config = match control {
+            thinking_config = match control {
                 stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value } => {
                     serde_json::json!({"thinkingBudget": value})
                 }
                 stravia_runtime_contract::thinking::TargetThinkingControl::Enabled => {
-                    serde_json::json!({"includeThoughts": true})
+                    serde_json::json!({})
                 }
                 stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => {
                     serde_json::json!({"thinkingBudget": 0})
@@ -164,8 +165,18 @@ impl GoogleEncoder {
                     "Google Gemini cannot represent Target Thinking Control {control:?}"
                 ),
             };
-            gen_config.insert("thinkingConfig".into(), thinking_config);
         }
+        let summary_disabled = matches!(
+            req.reasoning.display.as_deref(),
+            Some("omitted" | "none" | "disabled" | "hidden")
+        ) || req.reasoning.level
+            == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+            || matches!(
+                req.reasoning.target_control,
+                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
+            );
+        thinking_config["includeThoughts"] = Value::Bool(!summary_disabled);
+        gen_config.insert("thinkingConfig".into(), thinking_config);
 
         if !gen_config.is_empty() {
             obj.insert("generationConfig".into(), Value::Object(gen_config));

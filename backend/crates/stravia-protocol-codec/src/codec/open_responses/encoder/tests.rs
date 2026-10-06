@@ -6,6 +6,42 @@ use crate::codec::openai::compatible::decoder::OpenAIDecoder;
 use stravia_runtime_contract::protocol::ir::AiItem;
 
 #[test]
+fn responses_summary_respects_explicit_intent_and_disabled_target() {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+    for (display, level, control, expected) in [
+        (Some("none"), None, None, None),
+        (Some("omitted"), None, None, None),
+        (Some("hidden"), None, None, None),
+        (Some("concise"), None, None, Some("concise")),
+        (Some("detailed"), None, None, Some("detailed")),
+        (
+            None,
+            Some(ThinkingLevel::Off),
+            Some(TargetThinkingControl::Effort {
+                value: "high".into(),
+            }),
+            None,
+        ),
+        (None, None, Some(TargetThinkingControl::Disabled), None),
+    ] {
+        let mut request = ResponsesDecoder
+            .decode_request(serde_json::json!({"model": "gpt", "input": "hello"}))
+            .unwrap();
+        request.reasoning.display = display.map(str::to_owned);
+        request.reasoning.level = level;
+        request.reasoning.target_control = control;
+        let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+        assert_eq!(
+            body["reasoning"].get("summary").and_then(Value::as_str),
+            expected
+        );
+        if level == Some(ThinkingLevel::Off) {
+            assert_eq!(body["reasoning"]["effort"], "high");
+        }
+    }
+}
+
+#[test]
 fn target_effort_maps_to_responses_shape() {
     let mut request = OpenAIDecoder
         .decode_request(serde_json::json!({
@@ -93,7 +129,22 @@ fn thinking_replay_signature_is_not_responses_ciphertext() {
 }
 
 #[test]
-fn native_responses_preserves_omitted_reasoning_summary() {
+fn native_responses_requests_summary_without_explicit_effort() {
+    let request = ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "gpt",
+            "input": "hello"
+        }))
+        .unwrap();
+
+    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+
+    assert_eq!(body["reasoning"]["summary"], "auto");
+    assert!(body["reasoning"].get("effort").is_none());
+}
+
+#[test]
+fn native_responses_defaults_omitted_reasoning_summary() {
     let mut request = ResponsesDecoder
         .decode_request(serde_json::json!({
             "model": "gpt",
@@ -110,7 +161,7 @@ fn native_responses_preserves_omitted_reasoning_summary() {
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
     assert_eq!(body["reasoning"]["effort"], "medium");
-    assert!(body["reasoning"].get("summary").is_none());
+    assert_eq!(body["reasoning"]["summary"], "auto");
 }
 
 #[test]
@@ -162,7 +213,7 @@ fn anthropic_adaptive_thinking_maps_display_to_responses_summary() {
 }
 
 #[test]
-fn anthropic_without_thinking_omits_responses_reasoning() {
+fn anthropic_without_thinking_requests_summary_without_selecting_effort() {
     let request = AnthropicDecoder
         .decode_request(serde_json::json!({
             "model": "gpt",
@@ -173,7 +224,8 @@ fn anthropic_without_thinking_omits_responses_reasoning() {
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
-    assert!(body.get("reasoning").is_none());
+    assert_eq!(body["reasoning"]["summary"], "auto");
+    assert!(body["reasoning"].get("effort").is_none());
 }
 
 #[test]

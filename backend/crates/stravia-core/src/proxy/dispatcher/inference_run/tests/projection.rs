@@ -1,6 +1,134 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_delivered_protected_thinking_replay_preserves_parent() {
+    use axum::Json;
+    use axum::response::IntoResponse;
+    use serde_json::{Value, json};
+
+    for readable in [false, true] {
+        let parts = if readable {
+            json!([{"text": "public summary", "thought": true, "thoughtSignature": "protected-signature"}, {"text": "answer"}])
+        } else {
+            json!([{"text": "", "thought": true, "thoughtSignature": "protected-signature"}, {"text": "answer"}])
+        };
+        let upstream = json!({"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}]});
+        let app = Router::new().fallback(move |uri: axum::http::Uri| {
+            let upstream = upstream.clone();
+            async move {
+                if uri.path().contains("streamGenerateContent") {
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        format!("data: {upstream}\n\n"),
+                    )
+                        .into_response()
+                } else {
+                    Json(upstream).into_response()
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let data_dir = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new(crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let model = "protected-thinking-parent";
+        configure_route_with_protocol(
+            &gateway,
+            model,
+            &[format!("http://{address}")],
+            "custom",
+            "google-gemini",
+        )
+        .await;
+        let headers = authorized_headers(&gateway).await;
+        let authorization = headers.get(header::AUTHORIZATION).unwrap();
+        let router = crate::proxy::server::create_router(gateway.clone());
+        let mut events = gateway.observation.subscribe(0);
+        let mut input = vec![json!({"role": "user", "content": "question"})];
+        let mut parent = None;
+        for stream in [true, false, true, false] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/v1/responses")
+                        .header("content-type", "application/json")
+                        .header(header::AUTHORIZATION, authorization.clone())
+                        .body(Body::from(
+                            json!({"model": model, "input": input, "stream": stream}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let delivered: Value = if stream {
+                std::str::from_utf8(&body)
+                    .unwrap()
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                    .find(|event| event["type"] == "response.completed")
+                    .unwrap()["response"]
+                    .clone()
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            };
+            assert!(!delivered.to_string().contains("protected-signature"));
+            wait_for_observed_run_finish(&mut events).await;
+            let forest = gateway
+                .observation
+                .query_forest(Default::default())
+                .await
+                .unwrap();
+            let mut found = None;
+            let mut user_inputs = 0;
+            for interaction in forest.roots.iter().flat_map(|root| &root.interactions) {
+                let detail = gateway
+                    .observation
+                    .get_interaction(&interaction.id, Default::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                user_inputs += detail
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.events)
+                    .filter(|event| event.kind == "input_preview_recorded")
+                    .count();
+                if let Some(run) = detail
+                    .runs
+                    .iter()
+                    .find(|run| run.generation_node_id.as_deref() == delivered["id"].as_str())
+                {
+                    found = Some(run.generation_parent_id.clone());
+                }
+            }
+            assert_eq!(
+                found.unwrap(),
+                parent,
+                "readable={readable}, stream={stream}"
+            );
+            assert_eq!(
+                user_inputs, 1,
+                "full replay does not resubmit the original user delta"
+            );
+            parent = delivered["id"].as_str().map(str::to_owned);
+            input.extend(delivered["output"].as_array().unwrap().iter().cloned());
+            input.push(json!({"role": "assistant", "content": "continue"}));
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
     use axum::Json;
     use axum::response::IntoResponse;

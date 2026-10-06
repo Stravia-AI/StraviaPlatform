@@ -204,31 +204,18 @@ impl GoogleDecoder {
                 .get("thinkingBudget")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
-            let include_thoughts = tc
-                .get("includeThoughts")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let level = effort_level
-                .or_else(|| {
-                    budget.map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
-                })
-                .or_else(|| {
-                    tc.get("includeThoughts")
-                        .and_then(Value::as_bool)
-                        .map(|enabled| {
-                            if enabled {
-                                stravia_runtime_contract::thinking::ThinkingLevel::Medium
-                            } else {
-                                stravia_runtime_contract::thinking::ThinkingLevel::Off
-                            }
-                        })
-                });
+            let include_thoughts = tc.get("includeThoughts").and_then(Value::as_bool);
+            let level = effort_level.or_else(|| {
+                budget.map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
+            });
             ReasoningConfig {
                 enabled: level.is_some_and(|level| {
                     level != stravia_runtime_contract::thinking::ThinkingLevel::Off
-                }) || include_thoughts,
+                }),
                 budget_tokens: budget,
                 level,
+                display: include_thoughts
+                    .map(|enabled| if enabled { "summarized" } else { "omitted" }.into()),
                 ..Default::default()
             }
         } else {

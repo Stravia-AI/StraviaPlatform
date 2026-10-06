@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn gemini_summary_intent_survives_independent_intensity_mapping() {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+    for (config, control, include) in [
+        (serde_json::json!({}), None, true),
+        (
+            serde_json::json!({"includeThoughts": false}),
+            Some(TargetThinkingControl::Effort {
+                value: "high".into(),
+            }),
+            false,
+        ),
+        (
+            serde_json::json!({"includeThoughts": true}),
+            Some(TargetThinkingControl::Budget { value: 2048 }),
+            true,
+        ),
+        (
+            serde_json::json!({"thinkingBudget": 0}),
+            Some(TargetThinkingControl::Effort {
+                value: "high".into(),
+            }),
+            false,
+        ),
+        (
+            serde_json::json!({}),
+            Some(TargetThinkingControl::Disabled),
+            false,
+        ),
+    ] {
+        let mut request = crate::codec::google::gemini::decoder::GoogleDecoder
+            .decode_request(serde_json::json!({
+                "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+                "generationConfig": {"thinkingConfig": config}
+            }))
+            .unwrap();
+        request.reasoning.target_control = control.clone();
+        let (body, _) = GoogleEncoder.encode_request(&request).unwrap();
+        let thinking = &body["generationConfig"]["thinkingConfig"];
+        assert_eq!(thinking["includeThoughts"], include);
+        match control {
+            Some(TargetThinkingControl::Effort { .. }) => {
+                assert_eq!(thinking["thinkingLevel"], "HIGH")
+            }
+            Some(TargetThinkingControl::Budget { .. }) => {
+                assert_eq!(thinking["thinkingBudget"], 2048)
+            }
+            Some(TargetThinkingControl::Disabled) => assert_eq!(thinking["thinkingBudget"], 0),
+            None => {
+                assert_eq!(request.reasoning.level, None::<ThinkingLevel>);
+                assert!(thinking.get("thinkingBudget").is_none());
+                assert!(thinking.get("thinkingLevel").is_none());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn native_function_responses_round_trip_business_json_and_parallel_call_ids() {
     for responses in [
         serde_json::json!([{
@@ -238,8 +296,13 @@ fn target_controls_replace_raw_gemini_thinking_config() {
         .encode_request(&request)
         .expect("Gemini Thinking Level");
     assert_eq!(
-        body["generationConfig"]["thinkingConfig"],
-        serde_json::json!({"thinkingLevel": "HIGH"})
+        body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "HIGH"
+    );
+    assert!(
+        body["generationConfig"]["thinkingConfig"]
+            .get("thinkingBudget")
+            .is_none()
     );
 }
 

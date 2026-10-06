@@ -787,12 +787,48 @@ impl ClientProjectionSession {
                 return Err(HistoryMarkerError::InvalidPayload);
             }
         }
+        let mut marker_blocks = match &item.content {
+            MessageContent::Blocks(blocks) => blocks.as_slice(),
+            MessageContent::Text(_) => &[],
+        }
+        .iter()
+        .filter(|block| is_thinking(block));
         for marker in &markers {
-            marker_deltas.push(marker_delta_for(
-                self.state.openai_compatible,
-                post_text,
-                render_history_marker(marker),
-            ));
+            if self.state.ingress
+                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+            {
+                let block = marker_blocks
+                    .next()
+                    .ok_or(HistoryMarkerError::InvalidPayload)?;
+                let content_index = match block {
+                    ContentBlock::Reasoning { content, .. } => content.len().saturating_sub(1),
+                    _ => 0,
+                };
+                if self.carrier_facts.indexed {
+                    marker_deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
+                        text: render_history_marker(marker),
+                        obfuscation: None,
+                        output_index: Some(output_index),
+                        content_index: Some(content_index),
+                    });
+                } else {
+                    marker_deltas.push(AiStreamDelta::ThinkingDelta(render_history_marker(marker)));
+                }
+                marker_deltas.push(AiStreamDelta::ItemDone {
+                    index: output_index,
+                    item: if self.carrier_facts.indexed {
+                        AiItem::reasoning(Vec::new(), Vec::new(), None)
+                    } else {
+                        AiItem::thinking("", None)
+                    },
+                });
+            } else {
+                marker_deltas.push(marker_delta_for(
+                    self.state.openai_compatible,
+                    post_text,
+                    render_history_marker(marker),
+                ));
+            }
         }
         if !markers.is_empty() {
             self.early_thinking.insert(
@@ -1640,7 +1676,14 @@ impl ClientProjectionSession {
                                 .await?;
                             (marker, true)
                         };
-                        if self.state.openai_compatible && block_post_text {
+                        if self.state.ingress
+                            == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+                        {
+                            let mut carrier =
+                                self.state.responses_thinking_carrier(&block, &marker);
+                            carrier.meta = meta.take();
+                            projected.push(carrier);
+                        } else if self.state.openai_compatible && block_post_text {
                             if let Some(mut preview) = self.state.post_text_preview(&block, &marker)
                             {
                                 preview.meta = meta.take();
@@ -1651,10 +1694,17 @@ impl ClientProjectionSession {
                         {
                             push_projection_block(&mut projected, visible, &mut meta);
                         }
-                        let mut marker_item =
-                            marker_item_for(self.state.openai_compatible, block_post_text, &marker);
-                        marker_item.meta = meta.take();
-                        projected.push(marker_item);
+                        if self.state.ingress
+                            != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+                        {
+                            let mut marker_item = marker_item_for(
+                                self.state.openai_compatible,
+                                block_post_text,
+                                &marker,
+                            );
+                            marker_item.meta = meta.take();
+                            projected.push(marker_item);
+                        }
                         if newly_persisted {
                             staged_deltas.push(marker_delta_for(
                                 self.state.openai_compatible,
@@ -2175,6 +2225,37 @@ impl ProjectionState {
         Some(visible)
     }
 
+    fn responses_thinking_carrier(&self, block: &ContentBlock, marker: &HistoryMarker) -> AiItem {
+        let (mut summary, mut content) = match self.visible_protected_block(block, marker) {
+            Some(ContentBlock::Reasoning {
+                summary, content, ..
+            }) => (summary, content),
+            Some(ContentBlock::Thinking { thinking, .. }) => (
+                Vec::new(),
+                if thinking.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![thinking]
+                },
+            ),
+            None => (Vec::new(), Vec::new()),
+            _ => unreachable!("Thinking projection uses a native reasoning carrier"),
+        };
+        // The marker belongs to this synthetic block, not a second independent item.
+        // It follows the last content part, matching the streamed carrier.
+        let rendered = render_history_marker(marker);
+        if let Some(last) = content.last_mut() {
+            last.push_str(&rendered);
+        } else {
+            content.push(rendered);
+        }
+        // Empty preview parts emit no live bytes. Their authoritative boundaries
+        // remain in the marker payload rather than creating unary-only carriers.
+        summary.retain(|part| !part.is_empty());
+        content.retain(|part| !part.is_empty());
+        AiItem::reasoning(summary, content, None)
+    }
+
     pub(super) fn post_text_preview(
         &self,
         block: &ContentBlock,
@@ -2334,6 +2415,123 @@ mod tests {
             Vec::new(),
             Some(source),
         );
+    }
+
+    #[tokio::test]
+    async fn responses_synthetic_carriers_preserve_independent_items_and_parts() {
+        use serde_json::json;
+        use stravia_protocol_codec::codec::open_responses::{
+            decoder::ResponsesDecoder, formatter::ResponsesResponseFormatter,
+            stream::ResponsesStreamFormatter,
+        };
+        let (_, store, principal) = projection_session_fixture("independent-responses-owner").await;
+        let mut session = ClientProjectionSession::new(
+            Arc::clone(&store),
+            principal.clone(),
+            OPEN_RESPONSES_2026_04_24,
+        );
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: true,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            Vec::new(),
+            Some(replay_source(ANTHROPIC_MESSAGES_2023_06_01, "source-model")),
+        );
+        let originals = vec![
+            AiItem::reasoning(
+                vec!["summary A".into(), String::new(), "summary B".into()],
+                vec!["content A".into(), String::new(), "content B".into()],
+                Some("cipher A".into()),
+            ),
+            AiItem::reasoning(
+                vec!["independent summary".into()],
+                Vec::new(),
+                Some("cipher B".into()),
+            ),
+        ];
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut events = formatter.format_deltas(&[AiStreamDelta::MessageStart {
+            id: "independent".into(),
+            model: "model".into(),
+        }]);
+        for (index, original) in originals.iter().enumerate() {
+            let (summary, content, _) = original.reasoning_ref().unwrap();
+            let mut deltas = vec![AiStreamDelta::ProtectedThinkingStart { index }];
+            deltas.extend(summary.iter().enumerate().map(|(content_index, text)| {
+                AiStreamDelta::ReasoningSummaryDelta {
+                    text: text.clone(),
+                    obfuscation: None,
+                    output_index: Some(index),
+                    content_index: Some(content_index),
+                }
+            }));
+            deltas.extend(content.iter().enumerate().map(|(content_index, text)| {
+                AiStreamDelta::ThinkingDeltaWithMetadata {
+                    text: text.clone(),
+                    obfuscation: None,
+                    output_index: Some(index),
+                    content_index: Some(content_index),
+                }
+            }));
+            deltas.push(AiStreamDelta::ItemDone {
+                index,
+                item: original.clone(),
+            });
+            for batch in session.project_live_deltas(deltas, false).await.unwrap() {
+                events.extend(formatter.format_deltas(batch.deltas()));
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .unwrap();
+            }
+        }
+        events.extend(formatter.format_deltas(&[AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        }]));
+        let delivered = events
+            .iter()
+            .find(|event| event.event.as_deref() == Some("response.completed"))
+            .map(|event| {
+                serde_json::from_str::<serde_json::Value>(&event.data).unwrap()["response"].clone()
+            })
+            .unwrap();
+        let output = delivered["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2, "independent source blocks are not merged");
+        assert_eq!(output[0]["summary"].as_array().unwrap().len(), 2);
+        assert_eq!(output[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(output[1]["summary"].as_array().unwrap().len(), 1);
+        let mut canonical = AiResponse::new("independent", "model");
+        canonical.items = originals.clone();
+        let batch = session.project_staged(&mut canonical, &[]).await.unwrap();
+        session
+            .report_delivery(batch, ProjectionDelivery::Sent)
+            .await
+            .unwrap();
+        let unary = ResponsesResponseFormatter.format_response(&canonical);
+        let mut replay = ResponsesDecoder
+            .decode_request(json!({"model": "model", "input": output}))
+            .unwrap();
+        let unary_replay = ResponsesDecoder
+            .decode_request(json!({"model": "model", "input": unary["output"]}))
+            .unwrap();
+        assert!(
+            stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
+                &replay.items,
+                &unary_replay.items
+            )
+        );
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
+            .await
+            .unwrap();
+        assert_eq!(replay.items.len(), 2);
+        for (restored, original) in replay.items.iter().zip(&originals) {
+            assert_eq!(
+                serde_json::to_value(&restored.content).unwrap(),
+                serde_json::to_value(&original.content).unwrap()
+            );
+        }
     }
 
     #[tokio::test]
@@ -2595,6 +2793,26 @@ mod tests {
         assert_eq!(
             crate::history_marker::history_marker_references(&canonical.items),
             live_references
+        );
+        let unary =
+            stravia_protocol_codec::codec::open_responses::formatter::ResponsesResponseFormatter
+                .format_response(&canonical);
+        let live_history = client_pair
+            .decode_request(json!({
+                "model": "gemini-native-model", "input": output,
+            }))
+            .expect("live replay");
+        let unary_history = client_pair
+            .decode_request(json!({
+                "model": "gemini-native-model", "input": unary["output"],
+            }))
+            .expect("unary replay");
+        assert!(
+            stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
+                &live_history.items,
+                &unary_history.items,
+            ),
+            "actual delivered live and unary histories preserve identical synthetic block boundaries"
         );
     }
 
@@ -3202,13 +3420,13 @@ mod tests {
     fn text_of(deltas: &[AiStreamDelta]) -> String {
         deltas
             .iter()
-            .map(|delta| match delta {
+            .filter_map(|delta| match delta {
                 AiStreamDelta::TextDelta(text)
                 | AiStreamDelta::ThinkingDelta(text)
                 | AiStreamDelta::TextDeltaWithMetadata { text, .. }
                 | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
-                | AiStreamDelta::ReasoningSummaryDelta { text, .. } => text.as_str(),
-                other => panic!("unexpected projected delta: {other:?}"),
+                | AiStreamDelta::ReasoningSummaryDelta { text, .. } => Some(text.as_str()),
+                _ => None,
             })
             .collect()
     }

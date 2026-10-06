@@ -131,9 +131,36 @@ fn infer(
             "Anthropic requires the Anthropic Messages protocol",
         ));
     }
+    // Only the confirmed Anthropic API adapter adds this display default.
+    // Messages-compatible vendors retain their natural return behavior.
+    if request.reasoning.display.is_none()
+        && request.reasoning.level != Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+        && matches!(
+            request.reasoning.target_control,
+            Some(
+                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
+                    | stravia_runtime_contract::thinking::TargetThinkingControl::Budget { .. }
+                    | stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. }
+            )
+        )
+    {
+        request.reasoning.display = Some("summarized".into());
+    }
     let encoded =
         common::encode_inference_request(&ANTHROPIC_MESSAGES_2023_06_01.to_string(), &request)?;
-    let body = encoded.body;
+    let mut body = encoded.body;
+    if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
+        && thinking.get("type").and_then(Value::as_str) != Some("disabled")
+    {
+        let display = match request.reasoning.display.as_deref() {
+            Some("omitted" | "none" | "disabled" | "hidden") => Some("omitted"),
+            Some("summarized" | "auto" | "concise" | "detailed") => Some("summarized"),
+            _ => None,
+        };
+        if let Some(display) = display {
+            thinking.insert("display".into(), Value::String(display.into()));
+        }
+    }
     let codec_headers = encoded.headers;
     let egress_path = encoded.path;
     let mut headers = common::header_pairs(&codec_headers)?;

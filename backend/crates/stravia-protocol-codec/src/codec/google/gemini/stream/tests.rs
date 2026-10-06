@@ -1,6 +1,121 @@
 use super::*;
 
 #[test]
+fn gemini_stream_usage_preserves_reasoning_and_final_cumulative_revision() {
+    let mut reasoning_total = 0;
+    let mut output_total = 0;
+    for (thoughts, output) in [
+        (241, 337),
+        (19, 200),
+        (25, 250),
+        (19, 250),
+        (23, 250),
+        (661, 1000),
+    ] {
+        let mut parser = GoogleStreamParser::new();
+        let deltas = parser
+            .parse_chunk(&format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "candidates": [{"finishReason": "STOP"}],
+                    "usageMetadata": {
+                        "promptTokenCount": 100,
+                        "candidatesTokenCount": output - thoughts,
+                        "thoughtsTokenCount": thoughts,
+                        "totalTokenCount": 100 + output
+                    }
+                })
+            ))
+            .expect("parse cumulative usage");
+        let usage = deltas
+            .iter()
+            .find_map(|delta| match delta {
+                AiStreamDelta::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("reported usage");
+        assert_eq!(usage.reasoning_tokens, Some(thoughts));
+        assert_eq!(usage.completion_tokens, output);
+        assert_eq!(usage.cache_read_tokens, None);
+        reasoning_total += usage.reasoning_tokens.unwrap();
+        output_total += usage.completion_tokens;
+    }
+    assert_eq!(reasoning_total, 988);
+    assert_eq!(output_total, 2287);
+
+    let mut parser = GoogleStreamParser::new();
+    for (prompt, cache, terminal) in [(23243, 20010, true), (23570, 20337, false)] {
+        let mut chunk = serde_json::json!({"usageMetadata": {
+            "promptTokenCount": prompt,
+            "candidatesTokenCount": 339,
+            "thoughtsTokenCount": 661,
+            "totalTokenCount": prompt + 1000,
+            "cachedContentTokenCount": cache
+        }});
+        if terminal {
+            chunk["candidates"] = serde_json::json!([{"finishReason": "STOP"}]);
+        }
+        let deltas = parser
+            .parse_chunk(&format!("data: {chunk}\n\n"))
+            .expect("parse usage revision");
+        let usage = deltas
+            .iter()
+            .find_map(|delta| match delta {
+                AiStreamDelta::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("usage revision survives terminal candidate");
+        assert_eq!(usage.prompt_tokens, prompt);
+        assert_eq!(usage.cache_read_tokens, Some(cache));
+        assert_eq!(usage.completion_tokens, 1000);
+        assert_eq!(usage.reasoning_tokens, Some(661));
+        if !terminal {
+            assert_eq!(usage.prompt_tokens - usage.cache_read_tokens.unwrap(), 3233);
+        }
+    }
+}
+
+#[test]
+fn gemini_usage_distinguishes_explicit_zero_from_unknown() {
+    for (metadata, reasoning, cache) in [
+        (
+            serde_json::json!({"promptTokenCount": 0, "candidatesTokenCount": 0, "thoughtsTokenCount": 0, "cachedContentTokenCount": 0}),
+            Some(0),
+            Some(0),
+        ),
+        (
+            serde_json::json!({"promptTokenCount": 0, "candidatesTokenCount": 0}),
+            None,
+            None,
+        ),
+    ] {
+        let mut parser = GoogleStreamParser::new();
+        let deltas = parser
+            .parse_chunk(&format!(
+                "data: {}\n\n",
+                serde_json::json!({"usageMetadata": metadata})
+            ))
+            .expect("parse zero usage");
+        let usage = deltas
+            .iter()
+            .find_map(|delta| match delta {
+                AiStreamDelta::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("known zero usage is reported");
+        assert!(usage.required_components_known);
+        assert_eq!(usage.reasoning_tokens, reasoning);
+        assert_eq!(usage.cache_read_tokens, cache);
+        let formatted = google_usage_from_counts(usage);
+        assert_eq!(
+            formatted.get("thoughtsTokenCount").and_then(Value::as_u64),
+            reasoning.map(u64::from)
+        );
+    }
+    assert!(!extract_gemini_usage(&serde_json::json!({})).required_components_known);
+}
+
+#[test]
 fn gemini_tool_call_stop_is_anthropic_tool_use() {
     let pair = crate::transform::ProtocolTransform::global()
         .bind(

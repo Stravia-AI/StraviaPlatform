@@ -53,7 +53,9 @@ pub(crate) fn infer(
         );
         if effort {
             // 档位由真实模型 ID 实现，不再把同一控制转换成 Gemini thinking budget。
-            request.reasoning = Default::default();
+            request.reasoning.target_control = None;
+            request.reasoning.effort = None;
+            request.reasoning.budget_tokens = None;
         }
         effort
     } else {
@@ -100,8 +102,12 @@ pub(crate) fn infer(
         && let Some(config) = object
             .get_mut("generationConfig")
             .and_then(Value::as_object_mut)
+        && let Some(thinking) = config
+            .get_mut("thinkingConfig")
+            .and_then(Value::as_object_mut)
     {
-        config.remove("thinkingConfig");
+        thinking.remove("thinkingLevel");
+        thinking.remove("thinkingBudget");
     }
     // 同协议 raw tools 保留原始 function response 与内置工具，再统一投影。
     if let Some(tools) = tools.filter(|tools| !tools.is_empty())
@@ -220,7 +226,8 @@ pub(crate) fn infer(
         if let Some(error) = response_error(&value) {
             return Err(error);
         }
-        let inner = value.get_mut("response").map(Value::take).unwrap_or(value);
+        let mut inner = value.get_mut("response").map(Value::take).unwrap_or(value);
+        normalize_final_usage(&mut inner);
         return ProtocolTransform::global()
             .bind(protocol, protocol)
             .and_then(|pair| pair.decode_response(inner))
@@ -270,7 +277,7 @@ fn decode_event(
     if let Some(error) = response_error(&value) {
         return Err(error);
     }
-    let inner = value.get_mut("response").map(Value::take).unwrap_or(value);
+    let mut inner = value.get_mut("response").map(Value::take).unwrap_or(value);
     *terminal |= inner
         .get("candidates")
         .and_then(Value::as_array)
@@ -282,6 +289,9 @@ fn decode_event(
                     .is_some_and(|reason| !reason.is_empty())
             })
         });
+    if *terminal {
+        normalize_final_usage(&mut inner);
+    }
     let mut event = Vec::with_capacity(payload.len() + 8);
     event.extend_from_slice(b"data: ");
     serde_json::to_writer(&mut event, &inner)
@@ -291,6 +301,37 @@ fn decode_event(
         .decode_chunk(&event)
         .map_err(common::map_response_transform_error)?;
     common::emit_deltas(host, accumulator, &deltas)
+}
+
+fn normalize_final_usage(response: &mut Value) {
+    let Some(usage) = response
+        .get_mut("usageMetadata")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(prompt) = usage.get("promptTokenCount").and_then(Value::as_u64) else {
+        return;
+    };
+    let output_known = usage
+        .get("candidatesTokenCount")
+        .and_then(Value::as_u64)
+        .is_some()
+        || usage
+            .get("totalTokenCount")
+            .and_then(Value::as_u64)
+            .is_some_and(|total| total >= prompt);
+    if !output_known {
+        return;
+    }
+    // Official CLI 1.2.16's private StreamGenerateContent response wraps
+    // aiplatform.master.GenerateContentResponse. Its proto3 UsageMetadata
+    // cached_content_token_count (int32, field 5) has implicit presence:
+    // omission in a complete usage snapshot means zero, not unknown.
+    // Do not apply that default to partial frames or absent/invalid usage.
+    usage
+        .entry("cachedContentTokenCount")
+        .or_insert_with(|| json!(0));
 }
 
 fn response_error(value: &Value) -> Option<PluginError> {

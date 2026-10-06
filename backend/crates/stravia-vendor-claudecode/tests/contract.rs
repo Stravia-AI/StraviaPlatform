@@ -210,6 +210,45 @@ fn sent_cch(body: &[u8]) -> &str {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
+    let (runtime, plugin) = load_plugin().await;
+    for (display, expected) in [
+        (None, "summarized"),
+        (Some("omitted"), "omitted"),
+        (Some("none"), "omitted"),
+        (Some("disabled"), "omitted"),
+        (Some("hidden"), "omitted"),
+    ] {
+        let services = Arc::new(MockServices {
+            routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+            ..MockServices::default()
+        });
+        let mut request = anthropic_client_request(json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Read a."}]
+        }));
+        request.reasoning.display = display.map(str::to_owned);
+        let mut provider = signed_in();
+        provider.model = Some("claude-opus-5-5".into());
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await
+        .expect("implicit always-on inference succeeds");
+        let requests = services.requests.lock();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], expected);
+        assert!(body.get("output_config").is_none());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {

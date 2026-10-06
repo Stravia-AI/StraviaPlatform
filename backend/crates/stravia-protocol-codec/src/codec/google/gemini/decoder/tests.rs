@@ -104,17 +104,21 @@ fn missing_function_ids_are_compact_deterministic_and_skip_supplied_ids() {
 }
 
 #[test]
-fn include_thoughts_enables_reasoning_without_budget() {
-    let request = GoogleDecoder
-        .decode_request(serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "reason"}]}],
-            "generationConfig": {
-                "thinkingConfig": {"includeThoughts": true}
-            }
-        }))
-        .expect("Gemini request");
+fn include_thoughts_preserves_display_without_selecting_intensity() {
+    for (include, display) in [(true, "summarized"), (false, "omitted")] {
+        let request = GoogleDecoder
+            .decode_request(serde_json::json!({
+                "contents": [{"role": "user", "parts": [{"text": "reason"}]}],
+                "generationConfig": {
+                    "thinkingConfig": {"includeThoughts": include}
+                }
+            }))
+            .expect("Gemini request");
 
-    assert!(request.reasoning.enabled);
+        assert_eq!(request.reasoning.display.as_deref(), Some(display));
+        assert_eq!(request.reasoning.level, None);
+        assert!(!request.reasoning.enabled);
+    }
 }
 
 #[test]

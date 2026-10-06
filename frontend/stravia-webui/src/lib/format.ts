@@ -168,23 +168,18 @@ export function generationMsOf(log: TpsInput | null | undefined): number | null 
   const ttfb = log.stream_first_chunk_ms ?? null
   if (isStream && upstream != null && ttfb != null) {
     const gen = upstream - ttfb
-    // 净生成耗时必须真实反映增量解码阶段。当首字节延迟占上游耗时比例过高
-    // (上游未真正增量流式,而是在服务端算完后一口气 flush),gen 会趋近于 0,
-    // 导致 TPS 被放大成荒诞的数值。此时回退到上游往返耗时作为生成耗时。
-    const TTFB_RATIO_THRESHOLD = 0.8
-    const GEN_MIN_MS = 50
-    const looksNonIncremental = gen <= 0 || ttfb / upstream >= TTFB_RATIO_THRESHOLD || gen < GEN_MIN_MS
-    if (looksNonIncremental) return upstream > 0 ? upstream : null
+    // 与 Provider 统计共用 50 ms 下限，不根据等待占比猜测上游是否增量生成。
+    if (gen < 50) return upstream
     return gen
   }
   return upstream ?? log.latency_total_ms ?? null
 }
 
-/** 净生成速度(tok/s);output ≤ 0 或净生成耗时无效时返回 null。 */
+/** 净生成速度(tok/s)；输出未知或净生成耗时无效时返回 null，已知零输出保留零。 */
 export function computeTps(log: TpsInput | null | undefined): number | null {
   const gen = generationMsOf(log)
-  const out = log?.output_tokens ?? 0
-  if (out > 0 && gen && gen > 0) return out / (gen / 1000)
+  const out = log?.output_tokens
+  if (out != null && out >= 0 && gen != null && gen > 0) return out / (gen / 1000)
   return null
 }
 

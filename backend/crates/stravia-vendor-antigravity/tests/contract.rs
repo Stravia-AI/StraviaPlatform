@@ -173,7 +173,7 @@ async fn upstream(
                 )
                     .into_response();
             }
-            let first = "data: {\"response\":{\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"真实 HTTP 冒烟\"}]}}]}}\r\n\r\n";
+            let first = "data: {\"response\":{\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"真实 HTTP 冒烟\"}]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":8,\"totalTokenCount\":13}}}\r\n\r\n";
             let last = "data: {\"response\":{\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"metadata\":{\"seed\":7}}},\"thoughtSignature\":\"genuine-signature\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":8,\"totalTokenCount\":13}}}\n\n";
             let body = if fixture.truncated.load(Ordering::Relaxed) {
                 first.to_owned()
@@ -455,6 +455,24 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         panic!("inference")
     };
     assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+    assert_eq!(output.usage.cache_read_tokens, Some(0));
+    assert_eq!(output.usage.prompt_tokens, 5);
+    assert_eq!(output.usage.completion_tokens, 8);
+    {
+        let deltas = services.deltas.lock();
+        let mut usages = deltas.iter().filter_map(|delta| match delta {
+            AiStreamDelta::Usage(usage) => Some(usage),
+            _ => None,
+        });
+        assert_eq!(
+            usages.next().expect("partial usage").cache_read_tokens,
+            None
+        );
+        assert_eq!(
+            usages.next().expect("final usage").cache_read_tokens,
+            Some(0)
+        );
+    }
     let call = output
         .items
         .iter()
@@ -621,17 +639,34 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             );
         }
     }
-    for (family, effort, expected) in [
-        ("gemini-3.1-pro", None, "gemini-pro-agent"),
-        ("gemini-3.1-pro", Some("low"), "gemini-3.1-pro-low"),
-        ("gemini-3.1-pro", Some("high"), "gemini-pro-agent"),
-        ("gemini-3.8-flash", Some("low"), "gemini-3.8-flash-low"),
+    for (family, effort, expected, summary) in [
+        ("gemini-3.1-pro", None, "gemini-pro-agent", true),
+        ("gemini-3.1-pro", Some("low"), "gemini-3.1-pro-low", true),
+        ("gemini-3.1-pro", Some("high"), "gemini-pro-agent", true),
+        (
+            "gemini-3.8-flash",
+            Some("low"),
+            "gemini-3.8-flash-low",
+            true,
+        ),
         (
             "gemini-3.8-flash",
             Some("medium"),
             "gemini-3.8-flash-medium",
+            true,
         ),
-        ("gemini-3.8-flash", Some("high"), "gemini-3.8-flash-high"),
+        (
+            "gemini-3.8-flash",
+            Some("high"),
+            "gemini-3.8-flash-high",
+            true,
+        ),
+        (
+            "gemini-3.8-flash",
+            Some("high"),
+            "gemini-3.8-flash-high",
+            false,
+        ),
     ] {
         let model = catalog
             .models
@@ -651,6 +686,9 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             ..Default::default()
         });
         let mut selected_request = request.clone();
+        if !summary {
+            selected_request.reasoning.display = Some("omitted".into());
+        }
         selected_request.reasoning.target_control =
             effort.map(
                 |value| stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
@@ -679,10 +717,19 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             .unwrap();
         let envelope: Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(envelope["model"], expected);
+        assert_eq!(
+            envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
+            Some(&serde_json::json!(summary))
+        );
         if effort.is_some() {
             assert!(
                 envelope
-                    .pointer("/request/generationConfig/thinkingConfig")
+                    .pointer("/request/generationConfig/thinkingConfig/thinkingLevel")
+                    .is_none()
+            );
+            assert!(
+                envelope
+                    .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
                     .is_none()
             );
         }

@@ -459,7 +459,12 @@ fn parse_gemini_chunk(
     }
 
     let usage = extract_gemini_usage(raw_chunk);
-    if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
+    if usage.required_components_known
+        || usage.prompt_tokens > 0
+        || usage.completion_tokens > 0
+        || usage.reasoning_tokens.is_some()
+        || usage.cache_read_tokens.is_some()
+    {
         deltas.push(AiStreamDelta::Usage(usage));
     }
     if let Some(metadata) = google_stream_metadata(raw_chunk) {
@@ -1106,7 +1111,7 @@ fn merge_usage_counts(mut usage: Value, resp: &AiResponse) -> Value {
         }
         .into(),
     );
-    if reasoning_tokens > 0 {
+    if resp.usage.reasoning_tokens.is_some() {
         obj.insert("thoughtsTokenCount".to_string(), reasoning_tokens.into());
     }
     if let Some(cache_read_tokens) = resp.usage.cache_read_tokens {
@@ -1128,7 +1133,7 @@ fn google_usage_from_counts(usage: &Usage) -> Value {
         "candidatesTokenCount": candidate_tokens,
         "totalTokenCount": usage.prompt_tokens + usage.completion_tokens,
     });
-    if reasoning_tokens > 0 {
+    if usage.reasoning_tokens.is_some() {
         metadata["thoughtsTokenCount"] = reasoning_tokens.into();
     }
     if let Some(cache_read_tokens) = usage.cache_read_tokens {
@@ -1205,8 +1210,7 @@ fn extract_gemini_usage(v: &Value) -> Usage {
     let thoughts = first_u64(
         u,
         &["thoughtsTokenCount", "reasoning_tokens", "thought_tokens"],
-    )
-    .unwrap_or(0);
+    );
     let cache_read = first_u64(
         u,
         &["cachedContentTokenCount", "cached_content_token_count"],
@@ -1214,7 +1218,7 @@ fn extract_gemini_usage(v: &Value) -> Usage {
     let output = input.and_then(|input| {
         total
             .and_then(|total| total.checked_sub(input))
-            .or_else(|| candidate_output.map(|output| output.saturating_add(thoughts)))
+            .or_else(|| candidate_output.map(|output| output.saturating_add(thoughts.unwrap_or(0))))
     });
 
     Usage {
@@ -1226,6 +1230,7 @@ fn extract_gemini_usage(v: &Value) -> Usage {
             .unwrap_or(0) as u32,
         required_components_known: input.is_some() && output.is_some(),
         cache_read_tokens: cache_read.map(|tokens| tokens as u32),
+        reasoning_tokens: thoughts.map(|tokens| tokens as u32),
         ..Usage::default()
     }
 }

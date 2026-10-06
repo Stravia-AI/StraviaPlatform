@@ -354,4 +354,54 @@ describe('run metrics', () => {
       tps: null,
     })
   })
+
+  test('long first-token waits do not replace a confirmed generation interval', () => {
+    const metrics = runMetrics([
+      started(1, 'a1', 'synthetic'),
+      finished(2, 'a1', 'completed', {
+        duration_ms: 6561,
+        first_token_ms: 6290,
+        usage: { ...usage, output_tokens: 337 },
+      }),
+    ])
+    expect(metrics.tps).toBeCloseTo(1243.5424, 4)
+  })
+
+  test.each([
+    [1000, 950, 100],
+    [1000, 951, 5],
+    [1000, null, 5],
+    [1000, 0, 5],
+    [0, 0, null],
+  ])('generation interval boundary for duration=%s and first token=%s', (duration, first, tps) => {
+    expect(
+      runMetrics([
+        started(1, 'a1', 'synthetic'),
+        finished(2, 'a1', 'completed', {
+          duration_ms: duration,
+          first_token_ms: first,
+          usage: { ...usage, output_tokens: 5 },
+        }),
+      ]).tps,
+    ).toBe(tps)
+  })
+
+  test('zero output contributes elapsed time while unknown output makes aggregate speed unknown', () => {
+    const events = [
+      started(1, 'a1', 'synthetic'),
+      finished(2, 'a1', 'completed', { duration_ms: 1000, usage: { ...usage, output_tokens: 10 } }),
+      started(3, 'a2', 'synthetic'),
+      finished(4, 'a2', 'completed', { duration_ms: 1000, usage: { ...usage, output_tokens: 0 } }),
+    ]
+    expect(runMetrics(events).tps).toBe(5)
+    expect(runMetrics(events.slice(2)).tps).toBe(0)
+    events.push(
+      finished(5, 'a2', 'completed', { duration_ms: 0, first_token_ms: 0, usage: { ...usage, output_tokens: 0 } }),
+    )
+    expect(runMetrics(events).tps).toBe(10)
+    events.push(finished(6, 'a2', 'completed', { duration_ms: 1000, usage: { ...usage, output_tokens: null } }))
+    expect(runMetrics(events).tps).toBeNull()
+    events.push(finished(7, 'a2', 'completed', { usage: { ...usage, output_tokens: 5 } }))
+    expect(runMetrics(events).tps).toBeNull()
+  })
 })

@@ -127,6 +127,7 @@ export function runMetrics(events: readonly ObservationEvent[]): RunMetrics {
   let firstTokenMs: number | null = null
   let outputTokens = 0
   let generationMs = 0
+  let completeUsage = true
   for (const id of serving) {
     const target = started.get(id)
     if (target) upstream.set(`${target.model}\u0000${target.provider ?? ''}`, target)
@@ -135,15 +136,17 @@ export function runMetrics(events: readonly ObservationEvent[]): RunMetrics {
     if (firstTokenMs === null && payloadCount(payload.first_token_ms)) firstTokenMs = payload.first_token_ms
     const input = attemptTpsInput(payload)
     const generation = generationMsOf(input)
-    if (input.output_tokens && generation && generation > 0) {
+    if (input.output_tokens != null && generation != null) {
       outputTokens += input.output_tokens
       generationMs += generation
+    } else {
+      completeUsage = false
     }
   }
   return {
     upstream: [...upstream.values()],
     firstTokenMs,
-    tps: generationMs > 0 ? outputTokens / (generationMs / 1000) : null,
+    tps: completeUsage && generationMs > 0 ? outputTokens / (generationMs / 1000) : null,
   }
 }
 

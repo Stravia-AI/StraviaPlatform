@@ -148,6 +148,8 @@ Schema 依据实际 `openapi.proto` 投影 type/format/title/description/nullabl
 
 CLI master 的 `thinkingLevel` 是 int32，公开 Gemini 的 `"HIGH"` 等符号值不直接转发，也不猜测其私有数字映射。
 
+family selector 消费 `thinkingLevel` / `thinkingBudget` 后，只移除这些强度字段；`includeThoughts` 是独立的摘要意图，仍进入内层 `generationConfig.thinkingConfig`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。
+
 `args`、工具 `response`、schema `default`/`example` 是业务 JSON，不把其中名为 seed、metadata 或其他任意业务键当成协议参数删除。真实 thoughtSignature 原样保留，绝不生成伪造签名。
 
 **删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
@@ -157,6 +159,13 @@ CLI master 的 `thinkingLevel` 是 int32，公开 Gemini 的 `"HIGH"` 等符号�
 ### 响应
 
 云端 SSE 外层常为 `{"response": <Gemini response>, ...}`；先解包 response，再交现有 Gemini decoder/accumulator。SSE 分帧处理 CRLF、多个 data 行、分片 UTF-8 和 EOF 尾部；单事件有界，额度/认证 JSON 同样有界。保留工具参数、使用量与真实签名。HTTP 错误及流内 error 保留公共上游错误语义；没有 finishReason 的截断不返回伪成功。[DONE] 单独出现也不能制造成功。
+
+私有 usage 的缺省语义通过官方 [CLI 1.2.16 Linux x64 发布产物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.16/agy_cli_linux_x64.tar.gz) 内嵌的 FileDescriptorProto 核对，而非由公开 Gemini 文档推断。该归档为 61,494,901 字节，SHA-256 为 `d4247430e04cebdbe1ca93d9ccb483cd2f3daeb4cdb0ace5a71cd130e0bdab84`。解压后二进制的 descriptor 字节区间：
+
+- `google/internal/cloud/code/v1internal/prediction_service.proto`：offset 87,407,172，length 5,458。`PredictionService.StreamGenerateContent` 返回私有 `GenerateContentResponse`，其 `response` 字段引用 master `GenerateContentResponse`。
+- `google/cloud/aiplatform/master/prediction_service.proto`：offset 90,287,381，length 41,913，语法为 proto3。`GenerateContentResponse.UsageMetadata.cached_content_token_count` 是编号 5 的 int32 标量，没有 `optional` presence 或 oneof。
+
+依据 [Protobuf field presence](https://protobuf.dev/programming-guides/field_presence/)，上述已存在消息中的隐式 presence 标量省略等于零；缺失整个消息并不等于存在且全零。插件因此仅在已见终态、`usageMetadata` 为对象且报告有效 prompt 与 output/total 计数时，将省略的 `cachedContentTokenCount` 归一化为零。终态前的部分 usage、缺失 usage、无效计数与显式缓存值保持原样。共享 Gemini codec 不采用该私有规则；`thoughtsTokenCount` 独立保留，累计输出包含思考一次，后续累计修订覆盖已有快照。
 
 ## 6. 本地及真实账号验证与限制
 
@@ -201,6 +210,14 @@ Responses 通过 `previous_response_id` 与原始 `call_id` 续接；其它协�
 Codec 422 个单元测试、Core History Marker 22 个回归及真实 Wasm/loopback HTTP 合约通过；定向 Clippy（`-D warnings`）与仓库 Rust 格式检查通过。工具终态回归先失败后通过，回放重复与 JSON 丢失先由真实请求和抓包复现。初次编译命令超时未完成的检查随后完整执行；没有调整产品 deadline、上游校验或失败重试策略。插件更新预览确认凭据继承、无数据丢弃、无新增网络权限；临时 Debug 已关闭。
 
 验证没有覆盖其它账号、全部模型、真实图片、内置 Web Search/Media Understanding、MCP、额度耗尽、付费资格或长期刷新与续接。WebUI 源码无需供应商分支，本次未修改。初次本地验证遇到的启动 descriptor 超时没有通过缩短产品超时或盲目重试绕过；后续隔离 Server 已成功启动并完成上述真实路径。
+
+### 2026-10-06：Gemini 3.8 Flash 摘要意图与严格续接
+
+在独立临时 SQLite 实例中，仅复制已授权连接的当前访问凭据和指定模型记录，导入重建的 Antigravity 组件；不复制刷新凭据，不修改日常数据库、客户端配置或模型强度。Target 重试预算为零、无 failover；loopback 转发门每次仅放行一次推理，硬限制最多三次外发。
+
+实际使用两次推理：Responses SSE 返回只读 `read_local_receipt` 工具调用，客户端回填新生成的合成 receipt 后，非流式请求原样回放完整交付历史，不提供 `previous_response_id`。两轮均 completed，最终回答逐字使用工具 receipt；第二轮严格关联第一轮 Generation 节点，普通 Observation 只有一次输入预览。捕获中仅有两次 upstream request，没有恢复重放。
+
+两次实际选择器均为既有 `gemini-3.8-flash-high`，内层均携带 `thinkingConfig: {"includeThoughts": true}`，没有重复强度字段。上游仍只返回真实受保护签名，没有可读 thought 文本；这不构成失败，也没有为取得正文而额外调用。两轮 prompt 合计 224、output 131、其中 reasoning 105；终态 usage 均省略缓存字段，按已核实的私有标量语义得到 cache read 0、净输入 224。临时实例与凭据文件已清理。
 
 ## 7. 条款与运营风险
 

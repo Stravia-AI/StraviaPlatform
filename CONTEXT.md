@@ -86,6 +86,11 @@ _避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run�
 Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，但不遮蔽其他已确认用量，累计值与各项用量的报告覆盖程度分别表达，不能把未知记为零或用本地估算冒充精确值。
 _避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
 
+## Net Input Tokens
+
+Net Input Tokens 是 Stravia 管理面展示的已确认净输入 Token 数，按每次 Target attempt 的已知总输入减缓存读取、下限为零后累计，缓存写入不在扣除范围内。任一操作数真正未知时，该次尝试的净输入未知；未知部分不抹掉其他已确认值，也不能以含缓存总输入代替。
+_避免使用_：总输入 Token、Prompt Tokens（当指净输入）、Estimated Input Tokens
+
 ## Connect Client Apply
 
 Connect Client Apply 是 Stravia Desktop 把 Stravia provider 增量写入某个 Connect Client Global Config 的操作。它只 upsert Stravia 拥有的 provider 段及配套 catalog；可写与当前模型分离的激活 provider 键；不写当前/默认模型，也不写把 provider 和模型焊在一起的键。Claude Code 例外：只 merge Anthropic 的 base URL、token 与四套模型映射。它不是 admin HTTP API。
@@ -546,6 +551,11 @@ _避免使用_：Output Started、Response Committed、Delivery Commit
 
 Protocol Conversion 是在改变客户端与上游 wire protocol 时保留一次推理的 canonical semantics。目标协议无法表示任务内容、实际使用的工具、身份、结构或硬约束时必须拒绝；additive metadata、响应装饰和未被强制选择的 hosted tool 可以兼容性省略。它不把响应投影成客户端历史。它向 Client Projection 提供 Thinking 载体形状（是否 indexed、是否可能 protected、未保护 summary 能否直播），不执行投影。
 _避免使用_：把硬约束丢失称为兼容、把客户端可见投影当作 Protocol Conversion 的阶段
+
+## Thinking Summary
+
+Thinking Summary 是 Provider 返回的可公开推理概述，不等同于完整内部推理、签名、密文或 History Marker。索取或隐藏摘要是展示偏好，与 Thinking Level 的强度选择相互独立；未收到摘要不证明模型未进行推理。
+_避免使用_：完整思维链、思考签名、关闭思考（当指关闭摘要展示）
 
 ## Thinking Level
 

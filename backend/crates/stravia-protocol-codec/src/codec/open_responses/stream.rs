@@ -1713,6 +1713,12 @@ impl ResponsesStreamFormatter {
                     }
                 }
                 AiStreamDelta::ItemDone { index, item } => {
+                    // An unindexed native Thinking block has finished. Its public
+                    // preview and marker share the current reasoning carrier, but
+                    // the next independent block must open a new item.
+                    if item.thinking_ref().is_some() {
+                        self.seal_reasoning_item(&mut events);
+                    }
                     if let Some(fields) = item
                         .meta
                         .as_ref()

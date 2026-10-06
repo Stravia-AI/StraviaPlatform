@@ -292,6 +292,27 @@ fn raise_max_tokens(object: &mut Map<String, Value>, budget: u64) {
     }
 }
 
+/// Preserve explicit display-only intent when reasoning is implicitly always on.
+pub(crate) fn preserve_implicit_summary_intent(
+    body: &mut Value,
+    caps: &ModelCapabilities,
+    display: Option<&str>,
+) {
+    let Some(display) = display else { return };
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("thinking")
+        && ModelProfile::of_request(object, caps).is_some_and(|profile| profile.always_on())
+        && caps.thinking != Some(false)
+    {
+        object.insert(
+            "thinking".into(),
+            json!({"type": "adaptive", "display": display}),
+        );
+    }
+}
+
 /// 改写 `thinking`、`output_config.effort`、`max_tokens` 与强制 `tool_choice`，
 /// 使请求落在目标型号的接受范围内。无法识别的型号原样透传。
 pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilities) {
@@ -359,6 +380,14 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
     }
 
     if !on {
+        if profile.always_on() {
+            let thinking = json!({
+                "type": "adaptive",
+                "display": display.as_deref().unwrap_or("summarized")
+            });
+            // Keep summary opt-in independent of the model's native intensity.
+            object.insert("thinking".into(), thinking);
+        }
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
         return;
     }
@@ -416,7 +445,7 @@ fn sanitize_display(object: &mut Map<String, Value>) {
     let display = match thinking.get("display").and_then(Value::as_str) {
         None => return,
         Some("summarized" | "auto" | "concise" | "detailed") => Some("summarized"),
-        Some("omitted") => Some("omitted"),
+        Some("omitted" | "none" | "disabled" | "hidden") => Some("omitted"),
         Some(_) => None,
     };
     match display {

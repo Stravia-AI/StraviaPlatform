@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn generic_anthropic_does_not_invent_summary_controls_for_compatible_targets() {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+    let mut request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+    let (body, _) = AnthropicEncoder.encode_request(&request).unwrap();
+    assert!(body.get("thinking").is_none());
+    for display in [None, Some("omitted"), Some("concise")] {
+        request.reasoning.display = display.map(str::to_owned);
+        request.reasoning.target_control = Some(TargetThinkingControl::Budget { value: 2048 });
+        let (body, _) = AnthropicEncoder.encode_request(&request).unwrap();
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+        assert!(body["thinking"].get("display").is_none());
+    }
+    request.reasoning.target_control = Some(TargetThinkingControl::Disabled);
+    let (body, _) = AnthropicEncoder.encode_request(&request).unwrap();
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body["thinking"].get("display").is_none());
+}
+
+#[test]
 fn server_tool_results_keep_the_anthropic_wire_discriminator() {
     let encoded = encode_content_block_for_anthropic(&ContentBlock::ServerToolResult {
         tool_use_id: "srv_123".into(),

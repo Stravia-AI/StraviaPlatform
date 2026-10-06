@@ -98,7 +98,7 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
 - Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`；失败或未完成 attempt 定义上没有已确认用量，不参与统计；
-- Provider 汇总的 `avg_output_tps` 按已完成 attempt 的 `Σoutput_tokens / Σ净生成耗时` 计算；净生成耗时取 `duration_ms - first_token_ms`，首 Token 未报告或差值小于 50ms 时回退 `duration_ms`。任一已完成 attempt 未报告输出或耗时、或总生成耗时为零时为 `null`；
+- 详情中的 Run/Interaction Token 速度与 Provider 汇总的 `avg_output_tps` 共用口径：按已完成 attempt 的 `Σoutput_tokens / Σ净生成耗时` 计算，而非各 attempt 速度的平均值；净生成耗时取 `duration_ms - first_token_ms`，首 Token 未报告或差值小于 50ms 时回退 `duration_ms`，恰好 50ms 使用差值。已知零输出和零耗时保留并参与累计；任一已完成 attempt 未报告输出或耗时、或总生成耗时为零时为 `null`；
 - Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`、易失 usage 或 reset 协议。
@@ -108,6 +108,8 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 输入估算不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求的筛选与路由调度共用同一估算：将消息 `items`、独立系统提示词 `instructions` 和工具定义 `tools` 一并计算 JSON 序列化字节数，除以 4 向上取整；工具说明与参数 schema 也属于输入，不能只按用户消息估算。它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，已有记录不重算，不从截断的输入预览或 Debug 内容回填。
 
 客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零，也不改变管理面的净输入和按字段汇总口径。
+
+Gemini `thoughtsTokenCount` 保留为 reasoning 子项，输出仍只包含一次该部分；终态之后的累计 usage 修订覆盖同一 attempt 的快照，不作为新增用量相加。标准 Gemini 缺失缓存字段仍为未知。Antigravity 仅对已确认完整的私有终态 usage 使用其 proto3 标量缺省零语义，缺失整个 usage 或中间帧不补零；事实来源和消息存在性边界见 [Antigravity 响应协议](../research/antigravity-oauth.md#响应)。这些归一化仅影响后续请求，不补写存量事件。
 
 首内容超时在取消执行 future 前标记原因，未正常结束的 attempt 记录 `first_token_timeout`；`attempt_aborted` 仅作为没有明确结束原因的释放兜底。两者均不伪造 usage，也不改变原有超时配置、重试预算或调度策略，每个 attempt 仍只有一个终态。
 

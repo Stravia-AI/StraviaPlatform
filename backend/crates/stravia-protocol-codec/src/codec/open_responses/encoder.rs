@@ -271,39 +271,39 @@ fn insert_request_control_fields(
     if let Some(value) = req.parallel_tool_calls {
         obj.insert("parallel_tool_calls".into(), value.into());
     }
-    let converted_to_responses = req.meta.source_protocol.is_some_and(|source| {
-        source != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
-    });
+    let mut reasoning = serde_json::Map::new();
     if let Some(control) = req.reasoning.target_control.as_ref() {
-        let mut reasoning = serde_json::Map::new();
         let effort = match control {
             stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
                 value.as_str()
             }
             stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => "none",
-            _ => return,
+            _ => "",
         };
-        reasoning.insert("effort".into(), Value::String(effort.into()));
-        if req.meta.source_protocol
-            == Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
+        if !effort.is_empty() {
+            reasoning.insert("effort".into(), Value::String(effort.into()));
+        }
+    }
+    let summary = match req.reasoning.display.as_deref() {
+        Some("omitted" | "none" | "disabled" | "hidden") => None,
+        Some("summarized") => Some("auto"),
+        Some(value) => Some(value),
+        None if req.reasoning.level
+            == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+            || matches!(
+                req.reasoning.target_control,
+                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
+            ) =>
         {
-            match req.reasoning.display.as_deref() {
-                Some("omitted") => {}
-                Some("summarized") | None => {
-                    reasoning.insert("summary".into(), Value::String("auto".into()));
-                }
-                Some(summary) => {
-                    reasoning.insert("summary".into(), Value::String(summary.into()));
-                }
-            }
-        } else if let Some(summary) = &req.reasoning.display {
-            reasoning.insert("summary".into(), Value::String(summary.clone()));
-        } else if converted_to_responses {
-            reasoning.insert("summary".into(), Value::String("auto".into()));
+            None
         }
-        if !reasoning.is_empty() {
-            obj.insert("reasoning".into(), Value::Object(reasoning));
-        }
+        None => Some("auto"),
+    };
+    if let Some(summary) = summary {
+        reasoning.insert("summary".into(), Value::String(summary.into()));
+    }
+    if !reasoning.is_empty() {
+        obj.insert("reasoning".into(), Value::Object(reasoning));
     }
     if let Some(tools) = &req.tools {
         let tools = tools
