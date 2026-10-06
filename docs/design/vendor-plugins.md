@@ -24,6 +24,10 @@
 | `stravia-vendor-claudecode` | `claude-code` / `dedicated` | `provider_id = claude-code`、`catalog_id = anthropic`、channel `oauth`。 |
 | `stravia-vendor-antigravity` | `antigravity` / `dedicated` | `provider_id = antigravity`、无目录映射、channel `oauth`；模型与额度来自登录账号。 |
 
+### Codex 额度单位
+
+`openai-codex` 的 `credits.balance` 与 `spend_control.individual_limit` 金额按官方客户端语义使用 credits，输出现有 `unit="credits"` 且不声明 currency；保留数值和小数，不将点数当作 USD，不推测兑换率或缩放。WebUI 沿用通用额度单位本地化，中文显示「点」、英文显示 `credits`。更新独立 Codex 组件后刷新额度，既有 guard key、认证与数据库 schema 不变。固定官方源码证据、数值边界与验证见 [Codex 额度字段单位研究](../research/codex-credit-units.md)。
+
 ### Cline Pass 接入
 
 Cline Pass 不再是专属插件。`cline-pass` 是 `base` 的目录 Provider Profile，随内嵌供应商清单注册，推理复用标准 OpenAI-compatible codec；没有独立的 Wasm 包，也不发布专属 Release 附件。
@@ -56,6 +60,16 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 1. 添加 **Antigravity** 模型服务，选择 OAuth。浏览器授权后，从 Google 网站复制授权码并粘贴到界面的秘密输入框；不监听 loopback 端口。如果网站回调没有显示授权码，但跳转地址已有 `code` 参数，只提交该参数解码后的授权码，不提交整个回调 URL。
 2. 保存连接并同步账号模型。项目异步接入未完成时，保留凭据与 operation，后续真实发现请求检查一次进度并明确报告 pending；不猜 project/tier 或自动重试。
 3. 将发现的模型绑定到 Route。额度页读取账号共享池、剩余比例和重置时间；缺失额度不显示为零，未知窗口保留，disabled 不自动等于 exhausted。
+
+额度页为 Claude/GPT 与 Gemini 模型组的已知五小时、每周标签提供中英文显示，以及已知标签的 disabled 提示。翻译只在既有展示层识别明确标签，不检测 Vendor 身份、不改持久化 bucket/guard key；未知名称与窗口完整保留上游原文。
+
+模型同步只采用 `agentModelSorts[].groups[].modelIds` 引用的 Agent 选项，不把完整 `models` 目录或图片生成、搜索等其他用途清单直接加入可选模型。解析真实 `deprecatedModelIds` 重定向并排除 disabled 后，按官方显示 slug 的家族与明确档位合并：例如 Gemini 3.1 Pro 登记为 `gemini-3.1-pro`，支持 `low`、`high`，默认实际 selector 为 `gemini-pro-agent`。同名或同 enum 不构成合并依据，Thinking 标签不自动生成离散档位。筛选和映射证据见 [模型映射调研](../research/antigravity-model-mapping.md)。
+
+合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。Effort 通过 envelope 的模型 ID 实现，不同时转换为 Gemini thinking budget；独立的原生 Budget 等控制保持既有行为。
+
+升级时重新导入构建后的独立插件，再同步模型。旧逐档模型记录与 Route 绑定不自动删除或改绑；未再发现的记录沿用现有 missing 与可用状态规则，已有配置不会自动迁移到家族模型。需要统一档位选择时，从清单添加家族模型并显式调整原绑定。
+
+客户端标识使用 `antigravity/cli/<version>`，不能省略 `/cli/`：实际同账号差分验证中，省略会使上游不返回 Gemini 3.7／3.8 Flash 的 Agent 档位，而不是本地合并规则删除了这些模型。同步结果取决于真实账号响应，不固定承诺家族数量；此次修复不改账号、project、端点或权限。
 
 OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/auth`、`https://oauth2.googleapis.com/token`、固定网站回调 `https://antigravity.google/oauth-callback` 与 consumer 七个 scope。宿主通用契约允许 `AuthorizationCode + callback=None + manual_input.type=text`，有效模式为 `manual`、listener 为 `not_required`；缺少手动 text 输入的无 callback 授权码描述符仍拒绝。现有 WebUI 按描述符渲染，不增加供应商分支。
 

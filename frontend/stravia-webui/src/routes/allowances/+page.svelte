@@ -392,9 +392,28 @@ function allowanceLabel(allowance: Allowance): string {
       return m.allowances_label_extra_usage()
     case 'tokens':
       return m.allowances_label_tokens()
+  }
+  // 只识别已知上游标签组合；未知模型组或窗口保持原文，不从持久化 key 推断。
+  const disabled = allowance.label.endsWith(' (disabled)')
+  const label = disabled ? allowance.label.slice(0, -' (disabled)'.length) : allowance.label
+  let localized: string
+  switch (label) {
+    case 'Claude and GPT models / Five Hour Limit Remaining (5h)':
+      localized = m.allowances_label_models_five_hour_remaining({ models: m.allowances_label_claude_gpt_models() })
+      break
+    case 'Claude and GPT models / Weekly Limit Remaining (weekly)':
+      localized = m.allowances_label_models_weekly_remaining({ models: m.allowances_label_claude_gpt_models() })
+      break
+    case 'Gemini Models / Five Hour Limit Remaining (5h)':
+      localized = m.allowances_label_models_five_hour_remaining({ models: m.allowances_label_gemini_models() })
+      break
+    case 'Gemini Models / Weekly Limit Remaining (weekly)':
+      localized = m.allowances_label_models_weekly_remaining({ models: m.allowances_label_gemini_models() })
+      break
     default:
       return allowance.label
   }
+  return disabled ? m.allowances_label_disabled({ label: localized }) : localized
 }
 
 function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string {

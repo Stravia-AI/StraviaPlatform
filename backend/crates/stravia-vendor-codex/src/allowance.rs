@@ -113,7 +113,7 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
                 "credits_balance"
             };
             let mut allowance = item(key, window_label(key), "balance");
-            allowance.remaining = balance.map(|value| amount(value, "currency", Some("USD")));
+            allowance.remaining = balance.map(|value| amount(value, "credits", None));
             allowances.push(allowance);
         }
     }
@@ -125,14 +125,7 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
         let limit = field_number(spend, "limit");
         let remaining = used.zip(limit).map(|(used, limit)| limit - used);
         let mut allowance = item("credits", "Credit limit", "balance");
-        amount_fields(
-            &mut allowance,
-            used,
-            remaining,
-            limit,
-            "currency",
-            Some("USD"),
-        );
+        amount_fields(&mut allowance, used, remaining, limit, "credits", None);
         set_percent(
             &mut allowance,
             field_number(spend, "used_percent").or_else(|| percent_from(used, remaining, limit)),
@@ -283,5 +276,74 @@ fn window_label(key: &str) -> String {
         "credits_balance" => "Credit balance".into(),
         "tokens" => "Tokens".into(),
         other => other.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+    use stravia_vendor_sdk::AllowanceAmount;
+
+    fn assert_credits(amount: &AllowanceAmount, value: &str) {
+        assert_eq!(amount.value, value);
+        assert_eq!(amount.unit, "credits");
+        assert_eq!(amount.currency, None);
+    }
+
+    #[test]
+    fn credit_balances_preserve_decimal_values_without_currency_or_scaling() {
+        for (balance, expected) in [
+            (serde_json::json!("12345.67"), "12345.67"),
+            (serde_json::json!(12345.67), "12345.67"),
+            (serde_json::json!("0.25"), "0.25"),
+            (serde_json::json!(0.25), "0.25"),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "credits": {"has_credits": true, "unlimited": false, "balance": balance}
+            }))
+            .unwrap();
+            let response = parse(&body).unwrap();
+            let allowance = &response.allowances[0];
+            assert_eq!(allowance.key, "credits_balance");
+            assert_credits(allowance.remaining.as_ref().unwrap(), expected);
+            assert_eq!(allowance.condition, None);
+        }
+    }
+
+    #[test]
+    fn zero_credit_balance_is_exhausted_not_missing() {
+        for balance in [serde_json::json!("0"), serde_json::json!(0)] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "credits": {"has_credits": false, "unlimited": false, "balance": balance}
+            }))
+            .unwrap();
+            let response = parse(&body).unwrap();
+            let allowance = &response.allowances[0];
+            assert_eq!(allowance.key, "credits_balance");
+            assert_credits(allowance.remaining.as_ref().unwrap(), "0");
+            assert_eq!(allowance.condition.as_deref(), Some("exhausted"));
+        }
+    }
+
+    #[test]
+    fn spend_limit_amounts_are_credits_without_currency_or_scaling() {
+        let response =
+            parse(br#"{"spend_control":{"individual_limit":{"used":"1.25","limit":"9.5"}}}"#)
+                .unwrap();
+        let allowance = &response.allowances[0];
+        assert_credits(allowance.used.as_ref().unwrap(), "1.25");
+        assert_credits(allowance.remaining.as_ref().unwrap(), "8.25");
+        assert_credits(allowance.limit.as_ref().unwrap(), "9.5");
+    }
+
+    #[test]
+    fn unlimited_credits_do_not_invent_a_numeric_balance() {
+        let response =
+            parse(br#"{"credits":{"has_credits":true,"unlimited":true,"balance":null}}"#).unwrap();
+        let allowance = &response.allowances[0];
+        assert_eq!(allowance.key, "credits_unlimited");
+        assert!(allowance.remaining.is_none());
+        assert!(allowance.limit.is_none());
+        assert_eq!(allowance.condition, None);
     }
 }

@@ -2,6 +2,7 @@ mod allowance;
 mod auth;
 mod catalog;
 mod client;
+mod selector;
 mod wire;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -25,7 +26,7 @@ const VENDOR_ID: &str = "antigravity";
 const CHANNEL: &str = "oauth";
 const BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const CLI_USER_AGENT: &str =
-    "antigravity/1.2.16 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)";
+    "antigravity/cli/1.2.16 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)";
 
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([

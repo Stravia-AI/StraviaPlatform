@@ -40,6 +40,32 @@ pub(crate) fn infer(
         .take()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| invalid("Antigravity requires an upstream model"))?;
+    let selector_effort = if let Some(table) = provider
+        .model_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
+    {
+        request.model =
+            crate::selector::resolve(table, request.reasoning.target_control.as_ref())?.into();
+        let effort = matches!(
+            request.reasoning.target_control,
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
+        );
+        if effort {
+            // 档位由真实模型 ID 实现，不再把同一控制转换成 Gemini thinking budget。
+            request.reasoning = Default::default();
+        }
+        effort
+    } else {
+        if let Some(selector) = provider
+            .model_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.selector.as_deref())
+        {
+            request.model = selector.into();
+        }
+        false
+    };
     if request.embedding.is_some() {
         return Err(common::plugin_error(
             ErrorKind::Unsupported,
@@ -70,6 +96,13 @@ pub(crate) fn infer(
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Gemini request must be an object"))?;
+    if selector_effort
+        && let Some(config) = object
+            .get_mut("generationConfig")
+            .and_then(Value::as_object_mut)
+    {
+        config.remove("thinkingConfig");
+    }
     // 同协议 raw tools 保留原始 function response 与内置工具，再统一投影。
     if let Some(tools) = tools.filter(|tools| !tools.is_empty())
         && !object.contains_key("tools")

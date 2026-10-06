@@ -89,7 +89,7 @@ openid
 | 项目发现 | `POST /v1internal:loadCodeAssist`，`{"metadata":{"ideType":"ANTIGRAVITY"}}`；该 enum 在实际 ClientMetadata 描述符中存在。读取 `cloudaicompanionProject`。 |
 | 项目接入 | 确实无 project 时，从 `allowedTiers` 选择唯一 `isDefault=true` 的真实 tier，`POST /v1internal:onboardUser`，仅发送 `tierId` 和上述 metadata。 |
 | 异步 operation | 保存返回的 `operations/...`，后续真实发现请求执行一次 `GET /v1internal/{operation}`；未完成明确报 pending，不阻塞等待。拒绝含 URL、查询参数或路径穿越的 operation name。 |
-| 模型发现 | `POST /v1internal:fetchAvailableModels`，仅 `{"project":"<account-project>"}`。模型 ID 来自 `models` 的 map key，不把 ModelDetails.model enum 当成 ID；过滤 disabled/internal。 |
+| 模型发现 | `POST /v1internal:fetchAvailableModels`，仅 `{"project":"<account-project>"}`。按 Agent 分组引用解析 `models` 的 map key 与真实废弃重定向，排除 disabled，再按明确档位生成家族与 selector 表；不把 ModelDetails.model enum 当成 ID。 |
 | 额度 | `POST /v1internal:retrieveUserQuotaSummary`，仅 `{"project":"<account-project>"}`。同时解析 `groups[].buckets` 与顶层 `buckets`，按 bucketId 去重并保留分组标签。 |
 
 异步接入时，授权码完成只能返回宿主接受的 Credentials，不能返回授权码流程不支持的 Pending。成功交换的 token 在会话私有状态中保留；项目发现失败后可继续该会话而不重复消耗授权码。项目状态限定在连接/凭据作用域，不跨账号使用。
@@ -114,8 +114,10 @@ openid
 ```text
 Authorization: Bearer <this connection's access token>
 Content-Type: application/json
-User-Agent: antigravity/1.2.16 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)
+User-Agent: antigravity/cli/1.2.16 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)
 ```
+
+`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。官方发布标签 1.2.16 的 Windows 二进制实际请求标识为 `antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119; auth_method=consumer)`。插件保留已验证的固定 Linux/amd64 与发布版本声明，没有复制构建号；最小差分验证表明仅补回 `/cli/` 即可恢复清单。实际请求捕获与验证见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。
 
 operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注入社区代理常见的 `X-Goog-Api-Client` 或 `Client-Metadata`；本插件也不注入它们。不读取或合并 ProviderSnapshot.client_headers，不允许下游替换 Bearer、User-Agent 或增加供应商自定义头。Host、Content-Length、HTTP/2 framing 等传输层必需信息由宿主 HTTP 实现负责，不宣称是完整 CLI transport fingerprint。
 
