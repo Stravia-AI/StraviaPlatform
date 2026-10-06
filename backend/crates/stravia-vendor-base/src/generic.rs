@@ -134,6 +134,7 @@ pub(crate) fn execute_inference(
                 host,
                 protocol,
                 response,
+                common::HttpResponseMode::HeaderDetected,
                 classify_open_responses_error,
             )
         } else {
@@ -141,6 +142,7 @@ pub(crate) fn execute_inference(
                 host,
                 protocol,
                 response,
+                common::HttpResponseMode::HeaderDetected,
                 classify_open_responses_error,
             )
         };

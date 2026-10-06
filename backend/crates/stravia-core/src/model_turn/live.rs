@@ -2021,7 +2021,7 @@ async fn drive_vendor_attempt(
                     );
                     policy.record_success(&target);
                     lifecycle.complete();
-                    attempt.finish("completed", None, None, Some(first_token_ms));
+                    attempt.finish("completed", None, None, Some(first_token_ms), None);
                 }
                 return;
             }
@@ -2036,7 +2036,7 @@ async fn drive_vendor_attempt(
                 if let Some(first_token_ms) = published {
                     policy.record_success(&target);
                     lifecycle.complete();
-                    attempt.finish("completed", None, None, Some(first_token_ms));
+                    attempt.finish("completed", None, None, Some(first_token_ms), None);
                 }
                 return;
             }
@@ -2064,6 +2064,7 @@ async fn drive_vendor_attempt(
                         failure.diagnostic.status_code,
                         Some("protected_reasoning_rejected".into()),
                         None,
+                        Some(&failure.diagnostic),
                     );
                     let after = crate::history_marker::protected_payload_digests(&replay.items);
                     stripped_protected_reasoning =
@@ -2103,6 +2104,7 @@ async fn drive_vendor_attempt(
                     failure.diagnostic.status_code,
                     Some("provider_auth_error".into()),
                     None,
+                    Some(&failure.diagnostic),
                 );
                 let admin = gateway.admin();
                 let refresh = admin.recover_provider_auth_with_lease(
@@ -2167,6 +2169,7 @@ async fn drive_vendor_attempt(
                     None,
                     Some("continuation_unavailable".into()),
                     None,
+                    Some(&failure.diagnostic),
                 );
                 request = continuation_fallback.take().expect("checked fallback");
             }
@@ -2185,6 +2188,7 @@ async fn drive_vendor_attempt(
                     failure.diagnostic.status_code,
                     Some("continuation_not_found".into()),
                     None,
+                    Some(&failure.diagnostic),
                 );
                 request = continuation_fallback.take().expect("checked fallback");
             }
@@ -2298,7 +2302,13 @@ async fn finish_vendor_failure(
     {
         policy.record_failure(target, failure.retry_after);
     }
-    attempt.finish("failed", status, Some(code), None);
+    attempt.finish(
+        "failed",
+        status,
+        Some(code),
+        None,
+        Some(&failure.diagnostic),
+    );
     lifecycle
         .publish_failure(failure, terminal_output, observer)
         .await;

@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::Mutex;
 
 use crate::interaction_observation::{
-    ConfirmedUsage, RunEvent, RunObserver, canonical_item_block_id,
+    ConfirmedUsage, FailureDiagnostic, RunEvent, RunObserver, canonical_item_block_id,
 };
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_runtime_contract::protocol::ir::{
@@ -309,6 +309,7 @@ impl AttemptObservation {
         status_code: Option<u16>,
         error_code: Option<String>,
         first_token_ms: Option<i64>,
+        diagnostic: Option<&FailureDiagnostic>,
     ) {
         let error_code = if status != "completed"
             && self
@@ -346,12 +347,20 @@ impl AttemptObservation {
             }
         }
         if let Some(observer) = &self.observer {
+            let error = diagnostic.map(|diagnostic| FailureDiagnostic {
+                source: diagnostic.source.clone(),
+                code: error_code.clone(),
+                message: diagnostic.message.clone(),
+                status_code,
+                upstream_code: diagnostic.upstream_code.clone(),
+            });
             observer.record(RunEvent::TargetAttemptFinished {
                 model_turn_id: self.model_turn_id.clone(),
                 attempt_id: self.id.clone(),
                 status: status.to_owned(),
                 status_code,
                 error_code,
+                error,
                 duration_ms: self.started_at.elapsed().as_millis() as i64,
                 first_token_ms,
                 usage: self.confirmed_usage.lock().clone(),
@@ -378,7 +387,7 @@ impl Drop for AttemptObservation {
         } else {
             "attempt_aborted"
         };
-        self.finish("failed", None, Some(reason.into()), None);
+        self.finish("failed", None, Some(reason.into()), None, None);
     }
 }
 

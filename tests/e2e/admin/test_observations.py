@@ -402,10 +402,24 @@ def test_failed_request_excludes_recovered_internal_retry(admin_env: dict[str, A
     )
     detail = _detail(admin_env, interaction["id"])
     assert len(detail["runs"]) == 1
-    assert [
-        event["payload"]["status"] for event in detail["runs"][0]["events"]
+    attempts = [
+        event for event in detail["runs"][0]["events"]
         if event["kind"] == "target_attempt_finished"
-    ] == ["failed", "completed"]
+    ]
+    assert [event["payload"]["status"] for event in attempts] == ["failed", "completed"]
+    error = attempts[0]["payload"]["error"]
+    assert error["source"] == "upstream"
+    assert error["code"] == attempts[0]["payload"]["error_code"]
+    assert error["status_code"] == 503
+    assert "retry" in error["message"]
+    assert attempts[1]["payload"].get("error") is None
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        exported = json.loads(bundle.read("interaction.json"))
+    exported_attempts = [
+        event for event in exported["events"] if event["kind"] == "target_attempt_finished"
+    ]
+    assert exported_attempts[0]["payload"]["error"] == error
     assert _failed_requests(admin_env, model=route_id)["items"] == []
 
 
@@ -523,6 +537,21 @@ def test_failed_request_has_one_row_for_all_attempts_and_redacted_full_error(adm
     attempts = [event for event in detail["runs"][0]["events"] if event["kind"] == "target_attempt_finished"]
     assert len(attempts) == 3
     assert all(event["payload"]["status"] == "failed" for event in attempts)
+    for attempt in attempts:
+        error = attempt["payload"]["error"]
+        assert error["status_code"] == 503
+        assert "long detail " * 200 in error["message"]
+    assert "upstream-secret" not in json.dumps(detail)
+    assert key not in json.dumps(detail)
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        exported = json.loads(bundle.read("interaction.json"))
+    exported_attempts = [
+        event for event in exported["events"] if event["kind"] == "target_attempt_finished"
+    ]
+    assert [event["payload"]["error"] for event in exported_attempts] == [
+        event["payload"]["error"] for event in attempts
+    ]
     assert "long detail " * 200 in failure["error"]["message"]
     assert "upstream-secret" not in json.dumps(failure)
     assert key not in json.dumps(failure)

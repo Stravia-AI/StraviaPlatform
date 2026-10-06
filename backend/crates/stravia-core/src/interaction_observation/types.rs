@@ -357,6 +357,8 @@ pub(crate) enum RunEvent {
         status: String,
         status_code: Option<u16>,
         error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<FailureDiagnostic>,
         duration_ms: i64,
         first_token_ms: Option<i64>,
         #[serde(default)]

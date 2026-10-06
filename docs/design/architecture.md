@@ -553,6 +553,8 @@ OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通�
 
 宿主空闲连接池最多保留 64 条连接，满时淘汰最早归池的连接，并按原始建连时间执行 60 分钟 max-age；无 affinity 的 socket 在终态关闭。该空闲池容量不限制正在执行的连接，高并发分支仍会增加文件描述符、内存和上游连接占用。淘汰只影响续接优化，不影响 Generation Chain 提供完整历史。结构化日志只记录 transport、Target namespace、response/connection ID、连接年龄、fallback/replay 与 close reason，不记录 prompt、content、tool arguments、媒体或 credential。
 
+Codex HTTP 推理实际发送 `stream=true` 时，Vendor 显式选择既有 SSE 解码器，不以响应 `Content-Type` 是否存在作为流式判据；增量输出、工具调用、终态校验与 usage 继续共用原有累积路径。实际非流式请求、Compact 与其他 Vendor 的响应判定保持不变。此约定不增加重试或重新升级 WebSocket：同一 Target 的 WebSocket transport failure 仍由既有预算与提交边界决定是否重试，允许的后续尝试保持 `HttpOnly`。
+
 ### 4.9 安全、观测与边界
 
 - Hook 运行在受信 in-process Rust 环境，不获得可变 `Gateway`、任意存储、原始 `Authorization`、API key、provider credential 或 raw request/response。
@@ -952,7 +954,7 @@ WebUI 的 `frontend/stravia-webui/src/lib/provider-model-editing.ts` 是 Provide
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
-SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后续变化通过增量 migration 交付。Server 完成存储配置后、Desktop 打开本地库时，校验已应用历史是否为当前迁移列表的连续成功前缀，再保留数据升级；未知版本、缺口、失败记录、checksum 不一致和无版本非空库都拒绝启动。违反新增约束的历史数据使迁移失败，不自动清空或修正。升级前备份完整数据根及外部数据库；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。参考 SQL 仅供 DBA 审阅，不用于初始化部署。
+SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后续变化通过增量 migration 交付。Server 完成存储配置后、Desktop 打开本地库时，校验已应用历史是否为当前迁移列表的连续成功前缀，再保留数据升级；未知版本、缺口、失败记录、非换行等价的 checksum 不一致和无版本非空库都拒绝启动。checksum 差异只允许同一 SQL 的完整 LF/CRLF 表示，保留其他字节与末尾换行；确认匹配后，只调整本次 runner 的内存副本，不回写已有迁移记录。离线复制执行相同检查，真实 SQL 改动仍拒绝。违反新增约束的历史数据使迁移失败，不自动清空或修正。升级前备份完整数据根及外部数据库；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。参考 SQL 仅供 DBA 审阅，不用于初始化部署。
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 

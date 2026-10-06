@@ -144,6 +144,12 @@ const localIgnored: Record<string, true> = {
   no_code_continuation_error_requires_requested_id_before_response_created: true,
   affinity_and_account_headers_follow_actual_codex_frames: true,
   large_reasoning_signature_completes: true,
+  http_sse_without_content_type_emits_before_eof: true,
+  http_sse_with_content_type_emits_before_eof: true,
+  http_unary_json_remains_unary: true,
+  http_malformed_and_truncated_sse_fail: true,
+  http_non_success_json_keeps_status: true,
+  http_compaction_remains_unary_and_preserves_error: true,
   real_base_executes_with_stable_wasi_patches_and_mixed_imports: true,
 }
 

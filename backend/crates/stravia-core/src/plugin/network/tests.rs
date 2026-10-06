@@ -51,6 +51,16 @@ async fn websocket_handler(
                 if text == "disconnect-without-close" {
                     break;
                 }
+                if text == "close-before-response" {
+                    socket
+                        .send(AxumMessage::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 1001,
+                            reason: "synthetic upstream shutdown".into(),
+                        })))
+                        .await
+                        .expect("send real upstream Close");
+                    break;
+                }
                 if socket
                     .send(AxumMessage::Text(format!("ack:{text}").into()))
                     .await
@@ -174,6 +184,343 @@ fn assert_local_miss(error: stravia_vendor_runtime::HostFailure) {
         stravia_vendor_sdk::ErrorKind::ContinuationUnavailable
     ));
     assert_eq!(error.upstream_status, None);
+}
+
+async fn capture_observer(
+    directory: &std::path::Path,
+    debug: bool,
+) -> (
+    crate::interaction_observation::InteractionObservation,
+    crate::interaction_observation::RunObserver,
+) {
+    use crate::interaction_observation::{AdmissionFacts, IngressStart, RunStart};
+    let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let observation = crate::interaction_observation::InteractionObservation::new(
+        Some(pool),
+        None,
+        directory.to_path_buf(),
+        1,
+        true,
+        crate::generation_chain::test_chain().await,
+        Some(Arc::new(tokio::sync::Mutex::new(()))),
+    )
+    .await;
+    observation.set_debug_enabled(debug);
+    let observer = observation
+        .observe_ingress(IngressStart {
+            id: "ws-capture-ingress".into(),
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            protocol: "responses".into(),
+        })
+        .admit(
+            RunStart {
+                id: "ws-capture-run".into(),
+                principal: "synthetic-owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                route_id: "synthetic-route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            },
+            AdmissionFacts {
+                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    "synthetic-model",
+                    Vec::new(),
+                ),
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                generation_root_id: None,
+                generation_parent_id: None,
+            },
+        );
+    (observation, observer)
+}
+
+async fn captured_records(
+    observation: &crate::interaction_observation::InteractionObservation,
+) -> Vec<serde_json::Value> {
+    use crate::interaction_observation::{BundleRequest, BundleResourceKind, ForestQuery};
+    use futures::StreamExt as _;
+    use std::io::Read as _;
+    observation.flush().await.unwrap();
+    let forest = observation
+        .query_forest(ForestQuery::default())
+        .await
+        .unwrap();
+    let interaction = &forest.roots.first().unwrap().interactions[0];
+    let ticket = observation
+        .issue_bundle_ticket(BundleRequest {
+            kind: BundleResourceKind::Interaction,
+            resource_id: interaction.id.clone(),
+            through_sequence: Some(forest.snapshot_sequence),
+        })
+        .await
+        .unwrap();
+    let token = ticket.download_url.rsplit('/').next().unwrap();
+    let mut stream = observation.consume_bundle_ticket(token).await.unwrap();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        bytes.extend_from_slice(&chunk.unwrap());
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        if entry.name().ends_with("/events.jsonl") {
+            let mut text = String::new();
+            entry.read_to_string(&mut text).unwrap();
+            records.extend(text.lines().map(|line| serde_json::from_str(line).unwrap()));
+        }
+    }
+    records.sort_by_key(|record| record["recorded_at"].as_i64());
+    records
+}
+
+#[tokio::test]
+async fn reused_websocket_pre_application_close_is_captured_before_failure() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), true).await;
+    let pool = Arc::new(VendorWebSocketPool::default());
+    let network = network(&server.url, pool)
+        .with_observer(Some(observer))
+        .with_observation_scope(Some("ws-model-turn".into()), Some("ws-attempt".into()));
+    round_trip_and_park(&network, &server.url, "first").await;
+    let socket = require_tip(&network, &server.url, "first", Vec::new())
+        .await
+        .unwrap();
+    socket
+        .send(WebSocketMessage::Text("close-before-response".into()))
+        .await
+        .unwrap();
+    let failure = socket
+        .next()
+        .await
+        .expect_err("reused Close must still fail");
+    assert_eq!(
+        failure.kind.transport_failure(),
+        Some(stravia_vendor_sdk::TransportFailure::Websocket)
+    );
+    observation.flush().await.unwrap();
+    let records = captured_records(&observation).await;
+    let closes: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record["direction"] == "upstream_response" && record["message_type"] == "close"
+        })
+        .collect();
+    assert_eq!(closes.len(), 1, "real Close must be captured exactly once");
+    assert_eq!(closes[0]["run_id"], "ws-capture-run");
+    assert_eq!(closes[0]["model_turn_id"], "ws-model-turn");
+    assert_eq!(closes[0]["attempt_id"], "ws-attempt");
+    assert_eq!(
+        closes[0]["payload"],
+        serde_json::json!({"code": 1001, "reason": "synthetic upstream shutdown"})
+    );
+    // 对端已关闭，关闭握手允许失败；这里验证失败连接不会被重新归池。
+    let _ = socket.close(Some("invalid-tip".into())).await;
+    assert_local_miss(
+        require_tip(&network, &server.url, "invalid-tip", Vec::new())
+            .await
+            .err()
+            .unwrap(),
+    );
+    observation.shutdown().await;
+}
+
+#[tokio::test]
+async fn abnormal_websocket_termination_has_no_phantom_received_close() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), true).await;
+    let network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
+        .with_observer(Some(observer))
+        .with_observation_scope(Some("ws-model-turn".into()), Some("ws-attempt".into()));
+    round_trip_and_park(&network, &server.url, "first").await;
+    let socket = require_tip(&network, &server.url, "first", Vec::new())
+        .await
+        .unwrap();
+    socket
+        .send(WebSocketMessage::Text("disconnect-without-close".into()))
+        .await
+        .unwrap();
+    let failure = socket.next().await.unwrap_err();
+    assert!(failure.message.contains("without closing handshake"));
+    assert_eq!(
+        failure.kind.transport_failure(),
+        Some(stravia_vendor_sdk::TransportFailure::Websocket)
+    );
+    let send_failure = socket
+        .send(WebSocketMessage::Text("synthetic-after-disconnect".into()))
+        .await
+        .expect_err("failed transport must reject subsequent sends");
+    assert!(send_failure.message.contains("send failed"));
+    assert_eq!(
+        send_failure.kind.transport_failure(),
+        Some(stravia_vendor_sdk::TransportFailure::Websocket)
+    );
+    // 传输已失败，关闭握手不再保证成功；失败连接仍不得被重新归池。
+    let _ = socket.close(Some("abnormal-tip".into())).await;
+    assert_local_miss(
+        require_tip(&network, &server.url, "abnormal-tip", Vec::new())
+            .await
+            .err()
+            .unwrap(),
+    );
+    observation.flush().await.unwrap();
+    let records = captured_records(&observation).await;
+    assert!(!records.iter().any(|record| {
+        record["direction"] == "upstream_response" && record["message_type"] == "close"
+    }));
+    assert!(
+        records
+            .iter()
+            .filter(|record| record["run_id"] == "ws-capture-run")
+            .all(|record| record["model_turn_id"] == "ws-model-turn"
+                && record["attempt_id"] == "ws-attempt")
+    );
+    observation.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_eof_after_real_close_does_not_duplicate_the_received_frame() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), true).await;
+    let network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
+        .with_observer(Some(observer));
+    let socket = checkout(&network, &server.url).await;
+    socket
+        .send(WebSocketMessage::Text("close-before-response".into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        socket.next().await.unwrap(),
+        Some(WebSocketMessage::Close(Some((1001, _))))
+    ));
+    assert!(socket.next().await.is_err());
+    observation.flush().await.unwrap();
+    assert_eq!(
+        captured_records(&observation)
+            .await
+            .iter()
+            .filter(|record| {
+                record["direction"] == "upstream_response" && record["message_type"] == "close"
+            })
+            .count(),
+        1
+    );
+    observation.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_websocket_expiry_and_cancellation_do_not_capture_received_close() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), true).await;
+    let network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
+        .with_observer(Some(observer));
+    let socket = checkout(&network, &server.url).await;
+    tokio::time::pause();
+    tokio::time::advance(MAX_WEBSOCKET_AGE).await;
+    let expired = socket.next().await.unwrap_err();
+    tokio::time::resume();
+    assert!(expired.message.contains("maximum age"));
+    assert!(
+        socket
+            .next()
+            .await
+            .unwrap_err()
+            .message
+            .contains("maximum age")
+    );
+    let socket = checkout(&network, &server.url).await;
+    network.cancellation.cancel();
+    assert!(matches!(
+        socket.next().await.unwrap_err().kind,
+        stravia_vendor_sdk::ErrorKind::Cancelled
+    ));
+    drop(socket);
+    observation.flush().await.unwrap();
+    assert!(!captured_records(&observation).await.iter().any(|record| {
+        record["direction"] == "upstream_response" && record["message_type"] == "close"
+    }));
+    observation.shutdown().await;
+}
+
+#[tokio::test]
+async fn debug_disabled_websocket_close_retains_failure_without_wire_capture() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), false).await;
+    let network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
+        .with_observer(Some(observer));
+    round_trip_and_park(&network, &server.url, "first").await;
+    let socket = require_tip(&network, &server.url, "first", Vec::new())
+        .await
+        .unwrap();
+    socket
+        .send(WebSocketMessage::Text("close-before-response".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.next().await.unwrap_err().kind.transport_failure(),
+        Some(stravia_vendor_sdk::TransportFailure::Websocket)
+    );
+    drop(socket);
+    observation.flush().await.unwrap();
+    assert!(captured_records(&observation).await.is_empty());
+    observation.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_websocket_close_is_only_an_outgoing_wire_frame() {
+    let server = test_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (observation, observer) = capture_observer(directory.path(), true).await;
+    // 无池的显式释放会真正发送 Close；归池不应伪造该帧。
+    let mut network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
+        .with_observer(Some(observer));
+    network.websocket_pool = None;
+    let socket = checkout(&network, &server.url).await;
+    socket.close(None).await.unwrap();
+    socket.close(None).await.unwrap();
+    observation.flush().await.unwrap();
+    let records = captured_records(&observation).await;
+    let closes: Vec<_> = records
+        .iter()
+        .filter(|record| record["message_type"] == "close")
+        .collect();
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0]["direction"], "upstream_request");
+    assert_eq!(
+        closes[0]["payload"],
+        serde_json::json!({"code": 1000, "reason": ""})
+    );
+    observation.shutdown().await;
+}
+
+#[test]
+fn websocket_transport_diagnostics_redact_source_chain_secrets() {
+    #[derive(Debug)]
+    struct SyntheticFailure(std::io::Error);
+    impl std::fmt::Display for SyntheticFailure {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("synthetic receive error")
+        }
+    }
+    impl std::error::Error for SyntheticFailure {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    let error = SyntheticFailure(std::io::Error::other(
+        "https://synthetic.invalid/socket?api_key=synthetic-secret",
+    ));
+    let cause = super::transport_cause(&error);
+    assert!(cause.contains("synthetic receive error"));
+    assert!(!cause.contains("synthetic-secret"));
 }
 
 #[tokio::test]

@@ -187,15 +187,30 @@ impl ProtectedSecrets {
                 error_code: Some(reason),
                 ..
             }
-            | RunEvent::TargetAttemptFinished {
-                error_code: Some(reason),
-                ..
-            }
             | RunEvent::DeliveryFinished {
                 reason: Some(reason),
                 ..
             }
             | RunEvent::ObservationGap { reason } => self.text(reason),
+            RunEvent::TargetAttemptFinished {
+                error_code, error, ..
+            } => {
+                if let Some(code) = error_code {
+                    self.text(code);
+                }
+                if let Some(error) = error {
+                    for value in [
+                        &mut error.code,
+                        &mut error.message,
+                        &mut error.upstream_code,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        self.text(value);
+                    }
+                }
+            }
             RunEvent::ModelTurnFinished { status, .. } => self.text(status),
             _ => {}
         }
@@ -740,10 +755,18 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
             *upstream_url = redacted;
             report.merge(url_report);
         }
-        RunEvent::CompactionOperation { error_code, .. }
-        | RunEvent::TargetAttemptFinished { error_code, .. } => {
-            if let Some(error) = error_code {
-                redact_string(error, &mut report);
+        RunEvent::CompactionOperation {
+            error_code: Some(error),
+            ..
+        } => redact_string(error, &mut report),
+        RunEvent::TargetAttemptFinished {
+            error_code, error, ..
+        } => {
+            if let Some(code) = error_code {
+                redact_string(code, &mut report);
+            }
+            if let Some(error) = error {
+                redact_failure(error, &mut report);
             }
         }
         RunEvent::DeliveryFinished {

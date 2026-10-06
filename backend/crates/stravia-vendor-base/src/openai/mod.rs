@@ -280,6 +280,7 @@ fn infer(
                     host,
                     &protocol.to_string(),
                     response,
+                    common::HttpResponseMode::HeaderDetected,
                     classify_responses_stream_error,
                 )
             } else {
@@ -288,6 +289,7 @@ fn infer(
                     host,
                     &protocol.to_string(),
                     response,
+                    common::HttpResponseMode::HeaderDetected,
                     classify_responses_stream_error,
                 )
             };

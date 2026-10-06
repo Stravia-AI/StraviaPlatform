@@ -134,6 +134,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
         status: "completed".into(),
         status_code: Some(200),
         error_code: None,
+        error: None,
         duration_ms: 100,
         first_token_ms: Some(10),
         usage: None,

@@ -283,11 +283,18 @@ fn infer(
     })?;
     match operation {
         Operation::Infer => {
+            // Codex 流式请求的成功响应按 SSE 解码，不依赖上游是否返回 Content-Type。
+            let response_mode = if body.get("stream").and_then(Value::as_bool) == Some(true) {
+                common::HttpResponseMode::Streaming
+            } else {
+                common::HttpResponseMode::HeaderDetected
+            };
             let decoded = if preserve_upstream_errors {
                 common::decode_ai_response_preserving_upstream_errors(
                     host,
                     &protocol.to_string(),
                     response,
+                    response_mode,
                     classify_responses_stream_error,
                 )
             } else {
@@ -296,6 +303,7 @@ fn infer(
                     host,
                     &protocol.to_string(),
                     response,
+                    response_mode,
                     classify_responses_stream_error,
                 )
             };

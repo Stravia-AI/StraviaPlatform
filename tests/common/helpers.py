@@ -474,7 +474,7 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
             message = (
                 json.dumps({"detail": r'{"api\u005fkey":"nested-diagnostic-secret","hint":"provider detail"}'})
                 if "structured-error" in scenario
-                else "All attempts failed: " + "long detail " * 200 + "Bearer upstream-secret"
+                else "All attempts failed: " + "long detail " * 200 + "Bearer upstream-secret; credential echo upstream-secret"
             )
             self._write_json(503, {
                 "error": {

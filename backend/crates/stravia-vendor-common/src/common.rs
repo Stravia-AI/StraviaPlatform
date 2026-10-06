@@ -236,16 +236,38 @@ pub fn decode_ai_response(
     protocol: &str,
     response: HttpResponse,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_classifier(host, protocol, response, no_http_stream_error)
+    decode_ai_response_with_error_classifier(
+        host,
+        protocol,
+        response,
+        HttpResponseMode::HeaderDetected,
+        no_http_stream_error,
+    )
+}
+
+/// 上游端点的响应分帧契约；未显式约定流式响应时保留响应头检测。
+#[derive(Clone, Copy)]
+pub enum HttpResponseMode {
+    HeaderDetected,
+    Streaming,
 }
 
 pub fn decode_ai_response_with_error_classifier(
     host: &GuestHost,
     protocol: &str,
     response: HttpResponse,
+    mode: HttpResponseMode,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_policy(host, protocol, response, classify_error, false, None)
+    decode_ai_response_with_error_policy(
+        host,
+        protocol,
+        response,
+        mode,
+        classify_error,
+        false,
+        None,
+    )
 }
 
 /// 与 [`decode_ai_response_with_error_classifier`] 相同，但在发出增量与组装
@@ -263,6 +285,7 @@ pub fn decode_ai_response_renaming_tools(
         host,
         protocol,
         response,
+        HttpResponseMode::HeaderDetected,
         classify_error,
         false,
         Some(rename_tool),
@@ -299,15 +322,17 @@ pub fn decode_ai_response_preserving_upstream_errors(
     host: &GuestHost,
     protocol: &str,
     response: HttpResponse,
+    mode: HttpResponseMode,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_policy(host, protocol, response, classify_error, true, None)
+    decode_ai_response_with_error_policy(host, protocol, response, mode, classify_error, true, None)
 }
 
 fn decode_ai_response_with_error_policy(
     host: &GuestHost,
     protocol: &str,
     response: HttpResponse,
+    mode: HttpResponseMode,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
     preserve_upstream_errors: bool,
     rename_tool: Option<fn(&str) -> Option<String>>,
@@ -337,16 +362,17 @@ fn decode_ai_response_with_error_policy(
     }
 
     let endpoint = endpoint(protocol)?;
-    let streaming = headers.iter().any(|(name, value)| {
-        if !name.eq_ignore_ascii_case("content-type") {
-            return false;
-        }
-        let value = value.to_ascii_lowercase();
-        value.contains("text/event-stream")
-            || value.contains("application/x-ndjson")
-            || value.contains("application/connect+proto")
-            || value.contains("application/vnd.amazon.eventstream")
-    });
+    let streaming = matches!(mode, HttpResponseMode::Streaming)
+        || headers.iter().any(|(name, value)| {
+            if !name.eq_ignore_ascii_case("content-type") {
+                return false;
+            }
+            let value = value.to_ascii_lowercase();
+            value.contains("text/event-stream")
+                || value.contains("application/x-ndjson")
+                || value.contains("application/connect+proto")
+                || value.contains("application/vnd.amazon.eventstream")
+        });
 
     if !streaming {
         let body = read_http_body(&response, MAX_UNARY_BODY)?;

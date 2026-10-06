@@ -289,7 +289,11 @@ pub(crate) fn decode_inference(
             .map(|endpoint| generic::inference_error_classifier_for(endpoint.protocol))
             .unwrap_or(generic::no_inference_error_classification);
         return common::decode_ai_response_with_error_classifier(
-            host, protocol, response, classify,
+            host,
+            protocol,
+            response,
+            common::HttpResponseMode::HeaderDetected,
+            classify,
         )
         .map(Box::new)
         .map(OperationOutput::Infer);

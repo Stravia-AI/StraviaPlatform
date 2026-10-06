@@ -144,7 +144,7 @@ impl<'a> OutputLifecycle<'a> {
                 Some(timing)
             }
             Err(error) => {
-                attempt.finish("interrupted", None, Some(error.code.clone()), None);
+                attempt.finish("interrupted", None, Some(error.code.clone()), None, None);
                 if first_commit && let Some(ready) = self.ready.take() {
                     let _ = ready.send(Err(AttemptFailure::terminal(error.code, error.message)));
                 }

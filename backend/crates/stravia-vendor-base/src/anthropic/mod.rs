@@ -193,6 +193,7 @@ fn infer(
         host,
         &ANTHROPIC_MESSAGES_2023_06_01.to_string(),
         response,
+        common::HttpResponseMode::HeaderDetected,
         crate::generic::classify_anthropic_error,
     )
     .map(Box::new)

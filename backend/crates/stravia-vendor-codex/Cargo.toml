@@ -34,5 +34,6 @@ serde_json = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "stream"] }
 stravia-vendor-runtime = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util", "sync"] }

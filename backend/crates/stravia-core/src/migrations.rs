@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::startup_progress::report;
 use anyhow::ensure;
+use sha2::{Digest, Sha384};
 use sqlx::{
     PgPool, Sqlite, SqlitePool,
     migrate::{Migrate, Migrator},
@@ -26,23 +27,45 @@ fn unlocked_runner(migrator: &Migrator) -> Migrator {
     }
 }
 
-/// An installed history must be a successful, checksum-matching contiguous
-/// prefix of the migrations supplied by the caller (including offline copies).
-fn supported_history(rows: &[(i64, bool, Vec<u8>)], migrator: &Migrator) -> anyhow::Result<()> {
-    ensure!(
-        rows.iter()
-            .zip(migrator.iter())
-            .all(|((version, success, checksum), migration)| {
-                *success
-                    && *version == migration.version
-                    && checksum.as_slice() == migration.checksum.as_ref()
-            }),
-        "{INCOMPATIBLE_HISTORY}"
-    );
+fn matches_line_ending_checksum(sql: &str, checksum: &[u8]) -> bool {
+    let mut lf = Sha384::new();
+    let mut crlf = Sha384::new();
+    for line in sql.as_bytes().split_inclusive(|byte| *byte == b'\n') {
+        if let Some(content) = line.strip_suffix(b"\n") {
+            let content = content.strip_suffix(b"\r").unwrap_or(content);
+            lf.update(content);
+            lf.update(b"\n");
+            crlf.update(content);
+            crlf.update(b"\r\n");
+        } else {
+            lf.update(line);
+            crlf.update(line);
+        }
+    }
+    checksum == &lf.finalize()[..] || checksum == &crlf.finalize()[..]
+}
+
+/// 接受成功、连续的迁移前缀；只有同一 SQL 的 LF/CRLF 表示可使用历史校验和。
+fn supported_history(rows: &[(i64, bool, Vec<u8>)], migrator: &mut Migrator) -> anyhow::Result<()> {
     ensure!(
         rows.len() <= migrator.iter().count(),
         "{INCOMPATIBLE_HISTORY}"
     );
+    for (index, (version, success, checksum)) in rows.iter().enumerate() {
+        let migration = &migrator.migrations[index];
+        ensure!(
+            *success && *version == migration.version,
+            "{INCOMPATIBLE_HISTORY}"
+        );
+        if checksum.as_slice() != migration.checksum.as_ref() {
+            ensure!(
+                matches_line_ending_checksum(migration.sql.as_str(), checksum),
+                "{INCOMPATIBLE_HISTORY}"
+            );
+            // SQLx 会再次校验历史。只调整本次 runner，保留数据库中的原始记录。
+            migrator.migrations.to_mut()[index].checksum = checksum.clone().into();
+        }
+    }
     Ok(())
 }
 
@@ -50,7 +73,8 @@ fn supported_history(rows: &[(i64, bool, Vec<u8>)], migrator: &Migrator) -> anyh
 pub async fn check_sqlite_source_history(
     connection: &mut sqlx::SqliteConnection,
 ) -> anyhow::Result<()> {
-    reject_incompatible_sqlite(connection, &SQLITE_MIGRATOR).await
+    let mut runner = unlocked_runner(&SQLITE_MIGRATOR);
+    reject_incompatible_sqlite(connection, &mut runner).await
 }
 
 struct SqliteMigrationConnection {
@@ -90,7 +114,8 @@ pub async fn run_sqlite_migrator(
         // Arm before the first await which can disable FK enforcement.
         foreign_keys_may_be_off: true,
     };
-    reject_incompatible_sqlite(&mut pinned.connection, migrator).await?;
+    let mut runner = unlocked_runner(migrator);
+    reject_incompatible_sqlite(&mut pinned.connection, &mut runner).await?;
     let existing_violations: Vec<(String, i64, String, i64)> =
         sqlx::query_as("PRAGMA foreign_key_check")
             .fetch_all(&mut *pinned.connection)
@@ -109,7 +134,6 @@ pub async fn run_sqlite_migrator(
         None,
     );
     Migrate::lock(&mut *pinned.connection).await?;
-    let runner = unlocked_runner(migrator);
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner
@@ -212,8 +236,8 @@ pub async fn run_postgres_migrator(
         0,
         None,
     );
-    reject_incompatible_postgres(&mut connection, migrator).await?;
-    let runner = unlocked_runner(migrator);
+    let mut runner = unlocked_runner(migrator);
+    reject_incompatible_postgres(&mut connection, &mut runner).await?;
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner.run_direct(Some(6), &mut *connection, false).await?;
@@ -268,7 +292,7 @@ pub async fn run_postgres_migrator(
 
 async fn reject_incompatible_sqlite(
     connection: &mut sqlx::SqliteConnection,
-    migrator: &Migrator,
+    migrator: &mut Migrator,
 ) -> anyhow::Result<()> {
     let has_history: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations')",
@@ -303,7 +327,7 @@ async fn reject_incompatible_sqlite(
 
 async fn reject_incompatible_postgres(
     connection: &mut sqlx::PgConnection,
-    migrator: &Migrator,
+    migrator: &mut Migrator,
 ) -> anyhow::Result<()> {
     let has_history: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
@@ -341,7 +365,34 @@ async fn reject_incompatible_postgres(
 #[cfg(test)]
 mod tests {
     use super::{SQLITE_MIGRATOR, migrate_postgres, migrate_sqlite};
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{
+        SqlSafeStr,
+        migrate::{Migration, MigrationType, Migrator},
+        sqlite::SqlitePoolOptions,
+    };
+
+    const RETAINED_VALUE_SQL: &str = "CREATE TABLE retained_value (\n    id INTEGER PRIMARY KEY,\n    value TEXT NOT NULL\n);\nINSERT INTO retained_value VALUES (1, 'kept');\n";
+
+    fn retained_value_migrator(sql: String, upgrade: bool) -> Migrator {
+        let mut migrations = vec![Migration::new(
+            1,
+            "retained value".into(),
+            MigrationType::Simple,
+            sqlx::AssertSqlSafe(sql).into_sql_str(),
+            false,
+        )];
+        if upgrade {
+            migrations.push(Migration::new(
+                2,
+                "upgrade version".into(),
+                MigrationType::Simple,
+                "ALTER TABLE retained_value ADD COLUMN upgrade_version INTEGER NOT NULL DEFAULT 2;\n"
+                    .into_sql_str(),
+                false,
+            ));
+        }
+        Migrator::with_migrations(migrations)
+    }
 
     async fn sqlite_pool() -> sqlx::SqlitePool {
         SqlitePoolOptions::new()
@@ -349,6 +400,217 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("SQLite pool")
+    }
+
+    #[tokio::test]
+    async fn sqlite_crlf_history_upgrades_without_rewriting_applied_migrations() {
+        for (historical, current_sql) in [
+            (
+                RETAINED_VALUE_SQL.replace('\n', "\r\n"),
+                RETAINED_VALUE_SQL.to_owned(),
+            ),
+            (
+                RETAINED_VALUE_SQL.to_owned(),
+                RETAINED_VALUE_SQL.replace('\n', "\r\n"),
+            ),
+        ] {
+            let pool = sqlite_pool().await;
+            retained_value_migrator(historical, false)
+                .run(&pool)
+                .await
+                .unwrap();
+            let installed: (Vec<u8>, String, i64, bool) = sqlx::query_as(
+                "SELECT checksum, CAST(installed_on AS TEXT), execution_time, success FROM _sqlx_migrations WHERE version=1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let current = retained_value_migrator(current_sql, true);
+
+            super::run_sqlite_migrator(&pool, &current, None)
+                .await
+                .expect("the same SQL must accept its other line-ending checksum");
+            super::run_sqlite_migrator(&pool, &current, None)
+                .await
+                .expect("restarting must preserve the historical checksum");
+            let retained: (String, i64) =
+                sqlx::query_as("SELECT value, upgrade_version FROM retained_value WHERE id=1")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(retained, ("kept".into(), 2));
+            let after: (Vec<u8>, String, i64, bool) = sqlx::query_as(
+                "SELECT checksum, CAST(installed_on AS TEXT), execution_time, success FROM _sqlx_migrations WHERE version=1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(after, installed);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_rejects_changes_beyond_lf_crlf_without_modifying_data() {
+        for historical in [
+            RETAINED_VALUE_SQL.replace("'kept'", "'edited'"),
+            RETAINED_VALUE_SQL.trim_end().to_owned(),
+            format!("{RETAINED_VALUE_SQL}\n"),
+            RETAINED_VALUE_SQL.replacen('\n', "\r", 1),
+            RETAINED_VALUE_SQL.replacen('\n', "\r\n", 1),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    sqlx::sqlite::SqliteConnectOptions::new()
+                        .filename(directory.path().join("history.db"))
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            retained_value_migrator(historical, false)
+                .run(&pool)
+                .await
+                .unwrap();
+            let before: Vec<(i64, String)> = sqlx::query_as("SELECT id, value FROM retained_value")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            let installed: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let current = retained_value_migrator(RETAINED_VALUE_SQL.to_owned(), true);
+
+            assert!(
+                super::run_sqlite_migrator(&pool, &current, None)
+                    .await
+                    .is_err()
+            );
+            let after: Vec<(i64, String)> = sqlx::query_as("SELECT id, value FROM retained_value")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(after, before);
+            let columns: Vec<String> = sqlx::query_scalar(
+                "SELECT name FROM pragma_table_info('retained_value') ORDER BY cid",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(columns, ["id", "value"]);
+            let history: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(history, installed);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_offline_copy_and_startup_preserve_crlf_allowance_migration_history() {
+        let pool = sqlite_pool().await;
+        let mut historical = super::unlocked_runner(&SQLITE_MIGRATOR);
+        let migration = historical
+            .migrations
+            .to_mut()
+            .iter_mut()
+            .find(|migration| migration.version == 10)
+            .unwrap();
+        *migration = Migration::new(
+            migration.version,
+            migration.description.clone(),
+            migration.migration_type,
+            sqlx::AssertSqlSafe(migration.sql.as_str().replace('\n', "\r\n")).into_sql_str(),
+            migration.no_tx,
+        );
+        super::run_sqlite_migrator(&pool, &historical, None)
+            .await
+            .unwrap();
+        let installed: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        super::check_sqlite_source_history(&mut pool.acquire().await.unwrap())
+            .await
+            .expect("offline copies must accept historical CRLF SQL without repairing metadata");
+        migrate_sqlite(&pool, None).await.unwrap();
+        let after: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after, installed);
+    }
+
+    #[tokio::test]
+    async fn postgres_crlf_history_upgrades_but_sql_changes_are_rejected_when_configured() {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("stravia_newline_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        retained_value_migrator(RETAINED_VALUE_SQL.replace('\n', "\r\n"), false)
+            .run(&pool)
+            .await
+            .unwrap();
+        let installed: (Vec<u8>, String, i64, bool) = sqlx::query_as(
+            "SELECT checksum, CAST(installed_on AS TEXT), execution_time, success FROM _sqlx_migrations WHERE version=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let current = retained_value_migrator(RETAINED_VALUE_SQL.to_owned(), true);
+
+        super::run_postgres_migrator(&pool, &current, None)
+            .await
+            .unwrap();
+        super::run_postgres_migrator(&pool, &current, None)
+            .await
+            .unwrap();
+        let changed =
+            retained_value_migrator(RETAINED_VALUE_SQL.replace("'kept'", "'edited'"), true);
+        assert!(
+            super::run_postgres_migrator(&pool, &changed, None)
+                .await
+                .is_err()
+        );
+        let retained: (String, i32) =
+            sqlx::query_as("SELECT value, upgrade_version FROM retained_value WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retained, ("kept".into(), 2));
+        let after: (Vec<u8>, String, i64, bool) = sqlx::query_as(
+            "SELECT checksum, CAST(installed_on AS TEXT), execution_time, success FROM _sqlx_migrations WHERE version=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, installed);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
     }
 
     #[tokio::test]
@@ -683,9 +945,10 @@ mod tests {
         let second = SQLITE_MIGRATOR.iter().nth(1).unwrap();
         let v1 = (first.version, true, first.checksum.to_vec());
         let v2 = (second.version, true, second.checksum.to_vec());
-        super::supported_history(&[], &SQLITE_MIGRATOR).unwrap();
-        super::supported_history(std::slice::from_ref(&v1), &SQLITE_MIGRATOR).unwrap();
-        super::supported_history(&[v1.clone(), v2.clone()], &SQLITE_MIGRATOR).unwrap();
+        let mut runner = super::unlocked_runner(&SQLITE_MIGRATOR);
+        super::supported_history(&[], &mut runner).unwrap();
+        super::supported_history(std::slice::from_ref(&v1), &mut runner).unwrap();
+        super::supported_history(&[v1.clone(), v2.clone()], &mut runner).unwrap();
         for history in [
             vec![(second.version, true, second.checksum.to_vec())],
             vec![(first.version, false, first.checksum.to_vec())],
@@ -699,7 +962,7 @@ mod tests {
             ],
             vec![(first.version, true, vec![0])],
         ] {
-            assert!(super::supported_history(&history, &SQLITE_MIGRATOR).is_err());
+            assert!(super::supported_history(&history, &mut runner).is_err());
         }
     }
 

@@ -226,6 +226,8 @@ clear_history() -> ClearHistoryResult
 
 生命周期事件把 `usage_confirmed` 合并到 `target_attempt_finished.usage`（`ConfirmedUsage | null`），把 `delivery_finished` 合并到 `run_finished.delivery`（`{status, reason, completed_at} | null`）；失败、中断前已收到的用量与交付事实也保留，早到事实先更新投影，不能因尚未终态而丢弃。`delivery_completed_at` 保存于 Run 投影。`generation_associated`、`client_output_committed` 只更新投影，不再落独立事件；启动恢复以 `run_state_changed` 维持 SSE 唤醒。
 
+推理尝试已有失败诊断时，`target_attempt_finished.error` 保存可选的 `FailureDiagnostic`（`source`、`code`、`message`、`status_code`、`upstream_code`）。它沿用普通 Observation 的结构化凭据与已知秘密脱敏，随事件查询和 Bundle 导出；即使后续重试成功，该尝试的安全原因摘要也不会被丢弃。既有 `error_code` 与状态语义不变，成功尝试不附带 `error`，旧记录与没有诊断的恢复终态允许缺省；无需数据库迁移，也不为旧记录补造原因。恢复成功的内部失败仍不成为最终 Failed Request。
+
 `model_thinking_delta` 与 `client_visible_content_delta` 仅用于易失实时通道，不是持久化 kind。`model_thinking_delta` 只接收上游可读 thinking / reasoning summary 文本，并以 Model Turn、Target attempt、Canonical Item 与项内 part 隔离增量脱敏和汇聚状态。签名、密文、obfuscation 和不透明快照不作为普通思考正文。`client_visible_content_delta` 仍只接收 Client Projection 已交付的可见内容。
 
 普通诊断内容按 Canonical Item 收口持久化为 `model_thinking` 或 `client_visible_content`：每个 item 一行，payload 保存 `text`、`parts`、`block_id`、`item` 与 `complete`，思考内容另带 Model Turn/attempt 关联。同一 item 的流式碎片汇聚为一项，保留项内 part 的边界和顺序；具有独立身份的 item 即使类型相同也不得合并。正常结束保存完整 item；可处理的失败或取消保存已实际收到的内容并标为未完成，不补造未收到的尾部。item 首次落盘只发生在收口时，不周期性持久化中间快照；进程突然崩溃可以丢失整个尚未落盘的 item。实时与持久内容共享 scope 与真实源 item ordinal：可见内容在 Run 内、thinking 在 attempt 内稳定编号，迟到 provider ID 不改变 block_id。WebSocket 仅累计已成功发送并确认的客户端帧，失败或断线收口为 `complete=false`，不补入未发送正文。
@@ -341,6 +343,8 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 WebSocket 捕获 handshake 元数据与应用 message；Ping/Pong 控制帧的既有限制保留，只记录事件类型、方向与时间，不保存控制帧载荷，并明确标记策略性省略。该省略不把 Trace 标为 partial；历史 Trace 不回填或改写。
 
+实际收到的 Close 在复用连接的提前失败判定之前捕获一次，保留 code、reason 及所属 attempt。EOF、接收异常、本地取消与连接到期没有收到 Close 时，不得补造入站帧；原因由普通 Observation 表达。本地主动发出的 Close 只归入上游请求方向，不冒充上游响应。
+
 payload 写入 `GatewayConfig.data_dir` 下由 Observation 模块拥有的目录，建议布局：
 
 ```text
@@ -364,7 +368,7 @@ diagnostics/observation-debug/
 
 传输失败、协议解码失败和规范化错误沿用普通 Observation 的错误分类、阶段、状态与安全原因摘要，不作为 Debug 内容记录。对应方向没有实际收发时不得补造 Wire；Trace manifest 如实表达缺失或 `partial`。这些诊断不改变重试、回退、超时或成功判定，也不为旧 Trace 补录原因。
 
-宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。完整摘要沿用普通 Observation 的既有脱敏规则后进入日志与失败请求记录；不改变 Wire Debug 的捕获与脱敏边界，也不能恢复旧记录中已丢失的原因。
+宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。完整摘要沿用普通 Observation 的既有脱敏规则后进入日志、推理尝试终态及最终失败请求记录；不改变 Wire Debug 的捕获与脱敏边界，也不能恢复旧记录中已丢失的原因。
 
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 

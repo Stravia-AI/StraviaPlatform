@@ -378,13 +378,14 @@ impl Gateway {
                                 None,
                                 Some("vendor_output_invalid".into()),
                                 None,
+                                None,
                             );
                             anyhow::bail!("Vendor returned an output for the wrong operation");
                         }
                         if let Some(usage) = operation_usage(&execution.output) {
                             attempt.confirm_usage(usage);
                         }
-                        attempt.finish("completed", None, None, None);
+                        attempt.finish("completed", None, None, None, None);
                         let target_id = selected_target_key(&target);
                         policy.state().record_success(
                             policy.context(),
@@ -437,6 +438,7 @@ impl Gateway {
                                 .downcast_ref::<RuntimeError>()
                                 .and_then(RuntimeError::upstream_status),
                             Some(failure.code.to_owned()),
+                            None,
                             None,
                         );
                         let Some(kind) = failure.retry_kind.clone() else {

@@ -1147,6 +1147,9 @@ impl HostWebSocket for ScopedWebSocket {
             Message::Ping(bytes) => WebSocketMessage::Ping(bytes.to_vec()),
             Message::Pong(bytes) => WebSocketMessage::Pong(bytes.to_vec()),
             Message::Close { code, reason } => {
+                let message = WebSocketMessage::Close(Some((code.into(), reason)));
+                // 实际收到的 Close 必须先捕获；复用连接的分类失败不能吞掉线上的帧。
+                self.wire_message("upstream_response", &message);
                 if self.reused && !self.application_message_seen.load(Ordering::Acquire) {
                     let failure = self.transport_failure(
                         AiErrorKind::UnexpectedEof,
@@ -1156,7 +1159,7 @@ impl HostWebSocket for ScopedWebSocket {
                     return Err(failure);
                 }
                 self.invalidate();
-                WebSocketMessage::Close(Some((code.into(), reason)))
+                return Ok(Some(message));
             }
         };
         self.wire_message("upstream_response", &message);
