@@ -2,7 +2,20 @@ diff --git a/dist/cjs/index.js b/dist/cjs/index.js
 index c14f1e3d83824dbc24a130c7aab60572036650be..bfabb4de4b9fb1020fd50fcbbea195a1a523dfac 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
-@@ -1690,7 +1690,7 @@ async function findMsEdgeDriver() {
+@@ -1681,16 +1681,17 @@ async function findMsEdgeDriver() {
+         // Try to find in PATH
+-        const { stdout: pathResult } = await execAsync('where msedgedriver.exe 2>nul', {
++        const { stdout: pathResult } = await execFileAsync('where.exe', ['msedgedriver.exe'], {
+             encoding: 'utf8',
+         });
+-        const driverPath = pathResult.trim().split('\n')[0];
++        // where.exe emits CRLF; trim each selected path, not only the complete output.
++        const driverPath = pathResult.split(/\r?\n/)[0].trim();
+         if (driverPath && existsSync(driverPath)) {
+             // Get version
+             try {
+-                const { stdout: versionOutput } = await execAsync(`"${driverPath}" --version`, {
++                const { stdout: versionOutput } = await execFileAsync(driverPath, ['--version'], {
                      encoding: 'utf8',
                      timeout: 5000,
                  });
@@ -15,7 +28,20 @@ diff --git a/dist/esm/index.js b/dist/esm/index.js
 index 7f49bdefae0380e164bfb2c8a149288cc80193ad..6002575413db7c775e17fb594cd256d4d839858b 100644
 --- a/dist/esm/index.js
 +++ b/dist/esm/index.js
-@@ -1686,7 +1686,7 @@ async function findMsEdgeDriver() {
+@@ -1677,16 +1677,17 @@ async function findMsEdgeDriver() {
+         // Try to find in PATH
+-        const { stdout: pathResult } = await execAsync('where msedgedriver.exe 2>nul', {
++        const { stdout: pathResult } = await execFileAsync('where.exe', ['msedgedriver.exe'], {
+             encoding: 'utf8',
+         });
+-        const driverPath = pathResult.trim().split('\n')[0];
++        // where.exe emits CRLF; trim each selected path, not only the complete output.
++        const driverPath = pathResult.split(/\r?\n/)[0].trim();
+         if (driverPath && existsSync(driverPath)) {
+             // Get version
+             try {
+-                const { stdout: versionOutput } = await execAsync(`"${driverPath}" --version`, {
++                const { stdout: versionOutput } = await execFileAsync(driverPath, ['--version'], {
                      encoding: 'utf8',
                      timeout: 5000,
                  });

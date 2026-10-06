@@ -3,8 +3,8 @@ import { join } from 'node:path'
 
 // tauri-service 1.4.0 has no persistent cache option. Provision through its supported
 // PATH contract, then let the service independently check runtime compatibility.
-// The Bun patch only teaches its version parser both official Microsoft banners;
-// it does not bypass compatibility checks or replace the native executable.
+// The Bun patch handles Windows PATH discovery and both official Microsoft banners;
+// it executes the native binary directly without bypassing compatibility checks.
 export function prepareDesktopDriver(): void {
   if (process.platform !== 'win32') throw new Error('Native desktop smoke requires Windows and WebView2')
   const localAppData = process.env.LOCALAPPDATA

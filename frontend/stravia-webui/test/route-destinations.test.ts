@@ -115,7 +115,12 @@ describe('summarizeRouteDestinations', () => {
   test('without any available target counts each enabled target under one reason', () => {
     const summary = summarizeRouteDestinations(
       route([target('a', 1), target('b', 0), target('c', 0), target('d', 0, { enabled: false })]),
-      [provider('a', { is_enabled: false, credential_status: 'invalid' }), provider('b', invalid), provider('c', suspended), provider('d')],
+      [
+        provider('a', { is_enabled: false, credential_status: 'invalid' }),
+        provider('b', invalid),
+        provider('c', suspended),
+        provider('d'),
+      ],
     )
 
     expect(summary.preferred).toBeNull()

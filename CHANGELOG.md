@@ -54,6 +54,7 @@
 
 ### Fixed
 
+- Fixed CI compatibility with Rust 1.99 by using the non-deprecated atomic update API already supported by the pinned toolchain. Windows desktop smoke tests now recognize the first EdgeDriver when multiple drivers appear in `PATH`, including CRLF-separated paths and directories containing spaces; native driver version checks remain enabled.
 - Antigravity now accepts boolean JSON Schemas in tool declarations, including `not: true`, while preserving allow/deny constraints and leaving application JSON booleans unchanged. Requests with these schemas no longer fail locally with `vendor_request_invalid`. Rebuild and re-import the standalone Antigravity plugin to receive this fix.
 - Fixed Desktop and Server startup rejecting historical migration checksums caused solely by LF/CRLF line endings. SQLite, PostgreSQL, and offline copies now accept otherwise-identical SQL with either line-ending convention without rewriting applied migration records; actual SQL changes and other incompatible histories remain errors. Update the host to receive this fix; no database reset is required.
 - Codex HTTP inference now decodes explicitly streamed responses as SSE even when the upstream omits `Content-Type`, retaining incremental text, tool calls, completion and confirmed usage. Non-streaming JSON, compaction and upstream error handling remain unchanged. Rebuild and re-import the standalone Codex plugin to receive this fix.

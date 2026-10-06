@@ -226,10 +226,7 @@
     {
       "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
       "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{count} 个目标 · {strategy}",
-        "countPlural=other": "{count} 个目标 · {strategy}"
-      }
+      "match": { "countPlural=one": "{count} 个目标 · {strategy}", "countPlural=other": "{count} 个目标 · {strategy}" }
     }
   ],
   "models_destinations_fallback": [
@@ -246,10 +243,7 @@
     {
       "declarations": ["input count", "local countPlural = count: plural"],
       "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{count} 个目标不可用",
-        "countPlural=other": "{count} 个目标不可用"
-      }
+      "match": { "countPlural=one": "{count} 个目标不可用", "countPlural=other": "{count} 个目标不可用" }
     }
   ],
   "overview_no_traffic_title": "尚无请求流量",

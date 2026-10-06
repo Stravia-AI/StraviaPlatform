@@ -251,11 +251,8 @@ async function deleteModel(): Promise<void> {
   {@const text = formatRouteDestinations(summary)}
   <div class="min-w-0">
     <span
-      class={cn(
-        'block truncate',
-        !summary.preferred && 'text-warning',
-        !model.is_enabled && 'text-muted-foreground',
-      )}>{text.primary}</span>
+      class={cn('block truncate', !summary.preferred && 'text-warning', !model.is_enabled && 'text-muted-foreground')}
+      >{text.primary}</span>
     {#if text.details.length > 0}
       <span class="block truncate text-xs text-muted-foreground">
         {#each text.details as detail, index (detail.text)}

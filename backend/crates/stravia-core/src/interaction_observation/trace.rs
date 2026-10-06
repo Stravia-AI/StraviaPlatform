@@ -1170,7 +1170,7 @@ pub(crate) fn optimize_trace_directory(root: &Path) -> io::Result<Vec<(String, u
 }
 
 fn subtract_saturating(counter: &AtomicU64, amount: u64) {
-    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+    let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some(current.saturating_sub(amount))
     });
 }
@@ -1186,6 +1186,46 @@ mod regression_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtract_saturating_preserves_boundaries() {
+        for (initial, amount, expected) in [
+            (0, 0, 0),
+            (0, 1, 0),
+            (10, 0, 10),
+            (10, 3, 7),
+            (10, 10, 0),
+            (10, 11, 0),
+            (1, u64::MAX, 0),
+            (u64::MAX, 1, u64::MAX - 1),
+            (u64::MAX, u64::MAX, 0),
+        ] {
+            let counter = AtomicU64::new(initial);
+            subtract_saturating(&counter, amount);
+            assert_eq!(counter.load(Ordering::Acquire), expected);
+        }
+    }
+
+    #[test]
+    fn subtract_saturating_preserves_concurrent_updates() {
+        const THREADS: usize = 8;
+        const UPDATES: u64 = 1_000;
+        for (initial, expected) in [(16_000, 8_000), (4_000, 0)] {
+            let counter = AtomicU64::new(initial);
+            let barrier = std::sync::Barrier::new(THREADS);
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        for _ in 0..UPDATES {
+                            subtract_saturating(&counter, 1);
+                        }
+                    });
+                }
+            });
+            assert_eq!(counter.load(Ordering::Acquire), expected);
+        }
+    }
 
     #[tokio::test]
     async fn wire_snapshot_preserves_sequence_and_payload_boundaries() -> io::Result<()> {

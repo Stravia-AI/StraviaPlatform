@@ -111,9 +111,7 @@ export interface RouteDestinationText {
 }
 
 function strategyLabel(strategy: RouteSelectionStrategy): string {
-  return strategy === 'latency_preference'
-    ? m.model_editor_latency_preference()
-    : m.model_editor_traffic_equalization()
+  return strategy === 'latency_preference' ? m.model_editor_latency_preference() : m.model_editor_traffic_equalization()
 }
 
 export function formatRouteDestinations(summary: RouteDestinationSummary): RouteDestinationText {
