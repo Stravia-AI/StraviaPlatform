@@ -7859,6 +7859,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
+ "jsonschema",
  "parking_lot",
  "reqwest",
  "semver",

@@ -75,6 +75,8 @@ OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/au
 
 推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头只由插件构造 Bearer、JSON Content-Type 与已核对的 CLI User-Agent；不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON 和真实签名保留，不制造签名或伪成功。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
 
+Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false` 等价转换为 `{"not": {}}`，因此 `{"not": true}` 仍表示禁止任意值，不通过删除约束绕过本地校验。`additionalProperties` 的原生布尔开关，以及 `default`、`example`、工具参数与结果中的业务布尔值保持原样。
+
 已在隔离 Server 中通过默认 Edge 完成真实 Google OAuth，并用 `gemini-3.5-flash-lite` 验证四种客户端协议各三轮上下文与第三轮 SSE 终态；Responses 使用 `previous_response_id`，Gemini 保留真实签名。四协议还分别通过同步工具调用后流式回填、流式工具调用后同步回填：客户端执行声明的整数加法工具，并校验模型逐字返回工具生成的随机 receipt，确认工具结果实际进入下一轮。此验证不覆盖内置平台工具或 MCP。真实额度 API 与 Edge 额度页的四个共享窗口、剩余/已用切换和重置时间一致。这仅证明测试账号当时可用，不保证其它账号资格、全部模型或未来可用性。第三方 OAuth 使用可能违反 Google 条款并导致账号暂停或终止；私有协议与客户端识别也可能变化。固定 Linux/amd64 User-Agent 不代表复刻了原生 TLS、HTTP 或 JSON 序列化指纹。专属插件要求支持网站回调后手动授权码的 Stravia 版本，单独导入到旧宿主不能获得该流程；工具回放修复同样需要更新宿主与重建的独立插件。
 
 ### Provider 图标标识

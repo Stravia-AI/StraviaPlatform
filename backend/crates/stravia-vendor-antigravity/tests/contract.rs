@@ -325,6 +325,91 @@ fn artifact() -> std::path::PathBuf {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new()
+        .fallback(upstream)
+        .with_state(Arc::clone(&fixture));
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    let mut provider = provider();
+    provider.credentials = BTreeMap::from([
+        ("access_token".into(), json!("test-token")),
+        ("project_id".into(), json!("test-project")),
+    ]);
+    let schema = json!({
+        "properties": {
+            "model": {"not": true},
+            "allowed": true,
+            "forbidden": false,
+            "values": {"items": false},
+            "choice": {"anyOf": [false, {"not": false}]}
+        },
+        "required": ["values"],
+        "additionalProperties": false,
+        "default": {"not": true, "flag": false}
+    });
+    let endpoint = stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    let request = ProtocolTransform::global()
+        .bind(endpoint, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        .unwrap()
+        .decode_request(json!({
+            "model": "account-model",
+            "input": "Use task without a model override",
+            "tools": [{"type": "function", "name": "task", "parameters": schema}]
+        }))
+        .unwrap();
+    let result = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer { provider, request },
+    )
+    .await;
+    server.abort();
+    let OperationOutput::Infer(output) = result.unwrap() else {
+        panic!("inference output")
+    };
+    assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+    let received = fixture.received.lock();
+    let (_, _, bytes) = received
+        .iter()
+        .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(bytes).unwrap();
+    let parameters = &envelope["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+    let validator = jsonschema::validator_for(parameters).unwrap();
+    for (arguments, valid) in [
+        (json!({"values": []}), true),
+        (json!({"values": [], "allowed": {"flag": false}}), true),
+        (json!({"values": [], "choice": false}), true),
+        (json!({"values": [], "model": "override"}), false),
+        (json!({"values": [], "model": null}), false),
+        (json!({"values": [], "forbidden": false}), false),
+        (json!({"values": [null]}), false),
+        (json!({"values": [], "unknown": true}), false),
+        (json!({}), false),
+    ] {
+        assert_eq!(validator.is_valid(&arguments), valid, "{arguments}");
+    }
+    assert_eq!(parameters["default"], json!({"not": true, "flag": false}));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     let fixture = Arc::new(Fixture::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
