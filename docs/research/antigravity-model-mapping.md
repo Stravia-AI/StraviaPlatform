@@ -267,3 +267,32 @@ gpt-oss-120b-medium
 - Chromium 实际页面核对英文深色桌面表格、中文浅色 390px 移动列表，Pro 只有一行并显示 `low, high`，Flash 同行显示三档；未显示 Gemini 2.5 Pro 等非 Agent 项，浏览器无错误。复用现有 Svelte 页面，没有修改前端源码。
 
 临时服务、存储、模型响应夹具与截图在验证后清理。上述请求只访问本地假上游，不证明真实 Google 推理可用性；未运行完整仓库测试矩阵或 Tauri 原生宿主。本轮首次编译的错误枚举名称已修正为项目既有 `ErrorKind::Invalid`，后续列出的检查均为修正后结果。
+
+## 9. 官方有 3.7/3.8 而 Stravia 缺项的根因
+
+用户升级后的桌面截图只有五个家族，而同一已登录官方 CLI 仍列出 Gemini 3.7／3.8 Flash。只读检查桌面 SQLite：五条家族记录为 `present`，共有八个档位；另有 23 条旧记录为 `missing`，包括 `gemini-3.7-flash-tiered` 和 `gemini-3.8-flash-tiered`。页面筛选解释了旧记录隐藏，但不能解释官方与插件为何拿到不同 Agent 选项。
+
+使用该连接已保存且仍有效的 token 与 project，只读调用 `fetchAvailableModels`。在 LLDB 中捕获官方 CLI 发送前的实际 HTTP 请求，仅输出公开客户端标识、端点、请求字段与 project 相等性，不输出凭据或项目值。官方使用相同 daily 端点，请求体也只有相同的 `project`；其 User-Agent 实际为：
+
+```text
+antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119; auth_method=consumer)
+```
+
+该二进制来自已校验的官方 1.2.16 发布包；发布标签与请求内构建版本不相同，不能只拼接发布标签推断完整客户端标识。
+
+固定同一 token、project、端点和请求体，逐项差分得到：
+
+|只改动的条件|目录项目数|Agent 档位数|Gemini 3.7／3.8 Agent 档位|
+|---|---:|---:|---|
+|原插件 `antigravity/1.2.16 (...)`|27|8|未返回；只有不被 Agent 引用的 tiered 目录项|
+|仅把 `os_type=linux` 改为 `windows`|27|8|未返回|
+|仅切换为 production Cloud Code 域名|27|8|未返回|
+|替换为捕获的完整官方 User-Agent|33|14|均返回|
+|原插件标识仅补回 `/cli/`，版本仍为 1.2.16，Linux/amd64，不带构建号|33|14|均返回|
+|带 `/cli/`，版本改为 1.2.17，Linux/amd64，不带构建号|33|14|均返回|
+
+根因是原 `CLI_USER_AGENT` 漏掉 `/cli/`，导致实际上游返回不同模型集合，不是家族合并删除模型，也不是同账号差分中的账号资格、project 或平台差异。最小修复只补回该片段，不加入额外头、请求字段、端点回退或权限变化。此证据说明当前响应行为，不声称掌握 Google 内部分类规则或保证所有账号返回相同模型。
+
+回归在既有真实 Wasm/HTTP 契约中模拟已观察到的客户端分类：非 CLI 请求不提供新 Flash 的 Agent 档位，断言保护完整家族发现，而不绑定版本、平台或构建号的完整字符串。修复前该断言实际失败，缺少 `gemini-3.8-flash`；重建独立插件后同一用例通过。`task build:vendors:all`、15 个插件单测、真实 Wasm 契约及定向 Clippy 均通过。
+
+另启动全新临时 Server，导入本轮实际构建的 Wasm，仅在隔离存储中预置当前有效 token 与 project，不重新授权、刷新 token 或复制账号其他资料。通过真实管理同步接口访问 Google：HTTP 200，`added=7`，模型列表包含 `gemini-3.7-flash` 与 `gemini-3.8-flash`。没有发送推理请求，也没有修改用户现有实例。验证后的临时 Server、凭据副本、官方调试进程与下载包均清理；使用修复仍需向实际实例导入新组件并同步模型。

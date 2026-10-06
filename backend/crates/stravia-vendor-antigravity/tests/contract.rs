@@ -91,6 +91,9 @@ async fn upstream(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    let cli_client = headers
+        .get("user-agent")
+        .is_some_and(|value| value.as_bytes().starts_with(b"antigravity/cli/"));
     fixture
         .received
         .lock()
@@ -124,26 +127,41 @@ async fn upstream(
         "/v1internal/operations/account-onboarding" => {
             json!({"name":"operations/account-onboarding","done":true,"response":{"cloudaicompanionProject":"test-project"}})
         }
-        "/v1internal:fetchAvailableModels" => json!({
-            "defaultAgentModelId": "gemini-3.8-flash-high",
-            "agentModelSorts":[{"groups":[{"modelIds":[
-                "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
-                "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"
-            ]}]}],
-            "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
-            "imageGenerationModelIds": ["gemini-3.1-flash-image"],
-            "models":{
-            "account-model":{"displayName":"Account model","supportsImages":true,"maxTokens":131072},
-            "hidden-model":{"isInternal":true},
-            "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
-            "gemini-3.1-pro-high":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
-            "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","supportsThinking":true},
-            "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true},
-            "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true},
-            "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true},
-            "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
-            "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
-        }}),
+        "/v1internal:fetchAvailableModels" => {
+            let mut catalog = json!({
+                "defaultAgentModelId": "gemini-3.8-flash-high",
+                "agentModelSorts":[{"groups":[{"modelIds":[
+                    "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
+                    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"
+                ]}]}],
+                "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
+                "imageGenerationModelIds": ["gemini-3.1-flash-image"],
+                "models":{
+                "account-model":{"displayName":"Account model","supportsImages":true,"maxTokens":131072},
+                "hidden-model":{"isInternal":true},
+                "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
+                "gemini-3.1-pro-high":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
+                "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","supportsThinking":true},
+                "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true},
+                "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true},
+                "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true},
+                "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
+                "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
+            }});
+            // 真实上游按 CLI 客户端身份返回新 Flash 档位，完整目录夹具会漏掉这个边界。
+            if !cli_client {
+                catalog["defaultAgentModelId"] = json!("gemini-pro-agent");
+                catalog["agentModelSorts"][0]["groups"][0]["modelIds"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|id| !id.as_str().unwrap().starts_with("gemini-3.8-flash-"));
+                catalog["models"]
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|id, _| !id.starts_with("gemini-3.8-flash-"));
+            }
+            catalog
+        }
         "/v1internal:retrieveUserQuotaSummary" => {
             json!({"groups":[{"displayName":"Gemini","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7,"resetTime":"2026-01-01T00:00:00Z"}]}],"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7}]})
         }
