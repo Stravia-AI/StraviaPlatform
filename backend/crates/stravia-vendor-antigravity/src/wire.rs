@@ -560,6 +560,15 @@ fn tool(value: &mut Value) -> Result<(), PluginError> {
     Ok(())
 }
 fn schema_projection(value: &mut Value) -> Result<(), PluginError> {
+    if let Value::Bool(allowed) = value {
+        // CLI 只接受 Schema 对象；等价转换保留布尔 schema 的允许/禁止语义。
+        *value = if *allowed {
+            json!({})
+        } else {
+            json!({"not": {}})
+        };
+        return Ok(());
+    }
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("schema must be an object"))?;

@@ -33,6 +33,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+jsonschema = { workspace = true }
 parking_lot = { workspace = true }
 stravia-vendor-runtime = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
