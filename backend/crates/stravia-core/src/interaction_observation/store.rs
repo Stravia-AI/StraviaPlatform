@@ -120,6 +120,8 @@ impl ObservationStore {
         })
     }
 
+    // 一次写入尾源所需的全部字段，拆结构体只会增加调用点噪声。
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.writer.persist_tail_source",
