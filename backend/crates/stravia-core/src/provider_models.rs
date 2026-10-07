@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use anyhow::Context;
 use rust_decimal::Decimal;
@@ -234,6 +235,13 @@ impl ProviderModelMetadata {
         }
     }
 
+    /// 未登记模态按文本输入输出使用；不写回快照，避免默认值被视为上游规格。
+    pub fn effective_modalities(&self) -> &ModelModalities {
+        static TEXT_MODALITIES: LazyLock<ModelModalities> =
+            LazyLock::new(ModelModalities::text_only);
+        self.modalities.as_ref().unwrap_or(&TEXT_MODALITIES)
+    }
+
     pub fn has_specification(&self) -> bool {
         let declared_limit = self
             .limit
@@ -330,6 +338,15 @@ impl ProviderModelMetadata {
 pub struct ModelModalities {
     pub input: Vec<String>,
     pub output: Vec<String>,
+}
+
+impl ModelModalities {
+    pub fn text_only() -> Self {
+        Self {
+            input: vec!["text".to_owned()],
+            output: vec!["text".to_owned()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -592,7 +609,7 @@ impl From<&ProviderModelRecord> for ProviderModelSummary {
             specification: ModelSpecification {
                 reasoning_efforts: record.metadata.reasoning_efforts.clone(),
                 limit: record.metadata.limit.clone(),
-                modalities: record.metadata.modalities.clone(),
+                modalities: Some(record.metadata.effective_modalities().clone()),
             },
             revision: record.revision,
         }
@@ -616,10 +633,14 @@ pub struct ProviderModelDetail {
 }
 
 impl From<ProviderModelRecord> for ProviderModelDetail {
-    fn from(record: ProviderModelRecord) -> Self {
+    fn from(mut record: ProviderModelRecord) -> Self {
         let extensions = record.metadata.extension_value();
         let available = record.effective_available();
         let thinking_level_map = crate::thinking::generate_thinking_level_map(&record.metadata);
+        record
+            .metadata
+            .modalities
+            .get_or_insert_with(ModelModalities::text_only);
         Self {
             id: record.model_id,
             available,

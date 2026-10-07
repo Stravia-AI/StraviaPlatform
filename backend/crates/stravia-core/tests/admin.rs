@@ -1062,7 +1062,9 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
     );
     assert_eq!(unknown.snapshot_state, SnapshotState::Unregistered);
     assert!(unknown.metadata.limit.is_none());
-    assert!(unknown.metadata.modalities.is_none());
+    let modalities = unknown.metadata.modalities.expect("text modality fallback");
+    assert_eq!(modalities.input, ["text"]);
+    assert_eq!(modalities.output, ["text"]);
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;

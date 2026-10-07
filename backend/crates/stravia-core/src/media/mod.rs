@@ -154,8 +154,7 @@ pub(crate) async fn route_metadata(
             model: target.model().clone().into(),
             input_modalities: metadata
                 .as_ref()
-                .and_then(|metadata| metadata.modalities.as_ref())
-                .map(|modalities| modalities.input.clone())
+                .map(|metadata| metadata.effective_modalities().input.clone())
                 .unwrap_or_default(),
         });
     }

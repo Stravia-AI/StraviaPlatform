@@ -481,7 +481,7 @@ impl SendEligibility {
                         .any(|value| value.as_str() == Some(capability))
                 })
             };
-            let modalities = metadata.and_then(|metadata| metadata.modalities.as_ref());
+            let modalities = metadata.map(|metadata| metadata.effective_modalities());
             if self.requires_video
                 && !modalities.is_some_and(|modalities| {
                     modalities

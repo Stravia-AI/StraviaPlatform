@@ -61,6 +61,7 @@ venv/
 .vscode/
 *.sw?
 .agents/
+/.omp/
 .antigravitycli/
 .claude/
 /.scratch/

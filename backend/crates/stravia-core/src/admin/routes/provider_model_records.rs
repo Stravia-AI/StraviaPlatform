@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::provider_models::{
-    CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
-    ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
-    ProviderModelReconciliation, ProviderModelReimport, ProviderModelSelectionPolicy,
-    ProviderModelSourceKind, ProviderModelSummary, ProviderModelSyncSummary, ReimportProviderModel,
-    SnapshotState, SourceStamp, UpdateProviderModel, UpdateProviderModelSelection,
-    normalize_model_id,
+    CreateManualProviderModel, ModelModalities, NewProviderModelRecord, ProviderModelDetail,
+    ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
+    ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelReimport,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelSummary,
+    ProviderModelSyncSummary, ReimportProviderModel, SnapshotState, SourceStamp,
+    UpdateProviderModel, UpdateProviderModelSelection, normalize_model_id,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,7 +182,7 @@ impl RouteModule<'_> {
         {
             return Err(provider_model_conflict(provider_id, &model_id));
         }
-        let (metadata, snapshot_state) = match template_id {
+        let (mut metadata, snapshot_state) = match template_id {
             Some(template_id) => {
                 let template = self
                     .gw
@@ -223,6 +223,9 @@ impl RouteModule<'_> {
             },
         };
         let extensions = metadata.extension_value();
+        metadata
+            .modalities
+            .get_or_insert_with(ModelModalities::text_only);
         Ok(PreparedProviderModel {
             id: model_id,
             snapshot_state,

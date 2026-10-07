@@ -773,7 +773,7 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     )
     assert unknown_summary["specification"] == {
         "limit": None,
-        "modalities": None,
+        "modalities": {"input": ["text"], "output": ["text"]},
         "reasoning_efforts": None,
     }
 

@@ -70,6 +70,77 @@ async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider
     route_fixture_with_protocol("openai-compatible").await
 }
 
+#[tokio::test]
+async fn missing_model_modalities_default_to_text_without_overriding_declarations()
+-> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    let prepared = admin
+        .prepare_provider_model(&provider.id, "metadata-free-model", None)
+        .await?;
+    assert_eq!(
+        prepared.snapshot_state,
+        crate::provider_models::SnapshotState::Unregistered
+    );
+    assert_eq!(
+        prepared.metadata.to_value()?["modalities"],
+        json!({"input": ["text"], "output": ["text"]})
+    );
+    assert!(prepared.metadata.limit.is_none());
+    assert!(prepared.metadata.reasoning_efforts.is_none());
+
+    for (id, metadata, expected) in [
+        (
+            "metadata-free-model",
+            json!({}),
+            json!({"input": ["text"], "output": ["text"]}),
+        ),
+        (
+            "null-modalities-model",
+            json!({"modalities": null}),
+            json!({"input": ["text"], "output": ["text"]}),
+        ),
+        (
+            "audio-model",
+            json!({"modalities": {"input": ["audio"], "output": ["audio"]}}),
+            json!({"input": ["audio"], "output": ["audio"]}),
+        ),
+        (
+            "empty-modalities-model",
+            json!({"modalities": {"input": [], "output": []}}),
+            json!({"input": [], "output": []}),
+        ),
+    ] {
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                id,
+                CreateManualProviderModel {
+                    template_id: None,
+                    metadata,
+                },
+            )
+            .await?;
+        let detail = admin.get_provider_model(&provider.id, id).await?;
+        assert_eq!(detail.metadata.to_value()?["modalities"], expected);
+        let summary = admin
+            .list_provider_models(&provider.id)
+            .await?
+            .models
+            .into_iter()
+            .find(|model| model.id == id)
+            .expect("saved model");
+        assert_eq!(
+            serde_json::to_value(summary.specification)?["modalities"],
+            expected
+        );
+        let capabilities = admin.get_model_capabilities(&provider.id, id).await?;
+        assert_eq!(json!(capabilities.input_modalities), expected["input"]);
+        assert_eq!(json!(capabilities.output_modalities), expected["output"]);
+    }
+    Ok(())
+}
+
 #[test]
 fn route_wire_inputs_require_targets_and_reject_legacy_fields() {
     let current = serde_json::from_value::<CreateRoute>(json!({

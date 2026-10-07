@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider_models::ModelModalities;
 
 impl AdminService {
     pub async fn test_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
@@ -59,7 +60,9 @@ impl AdminService {
             })?;
         let metadata = record.metadata;
         let limits = metadata.limit.unwrap_or_default();
-        let modalities = metadata.modalities.unwrap_or_default();
+        let modalities = metadata
+            .modalities
+            .unwrap_or_else(ModelModalities::text_only);
         let prices = metadata.cost.map(|cost| cost.prices).unwrap_or_default();
         Ok(ModelCapabilities {
             provider: provider

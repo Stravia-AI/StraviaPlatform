@@ -242,13 +242,17 @@ impl RouteModule<'_> {
                     else {
                         continue;
                     };
-                    let limits = record.metadata.limit.unwrap_or_default();
-                    let modalities = record.metadata.modalities.unwrap_or_default();
+                    let context_window = record
+                        .metadata
+                        .limit
+                        .as_ref()
+                        .and_then(|limit| limit.context);
+                    let modalities = record.metadata.effective_modalities();
                     projections.insert(
                         key.clone(),
                         TargetModelProjection {
                             name: normalize_display_name(record.metadata.name.as_deref()),
-                            context_window: limits.context,
+                            context_window,
                             supports_image_input: modalities
                                 .input
                                 .iter()
