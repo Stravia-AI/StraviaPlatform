@@ -964,8 +964,8 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
     assert attributed_usage is not None
     assert attributed_usage["api_key_name"] == "test-key-log"
     assert attributed_usage["request_count"] >= 1
-    # Mock omits cache_read; analytics net input stays unknown until every attempt reports both.
-    assert attributed_usage["total_input_tokens"] is None
+    # Unknown cache dimensions do not hide the upstream-reported total input.
+    assert attributed_usage["total_input_tokens"] == 3
     assert attributed_usage["total_output_tokens"] is not None
     assert attributed_usage["total_output_tokens"] >= 2
     assert attributed_usage["cache_read_tokens"] is None
@@ -1007,7 +1007,7 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
             break
         time.sleep(0.3)
 
-    assert data.get("total_input_tokens") is None, data
+    assert data.get("total_input_tokens", 0) >= 3, data
     assert data.get("total_output_tokens") is not None, data
     assert data.get("avg_duration_ms") is not None, data
     assert data.get("total_requests", 0) >= 1

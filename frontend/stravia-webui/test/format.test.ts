@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import * as m from '../src/lib/paraglide/messages.js'
 import {
+  computeTps,
   formatBytes,
   formatCompactCount,
   formatDate,
@@ -16,6 +17,20 @@ import {
 
 const EN = 'en-US' as const
 const ZH = 'zh-CN' as const
+
+describe('full duration throughput', () => {
+  test.each([
+    [896, 13915, 896 / 13.915],
+    [5, 49, 5 / 0.049],
+    [0, 1000, 0],
+    [null, 1000, null],
+    [5, null, null],
+    [5, 0, null],
+    [5, -1, null],
+  ])('output=%s and duration=%s preserve known and unknown values', (output, duration, expected) => {
+    expect(computeTps({ output_tokens: output, duration_ms: duration })).toBe(expected)
+  })
+})
 
 describe('locale-aware standalone values', () => {
   test('formats grouped numbers and percentages with an explicit locale', () => {

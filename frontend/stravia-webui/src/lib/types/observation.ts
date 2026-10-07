@@ -196,6 +196,7 @@ export interface RunDetail {
   client_output_committed: boolean
   started_at: number
   finished_at: number | null
+  delivery_completed_at: number | null
   usage: ConfirmedUsage
   events: ObservationEvent[]
   trace: TraceManifest | null

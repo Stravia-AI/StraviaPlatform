@@ -155,7 +155,6 @@ function jumpToRun(runId: string | null) {
 {#snippet runBlock(run: RunDetail)}
   {@const ordinal = timeline.runIndex.get(run.id)}
   {@const items = timeline.streams.get(run.id) ?? []}
-  {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
   {@const parentIndex = run.parent_run_id ? (timeline.runIndex.get(run.parent_run_id) ?? null) : null}
   <!-- 父 Run 仍在未加载的更早区间时只显示编号，不提供跳转。 -->
   {@const parentShown = parentIndex !== null && parentIndex > timeline.orderedRuns.length - timeline.visibleRuns.length}
@@ -188,7 +187,7 @@ function jumpToRun(runId: string | null) {
                     {#if target.provider}<span class="run-metric-label">· {target.provider}</span>{/if}
                   </span>
                 {/each}
-                {@render runMetric(m.logs_duration_short(), formatDuration(duration))}
+                {@render runMetric(m.logs_duration_short(), formatDuration(metrics?.durationMs))}
                 {@render runMetric(m.logs_first_token_short(), formatDuration(metrics?.firstTokenMs))}
                 <!-- 单位 tok/s 已说明含义，省去标签让首行在窄检查器中少换行。 -->
                 <span class="run-metric" title={m.logs_token_speed()}

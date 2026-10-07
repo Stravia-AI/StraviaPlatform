@@ -804,19 +804,40 @@ impl ClientProjectionSession {
                     ContentBlock::Reasoning { content, .. } => content.len().saturating_sub(1),
                     _ => 0,
                 };
-                if self.carrier_facts.indexed {
+                // Facts describe what a Model Leg can carry, not the identity
+                // of the item it actually streamed. Keep the marker on the
+                // preview's last carrier, including its content part.
+                let carrier = finish_deltas.last().or_else(|| preview_deltas.last());
+                let indexed_part = match carrier {
+                    Some(AiStreamDelta::ThinkingDeltaWithMetadata {
+                        output_index: Some(index),
+                        content_index: Some(part),
+                        ..
+                    }) => Some((*index, *part)),
+                    Some(AiStreamDelta::ReasoningSummaryDelta {
+                        output_index: Some(index),
+                        content_index: Some(_),
+                        ..
+                    }) => Some((*index, 0)),
+                    Some(_) => None,
+                    None if matches!(block, ContentBlock::Reasoning { .. }) => {
+                        Some((output_index, content_index))
+                    }
+                    None => None,
+                };
+                if let Some((index, part)) = indexed_part {
                     marker_deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
                         text: render_history_marker(marker),
                         obfuscation: None,
-                        output_index: Some(output_index),
-                        content_index: Some(content_index),
+                        output_index: Some(index),
+                        content_index: Some(part),
                     });
                 } else {
                     marker_deltas.push(AiStreamDelta::ThinkingDelta(render_history_marker(marker)));
                 }
                 marker_deltas.push(AiStreamDelta::ItemDone {
                     index: output_index,
-                    item: if self.carrier_facts.indexed {
+                    item: if indexed_part.is_some() {
                         AiItem::reasoning(Vec::new(), Vec::new(), None)
                     } else {
                         AiItem::thinking("", None)
@@ -1144,14 +1165,14 @@ impl ClientProjectionSession {
             | AiStreamDelta::ReasoningSummaryDelta {
                 output_index: Some(index),
                 ..
-            } if self.carrier_facts.indexed && self.carrier_facts.may_be_protected => Some(*index),
+            } if self.carrier_facts.may_be_protected => Some(*index),
             AiStreamDelta::ThinkingDelta(_)
             | AiStreamDelta::ThinkingDeltaWithMetadata {
                 output_index: None, ..
             }
             | AiStreamDelta::ReasoningSummaryDelta {
                 output_index: None, ..
-            } if !self.carrier_facts.indexed && self.carrier_facts.may_be_protected => {
+            } if self.carrier_facts.may_be_protected => {
                 Some(self.observe_unindexed_item(UnindexedItemKind::Thinking))
             }
             _ => None,
@@ -2418,6 +2439,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_plugin_bare_thinking_keeps_one_carrier_through_tool_handoff() {
+        use serde_json::json;
+        use stravia_protocol_codec::codec::open_responses::{
+            decoder::ResponsesDecoder, stream::ResponsesStreamFormatter,
+        };
+        let (_, store, principal) = projection_session_fixture("plugin-bare-owner").await;
+        let mut session = ClientProjectionSession::new(
+            Arc::clone(&store),
+            principal.clone(),
+            OPEN_RESPONSES_2026_04_24,
+        );
+        // The plugin/default facts permit indexed and protected items; they do
+        // not describe the identity of this particular bare stream carrier.
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: true,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            Vec::new(),
+            Some(replay_source(ANTHROPIC_MESSAGES_2023_06_01, "plugin")),
+        );
+        let call = stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-read".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        };
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut events = formatter.format_deltas(&[AiStreamDelta::MessageStart {
+            id: "plugin".into(),
+            model: "model".into(),
+        }]);
+        for (step, deltas) in [
+            vec![AiStreamDelta::ThinkingDelta("Inspect the file.".into())],
+            vec![
+                AiStreamDelta::ToolCallStart {
+                    index: 1,
+                    id: call.id.to_string(),
+                    name: call.name.clone(),
+                },
+                AiStreamDelta::ToolCallComplete {
+                    index: 1,
+                    tool_call: call,
+                },
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for batch in session.project_live_deltas(deltas, false).await.unwrap() {
+                events.extend(formatter.format_deltas(batch.deltas()));
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .unwrap();
+            }
+            if step == 0 {
+                assert!(
+                    events.iter().any(|event| {
+                        event.event.as_deref() == Some("response.reasoning_text.delta")
+                            && event.data.contains("Inspect the file.")
+                    }),
+                    "the preview streams before the tool handoff",
+                );
+            }
+        }
+        events.extend(formatter.format_deltas(&[AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        }]));
+        let reasoning_events = |kind: &str| {
+            events
+                .iter()
+                .filter(|event| event.event.as_deref() == Some(kind))
+                .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+                .filter(|event| event["item"]["type"] == "reasoning")
+                .collect::<Vec<_>>()
+        };
+        let added = reasoning_events("response.output_item.added");
+        let done = reasoning_events("response.output_item.done");
+        assert_eq!(added.len(), 1);
+        assert_eq!(done.len(), 1);
+        assert_eq!(added[0]["item"]["id"], done[0]["item"]["id"]);
+        let terminal = events
+            .iter()
+            .find(|event| event.event.as_deref() == Some("response.completed"))
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+            .unwrap();
+        let output = terminal["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0], done[0]["item"]);
+        let preview = output[0]["content"][0]["text"].as_str().unwrap();
+        assert!(preview.contains("Inspect the file."));
+        assert!(preview.contains(":e-->"));
+        let mut replay = ResponsesDecoder
+            .decode_request(json!({"model": "model", "input": output}))
+            .unwrap();
+        assert_eq!(
+            crate::history_marker::history_marker_references(&replay.items).len(),
+            1,
+        );
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.items[0].thinking_ref().unwrap().0,
+            "Inspect the file."
+        );
+        assert_eq!(replay.items[1].function_call_ref().unwrap().name, "read");
+    }
+
+    #[tokio::test]
     async fn responses_synthetic_carriers_preserve_independent_items_and_parts() {
         use serde_json::json;
         use stravia_protocol_codec::codec::open_responses::{
@@ -2502,6 +2634,26 @@ mod tests {
         assert_eq!(output[0]["summary"].as_array().unwrap().len(), 2);
         assert_eq!(output[0]["content"].as_array().unwrap().len(), 2);
         assert_eq!(output[1]["summary"].as_array().unwrap().len(), 1);
+        let added = events
+            .iter()
+            .filter(|event| event.event.as_deref() == Some("response.output_item.added"))
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+            .collect::<Vec<_>>();
+        let done = events
+            .iter()
+            .filter(|event| event.event.as_deref() == Some("response.output_item.done"))
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(added.len(), 2);
+        assert_eq!(done.len(), 2);
+        assert_ne!(added[0]["item"]["id"], added[1]["item"]["id"]);
+        for (index, ((added, done), output)) in added.iter().zip(&done).zip(output).enumerate() {
+            assert_eq!(added["output_index"], index);
+            assert_eq!(done["output_index"], index);
+            assert_eq!(added["item"]["id"], done["item"]["id"]);
+            assert_eq!(&done["item"], output);
+            assert!(output.get("encrypted_content").is_none());
+        }
         let mut canonical = AiResponse::new("independent", "model");
         canonical.items = originals.clone();
         let batch = session.project_staged(&mut canonical, &[]).await.unwrap();

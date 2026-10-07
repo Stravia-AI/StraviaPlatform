@@ -92,8 +92,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
              SELECT
                  (SELECT COUNT(*) FROM requests WHERE expires_at > ?2
                     AND (?1 IS NULL OR started_at >= ?1)) AS total_requests,
-                 (SELECT SUM(CASE WHEN input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL
-                                  THEN MAX(input_tokens - cache_read_tokens, 0) END) FROM attempts) AS total_input_tokens,
+                 (SELECT SUM(input_tokens) FROM attempts) AS total_input_tokens,
                  (SELECT SUM(output_tokens) FROM attempts) AS total_output_tokens,
                  (SELECT SUM(cache_read_tokens) FROM attempts) AS total_cache_read_tokens,
                  (SELECT SUM(cache_write_tokens) FROM attempts) AS total_cache_write_tokens,
@@ -140,8 +139,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY bucket_start
              ), attempt_stats AS (
                  SELECT t.bucket_start,
-                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL
-                                 THEN MAX(a.input_tokens - a.cache_read_tokens, 0) END) AS total_input_tokens,
+                        SUM(a.input_tokens) AS total_input_tokens,
                         SUM(a.output_tokens) AS total_output_tokens,
                         SUM(a.cache_read_tokens) AS total_cache_read_tokens,
                         SUM(a.cache_write_tokens) AS total_cache_write_tokens,
@@ -185,8 +183,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL
-                                 THEN MAX(a.input_tokens - a.cache_read_tokens, 0) END) AS total_input_tokens,
+                        SUM(a.input_tokens) AS total_input_tokens,
                         SUM(a.output_tokens) AS total_output_tokens,
                         SUM(a.reasoning_tokens) AS total_reasoning_tokens
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.model
@@ -220,19 +217,9 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                     CASE WHEN SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) > 0
                               AND SUM(CASE WHEN status = 'completed' AND (output_tokens IS NULL OR duration_ms IS NULL)
                                            THEN 1 ELSE 0 END) = 0
-                              AND SUM(CASE WHEN status = 'completed'
-                                           THEN CASE WHEN first_token_ms IS NOT NULL
-                                                          AND duration_ms - first_token_ms >= 50
-                                                     THEN duration_ms - first_token_ms
-                                                     ELSE duration_ms END
-                                      END) > 0
+                              AND SUM(CASE WHEN status = 'completed' THEN duration_ms END) > 0
                          THEN SUM(CASE WHEN status = 'completed' THEN output_tokens END) * 1000.0
-                              / SUM(CASE WHEN status = 'completed'
-                                         THEN CASE WHEN first_token_ms IS NOT NULL
-                                                        AND duration_ms - first_token_ms >= 50
-                                                   THEN duration_ms - first_token_ms
-                                                   ELSE duration_ms END
-                                    END)
+                              / SUM(CASE WHEN status = 'completed' THEN duration_ms END)
                     END AS avg_output_tps
              FROM target_attempt_observations
              WHERE (?1 IS NULL OR started_at >= ?1)
@@ -258,8 +245,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id) AS request_count,
-                    SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL
-                             THEN MAX(a.input_tokens - a.cache_read_tokens, 0) END) AS total_input_tokens,
+                    SUM(a.input_tokens) AS total_input_tokens,
                     SUM(a.output_tokens) AS total_output_tokens,
                     SUM(a.cache_read_tokens) AS cache_read_tokens,
                     SUM(a.cache_write_tokens) AS cache_write_tokens,
@@ -571,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_stats_project_net_input_per_attempt() -> anyhow::Result<()> {
+    async fn management_stats_preserve_total_input_and_full_attempt_tps() -> anyhow::Result<()> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -583,28 +569,30 @@ mod tests {
         insert_turn(&pool, "recent", recent, "model", "key").await?;
         insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
         insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
-        // 失败 attempt 永远没有已确认用量，不计入统计覆盖。
+        sqlx::query("UPDATE target_attempt_observations SET duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 3000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 2990 END WHERE model_turn_id='recent'")
+            .execute(&pool).await?;
+        // 管理统计仍只统计已完成 attempt；失败 attempt 不计入。
         insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
         insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
-        insert_attempt(&pool, "old-a", "old", old, 8, None).await?;
+        insert_attempt(&pool, "old-a", "old", old, 12528, None).await?;
 
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
         let overview = store.stats_overview(Some(1)).await?;
-        assert_eq!(overview.total_input_tokens, Some(7));
+        assert_eq!(overview.total_input_tokens, Some(15));
         assert_eq!(overview.total_output_tokens, Some(6));
         assert_eq!(overview.total_reasoning_tokens, Some(2));
         // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
         let all_time = store.stats_overview(None).await?;
-        assert_eq!(all_time.total_input_tokens, Some(7));
+        assert_eq!(all_time.total_input_tokens, Some(12543));
         assert_eq!(all_time.total_output_tokens, Some(9));
         assert_eq!(all_time.total_cache_write_tokens, None);
 
         let series = store.stats_series(1, 3_600_000, 0).await?;
         assert_eq!(series.len(), 1);
-        assert_eq!(series[0].total_input_tokens, Some(7));
+        assert_eq!(series[0].total_input_tokens, Some(15));
         assert_eq!(series[0].total_output_tokens, Some(6));
         assert_eq!(series[0].total_reasoning_tokens, Some(2));
         assert_eq!(series[0].bucket_start % 3_600_000, 0);
@@ -620,19 +608,41 @@ mod tests {
 
         let models = store.stats_by_model(Some(1)).await?;
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].total_input_tokens, Some(7));
+        assert_eq!(models[0].total_input_tokens, Some(15));
         assert_eq!(models[0].total_output_tokens, Some(6));
         assert_eq!(models[0].total_reasoning_tokens, Some(2));
 
         let api_keys = store.stats_by_api_key(Some(1)).await?;
         assert_eq!(api_keys.len(), 1);
-        assert_eq!(api_keys[0].total_input_tokens, Some(7));
+        assert_eq!(api_keys[0].total_input_tokens, Some(15));
         assert_eq!(api_keys[0].total_output_tokens, Some(6));
         assert_eq!(api_keys[0].reasoning_tokens, Some(2));
 
         let providers = store.stats_by_provider(Some(1)).await?;
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].avg_output_tps, Some(300.0));
+        assert_eq!(providers[0].avg_output_tps, Some(1.5));
+        let old_model = store
+            .stats_by_model(None)
+            .await?
+            .into_iter()
+            .find(|model| model.model == "unknown-cache")
+            .unwrap();
+        assert_eq!(old_model.total_input_tokens, Some(12528));
+
+        // 未知成功输出或耗时不能伪装成完整吞吐；已知零输出仍为零。
+        for (column, value, expected) in [
+            ("output_tokens", "NULL", None),
+            ("output_tokens", "0", Some(0.0)),
+            ("duration_ms", "NULL", None),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE target_attempt_observations SET {column}={value} WHERE model_turn_id='recent'"
+            ))).execute(&pool).await?;
+            assert_eq!(
+                store.stats_by_provider(Some(1)).await?[0].avg_output_tps,
+                expected
+            );
+        }
 
         let raw_input: Option<i64> = sqlx::query_scalar(
             "SELECT SUM(input_tokens) FROM target_attempt_observations WHERE model_turn_id='recent'",

@@ -26,6 +26,7 @@ function run(id: string, parent: string | null = null): RunDetail {
     client_output_committed: true,
     started_at: 0,
     finished_at: null,
+    delivery_completed_at: null,
     usage,
     events: [],
     trace: null,

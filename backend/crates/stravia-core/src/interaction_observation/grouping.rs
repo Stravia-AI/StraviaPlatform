@@ -68,6 +68,7 @@ struct RetryCandidate {
     failed_at: Option<i64>,
     client_output_committed: bool,
     active: bool,
+    has_new_user: bool,
 }
 
 #[derive(Default)]
@@ -202,6 +203,7 @@ impl GroupingIndex {
                 failed_at: None,
                 client_output_committed: false,
                 active: true,
+                has_new_user: input.has_new_user,
             },
         );
         GroupAssignment {
@@ -232,6 +234,16 @@ impl GroupingIndex {
 
     pub fn interaction_for_run(&self, run_id: &str) -> Option<&str> {
         self.runs.get(run_id).map(|run| run.interaction_id.as_str())
+    }
+
+    pub fn has_new_user(&self, run_id: &str) -> bool {
+        self.runs.get(run_id).is_some_and(|run| run.has_new_user)
+    }
+
+    pub fn set_has_new_user(&mut self, run_id: &str, has_new_user: bool) {
+        if let Some(run) = self.runs.get_mut(run_id) {
+            run.has_new_user = has_new_user;
+        }
     }
 }
 

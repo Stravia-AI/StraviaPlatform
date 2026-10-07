@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { formatTps } from '../src/lib/format'
 import { observationEventSummary } from '../src/lib/observation-event-summary'
 import * as m from '../src/lib/paraglide/messages.js'
 import { getLocale, overwriteGetLocale } from '../src/lib/paraglide/runtime.js'
@@ -21,7 +22,7 @@ function speed(completion: ObservationEvent): string | undefined {
 }
 
 describe('observation attempt output speed', () => {
-  test('uses the usage carried by the finish event itself', () => {
+  test('uses finish event output and full attempt duration independently of first token', () => {
     expect(
       speed(
         event(10, 'target_attempt_finished', {
@@ -32,7 +33,7 @@ describe('observation attempt output speed', () => {
           usage: { output_tokens: 1110 },
         }),
       ),
-    ).toBe('100 tok/s')
+    ).toBe(formatTps(1110 / 18.75))
   })
 
   test('does not invent throughput when usage is absent or its output is unknown', () => {

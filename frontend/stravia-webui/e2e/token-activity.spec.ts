@@ -104,3 +104,31 @@ test('token activity cell tooltip reports the bucket time and token total', asyn
   await newest.hover()
   await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('tokens')
 })
+
+test('token breakdown excludes cache subsets from its total', async ({ page }) => {
+  await prepareApp(page)
+  await stubStats(page)
+  await page.route('**/api/v1/stats/overview**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: {
+          total_requests: 1,
+          total_input_tokens: 100,
+          total_output_tokens: 20,
+          total_cache_read_tokens: 80,
+          total_cache_write_tokens: 10,
+          total_reasoning_tokens: null,
+          avg_duration_ms: 1000,
+          avg_first_token_ms: 500,
+          error_count: 0,
+        },
+      },
+    })
+  })
+  await page.goto('/stats')
+  const breakdown = page.getByLabel('Token breakdown', { exact: true })
+  await expect(breakdown).toBeVisible()
+  await expect(breakdown).toContainText('120')
+  const categories = breakdown.locator('..').locator('ul > li')
+  await expect(categories).toHaveCount(2)
+})

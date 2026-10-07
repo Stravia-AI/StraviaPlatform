@@ -37,6 +37,7 @@ function run(id: string, startedAt: number, events: ObservationEvent[]): RunDeta
     client_output_committed: true,
     started_at: startedAt,
     finished_at: startedAt + 1,
+    delivery_completed_at: startedAt + 1,
     usage,
     events,
     trace: null,

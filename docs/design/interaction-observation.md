@@ -93,23 +93,25 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 用量分析总览、时间分桶和 Provider 汇总的错误数与「失败的请求」共用同一请求级查询：包括准入前拒绝，以及终态为 `failed` 且已结束的 Inference Run；排除内部恢复后成功、进行中、单纯取消、断线和中断。按请求开始时间归入窗口和分桶，并排除已过保留期的记录；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示错误；
 - 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。Provider 汇总按请求涉及的服务归属，每个服务内对同一请求去重；没有涉及任何服务的拒绝不归属 Provider，一次跨服务的最终失败可分别计入多个服务，不能将各服务错误数相加当作全局错误数。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
-- 管理面 input 在每个 attempt 上计算 `max(input_tokens - cache_read_tokens, 0)` 后累计；任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 同时计数。缓存写入不在此扣除范围内；
+- 管理面 `input_tokens` 统一表示上游报告的总输入，按 attempt 累计，不扣缓存读取或写入。缓存未知不遮蔽已知总输入；`missing_input_tokens` 只计数未报告总输入的 attempt；
 - output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。概览按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
-- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游口径及 reasoning 子项；列表、详情、事件查询、实时 SSE、重放 SSE 与 Bundle 的管理汇总和事件均在读取或发布边界转换，历史数据无需改写，也不得将管理投影再次写入原始用量；
+- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游口径及 reasoning 子项；管理统计、列表、详情、事件查询、携带用量的 SSE 与 Bundle 汇总和事件使用同一总输入语义，不再执行净输入投影。历史查询立即使用新口径，无需改写数据库或新增并行字段；轻量全局 SSE 通知仍不携带事件正文；
 - 每个实际上游 attempt 的 usage 最多记一次；
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
-- Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`；失败或未完成 attempt 定义上没有已确认用量，不参与统计；
-- 详情中的 Run/Interaction Token 速度与 Provider 汇总的 `avg_output_tps` 共用口径：按已完成 attempt 的 `Σoutput_tokens / Σ净生成耗时` 计算，而非各 attempt 速度的平均值；净生成耗时取 `duration_ms - first_token_ms`，首 Token 未报告或差值小于 50ms 时回退 `duration_ms`，恰好 50ms 使用差值。已知零输出和零耗时保留并参与累计；任一已完成 attempt 未报告输出或耗时、或总生成耗时为零时为 `null`；
+- Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`。失败或未完成 attempt 不参与这些成功尝试统计，但不否认其在 Run、Interaction 与 Bundle 中已报告的用量；
+- 全平台 TPS 使用测量对象自身的完整耗时，不扣首 Token 等待，也不使用 50ms 回退规则。首 Token 时间独立展示，不参与分母；
+- Run 耗时与 TPS 共用客户端接收到交付结束的时间：`delivery_completed_at - started_at`，包括内部重试、failover、平台工具与交付等待。分子使用 Run 的全部已报告输出，包括失败 attempt 已报告的输出；coverage 表明任一输出未知时 TPS 保持 `null`。运行中、成功但缺交付时间、无有效正耗时或输出未知时不猜测速率；失败、取消与中断等未交付终态可用 `finished_at` 收口。迟到 usage 修订不延长交付耗时，客户端跨请求执行工具的间隔不属于任一 Run；
+- Attempt TPS 使用自己的 `duration_ms`；Provider `avg_output_tps` 使用成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，不是单次 TPS 的平均值。成功样本缺输出或耗时、或总耗时为零时为 `null`；已知零输出保留为零。低延迟选路同样使用完整成功 attempt 耗时，仍按一小时成功率加权，保留 20 个成功样本、同组至少两个有效 Target 的门槛及既有亲和、优先级和 fallback；
 - Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`、易失 usage 或 reset 协议。
 
-请求记录的链路 Token 阈值按整个根 DAG（含子孙）累计。已确认部分仍采用卡片的输入、输出、缓存读与缓存写合计；尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
+请求记录的链路 Token 阈值按整个根 DAG（含子孙）的已确认总输入与输出累计，不重复加缓存分项；用量活动图与输入/输出构成图采用相同总量口径，缓存仍独立展示。尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
 
 输入估算不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求的筛选与路由调度共用同一估算：将消息 `items`、独立系统提示词 `instructions` 和工具定义 `tools` 一并计算 JSON 序列化字节数，除以 4 向上取整；工具说明与参数 schema 也属于输入，不能只按用户消息估算。它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，已有记录不重算，不从截断的输入预览或 Debug 内容回填。
 
-客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零，也不改变管理面的净输入和按字段汇总口径。
+客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零，也不改变管理面的总输入和按字段汇总口径。
 
 Gemini `thoughtsTokenCount` 保留为 reasoning 子项，输出仍只包含一次该部分；终态之后的累计 usage 修订覆盖同一 attempt 的快照，不作为新增用量相加。标准 Gemini 缺失缓存字段仍为未知。Antigravity 仅对已确认完整的私有终态 usage 使用其 proto3 标量缺省零语义，缺失整个 usage 或中间帧不补零；事实来源和消息存在性边界见 [Antigravity 响应协议](../research/antigravity-oauth.md#响应)。这些归一化仅影响后续请求，不补写存量事件。
 
@@ -227,6 +229,8 @@ clear_history() -> ClearHistoryResult
 - `interaction_relinked`
 - `observation_gap`
 - `input_preview_recorded`：每个带有新增用户输入的 Run 至多记录一次，`payload.text` 保存完成凭据保护后的最多 4,096 字符输入预览。同一 Interaction 的追加输入也记录事件，但只有初始 Run 更新卡片的 `input_preview`；重复发布不覆盖已有正文。旧事件缺少 `text` 时不推断或补录输入。
+
+没有已核验 Generation parent 时，完整请求中的历史 User 不自动视为新增：只有已选定的唯一续接来源或已观察父节点提供完整 received-input canonical 前缀证明，且当前请求仅追加 assistant/tool items、末尾为当前工具结果，才令新 Run 的 `has_new_user=false` 并抑制输入预览。证明包含 system/developer 前缀与私有控制，不凭预览文字相同去重；追加同文 User、前缀变化、证据缺失或超过既有窗口预算时均保留输入。重启可通过保留的 Generation 证据恢复前缀，无法恢复时保守记录。该判定只影响后续观察事件，不改变分组、模型输入或 Generation 父关系，不删除、改写或隐藏旧重复事件。
 
 `platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
@@ -775,11 +779,15 @@ reset 恢复开启新的 view epoch，取消或拒绝旧上下文结果；在权
 
 「对话」与「诊断」共用同一种向上加载的记录视图：打开时停在最新内容，处于底部时随新事件自动滚动。详情只带最新一页事件；仍有更早事件时，已加载记录的起点（对话页在初始用户消息之后）保留一行固定高度的加载行，向上滚到该行即显示转圈并读取更早一页，读取完成后在绘制前按到底部的距离恢复滚动位置，已在视口中的内容不发生位移。加载行在转圈、失败与移除前后高度不变；读取失败时改为「重试」操作，不在视口顶部反复请求。补入的历史不算新活动，不触发「回到最新」提示。
 
-「诊断」页默认呈现可读的事件摘要、时间与已记录的关键事实和结果。`parent_run_id` 表达续接与因果而非包含关系：Run 按 `started_at` 拍平为并列分段并依序编号（R1、R2…），不再嵌套缩进；续接关系以分段上的「续接自 Rₙ」标记表达，父 Run 属于同一 Interaction 时可点击回跳，属于其他 Interaction 或尚在未加载的更早历史中时仅显示静态标记。编号覆盖整个 Interaction 的全部 Run；排在最新事件页最早 Run 之前、尚无已加载事件的 Run 不显示为空分段，随更早事件加载在加载行下方出现。相邻 Run 结束与开始之间超过快速续接窗口（2 秒）的等待显示为间隔行：上一请求以客户端工具调用结束时标注所执行的工具名，否则只标注间隔时长。每个 Run 内的事件统一按 `occurred_at` 升序、同一时刻按 `sequence` 升序排列，不再将 Model Turn、Target attempt 或工具的子树整体提前展开，以免把较晚的完成事件放到较早的客户端输出之前。拒绝请求的事件采用相同排序规则。每个事件的「原始事件数据」默认折叠，展开后保留原始 kind 与完整 payload，因果关联字段不丢失；Run 和 Interaction ID 收在默认折叠的「技术标识」中。未知事件仍保留原始数据入口，不推断成功或其他未记录的结果。Run 分段默认折叠为摘要：标题行只显示编号、模型显示名（缺失时使用 Route ID）与开始偏移，不放状态、中断或 Debug 标签：Run 状态由主干圆点的形状与颜色表达并为读屏保留状态文字，用户中断见事件流，记录不完整见 Run 告警，Debug 捕获状态见交互概览；其下两行小字分别显示实际服务的上游模型与模型服务、耗时、首 Token 与 Token 速度，以及输入、输出、缓存读取与缓存写入用量，未报告的值显示中性破折号。上游模型取该 Run 已完成的 Target attempt（平台工具循环可有多个），没有已完成 attempt 时取最近开始的 attempt，回退前失败的 attempt 不冒充服务方；同一 attempt 的修订完成事件以最后一条为准。首 Token 取第一个服务 attempt，Token 速度为服务 attempts 的输出合计除以各自净生成耗时之和。展开 Run 才显示技术标识与事件流；Trace 不完整的提示不随之折叠。
+「诊断」页默认呈现可读的事件摘要、时间与已记录的关键事实和结果。`parent_run_id` 表达续接与因果而非包含关系：Run 按 `started_at` 拍平为并列分段并依序编号（R1、R2…），不再嵌套缩进；续接关系以分段上的「续接自 Rₙ」标记表达，父 Run 属于同一 Interaction 时可点击回跳，属于其他 Interaction 或尚在未加载的更早历史中时仅显示静态标记。编号覆盖整个 Interaction 的全部 Run；排在最新事件页最早 Run 之前、尚无已加载事件的 Run 不显示为空分段，随更早事件加载在加载行下方出现。相邻 Run 交付结束与下次开始之间超过快速续接窗口（2 秒）的等待显示为间隔行：上一请求以客户端工具调用结束时标注所执行的工具名，否则只标注间隔时长。
+
+每个 Run 内的事件统一按 `occurred_at` 升序、同一时刻按 `sequence` 升序排列，不再将 Model Turn、Target attempt 或工具的子树整体提前展开，以免把较晚的完成事件放到较早的客户端输出之前。拒绝请求的事件采用相同排序规则。每个事件的「原始事件数据」默认折叠，展开后保留原始 kind 与完整 payload，因果关联字段不丢失；Run 和 Interaction ID 收在默认折叠的「技术标识」中。未知事件仍保留原始数据入口，不推断成功或其他未记录的结果。
+
+Run 分段默认折叠为摘要：标题行只显示编号、模型显示名（缺失时使用 Route ID）与开始偏移，不放状态、中断或 Debug 标签：Run 状态由主干圆点的形状与颜色表达并为读屏保留状态文字，用户中断见事件流，记录不完整见 Run 告警，Debug 捕获状态见交互概览；其下两行小字分别显示实际服务的上游模型与模型服务、耗时、首 Token 与 Token 速度，以及输入、输出、缓存读取与缓存写入用量，未报告的值显示中性破折号。上游模型取该 Run 已完成的 Target attempt（平台工具循环可有多个），没有已完成 attempt 时取最近开始的 attempt，回退前失败的 attempt 不冒充服务方；同一 attempt 的修订完成事件以最后一条为准。首 Token 取第一个服务 attempt；Run Token 速度使用 Run 已确认输出除以客户端完整请求耗时，遵循 §3.3 的缺失覆盖规则，不借服务 attempts 的速度代替。展开 Run 才显示技术标识与事件流；Trace 不完整的提示不随之折叠。
 
 排序后相邻、已经分别按 Canonical Item 收口的 `client_visible_content` 只在界面上组成默认折叠的计数分组，不改写或合并独立 item；相邻且 `name` 相同、非空的 `client_tool_handoff` 同样仅作展示分组，例如「Bash × 4 · 已交给客户端」。分组显示首次和末次事件时间，不跨越其他事件、工具名称或 Run。展开分组保留每条事件的时间与完整原文入口，实时追加保持已有分组的展开状态。事件行将原始数据入口收至标题右侧箭头，不再重复占用一行按钮；展开 Run 后，关键结果和错误直接可见，不因精简而隐藏。
 
-`target_attempt_finished` 的耗时后显示 Token 速度。输出用量来自同一 Run、相同 `attempt_id` 的 `target_attempt_finished.usage`，迟到修订按 sequence 应用并保留此前已确认而新修订未提供的字段，不累加同一 attempt 的累计快照，也不借用整个 Run 或其他 attempt 的用量。速度复用 `computeTps` / `formatTps`：有有效首 Token 时间时使用既有净生成耗时与非增量流判定，否则使用上游耗时；缺少用量或有效耗时显示未知。卡片输出浮层使用「模型输出预览」名称；画布的已确认执行来源边保留连线、取消重复文字标签。
+`target_attempt_finished` 的耗时后显示 Token 速度。输出用量来自同一 Run、相同 `attempt_id` 的 `target_attempt_finished.usage`，迟到修订按 sequence 应用并保留此前已确认而新修订未提供的字段，不累加同一 attempt 的累计快照，也不借用整个 Run 或其他 attempt 的用量。速度复用 `computeTps` / `formatTps`，分母始终为该 attempt 的完整 `duration_ms`；缺少用量或有效正耗时显示未知。Run 摘要的耗时与 TPS 同用实际交付生命周期，首 Token 继续单独显示。卡片输出浮层使用「模型输出预览」名称；画布的已确认执行来源边保留连线、取消重复文字标签。
 
 普通诊断显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见事件。Debug 的四方向 Wire headers 与原始 body/frame 只通过 Debug Bundle 下载提供，不再内嵌展示、复制或提供单事件下载；Bundle 不包含 canonical、Hook 或 Client Projection 中间阶段。Interaction 与 Rejected Request 详情不返回 `debug_events`，不打开或解析 Trace 分段；保留 manifest 状态与缺失原因，运行中 manifest 可从内存捕获状态更新。下载沿用有界快照与单次 ticket，不改变捕获、脱敏、保留或清理规则。未开启 Debug 不影响普通诊断访问，实时刷新不得把选中的诊断页签切回对话。Rejected Request 默认显示简洁失败摘要，不伪造成模型对话；技术原因仍在诊断中。
 

@@ -226,9 +226,9 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
         assert len([event for event in events if event["kind"] == "client_tool_handoff"]) == tool_count
         assert len([event for event in events if event["kind"] == "client_tool_result"]) == tool_count
         expected = (
-            {"input_tokens": 76962, "output_tokens": 2287, "cache_read_tokens": 40676}
+            {"input_tokens": 117638, "output_tokens": 2287, "cache_read_tokens": 40676}
             if protocol == "google-gemini"
-            else {"input_tokens": 30569, "output_tokens": 3699, "cache_read_tokens": 117749}
+            else {"input_tokens": 148318, "output_tokens": 3699, "cache_read_tokens": 117749}
         )
         for field, value in expected.items():
             assert current_detail["interaction"]["usage"][field] == value
@@ -240,7 +240,7 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
             988 if protocol == "google-gemini" else 1710
         )
         if protocol == "google-gemini":
-            assert current_detail["runs"][-1]["usage"]["input_tokens"] == 3233
+            assert current_detail["runs"][-1]["usage"]["input_tokens"] == 23570
         assert current_detail["interaction"]["usage"]["coverage"]["attempt_count"] == 6
         _, _, archive = download_observation_bundle(env, current_detail)
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:

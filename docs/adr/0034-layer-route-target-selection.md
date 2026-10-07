@@ -14,6 +14,8 @@ Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；�
 
 本段明确替换本 ADR 此前的「重试预算用尽、QuotaExceeded 或请求放弃当前 Target 即立即冷却」规则：普通 Target 只在共享连续失败数达到统一阈值时冷却，单次流式失败、QuotaExceeded 或已提交输出均不会仅凭自身触发冷却。Target Cooldown 到期后进入半开，而不是全量恢复；下一个实际符合选路条件的请求独占一次探测机会。探测关闭同 Target 预算重试和 ProviderCall 内部回退，完整成功清零并恢复正常；任何上游探测失败（含已经发出上游请求后的超时）立即重新等待完整冷却。用户取消、本地准备失败和消费者断开仅释放名额。半开失败后的请求是否切换 Target，仍遵守错误分类与 Client Output Commit。冷却为 0 时仅关闭冷却调度门禁；失败仍计数并在达到阈值后按错误分类更换或停止 Target，完整成功仍清零。恢复状态、共享计数与进行中占位统一由 `RoutePolicyState` 拥有，以世代隔离迟到结果，不再叠加独立的固定失败次数健康过滤。已经开始执行的请求不因其他请求触发冷却而被取消。
 
+Latency Preference 的输出 tok/s 为一小时内成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，包含首 Token 等待，不减 `first_token_ms`，也不平均单次 TPS。管理面 Provider TPS 使用同一完整 attempt 耗时；Run TPS 评价客户端完整请求，不把其他 Target、平台工具或客户端请求间隔的耗时归到该 Target。成功率权重、有效样本门槛、亲和与优先级顺序保持不变。
+
 ## Root-scoped cooldown attempts
 
 本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一次额外实际上游尝试。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，必须经过实际发送目的地 RPM、明确 Retry-After、授权、能力、禁用、Credential Invalid、deadline 和取消门禁；不放宽 Continuation 的执行状态不确定性或 Client Output Commit。

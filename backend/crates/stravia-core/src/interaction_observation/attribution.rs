@@ -53,6 +53,8 @@ pub(crate) struct AdmissionFacts {
 /// The writer persists placement and moves the already captured received window
 /// into the bounded cache; it never recaptures or interprets request history.
 pub(super) struct Attribution {
+    /// Admission's caller fact, refined only by strict received-history proof.
+    pub has_new_user: bool,
     pub interaction_id: String,
     pub parent_run_id: Option<String>,
     pub parent_interaction_id: Option<String>,
@@ -383,6 +385,24 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 replayed_client_tool_results,
             })
             .await;
+        let historical_user = if facts.has_new_user
+            && let Some(input) = input.as_ref()
+        {
+            let source = diagnostic
+                .as_ref()
+                .map(|source| source.run_id.as_str())
+                .or_else(|| parent.as_ref().map(|parent| parent.run_id.as_str()));
+            match source {
+                Some(source) => {
+                    self.historical_user(&start.principal, source, input, now)
+                        .await
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let has_new_user = facts.has_new_user && !historical_user;
         let assignment = self.grouping.assign(
             AssignInput {
                 run_id: &start.id,
@@ -398,7 +418,11 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             parent.as_ref(),
             diagnostic.as_ref(),
         );
+        // Placement remains governed by ADR-0053. The stricter input-origin
+        // decision only controls observation metadata and preview publication.
+        self.grouping.set_has_new_user(&start.id, has_new_user);
         Attribution {
+            has_new_user,
             interaction_id: assignment.interaction_id,
             parent_run_id: assignment.parent_run_id,
             parent_interaction_id: assignment.parent_interaction_id,
@@ -508,6 +532,41 @@ impl<E: AttributionEvidence> RunAttribution<E> {
 
     pub(super) fn interaction_for_run(&self, run_id: &str) -> Option<&str> {
         self.grouping.interaction_for_run(run_id)
+    }
+
+    pub(super) fn has_new_user(&self, run_id: &str) -> bool {
+        self.grouping.has_new_user(run_id)
+    }
+
+    async fn historical_user(
+        &self,
+        principal: &str,
+        source: &str,
+        input: &Window,
+        now: i64,
+    ) -> bool {
+        if let Some(old) = self.tail.received_input(source, now) {
+            return old.is_received_prefix_with_tool_continuation(input);
+        }
+        let sources = [(source, None)];
+        match self
+            .evidence
+            .source_windows(principal, &sources, None, true)
+            .await
+        {
+            Ok(windows) if windows.len() == 1 => {
+                matches!(&windows[0], SourceWindow::Captured(old)
+                    if old.is_received_prefix_with_tool_continuation(input))
+            }
+            Ok(_) => false,
+            Err(error) => {
+                tracing::debug!(
+                    cause = %super::writer::redacted_persist_cause(&error),
+                    "historical user input evidence materialization failed"
+                );
+                false
+            }
+        }
     }
 
     pub(super) fn output_committed(&mut self, run_id: &str) {

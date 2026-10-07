@@ -202,15 +202,13 @@ const modelPie = $derived.by((): PieSlice[] => {
   if (rest > 0) slices.push({ key: '__other__', label: m.stats_other(), value: rest, color: 'var(--muted)' })
   return slices
 })
-const TOKEN_PIE_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)']
+const TOKEN_PIE_COLORS = ['var(--chart-1)', 'var(--chart-2)']
 // 未上报的类别不计入占比，避免把"未报告"显示成 0%。
 const tokenPie = $derived.by((): { slices: PieSlice[]; total: number } | null => {
   if (overview == null) return null
   const categories = [
     { key: 'input', label: m.stats_input_tokens(), value: overview.total_input_tokens },
     { key: 'output', label: m.stats_output_tokens(), value: overview.total_output_tokens },
-    { key: 'cache_read', label: m.stats_cache_read_tokens(), value: overview.total_cache_read_tokens },
-    { key: 'cache_write', label: m.stats_cache_write_tokens(), value: overview.total_cache_write_tokens },
   ]
   const slices = categories.flatMap((category, index) =>
     category.value == null

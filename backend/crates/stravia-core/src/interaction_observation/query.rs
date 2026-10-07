@@ -27,17 +27,15 @@ pub(super) struct BundleRejectionRecords {
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-// 已确认部分沿用卡片四项合计，不另计 reasoning；估算只补充仍在运行且尚无
+// 已确认部分合计上游总输入与输出；缓存已包含在总输入中，不重复累计。
+// 不另计 reasoning；估算只补充仍在运行且尚无
 // usage 报告的 Model Turn，每轮一次，不能因 Target 重试重复累计或冒充确认用量。
 // 按根 DAG（含子孙）一次聚合，列表、计数、分页与 SSE matched 共用同一判定。
 const CHAIN_TOKEN_ROOTS: &str = "i.root_id IN (
 SELECT tokens.root_id FROM (
     SELECT m.root_id,
-        CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0
-             WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
-             ELSE 0 END
-        + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0)
-        + COALESCE(a.cache_write_tokens,0) AS token_count
+        COALESCE(a.input_tokens,0)
+        + COALESCE(a.output_tokens,0) AS token_count
     FROM interaction_observations m
     JOIN target_attempt_observations a ON a.interaction_id=m.id
     UNION ALL
@@ -52,19 +50,13 @@ SELECT tokens.root_id FROM (
 ) tokens GROUP BY tokens.root_id HAVING SUM(tokens.token_count)>=";
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
-CAST(SUM(CASE
-    WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN NULL
-    WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
-    ELSE 0
-END) AS BIGINT) input_tokens,
+CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(CASE
-    WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1
-END) missing_input_tokens,
+COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -74,20 +66,14 @@ CAST(MAX(CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failur
 CAST(MAX(CASE WHEN r.client_output_committed THEN 1 ELSE 0 END) AS BIGINT) client_output_delivered,
 CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
-const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,
-CAST(SUM(CASE
-    WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN NULL
-    WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
-    ELSE 0
-END) AS BIGINT) input_tokens,
+const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,r.delivery_completed_at,
+CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(CASE
-    WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1
-END) missing_input_tokens,
+COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -422,6 +408,7 @@ struct RunRow {
     client_output_committed: bool,
     started_at: i64,
     finished_at: Option<i64>,
+    delivery_completed_at: Option<i64>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cache_read_tokens: Option<i64>,
@@ -945,6 +932,7 @@ impl ObservationStore {
                 client_output_committed: run.client_output_committed,
                 started_at: run.started_at,
                 finished_at: run.finished_at,
+                delivery_completed_at: run.delivery_completed_at,
                 usage: ConfirmedUsage {
                     input_tokens: run.input_tokens,
                     output_tokens: run.output_tokens,
@@ -1683,7 +1671,7 @@ fn rejection_summary(r: RejectionRow) -> RejectionSummary {
 fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(project_event_for_management(ObservationEvent {
+            Ok(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1693,7 +1681,7 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
                 payload: serde_json::from_slice(&crate::storage_codec::decode(
                     &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
-            }))
+            })
         })
         .collect()
 }
@@ -1701,7 +1689,7 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
 fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(project_event_for_management(ObservationEvent {
+            Ok(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1711,7 +1699,7 @@ fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<O
                 payload: serde_json::from_slice(&crate::storage_codec::decode(
                     &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
-            }))
+            })
         })
         .collect()
 }
@@ -2190,6 +2178,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn management_known_input_survives_unknown_cache_sqlite() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        management_known_input_scenario(&ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        ))
+        .await
+    }
+
+    async fn management_known_input_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_chain_node(store, "known-input", "known-input", None, 1).await?;
+        for event in [
+            RunEvent::ModelTurnStarted {
+                model_turn_id: "known-input".into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                estimated_input_tokens: None,
+            },
+            RunEvent::TargetAttemptStarted {
+                model_turn_id: "known-input".into(),
+                attempt_id: "known-input-a".into(),
+                target_id: "target".into(),
+                provider_id: "provider".into(),
+                provider_name: "provider".into(),
+                upstream_model: "model".into(),
+                protocol: "responses".into(),
+                upstream_url: "http://localhost".into(),
+            },
+        ] {
+            store
+                .persist_run_event("known-input", "known-input", &event, 2, i64::MAX)
+                .await?;
+        }
+        store
+            .persist_run_event(
+                "known-input",
+                "known-input",
+                &RunEvent::TargetAttemptFinished {
+                    model_turn_id: "known-input".into(),
+                    attempt_id: "known-input-a".into(),
+                    status: "completed".into(),
+                    status_code: Some(200),
+                    error_code: None,
+                    error: None,
+                    duration_ms: 13857,
+                    first_token_ms: Some(11918),
+                    usage: Some(ConfirmedUsage {
+                        input_tokens: Some(12528),
+                        output_tokens: Some(896),
+                        ..Default::default()
+                    }),
+                },
+                3,
+                i64::MAX,
+            )
+            .await?;
+        // 已有数据库列的投影不能把真实交付时间替换成更晚的观测完成时间。
+        let events = match store {
+            ObservationStore::Sqlite(pool, _, _) => {
+                sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=13916,finished_at=14000 WHERE id='known-input'")
+                    .execute(pool).await?;
+                map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
+                    .fetch_all(pool).await?)?
+            }
+            ObservationStore::Postgres(pool, _) => {
+                sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=13916,finished_at=14000 WHERE id='known-input'")
+                    .execute(pool).await?;
+                map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
+                    .fetch_all(pool).await?)?
+            }
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["usage"]["input_tokens"], 12528);
+        assert!(events[0].payload["usage"]["cache_read_tokens"].is_null());
+        let snapshot = store
+            .get_interaction_summary(
+                "known-input",
+                ForestQuery {
+                    start_at: Some(0),
+                    end_at: Some(DAY_MS),
+                    min_tokens: Some(13000),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .unwrap();
+        assert!(snapshot.interaction.matched);
+        assert_eq!(snapshot.interaction.usage.input_tokens, Some(12528));
+        let coverage = snapshot.interaction.usage.coverage.unwrap();
+        assert_eq!(coverage.missing_input_tokens, 0);
+        assert_eq!(coverage.missing_cache_read_tokens, 1);
+        let runs = store
+            .run_details(store.runs("known-input").await?, events)
+            .await?;
+        assert_eq!(runs[0].usage.input_tokens, Some(12528));
+        assert_eq!(
+            runs[0]
+                .usage
+                .coverage
+                .as_ref()
+                .unwrap()
+                .missing_input_tokens,
+            0
+        );
+        assert_eq!(runs[0].delivery_completed_at, Some(13916));
+        assert_eq!(runs[0].finished_at, Some(14000));
+
+        admit_chain_node(store, "cached-threshold", "cached-threshold", None, 4).await?;
+        confirm_displayed_tokens(store, "cached-threshold", 100, 50, 9000, 9000, 5).await?;
+        for (threshold, matched) in [(150, true), (151, false)] {
+            let filters = ForestQuery {
+                start_at: Some(0),
+                end_at: Some(DAY_MS),
+                min_tokens: Some(threshold),
+                ..Default::default()
+            };
+            let snapshot = store
+                .get_interaction_summary("cached-threshold", filters.clone())
+                .await?
+                .unwrap();
+            assert_eq!(snapshot.interaction.matched, matched);
+            let forest = store.query_forest(filters).await?;
+            assert_eq!(
+                forest
+                    .roots
+                    .iter()
+                    .any(|root| root.id == "cached-threshold"),
+                matched
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn forest_pending_input_estimate_postgres_when_configured() -> anyhow::Result<()> {
         let Ok(url) = std::env::var("DB_URL") else {
             eprintln!("跳过 PostgreSQL 动态验证：未显式设置 DB_URL");
@@ -2224,7 +2353,8 @@ mod tests {
                 cleared_snapshot_scenario(&store).await?;
                 pending_input_estimate_scenario(&store).await?;
                 root_changes_scenario(&store).await?;
-                batched_debug_scenario(&store).await
+                batched_debug_scenario(&store).await?;
+                management_known_input_scenario(&store).await
             }
             .await;
             pool.close().await;

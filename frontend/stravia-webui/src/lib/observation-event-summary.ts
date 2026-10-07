@@ -73,15 +73,12 @@ function statusLabel(status: string): string {
   }
 }
 
-/** `target_attempt_finished` 载荷到净生成速度输入：有首字耗时即按流式扣除等待首字的时间。 */
+/** `target_attempt_finished` 的输出除以该尝试完整耗时，与首字耗时无关。 */
 export function attemptTpsInput(payload: Record<string, unknown>): TpsInput {
   const usage = record(payload.usage)
-  const firstToken = count(payload.first_token_ms) ? payload.first_token_ms : null
   return {
     output_tokens: count(usage.output_tokens) ? usage.output_tokens : null,
-    is_stream: firstToken !== null,
-    latency_upstream_ms: count(payload.duration_ms) ? payload.duration_ms : null,
-    stream_first_chunk_ms: firstToken,
+    duration_ms: count(payload.duration_ms) ? payload.duration_ms : null,
   }
 }
 

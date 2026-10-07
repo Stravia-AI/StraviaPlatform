@@ -147,39 +147,17 @@ export function formatList(values: readonly string[], locale = getLocale()): str
   return values.join(locale === 'zh-CN' ? '、' : ', ')
 }
 
-/** 计算客户端可见输出速率所需的最小字段集。 */
+/** 输出速率使用所属请求或尝试的完整耗时。 */
 export interface TpsInput {
   output_tokens?: number | null
-  is_stream?: boolean | null
-  stream_chunks_count?: number | null
-  latency_upstream_ms?: number | null
-  latency_total_ms?: number | null
-  stream_first_chunk_ms?: number | null
+  duration_ms?: number | null
 }
 
-/**
- * 净生成耗时(ms):流式 = 上游耗时 − 首字节延迟;非流式 = 上游往返耗时;
- * 缺失时回退到端到端总耗时。无法确定时返回 null。
- */
-export function generationMsOf(log: TpsInput | null | undefined): number | null {
-  if (!log) return null
-  const isStream = log.is_stream ?? (log.stream_chunks_count ?? 0) > 0
-  const upstream = log.latency_upstream_ms ?? null
-  const ttfb = log.stream_first_chunk_ms ?? null
-  if (isStream && upstream != null && ttfb != null) {
-    const gen = upstream - ttfb
-    // 与 Provider 统计共用 50 ms 下限，不根据等待占比猜测上游是否增量生成。
-    if (gen < 50) return upstream
-    return gen
-  }
-  return upstream ?? log.latency_total_ms ?? null
-}
-
-/** 净生成速度(tok/s)；输出未知或净生成耗时无效时返回 null，已知零输出保留零。 */
+/** 输出未知或完整耗时无效时返回 null，已知零输出保留零。 */
 export function computeTps(log: TpsInput | null | undefined): number | null {
-  const gen = generationMsOf(log)
+  const duration = log?.duration_ms
   const out = log?.output_tokens
-  if (out != null && out >= 0 && gen != null && gen > 0) return out / (gen / 1000)
+  if (out != null && out >= 0 && duration != null && duration > 0) return out / (duration / 1000)
   return null
 }
 

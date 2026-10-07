@@ -296,6 +296,9 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::InputPreview { run_id, preview }) => {
+                    if !attribution.has_new_user(&run_id) {
+                        continue;
+                    }
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         continue;
                     };
@@ -434,7 +437,7 @@ pub(super) fn spawn(
                             interaction_id: &decision.interaction_id,
                             generation_root_id: facts.generation_root_id.as_deref(),
                             generation_parent_id: facts.generation_parent_id.as_deref(),
-                            has_new_user: facts.has_new_user,
+                            has_new_user: decision.has_new_user,
                             ingress_received_at: decision.ingress_received_at,
                             parent_run_id: decision.parent_run_id.as_deref(),
                             parent_interaction_id: decision.parent_interaction_id.as_deref(),
@@ -1057,9 +1060,7 @@ fn publish(
     event: ObservationEvent,
 ) {
     trace_sequence.fetch_max(event.sequence, Ordering::AcqRel);
-    let _ = updates.send(ObservationUpdate::Event(project_event_for_management(
-        event,
-    )));
+    let _ = updates.send(ObservationUpdate::Event(event));
 }
 
 fn manifests_match(left: &TraceManifest, right: &TraceManifest) -> bool {

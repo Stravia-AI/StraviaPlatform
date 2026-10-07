@@ -442,12 +442,7 @@ impl InteractionObservation {
             self.inner
                 .trace_sequence
                 .fetch_max(event.sequence, Ordering::AcqRel);
-            let _ =
-                self.inner
-                    .updates
-                    .send(ObservationUpdate::Event(project_event_for_management(
-                        event,
-                    )));
+            let _ = self.inner.updates.send(ObservationUpdate::Event(event));
         }
         self.inner
             .unpersisted_gaps
@@ -2994,6 +2989,239 @@ mod snapshot_tests {
         }
         let debug_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE kind IN ('wire','content','target_selected','trace_manifest_updated')").fetch_one(&pool).await?;
         assert_eq!(debug_rows, 0);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn historical_user_preview_requires_received_prefix_evidence() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let user = AiItem {
+            role: Role::User,
+            content: MessageContent::Text("repeat preview-secret".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let publish = |id: &str, input: &[AiItem]| {
+            let run = test_run(&observation, id, facts(input.to_vec()));
+            run.capture_input_preview(input);
+            run.capture_client_tool_results(input);
+            run.protect_secrets(["preview-secret"]);
+            run.publish_input_preview();
+            run.publish_input_preview();
+            run
+        };
+        let deliver = |run: &RunObserver, input: &[AiItem], id: &str| {
+            let call = AiItem::function_call(ToolCall {
+                id: id.into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            });
+            run.record(RunEvent::ClientToolHandoff {
+                tool_id: id.into(),
+                name: "probe".into(),
+                input: None,
+            });
+            run.observe_client_completion(input, std::slice::from_ref(&call), writer::now());
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: Some(writer::now()),
+                status: "waiting_client".into(),
+                terminal_reason: None,
+                generation_node_id: None,
+                generation_root_id: None,
+            });
+            call
+        };
+        let mut input = vec![user.clone()];
+        let initial = publish("preview-initial", &input);
+        let call = deliver(&initial, &input, "preview-call-1");
+        observation.flush().await?;
+        input.extend([
+            call,
+            AiItem::function_call_output("preview-call-1", serde_json::json!("ok")),
+        ]);
+
+        // This is a separate fork, despite returning the exact pending tool ID.
+        let mut fork = input.clone();
+        fork[0].content = MessageContent::Text("changed prefix preview-secret".into());
+        let branch = publish("preview-fork", &fork);
+        branch.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        let continuation = publish("preview-continuation", &input);
+        let call = deliver(&continuation, &input, "preview-call-2");
+        observation.flush().await?;
+        input.extend([
+            call,
+            AiItem::function_call_output("preview-call-2", serde_json::json!("ok")),
+        ]);
+        // Identical text is a new input when its canonical item follows history.
+        input.push(user);
+        let followup = publish("preview-followup", &input);
+        let call = deliver(&followup, &input, "preview-call-3");
+        observation.flush().await?;
+        input.extend([
+            call,
+            AiItem::function_call_output("preview-call-3", serde_json::json!("ok")),
+        ]);
+        let continuation = publish("preview-followup-continuation", &input);
+        deliver(&continuation, &input, "preview-call-4");
+        observation.flush().await?;
+
+        // Restart loses process-local input proofs. No Generation node exists
+        // to rematerialize them, so the same input must conservatively survive.
+        observation.shutdown().await;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let unknown = test_run(&observation, "preview-unavailable", facts(input.clone()));
+        unknown.capture_input_preview(&input);
+        unknown.protect_secrets(["preview-secret"]);
+        unknown.publish_input_preview();
+        observation.flush().await?;
+        let previews: Vec<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT run_id,payload FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            previews
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "preview-initial",
+                "preview-fork",
+                "preview-followup",
+                "preview-unavailable"
+            ]
+        );
+        for (_, payload) in previews {
+            assert!(
+                !stored_payload(&payload)?["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("preview-secret")
+            );
+        }
+        let forest = observation.query_forest(Default::default()).await?;
+        let mut queried_previews = Vec::new();
+        for interaction in forest.roots.iter().flat_map(|root| &root.interactions) {
+            let detail = observation
+                .get_interaction(&interaction.id, Default::default())
+                .await?
+                .expect("persisted interaction");
+            assert!(
+                detail
+                    .runs
+                    .iter()
+                    .all(|run| run.generation_parent_id.is_none())
+            );
+            for run in &detail.runs {
+                for event in &run.events {
+                    if event.kind == "input_preview_recorded" {
+                        queried_previews.push(run.id.clone());
+                        assert!(!event.payload.to_string().contains("preview-secret"));
+                    }
+                }
+            }
+        }
+        queried_previews.sort();
+        assert_eq!(
+            queried_previews,
+            [
+                "preview-followup",
+                "preview-fork",
+                "preview-initial",
+                "preview-unavailable"
+            ]
+        );
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verified_parent_historical_user_preview_is_not_republished() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let question = AiItem {
+            role: Role::User,
+            content: MessageContent::Text("question".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let parent = test_run(
+            &observation,
+            "preview-verified-parent",
+            facts(vec![question.clone()]),
+        );
+        parent.capture_input_preview(std::slice::from_ref(&question));
+        parent.publish_input_preview();
+        parent.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(writer::now()),
+            status: "waiting_client".into(),
+            terminal_reason: None,
+            generation_node_id: Some("preview-verified-node".into()),
+            generation_root_id: Some("preview-verified-node".into()),
+        });
+        observation.flush().await?;
+        let mut input = vec![
+            question.clone(),
+            AiItem::function_call(ToolCall {
+                id: "verified-call".into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            }),
+            AiItem::function_call_output("verified-call", serde_json::json!("ok")),
+        ];
+        for (id, new_user) in [
+            ("preview-verified-history", false),
+            ("preview-verified-new-user", true),
+        ] {
+            if new_user {
+                input.push(question.clone());
+            }
+            let mut admission = facts(input.clone());
+            admission.generation_parent_id = Some("preview-verified-node".into());
+            let child = test_run(&observation, id, admission);
+            child.capture_input_preview(&input);
+            child.publish_input_preview();
+        }
+        observation.flush().await?;
+        let previews: Vec<String> = sqlx::query_scalar(
+            "SELECT run_id FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            previews,
+            ["preview-verified-parent", "preview-verified-new-user"]
+        );
+        let payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE kind='run_admitted' AND run_id='preview-verified-history'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stored_payload(&payload)?["has_new_user"], false);
         observation.shutdown().await;
         pool.close().await;
         Ok(())

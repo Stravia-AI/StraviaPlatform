@@ -156,7 +156,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
     });
     let new = ticket(&observation).await?;
     assert!(new.through_sequence > old.through_sequence);
-    for (issued, input) in [(&old, 16), (&new, 24)] {
+    for (issued, input) in [(&old, 20), (&new, 30)] {
         let (manifest, summary) = download(&observation, issued).await?;
         assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
         assert_eq!(summary["status"], "completed");
