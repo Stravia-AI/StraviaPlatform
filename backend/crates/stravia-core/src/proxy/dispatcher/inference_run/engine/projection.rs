@@ -1515,7 +1515,7 @@ impl ClientProjectionSession {
         deltas: impl IntoIterator<Item = AiStreamDelta>,
     ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
-        for delta in deltas {
+        for mut delta in deltas {
             if matches!(
                 delta,
                 AiStreamDelta::ProtectedThinkingStart { .. } | AiStreamDelta::Usage(_)
@@ -1595,7 +1595,24 @@ impl ClientProjectionSession {
                     AiStreamDelta::MessageStart { .. } | AiStreamDelta::ResponseMetadata { .. }
                 )
             {
-                continue;
+                // 后续 Model Leg 的 profile 仍不能覆盖已公开的消息头，但明确
+                // empty/null reasoning 是消息字段更新，不能随重复头一起丢弃。
+                let AiStreamDelta::ResponseMetadata { metadata } = &mut delta else {
+                    continue;
+                };
+                let key =
+                    stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+                let Some(fields) = metadata.as_object_mut() else {
+                    continue;
+                };
+                if fields
+                    .get(key)
+                    .filter(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
+                    .is_none()
+                {
+                    continue;
+                }
+                fields.retain(|field, _| field == key);
             }
             if matches!(&delta, AiStreamDelta::ItemDone { index, .. } if self.projected_thinking_items.remove(index))
             {
@@ -4262,6 +4279,66 @@ mod tests {
             .collect::<String>();
         assert!(visible.contains("> later reasoning"), "{visible}");
         assert!(visible.contains(HISTORY_MARKER_PREFIX), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn explicit_reasoning_metadata_survives_committed_model_leg_boundaries() {
+        use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+        let (mut session, _, _) = projection_session_fixture("reasoning-field-owner").await;
+        begin_openai_leg(&mut session);
+        let mut initial = AiResponse::new("first", "model");
+        initial.push_output_text("answer");
+        session
+            .project_live_deltas(
+                crate::model_turn::support::ai_response_to_deltas(&initial),
+                true,
+            )
+            .await
+            .expect("commit first response");
+        assert!(session.response_started);
+
+        for value in [serde_json::json!(""), serde_json::Value::Null] {
+            begin_openai_leg(&mut session);
+            let mut response = AiResponse::new("next", "model");
+            response
+                .vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+            response.push_output_text("next answer");
+            let mut deltas = crate::model_turn::support::ai_response_to_deltas(&response);
+            let AiStreamDelta::ResponseMetadata { metadata } = &mut deltas[1] else {
+                panic!("explicit field must follow MessageStart");
+            };
+            metadata["model"] = serde_json::json!("other-model");
+            let batches = session.project_live_deltas(deltas, true).await.unwrap();
+            let visible = batches.iter().flat_map(|batch| batch.deltas());
+            let mut fields = 0;
+            for delta in visible {
+                match delta {
+                    AiStreamDelta::ResponseMetadata { metadata } => {
+                        assert_eq!(metadata.get(CHAT_REASONING_FIELD_META), Some(&value));
+                        assert!(metadata.get("model").is_none());
+                        fields += 1;
+                    }
+                    AiStreamDelta::MessageStart { .. } => panic!("duplicate MessageStart"),
+                    AiStreamDelta::ThinkingDelta(_) => panic!("empty field became Thinking"),
+                    _ => {}
+                }
+            }
+            assert_eq!(fields, 1);
+            assert!(batches.iter().all(|batch| batch.references.is_empty()));
+        }
+        let batches = session
+            .project_live_deltas(
+                vec![AiStreamDelta::ResponseMetadata {
+                    metadata: serde_json::json!({"model": "ignored"}),
+                }],
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(batches.is_empty());
     }
 
     #[tokio::test]

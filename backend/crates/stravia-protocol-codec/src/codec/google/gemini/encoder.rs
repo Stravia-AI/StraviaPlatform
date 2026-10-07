@@ -478,7 +478,11 @@ pub(super) fn encode_content_block_for_gemini(
                 "functionResponse": {
                     "id": tool_use_id,
                     "name": name,
-                    "response": content
+                    "response": if content.is_object() {
+                        content.clone()
+                    } else {
+                        serde_json::json!({"result": content})
+                    }
                 }
             })
         }

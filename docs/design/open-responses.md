@@ -185,7 +185,13 @@ Reasoning content 保持 dated reasoning item 结构，但 wire delta/done 使�
 
 通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。`Thinking.signature` 不是 Responses 的 `encrypted_content`，不得在输出、流事件或历史投影中互换。Generation Chain 的 ingress 历史投影保留实际 OUTPUT 的公开文本与 item 身份；原生 `Reasoning.summary`、`Reasoning.content` 与真实密文保持原样，不套用上游 REQUEST 的字段约束。已知跨协议交付的原始思考块及可信来源由既有一对一 History Marker 保存，回放时恢复；Effective Model Request 与权威输出仍保留原始块，不回写既有历史节点或观察父边。
 
+OpenAI-compatible 响应中的推理字段缺失、显式空字符串、`null` 与真实文本是不同状态。真实文本仍进入 canonical `Thinking`；显式空值由内部 response metadata 保留，经同步响应、流式聚合、隐藏轮次和 Generation Chain 的 effective history 回放，在发送 Chat 请求时恢复为原值。字段缺失保持缺失，不为所有 assistant 补空推理，也不按 Provider、模型或 URL 特判。实际推理文本优先于空值；后到的空流事件不能覆盖已交付的文本。
+
+空值不生成虚假 `Thinking`，也不为 Responses、Anthropic 或 Gemini 制造原生推理条目。内部 metadata 不进入客户端公开响应。跨协议客户端通过已验证的 Generation Chain 历史恢复原始空值；若脱离该历史，仅回显无法承载空值的原生公开响应，或旧记录已经丢失字段，则不能凭空重建。只有实际 Responses reasoning item 才按其原生契约交付与回放。
+
 发送上游 Responses REQUEST 时，兼容的原生 `Reasoning` 保留 `summary` 与 `encrypted_content`，但 `content` 必须为空。原 `content` 的每个可读段落按原顺序放入紧随的 assistant `output_text`，位于后续工具调用之前；所有由思考条目降级或混合拆分得到的正文载体均不继承源条目的 id、status、phase 或原生扩展字段；混合条目拆出的 function_call 同样不借用父条目身份，但保留 call_id、name 与 arguments。普通 message、原生 function_call 及独立 function_call_output 仍保留各自合法的身份和元数据。这些规则仅作用于上游请求投影，不改写权威历史、来源或客户端 OUTPUT 身份。通用 `Thinking` 的可读内容降为 `output_text`，不把其它协议的签名当作 Responses 密文。没有可信来源的受保护载荷仍遵循 ADR-0075 的乐观判定；载荷类型的表示边界不因此放宽。
+
+发送 Chat 请求时，剥离另有字段承载的 assistant 推理和工具块后，单一文本块使用 `content` 字符串，保留原始空白；多文本块与多模态内容仍使用 parts 数组。该通用投影不要求仅支持文本字符串的兼容上游额外支持单元素 content 数组。
 
 ---
 
@@ -350,6 +356,8 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 ### 9.1 Function loop
 
 标准 function tool 保留 `name`、description、JSON Schema parameters、strict、tool choice、parallel choice、call ID、arguments delta/done 和 output content。
+
+跨协议工具结果按 producer 的 `ToolResultContentKind` 区分业务 JSON 与原生 content blocks。Anthropic `tool_result.content` 只发送合法的字符串或原生 block 数组：业务 JSON 序列化为字符串，包括业务 JSON 数组，不把数组元素误作原生 blocks。Gemini `functionResponse.response` 保留业务 JSON object，非 object 结果使用 `{"result": ...}` 承载原值。工具 call ID 与结果关联不变。
 
 客户端拥有的 function call，其 `arguments` 是不透明字符串：空串、非法 JSON、缺失闭合符号与原始空白均原样保留，不由响应 Hook 校验、补全或替换。此规则覆盖流式 delta/done、完整响应、Generation Chain 及客户端下一轮回显；工具参数解析错误由客户端处理，不单独升级为平台响应失败。Platform Tool 在实际执行前解析参数，解析失败作为 `is_error` 工具结果交回模型，不调用工具执行器。Hook 主动修改参数仍遵循既有 patch 契约。
 

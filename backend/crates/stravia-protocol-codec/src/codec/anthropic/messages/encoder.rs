@@ -11,6 +11,7 @@ use stravia_runtime_contract::protocol::ir::request::MediaSource;
 use stravia_runtime_contract::protocol::ir::request::MessageContent;
 use stravia_runtime_contract::protocol::ir::request::Role;
 use stravia_runtime_contract::protocol::ir::request::ToolChoice;
+use stravia_runtime_contract::protocol::ir::request::ToolResultContentKind;
 
 pub struct AnthropicEncoder;
 
@@ -622,6 +623,7 @@ fn encode_single_anthropic_content_block(
         ContentBlock::ToolResult {
             tool_use_id,
             content,
+            content_kind,
             is_error,
             cache_control,
             ..
@@ -631,7 +633,7 @@ fn encode_single_anthropic_content_block(
             let mut block = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": content,
+                "content": anthropic_tool_result_content(content, *content_kind),
             });
             if let Some(err) = is_error {
                 block["is_error"] = Value::Bool(*err);
@@ -681,6 +683,15 @@ fn encode_single_anthropic_content_block(
     }
 }
 
+fn anthropic_tool_result_content(content: &Value, kind: Option<ToolResultContentKind>) -> Value {
+    // 原生 content 只接受文本或内容块；业务 JSON 数组不能冒充原生块数组。
+    if kind == Some(ToolResultContentKind::Json) || !(content.is_string() || content.is_array()) {
+        Value::String(content.to_string())
+    } else {
+        content.clone()
+    }
+}
+
 fn anthropic_tool_result_payload(
     msg: &AiItem,
     generated_tool_id_seq: &mut usize,
@@ -694,9 +705,15 @@ fn anthropic_tool_result_payload(
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        content_kind,
                         ..
+                    } => {
+                        return (
+                            anthropic_tool_result_content(content, *content_kind),
+                            Some(tool_use_id.to_string()),
+                        );
                     }
-                    | ContentBlock::ServerToolResult {
+                    ContentBlock::ServerToolResult {
                         tool_use_id,
                         content,
                         ..

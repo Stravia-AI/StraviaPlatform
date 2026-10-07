@@ -3,6 +3,258 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 #[test]
+fn explicit_empty_reasoning_survives_response_history_and_request() {
+    use crate::codec::open_responses::adapter::OpenResponses20260424;
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    let response = OpenAIChatCompletionsV1
+        .decode_response(serde_json::json!({
+            "id": "chatcmpl-empty-reasoning",
+            "model": "model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "OK", "reasoning": ""},
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+    assert!(response.reasoning_items().next().is_none());
+    let formatted = OpenAIChatCompletionsV1.encode_response(&response);
+    let request = OpenAIChatCompletionsV1
+        .decode_request(serde_json::json!({
+            "model": "model",
+            "messages": [
+                {"role": "user", "content": "Reply OK."},
+                formatted["choices"][0]["message"].clone(),
+                {"role": "user", "content": "Continue."}
+            ]
+        }))
+        .unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    assert_eq!(
+        wire["messages"][1].get("reasoning_content"),
+        Some(&serde_json::json!("")),
+        "明确为空的推理字段必须能被客户端保存并回传"
+    );
+    let responses = OpenResponses20260424.encode_response(&response);
+    assert_eq!(
+        responses["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["message"]
+    );
+}
+
+#[test]
+fn missing_and_null_reasoning_remain_distinct_in_client_history() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    for (extra, expected) in [
+        (serde_json::json!({}), None),
+        (
+            serde_json::json!({"reasoning_content": null}),
+            Some(Value::Null),
+        ),
+    ] {
+        let mut message = serde_json::json!({"role": "assistant", "content": "OK"});
+        message
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = OpenAIChatCompletionsV1
+            .decode_response(serde_json::json!({
+                "id": "chatcmpl-nullable",
+                "model": "model",
+                "choices": [{"message": message, "finish_reason": "stop"}]
+            }))
+            .unwrap();
+        assert!(response.reasoning_items().next().is_none());
+        let formatted = OpenAIChatCompletionsV1.encode_response(&response);
+        assert_eq!(
+            formatted["choices"][0]["message"].get("reasoning_content"),
+            expected.as_ref()
+        );
+        let history = client_history_output_item(&response);
+        let request =
+            stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
+        let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+        assert_eq!(
+            wire["messages"][0].get("reasoning_content"),
+            expected.as_ref()
+        );
+    }
+}
+
+#[test]
+fn explicit_empty_reasoning_survives_tool_only_response_history() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    let response = OpenAIChatCompletionsV1
+        .decode_response(serde_json::json!({
+            "id": "chatcmpl-empty-tool",
+            "model": "model",
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": null, "reasoning_content": "",
+                    "tool_calls": [{
+                        "id": "call_echo", "type": "function",
+                        "function": {"name": "echo", "arguments": "{\"value\":\"OK\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .unwrap();
+    assert!(response.reasoning_items().next().is_none());
+    let history = client_history_output_item(&response);
+    let mut request =
+        stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
+    request.items.push(
+        OpenAIChatCompletionsV1
+            .decode_request(serde_json::json!({
+                "model": "model",
+                "messages": [{"role": "tool", "tool_call_id": "call_echo", "content": "OK"}]
+            }))
+            .unwrap()
+            .items
+            .remove(0),
+    );
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    assert_eq!(wire["messages"][0]["reasoning_content"], "");
+    assert_eq!(wire["messages"][0]["tool_calls"][0]["id"], "call_echo");
+    assert_eq!(wire["messages"][1]["tool_call_id"], "call_echo");
+}
+
+#[test]
+fn explicit_reasoning_field_keeps_a_legitimate_empty_assistant_message() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    let request = OpenAIChatCompletionsV1
+        .decode_request(serde_json::json!({
+            "model": "model",
+            "messages": [
+                {"role": "user", "content": "Continue."},
+                {"role": "assistant", "content": "", "reasoning_content": ""},
+                {"role": "user", "content": "Finish."}
+            ]
+        }))
+        .unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    assert_eq!(wire["messages"][1]["role"], "assistant");
+    assert_eq!(wire["messages"][1]["content"], "");
+    assert_eq!(
+        wire["messages"][1].get("reasoning_content"),
+        Some(&serde_json::json!(""))
+    );
+    assert_eq!(wire["messages"][2]["role"], "user");
+}
+
+#[test]
+fn chunked_empty_reasoning_stream_preserves_the_replayable_field() {
+    use crate::accumulator::StreamResponseAccumulator;
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::{ProtocolAdapter, ProtocolTransform};
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
+    let upstream = [
+        data_sse(r#"{"id":"chatcmpl-empty-stream","model":"model","choices":[{"delta":{"role":"assistant","reasoning":""},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+        data_sse("[DONE]"),
+    ].concat();
+    let mut accumulator = StreamResponseAccumulator::default();
+    let mut public_events = Vec::new();
+    for bytes in upstream.as_bytes().chunks(7) {
+        let deltas = decoder.decode_chunk(bytes).unwrap();
+        accumulator.apply_all(&deltas);
+        public_events.extend(encoder.encode_deltas(&deltas).unwrap());
+    }
+    let deltas = decoder.finish().unwrap();
+    accumulator.apply_all(&deltas);
+    public_events.extend(encoder.encode_deltas(&deltas).unwrap());
+    public_events.extend(encoder.finish().unwrap());
+    let explicit_field = public_events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+        .find_map(|event| event.pointer("/choices/0/delta/reasoning_content").cloned());
+    assert_eq!(explicit_field, Some(serde_json::json!("")));
+    let response = accumulator.into_ai_response();
+    assert!(response.reasoning_items().next().is_none());
+    let history = client_history_output_item(&response);
+    let request = stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    assert_eq!(wire["messages"][0]["reasoning_content"], "");
+}
+
+#[test]
+fn actual_stream_reasoning_takes_precedence_over_an_initial_null_field() {
+    use crate::accumulator::StreamResponseAccumulator;
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::{ProtocolAdapter, ProtocolTransform};
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
+    let upstream = [
+        data_sse(r#"{"id":"chatcmpl-real-stream","model":"model","choices":[{"delta":{"role":"assistant","reasoning":null},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{"reasoning_content":"  actual thought\n"},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{"reasoning_content":null,"content":"OK"},"finish_reason":"stop"}]}"#),
+        data_sse("[DONE]"),
+    ].concat();
+    let mut accumulator = StreamResponseAccumulator::default();
+    let deltas = decoder.decode_chunk(upstream.as_bytes()).unwrap();
+    let live_fields = encoder
+        .encode_deltas(&deltas)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| serde_json::from_str::<Value>(&event.data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]
+                .get("reasoning_content")
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live_fields,
+        vec![Value::Null, serde_json::json!("  actual thought\n")]
+    );
+    accumulator.apply_all(&deltas);
+    accumulator.apply_all(&decoder.finish().unwrap());
+    let response = accumulator.into_ai_response();
+    let formatted = OpenAIChatCompletionsV1.encode_response(&response);
+    assert_eq!(
+        formatted["choices"][0]["message"]["reasoning_content"],
+        "  actual thought\n"
+    );
+    let history = client_history_output_item(&response);
+    let request = stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    assert_eq!(
+        wire["messages"][0]["reasoning_content"],
+        "  actual thought\n"
+    );
+}
+
+#[test]
 fn client_history_normalizer_keeps_public_reasoning_unsigned_and_native_thinking_signed() {
     use crate::codec::anthropic::messages::stream::normalize_client_history_item;
     use stravia_runtime_contract::protocol::ir::AiItem;

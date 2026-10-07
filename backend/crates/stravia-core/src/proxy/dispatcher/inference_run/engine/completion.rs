@@ -527,7 +527,16 @@ fn append_restored_platform_round(
     response: &AiResponse,
     terminal: Vec<HiddenHistorySegment>,
 ) {
+    let output_start = request.items.len();
     request.items.extend(response.items.iter().cloned());
+    crate::model_turn::support::restore_chat_reasoning_field(
+        &mut request.items,
+        output_start,
+        response
+            .vendor
+            .ingress
+            .get(stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META),
+    );
     request.items.extend(terminal.into_iter().map(|segment| {
         let HiddenHistorySegment::Platform { result, .. } = segment else {
             unreachable!("terminal Platform markers contain Platform segments");
@@ -837,6 +846,141 @@ fn response_item_default_status(response: &AiResponse) -> AiItemStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_followup_keeps_explicit_reasoning_field_without_fake_thinking() {
+        use stravia_protocol_codec::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+        use stravia_protocol_codec::transform::ProtocolAdapter;
+        use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+        for value in [serde_json::json!(""), serde_json::Value::Null] {
+            let mut response = AiResponse::new("response", "model");
+            response.push_output_text("answer");
+            response
+                .vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            assert_eq!(request.items.len(), 1);
+            assert_eq!(
+                request.items[0]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content")),
+                Some(&value)
+            );
+            assert!(request.items[0].thinking_ref().is_none());
+            assert!(
+                !request
+                    .meta
+                    .vendor
+                    .ingress
+                    .contains_key(CHAT_REASONING_FIELD_META)
+            );
+
+            response.items.push(AiItem::function_call(
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "call_echo".into(),
+                    name: "echo".into(),
+                    arguments: "{}".into(),
+                },
+            ));
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            request.items.push(AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::Tool,
+                content: MessageContent::Text("READY".into()),
+                tool_calls: None,
+                tool_call_id: Some("call_echo".into()),
+                meta: None,
+            });
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            let assistants = wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .collect::<Vec<_>>();
+            assert!(
+                assistants
+                    .iter()
+                    .any(|message| message["content"] == "answer")
+            );
+            assert!(
+                assistants
+                    .iter()
+                    .any(|message| message["tool_calls"][0]["id"] == "call_echo")
+            );
+            assert!(
+                assistants
+                    .iter()
+                    .all(|message| message.get("reasoning_content") == Some(&value))
+            );
+            response.items.pop().unwrap();
+
+            response.items.insert(0, AiItem::thinking("real", None));
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            assert!(request.items.iter().all(|item| {
+                item.meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content"))
+                    .is_none()
+            }));
+            assert_eq!(
+                request.items[0].thinking_ref().map(|(text, _)| text),
+                Some("real")
+            );
+
+            response.items.remove(0);
+            response
+                .items
+                .insert(0, AiItem::thinking("", Some("opaque".into())));
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            assert_eq!(wire["messages"][0]["content"], "answer");
+            assert_eq!(wire["messages"][0].get("reasoning_content"), Some(&value));
+            response.items.remove(0);
+            response.items[0].meta = Some(
+                stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                    serde_json::json!({"reasoning_content": "existing"}),
+                ),
+            );
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            assert_eq!(
+                request.items[0]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content")),
+                Some(&serde_json::json!("existing"))
+            );
+
+            response.items.clear();
+            let mut request = AiRequest::new("model", Vec::new());
+            append_restored_platform_round(&mut request, &response, Vec::new());
+            assert_eq!(request.items.len(), 1);
+            assert_eq!(
+                request.items[0]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content")),
+                Some(&value)
+            );
+            assert!(request.items[0].thinking_ref().is_none());
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            assert_eq!(wire["messages"][0].get("reasoning_content"), Some(&value));
+        }
+        let mut request = AiRequest::new("model", Vec::new());
+        append_restored_platform_round(
+            &mut request,
+            &AiResponse::new("missing", "model"),
+            Vec::new(),
+        );
+        assert!(request.items.is_empty());
+    }
 
     #[test]
     fn incomplete_response_defaults_items_to_incomplete() {

@@ -1,6 +1,145 @@
 use super::*;
 
 #[tokio::test]
+async fn explicit_chat_reasoning_field_survives_persisted_client_history() {
+    use stravia_protocol_codec::transform::ProtocolAdapter;
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    for value in [serde_json::json!(""), serde_json::Value::Null] {
+        let chain = generation_chain().await;
+        let owner = principal("reasoning-field-owner");
+        let mut root = chain
+            .begin(
+                owner.clone(),
+                chat_request(serde_json::json!([
+                    {"role": "user", "content": "question"}
+                ])),
+            )
+            .await
+            .unwrap();
+        let mut response = AiResponse::new("upstream", "model");
+        response.push_output_text("answer");
+        response
+            .vendor
+            .ingress
+            .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+        assert!(root.stage(&mut response, &generation_source(), None));
+        root.persist().await.unwrap();
+        let resumed = chain
+            .begin(
+                owner,
+                chat_request(serde_json::json!([
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer", "reasoning_content": value},
+                    {"role": "user", "content": "follow-up"}
+                ])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.parent.parent_id.as_deref(), Some(root.id()));
+        let assistant = resumed
+            .parent
+            .parent_client_items
+            .iter()
+            .find(|item| item.role == Role::Assistant)
+            .expect("materialized assistant history");
+        assert_eq!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("reasoning_content")),
+            Some(&value)
+        );
+        assert!(assistant.thinking_ref().is_none());
+        assert!(assistant.reasoning_ref().is_none());
+        let (wire, _) = stravia_protocol_codec::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1
+            .encode_request(&resumed.request)
+            .unwrap();
+        assert_eq!(wire["messages"][1].get("reasoning_content"), Some(&value));
+    }
+}
+
+#[tokio::test]
+async fn explicit_chat_reasoning_field_survives_effective_history_across_ingress_protocols() {
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    for ingress in [
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        OPEN_RESPONSES_2026_04_24,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ] {
+        for value in [
+            None,
+            Some(serde_json::json!("")),
+            Some(serde_json::Value::Null),
+        ] {
+            let pair = ProtocolTransform::global()
+                .bind(ingress, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+                .unwrap();
+            let user = serde_json::json!({"role": "user", "content": "question"});
+            let seed = if ingress == OPEN_RESPONSES_2026_04_24 {
+                serde_json::json!({"model": "model", "input": [user.clone()]})
+            } else if ingress == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+                serde_json::json!({"model": "model", "contents": [{"role": "user", "parts": [{"text": "question"}]}]})
+            } else {
+                serde_json::json!({"model": "model", "max_tokens": 256, "messages": [user.clone()]})
+            };
+            let chain = generation_chain().await;
+            let owner = principal("cross-ingress-reasoning-field");
+            let mut root = chain
+                .begin(owner.clone(), pair.decode_request(seed.clone()).unwrap())
+                .await
+                .unwrap();
+            let mut response = AiResponse::new("upstream", "model");
+            response.push_output_text("answer");
+            if let Some(value) = &value {
+                response
+                    .vendor
+                    .ingress
+                    .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+            }
+            assert!(root.stage(&mut response, &generation_source(), None));
+            root.persist().await.unwrap();
+            let public = pair.encode_response(&response).unwrap();
+            let mut replay = seed;
+            if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+                replay["messages"] = serde_json::json!([user, public["choices"][0]["message"], {"role": "user", "content": "follow-up"}]);
+            } else if ingress == OPEN_RESPONSES_2026_04_24 {
+                let mut input = vec![user];
+                input.extend(public["output"].as_array().unwrap().iter().cloned());
+                input.push(serde_json::json!({"role": "user", "content": "follow-up"}));
+                replay["input"] = serde_json::Value::Array(input);
+            } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
+                replay["messages"] = serde_json::json!([user, {"role": "assistant", "content": public["content"]}, {"role": "user", "content": "follow-up"}]);
+            } else {
+                replay["contents"] = serde_json::json!([
+                    {"role": "user", "parts": [{"text": "question"}]},
+                    public["candidates"][0]["content"],
+                    {"role": "user", "parts": [{"text": "follow-up"}]}
+                ]);
+            }
+            let resumed = chain
+                .begin(owner, pair.decode_request(replay).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resumed.parent_id(),
+                Some(root.id()),
+                "ingress={ingress}, field={value:?}"
+            );
+            let wire = pair.encode_request(&resumed.request).unwrap().body;
+            assert_eq!(
+                wire["messages"][1].get("reasoning_content"),
+                value.as_ref(),
+                "ingress={ingress}, field={value:?}"
+            );
+            assert!(!wire.to_string().contains(CHAT_REASONING_FIELD_META));
+        }
+    }
+}
+
+#[tokio::test]
 async fn responses_thinking_tool_replay_discovers_immediate_parent() {
     use stravia_protocol_codec::codec::open_responses::decoder::ResponsesDecoder;
     use stravia_protocol_codec::codec::open_responses::formatter::ResponsesResponseFormatter;

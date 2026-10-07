@@ -291,6 +291,9 @@ fn normalize_messages_for_openai(
         if has_calls {
             return true;
         }
+        if is_explicit_chat_reasoning_carrier(msg) {
+            return true;
+        }
         // 只有明文 reasoning 才有可回放的载体：受保护载荷（signature /
         // encrypted_content / redacted）在 chat 协议上无处可去，条目若只剩
         // 这些载荷就必须整条丢弃，否则会编码出既无 content 也无 tool_calls 的
@@ -373,6 +376,7 @@ fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
 /// no tool-call id, and no textual or non-reasoning content blocks.
 fn is_standalone_reasoning_item(item: &AiItem) -> bool {
     item.role == Role::Assistant
+        && !is_explicit_chat_reasoning_carrier(item)
         && item
             .tool_calls
             .as_ref()
@@ -392,6 +396,16 @@ fn is_standalone_reasoning_item(item: &AiItem) -> bool {
                 )
             }),
         }
+}
+
+fn is_explicit_chat_reasoning_carrier(item: &AiItem) -> bool {
+    // 明确为空的 Chat 字段属于原消息，即使正文为空也不能当作独立推理项删除。
+    matches!(&item.content, MessageContent::Text(_))
+        && item
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("reasoning_content"))
+            .is_some_and(|value| value.is_null() || value.as_str() == Some(""))
 }
 
 /// Reasoning text of a standalone carrier, in encode order. The blocks win:
@@ -774,22 +788,33 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
             //     OpenAI cross-protocol conversion (the Anthropic decoder
             //     carries `tool_use` in BOTH `content` and `tool_calls`).
             let strip_for_assistant = msg.role == Role::Assistant;
-            let parts: Vec<Value> = blocks
-                .iter()
-                .filter(|b| {
-                    !(strip_for_assistant
-                        && matches!(
-                            b,
-                            ContentBlock::Thinking { .. }
-                                | ContentBlock::Reasoning { .. }
-                                | ContentBlock::RedactedThinking { .. }
-                                | ContentBlock::ToolUse { .. }
-                        ))
-                })
-                .map(encode_content_block_for_openai)
-                .collect();
-            if !parts.is_empty() {
-                map.insert("content".into(), Value::Array(parts));
+            let mut visible = blocks.iter().filter(|b| {
+                !(strip_for_assistant
+                    && matches!(
+                        b,
+                        ContentBlock::Thinking { .. }
+                            | ContentBlock::Reasoning { .. }
+                            | ContentBlock::RedactedThinking { .. }
+                            | ContentBlock::ToolUse { .. }
+                    ))
+            });
+            let first = visible.next();
+            let second = visible.next();
+            match (first, second) {
+                // 单一文本优先使用两种合法载体中的字符串形式，
+                // 避免要求兼容上游同时支持多模态 content 数组。
+                (Some(ContentBlock::Text { text, .. }), None) => {
+                    map.insert("content".into(), Value::String(text.clone()));
+                }
+                (Some(first), second) => {
+                    let parts = std::iter::once(first)
+                        .chain(second)
+                        .chain(visible)
+                        .map(encode_content_block_for_openai)
+                        .collect();
+                    map.insert("content".into(), Value::Array(parts));
+                }
+                (None, _) => {}
             }
             // An assistant turn that carries only tool calls / thinking has no
             // textual content — leave `content` unset (OpenAI accepts its

@@ -3,6 +3,55 @@ use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 
 #[test]
+fn chat_reasoning_presence_metadata_does_not_create_or_leak_responses_items() {
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    for value in [serde_json::json!(""), serde_json::Value::Null] {
+        let mut formatter = ResponsesStreamFormatter::new();
+        let events = formatter.format_deltas(&[
+            AiStreamDelta::ResponseMetadata {
+                metadata: serde_json::json!({
+                    "temperature": 0.4,
+                    "metadata": {"trace": "kept"},
+                    CHAT_REASONING_FIELD_META: value.clone()
+                }),
+            },
+            AiStreamDelta::ResponseMetadata {
+                metadata: serde_json::json!({CHAT_REASONING_FIELD_META: value}),
+            },
+            AiStreamDelta::TextDelta("answer".into()),
+            AiStreamDelta::Done {
+                stop_reason: "stop".into(),
+            },
+        ]);
+        let bodies = events
+            .iter()
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+            .collect::<Vec<_>>();
+        for body in &bodies {
+            if let Some(response) = body.get("response") {
+                assert!(response.get(CHAT_REASONING_FIELD_META).is_none());
+                assert_eq!(response["temperature"], 0.4);
+                assert_eq!(response["metadata"], serde_json::json!({"trace": "kept"}));
+            }
+        }
+        let completed = bodies
+            .iter()
+            .find(|body| body["type"] == "response.completed")
+            .unwrap();
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["text"], "answer");
+        assert!(
+            !bodies
+                .iter()
+                .any(|body| body["item"]["type"] == "reasoning")
+        );
+    }
+}
+
+#[test]
 fn anthropic_live_text_thinking_text_tool_preserves_responses_chronology() {
     use crate::codec::anthropic::messages::stream::AnthropicStreamParser;
 

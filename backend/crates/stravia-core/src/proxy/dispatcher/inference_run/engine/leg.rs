@@ -1122,6 +1122,68 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn hidden_round_reasoning_field_survives_without_creating_thinking() {
+        use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+        for value in [serde_json::json!(""), serde_json::Value::Null] {
+            let fixture = fixture().await;
+            let mut hidden = AiResponse::new("hidden", "model");
+            hidden
+                .vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+            fixture.ledger.record_hidden_round(&hidden);
+            fixture
+                .ledger
+                .record_hidden_round(&AiResponse::new("missing", "model"));
+            let mut visible = AiResponse::new("visible", "model");
+            visible.push_output_text("answer");
+            fixture.ledger.apply_hidden_rounds(&mut visible);
+            let item = stravia_protocol_codec::codec::openai::compatible::stream::client_history_output_item(&visible);
+            assert_eq!(
+                item.meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content")),
+                Some(&value)
+            );
+            assert_eq!(visible.items.len(), 1);
+            assert!(visible.items[0].thinking_ref().is_none());
+
+            visible
+                .vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), serde_json::Value::Null);
+            fixture.ledger.apply_hidden_rounds(&mut visible);
+            assert_eq!(
+                visible.vendor.ingress.get(CHAT_REASONING_FIELD_META),
+                Some(&serde_json::Value::Null)
+            );
+            visible
+                .items
+                .insert(0, AiItem::thinking("real reasoning", None));
+            let item = stravia_protocol_codec::codec::openai::compatible::stream::client_history_output_item(&visible);
+            assert_eq!(
+                item.meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("reasoning_content")),
+                Some(&serde_json::json!("real reasoning"))
+            );
+        }
+        let fixture = fixture().await;
+        fixture
+            .ledger
+            .record_hidden_round(&AiResponse::new("missing", "model"));
+        let mut response = AiResponse::new("visible", "model");
+        fixture.ledger.apply_hidden_rounds(&mut response);
+        assert!(
+            !response
+                .vendor
+                .ingress
+                .contains_key(CHAT_REASONING_FIELD_META)
+        );
+    }
+
     fn streamed_turn(events: Vec<Result<CanonicalEvent, ModelTurnError>>) -> ModelTurn {
         let mut turn = ModelTurn::in_memory(
             stravia_runtime_contract::hook::RouteContext {

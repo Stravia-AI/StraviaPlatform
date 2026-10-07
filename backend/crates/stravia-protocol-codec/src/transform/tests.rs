@@ -362,6 +362,397 @@ fn thinking_replay_matrix_keeps_mixed_text_and_tool_associations() {
 }
 
 #[test]
+fn wire_request_matrix_preserves_readable_reasoning_and_tool_continuations() {
+    let sources = [
+        (
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            json!({"model":"model","messages":[
+                {"role":"assistant","content":"answer","reasoning_content":"inspect",
+                 "tool_calls":[{"id":"call_lookup","type":"function","function":{
+                     "name":"lookup","arguments":"{\"key\":\"value\"}"}}]},
+                {"role":"tool","tool_call_id":"call_lookup","content":"found"}
+            ]}),
+        ),
+        (
+            ANTHROPIC_MESSAGES_2023_06_01,
+            json!({"model":"model","max_tokens":100,"messages":[
+                {"role":"assistant","content":[
+                    {"type":"thinking","thinking":"inspect","signature":"native-signature"},
+                    {"type":"text","text":"answer"},
+                    {"type":"tool_use","id":"call_lookup","name":"lookup","input":{"key":"value"}}
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call_lookup","content":"found"}
+                ]}
+            ]}),
+        ),
+        (
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            json!({"model":"model","contents":[
+                {"role":"model","parts":[
+                    {"text":"inspect","thought":true},
+                    {"text":"answer"},
+                    {"functionCall":{"id":"call_lookup","name":"lookup","args":{"key":"value"}}}
+                ]},
+                {"role":"user","parts":[
+                    {"functionResponse":{"id":"call_lookup","name":"lookup","response":{"result":"found"}}}
+                ]}
+            ]}),
+        ),
+        (
+            OPEN_RESPONSES_2026_04_24,
+            json!({"model":"model","input":[
+                {"type":"reasoning","summary":[{"type":"summary_text","text":"inspect"}]},
+                {"role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+                {"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"key\":\"value\"}"},
+                {"type":"function_call_output","call_id":"call_lookup","output":"found"}
+            ]}),
+        ),
+    ];
+    for (source, wire) in sources {
+        for target in [
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            ANTHROPIC_MESSAGES_2023_06_01,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            OPEN_RESPONSES_2026_04_24,
+        ] {
+            let pair = ProtocolTransform::global().bind(source, target).unwrap();
+            let request = pair.decode_request(wire.clone()).unwrap();
+            let body = pair.encode_request(&request).unwrap().body;
+            match target {
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 => {
+                    let messages = body["messages"].as_array().unwrap();
+                    let reasoning: Vec<_> = messages
+                        .iter()
+                        .filter_map(|message| message["reasoning_content"].as_str())
+                        .collect();
+                    assert_eq!(reasoning, ["inspect"]);
+                    let answers: Vec<_> = messages
+                        .iter()
+                        .filter(|message| message["role"] == "assistant")
+                        .flat_map(|message| {
+                            message["content"].as_str().into_iter().chain(
+                                message["content"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|part| part["text"].as_str()),
+                            )
+                        })
+                        .filter(|text| !text.is_empty())
+                        .collect();
+                    assert_eq!(answers, ["answer"]);
+                    let calls: Vec<_> = messages
+                        .iter()
+                        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+                        .collect();
+                    assert_eq!(calls.len(), 1);
+                    let call = calls[0];
+                    assert_eq!(call["id"], "call_lookup");
+                    assert_eq!(call["function"]["name"], "lookup");
+                    assert_eq!(
+                        serde_json::from_str::<Value>(
+                            call["function"]["arguments"].as_str().unwrap()
+                        )
+                        .unwrap(),
+                        json!({"key":"value"})
+                    );
+                    let result = messages
+                        .iter()
+                        .find(|message| message["role"] == "tool")
+                        .unwrap();
+                    assert_eq!(result["tool_call_id"], "call_lookup");
+                    if source == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+                        assert_eq!(
+                            serde_json::from_str::<Value>(result["content"].as_str().unwrap())
+                                .unwrap(),
+                            json!({"result":"found"})
+                        );
+                    } else {
+                        assert_eq!(result["content"], "found");
+                    }
+                }
+                ANTHROPIC_MESSAGES_2023_06_01 => {
+                    let messages = body["messages"].as_array().unwrap();
+                    let blocks: Vec<_> = messages
+                        .iter()
+                        .filter(|message| message["role"] == "assistant")
+                        .flat_map(|message| message["content"].as_array().unwrap())
+                        .collect();
+                    if source == ANTHROPIC_MESSAGES_2023_06_01 {
+                        assert_eq!(
+                            blocks[0],
+                            &json!({
+                                "type":"thinking","thinking":"inspect","signature":"native-signature"
+                            })
+                        );
+                    } else {
+                        // Unsigned/foreign readable reasoning is replayable text, not a forged signature.
+                        assert_eq!(blocks[0], &json!({"type":"text","text":"inspect"}));
+                    }
+                    assert_eq!(blocks[1], &json!({"type":"text","text":"answer"}));
+                    assert_eq!(
+                        blocks[2],
+                        &json!({
+                            "type":"tool_use","id":"call_lookup","name":"lookup","input":{"key":"value"}
+                        })
+                    );
+                    let result = messages
+                        .iter()
+                        .flat_map(|message| message["content"].as_array().unwrap())
+                        .find(|block| block["type"] == "tool_result")
+                        .unwrap();
+                    assert_eq!(result["type"], "tool_result");
+                    assert_eq!(result["tool_use_id"], "call_lookup");
+                    if source == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+                        assert_eq!(
+                            serde_json::from_str::<Value>(result["content"].as_str().unwrap())
+                                .unwrap(),
+                            json!({"result":"found"})
+                        );
+                    } else {
+                        assert_eq!(result["content"], "found");
+                    }
+                }
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA => {
+                    let contents = body["contents"].as_array().unwrap();
+                    let parts: Vec<_> = contents
+                        .iter()
+                        .filter(|content| content["role"] == "model")
+                        .flat_map(|content| content["parts"].as_array().unwrap())
+                        .collect();
+                    let readable: Vec<_> = parts
+                        .iter()
+                        .filter_map(|part| {
+                            part["text"]
+                                .as_str()
+                                .map(|text| (text, part["thought"] == true))
+                        })
+                        .collect();
+                    assert_eq!(readable, [("inspect", true), ("answer", false)]);
+                    let calls: Vec<_> = parts
+                        .iter()
+                        .filter_map(|part| part.get("functionCall"))
+                        .collect();
+                    assert_eq!(
+                        calls,
+                        [&json!({"id":"call_lookup","name":"lookup","args":{"key":"value"}})]
+                    );
+                    assert_eq!(
+                        contents.last().unwrap()["parts"][0]["functionResponse"],
+                        json!({
+                            "id":"call_lookup","name":"lookup","response":{"result":"found"}
+                        })
+                    );
+                }
+                OPEN_RESPONSES_2026_04_24 => {
+                    let input = body["input"].as_array().unwrap();
+                    let readable: Vec<_> = input
+                        .iter()
+                        .flat_map(|item| {
+                            let parts = if item["type"] == "reasoning" {
+                                item["summary"].as_array()
+                            } else {
+                                item["content"].as_array()
+                            };
+                            parts
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|part| part["text"].as_str())
+                        })
+                        .collect();
+                    assert_eq!(readable, ["inspect", "answer"]);
+                    let call = input
+                        .iter()
+                        .find(|item| item["type"] == "function_call")
+                        .unwrap();
+                    assert_eq!(call["call_id"], "call_lookup");
+                    assert_eq!(call["name"], "lookup");
+                    assert_eq!(
+                        serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+                        json!({"key":"value"})
+                    );
+                    let result = input
+                        .iter()
+                        .find(|item| item["type"] == "function_call_output")
+                        .unwrap();
+                    assert_eq!(result["call_id"], "call_lookup");
+                    if source == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+                        assert_eq!(
+                            serde_json::from_str::<Value>(result["output"].as_str().unwrap())
+                                .unwrap(),
+                            json!({"result":"found"})
+                        );
+                    } else {
+                        assert_eq!(result["output"], "found");
+                    }
+                    assert!(
+                        input
+                            .iter()
+                            .all(|item| item.get("encrypted_content").is_none())
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn anthropic_tool_result_preserves_json_array_and_native_block_meanings() {
+    use stravia_runtime_contract::protocol::ir::ToolResultContentKind;
+
+    let payload = json!([{"type": "text", "text": "business value"}]);
+    for kind in [
+        ToolResultContentKind::Json,
+        ToolResultContentKind::ContentBlocks,
+    ] {
+        let request = AiRequest::new(
+            "model",
+            vec![
+                AiItem::function_call(ToolCall {
+                    id: "call_lookup".into(),
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                }),
+                AiItem {
+                    role: Role::Tool,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_lookup".into(),
+                        content: payload.clone(),
+                        content_kind: Some(kind),
+                        is_error: None,
+                        cache_control: None,
+                    }]),
+                    tool_calls: None,
+                    tool_call_id: Some("call_lookup".into()),
+                    meta: None,
+                },
+            ],
+        );
+        let pair = ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                ANTHROPIC_MESSAGES_2023_06_01,
+            )
+            .unwrap();
+        let body = pair.encode_request(&request).unwrap().body;
+        let result = &body["messages"][1]["content"][0]["content"];
+        if kind == ToolResultContentKind::Json {
+            assert_eq!(
+                serde_json::from_str::<Value>(result.as_str().unwrap()).unwrap(),
+                payload
+            );
+        } else {
+            assert_eq!(result, &payload);
+        }
+    }
+}
+
+#[test]
+fn single_native_text_part_uses_the_common_chat_string_carrier() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            ANTHROPIC_MESSAGES_2023_06_01,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let request = pair.decode_request(json!({
+        "model": "model",
+        "max_tokens": 256,
+        "messages": [
+            {"role": "user", "content": "Reply READY."},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Inspect the requested reply.", "signature": "native-signature"},
+                {"type": "text", "text": "\nREADY"}
+            ]},
+            {"role": "user", "content": "Continue."}
+        ]
+    })).unwrap();
+    let body = pair.encode_request(&request).unwrap().body;
+    assert_eq!(body["messages"][1]["content"].as_str(), Some("\nREADY"));
+    assert_eq!(
+        body["messages"][1]["reasoning_content"],
+        "Inspect the requested reply."
+    );
+}
+
+#[test]
+fn explicit_chat_reasoning_presence_stays_native_across_response_roundtrips() {
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    let chat = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    for value in [Some(json!("")), Some(Value::Null), None] {
+        let mut message = json!({"role":"assistant","content":"answer"});
+        if let Some(value) = &value {
+            message["reasoning"] = value.clone();
+        }
+        let response = chat
+            .decode_response(json!({
+                "id":"chat_presence","model":"model","choices":[{
+                    "index":0,"finish_reason":"stop","message":message
+                }]
+            }))
+            .unwrap();
+        for client in [
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            ANTHROPIC_MESSAGES_2023_06_01,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            OPEN_RESPONSES_2026_04_24,
+        ] {
+            let outbound = ProtocolTransform::global()
+                .bind(client, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+                .unwrap();
+            let body = outbound.encode_response(&response).unwrap();
+            assert!(!body.to_string().contains(CHAT_REASONING_FIELD_META));
+            match client {
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 => {
+                    assert_eq!(
+                        body["choices"][0]["message"].get("reasoning_content"),
+                        value.as_ref()
+                    );
+                    assert_eq!(body["choices"][0]["message"]["content"], "answer");
+                }
+                ANTHROPIC_MESSAGES_2023_06_01 => {
+                    assert_eq!(body["content"], json!([{"type":"text","text":"answer"}]));
+                }
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA => {
+                    assert_eq!(
+                        body["candidates"][0]["content"]["parts"],
+                        json!([{"text":"answer"}])
+                    );
+                }
+                OPEN_RESPONSES_2026_04_24 => {
+                    let output = body["output"].as_array().unwrap();
+                    assert_eq!(output.len(), 1);
+                    assert_eq!(output[0]["type"], "message");
+                    assert_eq!(output[0]["content"][0]["type"], "output_text");
+                    assert_eq!(output[0]["content"][0]["text"], "answer");
+                }
+                _ => unreachable!(),
+            }
+            let inbound = ProtocolTransform::global()
+                .bind(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, client)
+                .unwrap();
+            let replay = inbound.decode_response(body).unwrap();
+            let replayed_chat = inbound.encode_response(&replay).unwrap();
+            let message = &replayed_chat["choices"][0]["message"];
+            assert_eq!(message["content"], "answer");
+            if client == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+                assert_eq!(message.get("reasoning_content"), value.as_ref());
+            } else {
+                assert!(message.get("reasoning_content").is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     let pair = ProtocolTransform::global()
         .bind(
@@ -426,24 +817,21 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
     let native = ProtocolTransform::global()
         .bind(ANTHROPIC_MESSAGES_2023_06_01, ANTHROPIC_MESSAGES_2023_06_01)
         .unwrap();
-    let mut original = native.decode_request(json!({"model":"model","max_tokens":100,"messages":[
-        {"role":"assistant","content":[{"type":"thinking","thinking":"visible","signature":"signed"},{"type":"text","text":"answer"}]},
+    let original = native.decode_request(json!({"model":"model","max_tokens":100,"messages":[
+        {"role":"assistant","content":[{"type":"thinking","thinking":"visible","signature":"signed"},{"type":"redacted_thinking","data":"hidden"},{"type":"text","text":"answer"}]},
         {"role":"user","content":"continue"}
     ]})).unwrap();
-    let MessageContent::Blocks(blocks) = &mut original.items[0].content else {
-        panic!("blocks")
-    };
-    blocks.insert(
-        1,
-        ContentBlock::RedactedThinking {
-            data: "hidden".into(),
-        },
-    );
     let mut same = original.clone();
     assert!(!super::prepare_thinking_replay(&mut same, |_| true));
-    let encoded = native.encode_request(&same).unwrap().body.to_string();
-    assert!(encoded.contains("signed"));
-    assert!(encoded.contains("hidden"));
+    let encoded = native.encode_request(&same).unwrap().body;
+    assert_eq!(
+        encoded["messages"][0]["content"],
+        json!([
+            {"type":"thinking","thinking":"visible","signature":"signed"},
+            {"type":"redacted_thinking","data":"hidden"},
+            {"type":"text","text":"answer"}
+        ])
+    );
     let mut foreign = original.clone();
     assert!(super::prepare_thinking_replay(&mut foreign, |_| false));
     let body = native.encode_request(&foreign).unwrap().body;
@@ -472,6 +860,28 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
         !body["messages"][0]["content"]
             .to_string()
             .contains("visible")
+    );
+    assert!(!body.to_string().contains("signed"));
+    assert!(!body.to_string().contains("hidden"));
+
+    let responses = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let body = responses.encode_request(&replay).unwrap().body;
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(
+        body["input"][0]["content"],
+        json!([
+            {"type":"output_text","text":"visible"},
+            {"type":"output_text","text":"answer"}
+        ])
+    );
+    assert!(
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none())
     );
     assert!(!body.to_string().contains("signed"));
     assert!(!body.to_string().contains("hidden"));

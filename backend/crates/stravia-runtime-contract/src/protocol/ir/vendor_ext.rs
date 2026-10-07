@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Chat 推理字段的显式空字符串或 null；不承载正文，也不表示 Thinking item。
+/// 该私有载体可经过响应和流式元数据，但不得出现在公开协议资源中。
+pub const CHAT_REASONING_FIELD_META: &str = "__stravia_chat_reasoning_field";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VendorExtensions {
     /// Extra fields from the ingress body (client side).
