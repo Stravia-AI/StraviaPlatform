@@ -264,6 +264,7 @@ impl WebSocketRunDelivery {
                 Some("response.completed" | "response.incomplete")
             ) {
                 self.delivery_completed_at.get_or_insert(sent_at);
+                self.terminal.publish_prepared_client_completion(sent_at);
             }
             if self.terminal.has_pending_inline_publications() {
                 self.terminal.receive_native_event(&self.observer, &value);
@@ -317,8 +318,7 @@ impl WebSocketRunDelivery {
             reason: reason.clone(),
         });
         let delivered = status == "delivered";
-        self.terminal
-            .finish_delivery_associations(&self.observer, delivered);
+        self.terminal.finish_delivery_associations(&self.observer);
         self.observer.finish(RunOutcome {
             client_output_committed: false,
             delivery: Some(crate::interaction_observation::DeliveryOutcome {
@@ -405,7 +405,26 @@ struct TerminalDelivery {
     visible_committed: bool,
     client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
     client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
+    client_completion_published: bool,
+    prepared_client_completion: Option<(RunObserver, VendorWriteGuards)>,
 }
+
+#[derive(Default)]
+struct GuardedVendorPublications {
+    _guards: Vec<tokio::sync::OwnedRwLockReadGuard<()>>,
+    publications: Vec<crate::plugin::VendorPublicationFence>,
+}
+
+impl GuardedVendorPublications {
+    fn ensure_current(&self) -> anyhow::Result<()> {
+        for publication in &self.publications {
+            publication.ensure_current()?;
+        }
+        Ok(())
+    }
+}
+
+type VendorWriteGuards = std::sync::Arc<GuardedVendorPublications>;
 
 pub(super) struct StreamDeliveryCompletion(
     tokio::sync::oneshot::Receiver<Option<RunTerminalContext>>,
@@ -473,7 +492,11 @@ impl ObservedDeliveryStream {
         let delivery_span = self.delivery_span.take();
         let root = self.root.clone();
         let delivery_completed_at = (delivery_status == "delivered" && self.status_code < 400)
-            .then(|| chrono::Utc::now().timestamp_millis());
+            .then(|| {
+                self.terminal
+                    .delivery_completed_at()
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+            });
         let Some(mut completion) = self.stream_completion.take() else {
             self.terminal.finish_http_delivery(
                 &self.observer,
@@ -630,7 +653,9 @@ impl RunTerminalContext {
     }
 
     pub(super) fn set_delivery_completed_at(&self, delivered_at: i64) {
-        self.shared().delivery_completed_at = Some(delivered_at);
+        self.shared()
+            .delivery_completed_at
+            .get_or_insert(delivered_at);
     }
 
     pub(super) fn mark_waiting_client(&self) {
@@ -865,21 +890,41 @@ impl RunTerminalContext {
         let _ = self.confirm_native_receipts(observer, receipts);
     }
 
-    fn finish_delivery_associations(&self, observer: &RunObserver, delivered: bool) {
-        if delivered
-            && self
-                .generation_committed
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            let shared = self.shared();
-            if let Some(output) = &shared.client_output {
-                observer.observe_client_completion(&shared.client_input, output);
-            } else {
-                observer.record(RunEvent::ObservationGap {
-                    reason: "client_history_projection_unavailable".into(),
-                });
+    /// Publish only from the existing confirmed-Sent settlement seam, while its
+    /// Vendor guards are held. Finishing the run must never republish history.
+    pub(super) fn publish_client_completion(&self, observer: &RunObserver, delivered_at: i64) {
+        let mut shared = self.shared();
+        if shared.client_completion_published {
+            return;
+        }
+        shared.delivery_completed_at.get_or_insert(delivered_at);
+        shared.client_completion_published = true;
+        if let Some(output) = &shared.client_output {
+            observer.observe_client_completion(&shared.client_input, output, delivered_at);
+        } else {
+            observer.record(RunEvent::ObservationGap {
+                reason: "client_history_projection_unavailable".into(),
+            });
+        }
+    }
+
+    fn prepare_client_completion(&self, observer: RunObserver, guards: VendorWriteGuards) {
+        self.shared().prepared_client_completion = Some((observer, guards));
+    }
+
+    pub(super) fn publish_prepared_client_completion(&self, delivered_at: i64) {
+        let prepared = self.shared().prepared_client_completion.take();
+        if let Some((observer, guards)) = prepared {
+            // The read locks fence epoch revocation; caller/deadline validity
+            // must also remain true at the actual synchronous Sent boundary.
+            if guards.ensure_current().is_ok() {
+                self.publish_client_completion(&observer, delivered_at);
             }
         }
+    }
+
+    fn finish_delivery_associations(&self, observer: &RunObserver) {
+        self.shared().prepared_client_completion.take();
         let records = self.compaction_records.lock();
         for record in records
             .iter()
@@ -921,7 +966,7 @@ impl RunTerminalContext {
             "failed"
         };
         let delivered = delivery_status == "delivered";
-        self.finish_delivery_associations(observer, delivered && status_code < 400);
+        self.finish_delivery_associations(observer);
         observer.finish(RunOutcome {
             client_output_committed: false,
             delivery: Some(crate::interaction_observation::DeliveryOutcome {

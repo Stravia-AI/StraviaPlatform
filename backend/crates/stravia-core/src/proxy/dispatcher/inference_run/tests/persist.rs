@@ -461,6 +461,293 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
 }
 
 #[tokio::test]
+async fn delivered_tool_sse_resumes_before_source_generation_commit() {
+    delivered_tool_resumes_before_source_generation_commit(false).await;
+}
+
+#[tokio::test]
+async fn delivered_tool_websocket_resumes_before_source_generation_commit() {
+    delivered_tool_resumes_before_source_generation_commit(true).await;
+}
+
+async fn delivered_tool_resumes_before_source_generation_commit(websocket: bool) {
+    use futures::SinkExt;
+    use reqwest_websocket::Upgrade as _;
+    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+    let mut tool_response = openai_response("");
+    tool_response["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+        "id": "commit-window-tool",
+        "type": "function",
+        "function": {"name": "inspect", "arguments": "{}"}
+    }]);
+    tool_response["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
+    let (provider_url, provider_calls) = serve_sse_sequence(vec![
+        openai_chat_response_as_sse(tool_response),
+        openai_sse("continued after tool"),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let barrier = Arc::new(CommitBarrierStore::new(Arc::clone(&gateway.turn_chains)));
+    gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
+        barrier.clone(),
+        std::time::Duration::from_secs(60),
+        None,
+    );
+    configure_route(&gateway, "tool-commit-window", &[provider_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let mut events = gateway.observation.subscribe(0);
+    let user = |text: &str| AiItem {
+        role: Role::User,
+        content: MessageContent::Text(text.into()),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let mut first = AiRequest::new("tool-commit-window", vec![user("original long question")]);
+    first.stream.enabled = true;
+    first.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+    barrier.block_next_commit();
+    let mut source_socket = None;
+    let mut websocket_server = None;
+    let completed = if websocket {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Gateway");
+        let address = listener.local_addr().expect("Gateway address");
+        let router = crate::proxy::server::create_router(gateway.clone());
+        websocket_server = Some(tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve Gateway")
+        }));
+        let mut socket = reqwest::Client::new()
+            .get(format!("http://{address}/v1/responses"))
+            .headers(headers.clone())
+            .upgrade()
+            .send()
+            .await
+            .expect("WebSocket handshake")
+            .into_websocket()
+            .await
+            .expect("WebSocket upgrade");
+        socket
+            .send(reqwest_websocket::Message::Text(
+                serde_json::json!({
+                    "type": "response.create", "model": "tool-commit-window",
+                    "input": "original long question"
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("source request");
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .expect("WebSocket event")
+                    .expect("event bytes");
+                let reqwest_websocket::Message::Text(text) = message else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(&text).expect("event JSON");
+                assert_ne!(event["type"], "error", "{event}");
+                if event["type"] == "response.completed" {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("socket sends complete tool response before source commit");
+        source_socket = Some(socket);
+        completed
+    } else {
+        let response = execute_request_with_headers(
+            gateway.clone(),
+            headers.clone(),
+            first,
+            OPEN_RESPONSES_2026_04_24,
+            "/v1/responses",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut chunks = response.into_body().into_data_stream();
+        let mut wire = String::new();
+        while !wire.contains("data: [DONE]\n\n") {
+            let bytes = chunks
+                .next()
+                .await
+                .expect("terminal frame")
+                .expect("terminal bytes");
+            wire.push_str(std::str::from_utf8(&bytes).expect("SSE UTF-8"));
+        }
+        // Do not drain/await source EOF: its producer is still free to be
+        // descheduled before settlement, exactly like the original race.
+        drop(chunks);
+        wire.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "response.completed")
+            .expect("complete tool response was actually delivered")
+    };
+    let output = completed["response"]["output"]
+        .as_array()
+        .expect("delivered output");
+    assert!(output.iter().any(|item| {
+        item["type"] == "function_call" && item["call_id"] == "commit-window-tool"
+    }));
+    // Deliberately replace the prefix: neither exact Generation matching nor
+    // a retained input tail can rescue an unpublished tool-delivery receipt.
+    let mut second = AiRequest::new(
+        "tool-commit-window",
+        vec![
+            user("compressed and rewritten question"),
+            AiItem::function_call(ToolCall {
+                id: "commit-window-tool".into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+            }),
+            AiItem::function_call_output("commit-window-tool", serde_json::json!("tool result")),
+        ],
+    );
+    second.stream.enabled = true;
+    second.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
+    let continuation = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_request_with_headers(
+            gateway.clone(),
+            headers,
+            second,
+            OPEN_RESPONSES_2026_04_24,
+            "/v1/responses",
+        ),
+    )
+    .await
+    .expect("tool-result admission must not wait for source commit");
+    assert_eq!(continuation.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        to_bytes(continuation.into_body(), usize::MAX),
+    )
+    .await
+    .expect("continuation completes while source commit is gated")
+    .expect("continuation bytes");
+    assert!(String::from_utf8_lossy(&body).contains("continued after tool"));
+    gateway
+        .observation
+        .flush()
+        .await
+        .expect("continuation admission flush");
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .expect("forest");
+    assert_eq!(
+        forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .count(),
+        1,
+        "immediate tool-result admission must keep the delivered source interaction"
+    );
+    let interaction_id = forest
+        .roots
+        .iter()
+        .flat_map(|root| &root.interactions)
+        .next()
+        .expect("source interaction")
+        .id
+        .clone();
+    let detail = gateway
+        .observation
+        .get_interaction(&interaction_id, Default::default())
+        .await
+        .expect("interaction query")
+        .expect("same interaction");
+    assert_eq!(
+        detail.runs.len(),
+        2,
+        "admission before release keeps the source interaction"
+    );
+    let source_id = detail
+        .runs
+        .iter()
+        .find(|run| run.parent_run_id.is_none())
+        .expect("original source run")
+        .id
+        .clone();
+    let continued = detail
+        .runs
+        .iter()
+        .find(|run| run.id != source_id)
+        .expect("tool-result continuation");
+    assert_eq!(continued.parent_run_id.as_deref(), Some(source_id.as_str()));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        barrier.wait_until_blocked(),
+    )
+    .await
+    .expect("source commit remains gated after continuation admission");
+    barrier.release_commit();
+    wait_for_observed_run_finish(&mut events).await;
+    wait_for_observed_run_finish(&mut events).await;
+    gateway
+        .observation
+        .flush()
+        .await
+        .expect("final observation flush");
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .expect("final forest");
+    assert_eq!(
+        forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .count(),
+        1
+    );
+    let detail = gateway
+        .observation
+        .get_interaction(&interaction_id, Default::default())
+        .await
+        .expect("final interaction query")
+        .expect("interaction");
+    assert!(
+        detail.runs.iter().all(|run| run.status != "waiting_client"),
+        "late source finish must not restore a consumed handoff"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    if let Some(socket) = source_socket {
+        socket
+            .close(reqwest_websocket::CloseCode::Normal, None)
+            .await
+            .expect("close socket");
+    }
+    if let Some(server) = websocket_server {
+        server.abort();
+    }
+    drop(events);
+    drop(barrier);
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
 async fn unavailable_observation_writer_never_holds_generation_progress() {
     let (provider_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse("first output"),

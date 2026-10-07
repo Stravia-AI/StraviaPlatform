@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
@@ -56,6 +56,7 @@ pub(super) enum WriterCommand {
         run_id: String,
         principal: String,
         window: Option<super::tail::Window>,
+        delivered_at: i64,
     },
     Admit(Box<AdmitPayload>),
     Event {
@@ -148,6 +149,7 @@ pub(super) fn spawn(
         };
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut terminal_facts: HashMap<String, (Option<DeliveryOutcome>, bool)> = HashMap::new();
+        let mut replayed_tool_results = HashSet::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -261,6 +263,9 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::ClientToolResults { run_id, events }) => {
+                    if replayed_tool_results.remove(&run_id) {
+                        continue;
+                    }
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         continue;
                     };
@@ -342,6 +347,7 @@ pub(super) fn spawn(
                     run_id,
                     principal,
                     window,
+                    delivered_at,
                 }) => {
                     let at = now();
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
@@ -357,6 +363,7 @@ pub(super) fn spawn(
                                     &principal,
                                     &hash,
                                     &pending,
+                                    delivered_at,
                                     expiry,
                                 )
                                 .await
@@ -385,7 +392,7 @@ pub(super) fn spawn(
                     let now = now();
                     // Run Attribution owns the placement decision end to end; the
                     // writer only persists the outcome and publishes it.
-                    let decision = attribution.admit(&start, &facts, received_at, now).await;
+                    let mut decision = attribution.admit(&start, &facts, received_at, now).await;
                     if decision.fingerprint_gap
                         && let Some(trace) = &trace
                     {
@@ -414,6 +421,12 @@ pub(super) fn spawn(
                         flush_one(&mut pending_text, &run);
                     }
                     let expires = expires(now, retention_days.load(Ordering::Relaxed));
+                    if let Some(input) = decision.received_input.take() {
+                        attribution.cache_received_input(start.id.clone(), input, expires);
+                    }
+                    if decision.replayed_client_tool_results {
+                        replayed_tool_results.insert(start.id.clone());
+                    }
                     match store
                         .admit(Admission {
                             start: &start,
@@ -686,6 +699,7 @@ pub(super) fn spawn(
                     mut outcome,
                     finished_at,
                 }) => {
+                    replayed_tool_results.remove(&run_id);
                     if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
                         outcome.client_output_committed |= committed;
                         if outcome.delivery.is_none() {
@@ -765,6 +779,7 @@ pub(super) fn spawn(
                     gap,
                 }) => {
                     if let Some(run_id) = run_id.as_deref() {
+                        replayed_tool_results.remove(run_id);
                         if gap {
                             if let Some(trace) = &trace {
                                 trace.mark_partial("writer_overflow", false);

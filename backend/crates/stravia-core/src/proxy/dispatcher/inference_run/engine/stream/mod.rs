@@ -409,12 +409,27 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut owned_run = Some(inference_run);
             let mut owned_phase = Some(phase);
             let mut marker_output_delivered = false;
+            let prepared_vendor_guards = if preflight_failure.is_none()
+                && !aborted && !transport.disrupted()
+            {
+                super::prepare_client_completion(
+                    &ledger, &observer, pending_generation_chain.as_mut(),
+                ).await
+            } else {
+                None
+            };
 
             if !buffer_terminal_hooks
                 && preflight_failure.is_none()
                 && !aborted
                 && !transport.disrupted()
             {
+                match projection.prepare_upload_delivery(&response).await {
+                    Ok(delivered) => ledger.terminal.stage_client_output(ingress, delivered.as_ref()),
+                    Err(error) => observer.record(crate::interaction_observation::RunEvent::ObservationGap {
+                        reason: format!("client_history_projection_unavailable: {error}"),
+                    }),
+                }
                 if let Some(marker_delivery) = staged_delivery.take()
                     && !marker_delivery.is_empty()
                 {
@@ -504,6 +519,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                 };
                 if let Some(delivered_response) = delivered_response {
+                    ledger.terminal.stage_client_output(ingress, delivered_response.as_ref());
                     delivery.reset_stream_encoder();
                     let mut final_deltas = ai_response_to_deltas(delivered_response.as_ref());
                     final_deltas.retain(|delta| !matches!(delta, AiStreamDelta::Done { .. }));
@@ -639,7 +655,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     Settlement {
                         pending_generation_chain: pending_generation_chain.take(),
                         delivery_completed_at,
-                        delivered_response: Some(response),
+                        prepared_vendor_guards,
                         ..Default::default()
                     },
                 )
@@ -680,5 +696,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         commit_tx,
         terminal_delivery_tx,
         ingress,
+        observe_delivery.then_some(completion_ledger.terminal.clone()),
     ))
 }

@@ -23,6 +23,40 @@ pub(super) struct PendingGenerationChainWrite {
     pub(super) vendor_publications: Vec<crate::plugin::VendorPublicationFence>,
 }
 
+use super::super::{GuardedVendorPublications, VendorWriteGuards};
+
+/// Acquire the existing revocation fence before exposing a complete response.
+/// The transport synchronously consumes the prepared observation at Sent;
+/// settlement retains the same guards rather than opening a second await gap.
+pub(super) async fn prepare_client_completion(
+    ledger: &RunLedger,
+    observer: &RunObserver,
+    mut pending: Option<&mut PendingGenerationChainWrite>,
+) -> Option<VendorWriteGuards> {
+    let publications = pending
+        .as_ref()
+        .map(|pending| pending.vendor_publications.as_slice())
+        .unwrap_or_default();
+    match crate::model_turn::vendor_write_fences(publications).await {
+        Ok(guards) => {
+            let guards = std::sync::Arc::new(GuardedVendorPublications {
+                _guards: guards,
+                publications: pending
+                    .as_mut()
+                    .map(|pending| std::mem::take(&mut pending.vendor_publications))
+                    .unwrap_or_default(),
+            });
+            ledger
+                .terminal
+                .prepare_client_completion(observer.clone(), guards.clone());
+            Some(guards)
+        }
+        // Settlement records the existing stale-publication failure and
+        // suppresses every result-derived side effect, as before.
+        Err(_) => None,
+    }
+}
+
 /// The outstanding work a run still owes after delivery is confirmed Sent.
 ///
 /// Every field is optional because settlement is shared by paths that owe
@@ -30,7 +64,7 @@ pub(super) struct PendingGenerationChainWrite {
 /// executions, the live tail has no staged batch left, and so on.
 #[derive(Default)]
 pub(super) struct Settlement {
-    /// Marker batch staged for the Sent response, published as the first step.
+    /// Marker batch staged for the Sent response, published after observation.
     pub staged_delivery: Option<ProjectedDeltaBatch>,
     /// Platform executions whose jobs start once their Markers are published.
     pub background_executions: Vec<crate::HistoryMarkerExecutionJob>,
@@ -45,6 +79,8 @@ pub(super) struct Settlement {
     pub delivery_completed_at: Option<i64>,
     /// The response the client received, staged as observed client output.
     pub delivered_response: Option<AiResponse>,
+    /// Revocation guards acquired before the transport exposed terminal output.
+    pub prepared_vendor_guards: Option<VendorWriteGuards>,
 }
 
 /// A settlement step that failed. Later steps still ran; the outcome
@@ -100,10 +136,10 @@ pub(super) async fn report_projected_delivery(
 
 /// Run the post-Sent tail in its fixed order:
 ///
-/// 1. publish the staged Marker batch and record the executions it released;
-/// 2. start background Platform executions and spawn the already-started ones;
-/// 3. persist the pending Generation Chain node, then flag it committed;
-/// 4. stage the delivered response as the run's observed client output.
+/// 1. publish the real delivered client projection and adapter timestamp;
+/// 2. publish the staged Marker batch and record the executions it released;
+/// 3. start background Platform executions and spawn the already-started ones;
+/// 4. persist the pending Generation Chain node, then flag it committed.
 ///
 /// A step's failure is recorded as an observation gap and enumerated in the
 /// outcome; later independent steps still run. A stale Vendor fence is the one
@@ -124,17 +160,34 @@ pub(super) async fn settle(
         mut pending_generation_chain,
         delivery_completed_at,
         mut delivered_response,
+        prepared_vendor_guards,
     } = settlement;
     let mut outcome = SettlementOutcome {
         published_platform_executions: Vec::new(),
         failures: Vec::new(),
     };
 
-    let vendor_publications = pending_generation_chain
-        .as_ref()
-        .map(|pending| pending.vendor_publications.clone())
-        .unwrap_or_default();
-    let _vendor_guards = match crate::model_turn::vendor_write_fences(&vendor_publications).await {
+    let guards = match prepared_vendor_guards {
+        Some(guards) => guards.ensure_current().map(|()| guards),
+        None => {
+            let publications = pending_generation_chain
+                .as_ref()
+                .map(|pending| pending.vendor_publications.as_slice())
+                .unwrap_or_default();
+            crate::model_turn::vendor_write_fences(publications)
+                .await
+                .map(|guards| {
+                    std::sync::Arc::new(GuardedVendorPublications {
+                        _guards: guards,
+                        publications: pending_generation_chain
+                            .as_mut()
+                            .map(|pending| std::mem::take(&mut pending.vendor_publications))
+                            .unwrap_or_default(),
+                    })
+                })
+        }
+    };
+    let _vendor_guards = match guards {
         Ok(guards) => Some(guards),
         Err(error) => {
             tracing::error!("refused stale Vendor settlement write: {error}");
@@ -153,6 +206,21 @@ pub(super) async fn settle(
             None
         }
     };
+
+    // This is observation-only publication: it cannot wait for Marker side
+    // effects or Generation persistence. The existing Sent receipt, not a
+    // pre-delivery ClientToolHandoff, proves the client received this window.
+    if let Some(delivered_at) = delivery_completed_at {
+        ledger.terminal.set_delivery_completed_at(delivered_at);
+        if _vendor_guards.is_some() {
+            if let Some(response) = delivered_response.take() {
+                ledger.terminal.stage_client_output(ingress, &response);
+            }
+            ledger
+                .terminal
+                .publish_client_completion(observer, delivered_at);
+        }
+    }
 
     if let Some(batch) = staged_delivery {
         match report_projected_delivery(session, ledger, batch, ProjectionDelivery::Sent).await {
@@ -213,12 +281,6 @@ pub(super) async fn settle(
         }
     }
 
-    if let Some(delivered_at) = delivery_completed_at {
-        ledger.terminal.set_delivery_completed_at(delivered_at);
-    }
-    if let Some(response) = delivered_response {
-        ledger.terminal.stage_client_output(ingress, &response);
-    }
     outcome
 }
 

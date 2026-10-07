@@ -7,11 +7,20 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
 
-from tests.common.helpers import find_free_port, http_request, minimal_mock_provider
+from tests.common.helpers import (
+    WebSession,
+    find_free_port,
+    http_request,
+    minimal_mock_provider,
+    start_stravia_server,
+    stop_stravia_server,
+    wait_until_ready,
+)
 from tests.e2e.admin.test_observations import (
     _create_route,
     _detail,
@@ -548,3 +557,119 @@ def test_trace_failure_preserves_exact_compacted_inference_and_reports_partial(d
         displaced.rename(trace_root)
         status, body = http_request("PUT", f"{conversation.env['admin']}/api/v1/observations/debug", headers=conversation.env["auth"], payload={"enabled": False})
         assert status == 200, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("restart", [False, True])
+def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
+    diagnostic_provider, admin_env: dict[str, Any], stravia_binary: Path, restart: bool,
+) -> None:
+    conversation = diagnostic_provider("receipt-replay")
+    question = _user("Run a probe and use its result.")
+    call_id = "call-receipt-" + uuid4().hex
+    call = {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "probe", "arguments": "{}"},
+        }],
+    }
+    assistant, _ = conversation.send([question], answer=call, tools=True)
+    original = [
+        question, assistant,
+        {"role": "tool", "tool_call_id": call_id, "content": "first result"},
+    ]
+    conversation.accepted[_semantic(original)] = {
+        "role": "assistant", "reasoning_content": "Review the probe result before continuing.",
+    }
+    tools = {"tools": [{
+        "type": "function",
+        "function": {"name": "probe", "parameters": {"type": "object"}},
+    }]}
+    status, body = _proxy(
+        conversation.env, conversation.key, conversation.name, original, body_extra=tools,
+    )
+    assert status == 200, body
+    message = body["choices"][0]["message"]
+    assert message.get("content") in (None, "")
+    assert message["reasoning_content"]
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+    def received() -> dict[str, Any] | None:
+        for item in _all_interactions(conversation.env, conversation.route_id):
+            detail = _detail(conversation.env, item["id"])
+            for run in detail["runs"]:
+                results = [event for event in run["events"] if event["kind"] == "client_tool_result"]
+                if (
+                    run["status"] == "completed"
+                    and any(event["kind"] == "run_finished" for event in run["events"])
+                    and any(event["payload"]["tool_id"] == call_id for event in results)
+                ):
+                    return detail
+        return None
+
+    first = _wait_for("thinking-only result receipt persisted", received)
+    first_receipt = next(
+        run for run in first["runs"]
+        if any(event["kind"] == "client_tool_result" for event in run["events"])
+    )
+    if restart:
+        stop_stravia_server(admin_env["process"], admin_env["logs"])
+        port = urlparse(admin_env["admin"]).port
+        proc, logs = start_stravia_server(
+            stravia_binary=stravia_binary,
+            args=[
+                "--host", "127.0.0.1", "--port", str(port),
+                "--data-dir", str(admin_env["data_dir"]),
+                "--proxy-cors-origin", admin_env["proxy_cors_origin"],
+            ],
+        )
+        admin_env.update({"process": proc, "logs": logs})
+        wait_until_ready(f"{admin_env['admin']}/api/v1/auth/state")
+        session = WebSession(admin_env["admin"])
+        status, body = session.request(
+            "POST", "/api/v1/auth/login",
+            {"username": admin_env["username"], "password": admin_env["password"]},
+        )
+        assert status == 200, body
+        admin_env["auth"] = session.auth_headers()
+        conversation.env["auth"] = admin_env["auth"]
+
+    # The client omits the thinking-only output and only appends a reminder.
+    _, replay = conversation.send([*original, _user("Continue the work.")], tools=True)
+    replay_run = _newest_run(replay)
+    assert _admitted(replay)["grouping_reason"] not in (
+        "current_tool_continuation", "pending_tool_result",
+    )
+    assert not any(event["kind"] == "client_tool_result" for event in replay_run["events"])
+    assert replay_run["generation_parent_id"] == first_receipt["generation_parent_id"]
+
+    # An identical independent invocation, unlike a strict user-only extension,
+    # is still a branch receipt. Changed values are not erased either.
+    for messages, result in [
+        (original, "first result"),
+        ([*original[:-1], {**original[-1], "content": "branch result"}], "branch result"),
+    ]:
+        _, branch = conversation.send(messages, tools=True)
+        newest = _newest_run(branch)
+        events = [event["payload"] for event in newest["events"] if event["kind"] == "client_tool_result"]
+        assert len(events) == 1
+        assert events[0]["tool_id"] == call_id
+        assert events[0]["content"] == result
+
+    details = [
+        _detail(conversation.env, item["id"])
+        for item in _all_interactions(conversation.env, conversation.route_id)
+    ]
+    runs = [run for detail in details for run in detail["runs"]]
+    assert len(runs) == 5
+    results = [
+        event["payload"] for run in runs for event in run["events"]
+        if event["kind"] == "client_tool_result"
+    ]
+    assert sorted(event["content"] for event in results) == [
+        "branch result", "first result", "first result",
+    ]
+    assert all(run["status"] != "waiting_client" for run in runs)

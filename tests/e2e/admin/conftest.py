@@ -40,6 +40,7 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
                     proxy_cors_origin,
                 ],
             )
+            environment: dict[str, Any] = {"process": proc, "logs": logs}
             try:
                 # Let the server own its ephemeral port, rather than releasing
                 # a probe socket and racing other module workers to rebind it.
@@ -67,7 +68,7 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
                     setup_token,
                     {"backend": "sqlite"},
                 )
-                yield {
+                environment.update({
                     "admin": admin_base,
                     "proxy": proxy_base,
                     "proxy_cors_origin": proxy_cors_origin,
@@ -77,11 +78,10 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
                     "username": "admin",
                     "password": "correct horse battery staple",
                     "data_dir": Path(data_dir),
-                    "logs": logs,
-                    "process": proc,
-                }
+                })
+                yield environment
             finally:
-                stop_stravia_server(proc, logs)
+                stop_stravia_server(environment["process"], environment["logs"])
     finally:
         mock_server.shutdown()
         mock_server.server_close()

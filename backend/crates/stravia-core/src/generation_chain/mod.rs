@@ -365,6 +365,8 @@ impl GenerationChain {
     /// Visits cumulative ancestor client items of a completed response node.
     /// Generation Chain owns its schema; callers borrow each root-to-head snapshot,
     /// never node payloads. An incomplete or expired chain declines without visiting.
+    /// `input_end` separates this node's received client input from its output,
+    /// borrowing the same cumulative buffer without allocating another history.
     #[tracing::instrument(
         target = "stravia::perf",
         name = "generation_chain.ancestor.visit_client_items",
@@ -375,7 +377,7 @@ impl GenerationChain {
         &self,
         principal: &Principal,
         node: &str,
-        visit: impl FnMut(&str, &[AiItem]) + Send,
+        visit: impl FnMut(&str, &[AiItem], usize) + Send,
     ) -> anyhow::Result<bool> {
         match self
             .store

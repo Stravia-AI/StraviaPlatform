@@ -145,16 +145,6 @@ impl DeliveryAdapter {
         }
     }
 
-    pub(super) async fn deliver_projected(
-        &mut self,
-        response: &AiResponse,
-        status: StatusCode,
-        projection: &mut super::projection::ClientProjectionSession,
-    ) -> Result<BufferedDelivery, crate::history_marker::HistoryMarkerError> {
-        let delivered = projection.prepare_upload_delivery(response).await?;
-        Ok(self.deliver_canonical(delivered.as_ref(), status))
-    }
-
     pub(super) fn deliver_canonical(
         &mut self,
         response: &AiResponse,
@@ -336,12 +326,14 @@ impl DeliveryAdapter {
         commit: tokio::sync::oneshot::Sender<()>,
         terminal_delivery: tokio::sync::oneshot::Sender<i64>,
         egress: ProtocolId,
+        terminal: Option<super::super::RunTerminalContext>,
     ) -> Response {
         streaming_response(Body::from_stream(CommitOnPollStream {
             inner: ReceiverStream::new(receiver),
             commit: Some(commit),
             terminal_delivery: Some(terminal_delivery),
             egress,
+            terminal,
         }))
     }
     pub(super) async fn wait_for_terminal_delivery(&mut self) -> Option<i64> {
@@ -409,6 +401,7 @@ struct CommitOnPollStream {
     commit: Option<tokio::sync::oneshot::Sender<()>>,
     terminal_delivery: Option<tokio::sync::oneshot::Sender<i64>>,
     egress: ProtocolId,
+    terminal: Option<super::super::RunTerminalContext>,
 }
 
 impl Stream for CommitOnPollStream {
@@ -423,7 +416,13 @@ impl Stream for CommitOnPollStream {
             && terminal_payload_delivered(self.egress, payload)
             && let Some(terminal_delivery) = self.terminal_delivery.take()
         {
-            let _ = terminal_delivery.send(chrono::Utc::now().timestamp_millis());
+            let delivered_at = chrono::Utc::now().timestamp_millis();
+            if let Some(terminal) = &self.terminal {
+                // Queue attribution before exposing the final frame to the
+                // caller; no producer scheduling or async fence lies between.
+                terminal.publish_prepared_client_completion(delivered_at);
+            }
+            let _ = terminal_delivery.send(delivered_at);
         }
         poll
     }
@@ -597,6 +596,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_poll_publishes_before_the_producer_receipt_is_resumed() {
+        use crate::interaction_observation::{AdmissionFacts, IngressStart, RunEvent, RunStart};
+        use futures::StreamExt;
+        use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, ToolCall};
+        let directory = tempfile::tempdir().expect("temporary Gateway");
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .expect("Gateway");
+        let observer = gateway
+            .observation
+            .observe_ingress(IngressStart {
+                id: "terminal-poll-run".into(),
+                method: "POST".into(),
+                path: "/v1/chat/completions".into(),
+                protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+            })
+            .admit(
+                RunStart {
+                    id: "terminal-poll-run".into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+                },
+                AdmissionFacts {
+                    client_request: AiRequest::new("model", Vec::new()),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
+        let terminal = super::super::super::RunTerminalContext::new(
+            None,
+            None,
+            Vec::new(),
+            gateway.compaction.clone(),
+            stravia_runtime_contract::Principal::new("owner"),
+            Default::default(),
+        );
+        let call = ToolCall {
+            id: "terminal-poll-tool".into(),
+            name: "inspect".into(),
+            arguments: "{}".into(),
+        };
+        let mut response = AiResponse::new("response", "model");
+        response.items = vec![AiItem::function_call(call.clone())];
+        observer.record(RunEvent::ClientToolHandoff {
+            tool_id: call.id.to_string(),
+            name: call.name.clone(),
+            input: None,
+        });
+        terminal.stage_client_output(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, &response);
+        terminal.prepare_client_completion(observer, std::sync::Arc::new(Default::default()));
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (commit_tx, _commit_rx) = tokio::sync::oneshot::channel();
+        let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
+        let response = DeliveryAdapter::response_from_receiver(
+            rx,
+            commit_tx,
+            receipt_tx,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            Some(terminal.clone()),
+        );
+        tx.send(Ok("data: [DONE]\n\n".into()))
+            .await
+            .expect("terminal payload");
+        let mut body = response.into_body().into_data_stream();
+        body.next()
+            .await
+            .expect("complete frame")
+            .expect("complete bytes");
+        // The producer is deterministically gated: no task/future has polled
+        // receipt_rx and no settlement has run. Publication must already be
+        // queued synchronously by the authoritative terminal-poll callback.
+        let _continued = gateway
+            .observation
+            .observe_ingress(IngressStart {
+                id: "terminal-poll-continued".into(),
+                method: "POST".into(),
+                path: "/v1/chat/completions".into(),
+                protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+            })
+            .admit(
+                RunStart {
+                    id: "terminal-poll-continued".into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+                },
+                AdmissionFacts {
+                    client_request: AiRequest::new(
+                        "model",
+                        vec![
+                            AiItem::function_call(call),
+                            AiItem::function_call_output(
+                                "terminal-poll-tool",
+                                serde_json::json!("result"),
+                            ),
+                        ],
+                    ),
+                    has_new_user: false,
+                    has_matching_pending_tool_result: true,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
+        let delivered_at = terminal.delivery_completed_at().expect("Sent timestamp");
+        assert_eq!(receipt_rx.try_recv().expect("receipt queued"), delivered_at);
+        terminal.publish_prepared_client_completion(delivered_at + 1);
+        assert_eq!(terminal.delivery_completed_at(), Some(delivered_at));
+        gateway
+            .observation
+            .flush()
+            .await
+            .expect("publication flush");
+        let forest = gateway
+            .observation
+            .query_forest(Default::default())
+            .await
+            .expect("forest");
+        let interactions: Vec<_> = forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .collect();
+        assert_eq!(
+            interactions.len(),
+            1,
+            "publication precedes admission without any producer progress"
+        );
+        let detail = gateway
+            .observation
+            .get_interaction(&interactions[0].id, Default::default())
+            .await
+            .expect("interaction query")
+            .expect("interaction");
+        let continued = detail
+            .runs
+            .iter()
+            .find(|run| run.id == "terminal-poll-continued")
+            .expect("continued run");
+        assert_eq!(
+            continued.parent_run_id.as_deref(),
+            Some("terminal-poll-run")
+        );
+        gateway.observation.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn terminal_receipt_survives_later_cancellation_without_retiming() {
         use futures::StreamExt;
         let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -618,6 +775,7 @@ mod tests {
             commit_tx,
             terminal_tx,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            None,
         );
         tx.send(Ok("data: [DONE]\n\n".into())).await.unwrap();
         let before = chrono::Utc::now().timestamp_millis();

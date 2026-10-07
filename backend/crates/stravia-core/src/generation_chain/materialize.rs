@@ -11,18 +11,23 @@ pub(super) fn decode_response_node(
     Ok((node.id, persisted))
 }
 
-fn fold_client_history(client_items: &mut Vec<AiItem>, persisted: &mut PersistedResponseNode) {
+fn fold_client_history(
+    client_items: &mut Vec<AiItem>,
+    persisted: &mut PersistedResponseNode,
+) -> usize {
     match persisted.client_history_mutation.take() {
         Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
         Some(EffectiveHistoryMutation::Replace { items }) => *client_items = items,
         None => client_items.append(&mut persisted.client_delta.messages),
     }
+    let input_end = client_items.len();
     client_items.extend(
         persisted
             .client_output
             .take()
             .unwrap_or_else(|| generic_client_history_output(&persisted.effective_output)),
     );
+    input_end
 }
 
 pub(super) fn materialize_generation_nodes(
@@ -199,7 +204,7 @@ pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) 
 
 pub(super) fn visit_client_items_from_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
-    mut visit: impl FnMut(&str, &[AiItem]),
+    mut visit: impl FnMut(&str, &[AiItem], usize),
 ) -> Result<(), String> {
     let mut decoded = Vec::with_capacity(nodes.len());
     for node in nodes {
@@ -208,8 +213,8 @@ pub(super) fn visit_client_items_from_nodes(
 
     let mut client_items = Vec::new();
     for (node_id, mut persisted) in decoded {
-        fold_client_history(&mut client_items, &mut persisted);
-        visit(node_id.as_str(), &client_items);
+        let input_end = fold_client_history(&mut client_items, &mut persisted);
+        visit(node_id.as_str(), &client_items, input_end);
     }
     Ok(())
 }

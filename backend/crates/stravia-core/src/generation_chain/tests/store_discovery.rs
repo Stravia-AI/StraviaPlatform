@@ -2655,7 +2655,15 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
 
     let mut snapshots = Vec::new();
     let available = chain
-        .visit_ancestor_client_items(&owner, "observation-replace", |node, items| {
+        .visit_ancestor_client_items(&owner, "observation-replace", |node, items, input_end| {
+            assert_eq!(
+                input_end,
+                match node {
+                    "observation-root" | "observation-replace" => 1,
+                    "observation-append" => 3,
+                    _ => panic!("unexpected node"),
+                }
+            );
             snapshots.push((
                 node.to_owned(),
                 items
@@ -2701,7 +2709,7 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
     let mut visited = Vec::new();
     assert!(
         !chain
-            .visit_ancestor_client_items(&owner, "missing-node", |node, _| {
+            .visit_ancestor_client_items(&owner, "missing-node", |node, _, _| {
                 visited.push(node.to_owned())
             })
             .await
@@ -2721,7 +2729,7 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
 
     assert!(
         !chain
-            .visit_ancestor_client_items(&owner, "expired-observation", |node, _| {
+            .visit_ancestor_client_items(&owner, "expired-observation", |node, _, _| {
                 visited.push(node.to_owned())
             })
             .await
@@ -2759,7 +2767,7 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
     let mut visited = Vec::new();
     assert!(
         chain
-            .visit_ancestor_client_items(&owner, "invalid-observation-tail", |node, _| {
+            .visit_ancestor_client_items(&owner, "invalid-observation-tail", |node, _, _| {
                 visited.push(node.to_owned())
             })
             .await

@@ -72,15 +72,17 @@ Generation parent 存在但对应父观察不可用时，新准入记录 `genera
 
 Run 级别的等待分支在两条路径上终结，不无限滞留：续接 Run 准入同一 Interaction 时（`parent_run_id` 落在本 Interaction 内、非新交互打断），仍停在 `waiting_client` 的父 Run 在准入同一事务内转为终态 `superseded`、`terminal_reason='superseded'`，并发布 `run_state_changed`（payload 带 `superseded_by` 指向续接 Run）。`superseded` 是终态：不持有最终生成响应、不参与 `completed` 判定、不再被中断/断连/重启清扫改写，按既有规则过期清理。仅 sibling 证据解除、结构上仍是叶节点的等待分支保持 `waiting_client` 投影（不参与活动等待聚合），由断连、进程重启或新输入清扫终结；新输入清扫只把本 Interaction 内尚无续接 Run 的叶分支记为 `user_interrupted`，已有本 Interaction 续接的分支一律记 `superseded`（其他 Interaction 的新分支不算续接），不当作中断。
 
+续接准入可能早于来源 Run 的 Generation 提交和 finish。来源随后以工具等待结束时，finish 事务核验同一 Interaction 内已经存在的 child，保留 `superseded` 并以该实际状态写入 `run_finished`，不能把已续接的分支退回 `waiting_client`。既有 `user_interrupted` 和真实失败的优先级不变。
+
 HTTP 等待允许一个兜底闲置边界：叶等待 Run 的 `last_active_at` 超过 24 小时仍无回传时，随保留清理按 `client_wait_expired` 转为 `disconnected` 并发布 `run_state_changed`。窗口必须覆盖合法的长时客户端工具执行，不能缩短到会话级别；客户端可能在边界后补传结果，逾期转换不删除历史也不阻止该结果照常落库。
 
 WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run 且尚未由完整工具回传解除等待的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。结果先到时不追加虚假断线；关闭先到时保留真实断线历史。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，同一进程内仍等待合法续接、24 小时闲置超时或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填 `client_disconnected`。
 
 启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，以 `run_state_changed` 承载，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`；不再单独持久化 `process_restarted` kind。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage、`last_active_at` 和 `expires_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
 
-HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。Observation 在流处理任务完成 Generation Chain 提交尝试后记录最终状态与已提交的节点关联；协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。公开工具交付后的 `waiting_client` 使用流处理任务最终确定的状态。
+HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。终帧被 delivery stream 交出时，同步投递实际客户端投影与交付时间，先于生产任务恢复和 Generation Chain 提交；非流式响应沿用完整 body 交付确认。writer 在后续准入前处理该来源索引和 `delivery_completed_at`，使立即回传工具结果的请求不依赖来源 Generation 已落盘。最终状态与已提交节点关联仍在提交尝试后记录；后续 finish 保留最早实际交付时间。协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。
 
-WebSocket 同样等待流生产任务的最终结果，再记录成功交付与工具交接；不能使用开始转发时的终态快照。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
+WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前同步登记已交付来源；不能把生产任务开始转发或消息入队当成交付。最终状态与工具交接仍使用流生产任务的最终结果。交付发布沿用已经取得的 Vendor fences，并重新检查取消、deadline 和 epoch，不等待新的写者之后重新取得读锁。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
 
 `prefers-reduced-motion: reduce` 下，`running` 使用静态绿色圆点，不播放呼吸动画。
 
@@ -135,6 +137,10 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 已确认的当前工具续接优先于 Generation parent 的常规观测分组：本次回传来源 Run 当前待完成工具调用的结果时，即使已有 Generation parent、同时夹带额外的 User 输入，也继续来源 Interaction，并将观测父节点指向来源 Run，不受尾部归并五分钟窗口限制。Generation 父边不变。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
 
+客户端可能省略 thinking-only 输出，再把上次收到的完整输入加一条 User 提醒重新提交。只有同 Principal、未过期的 `client_tool_result` 收据和完整收到输入的 canonical 严格前缀共同证明这种回放，且新增后缀仅为普通 User 输入时，才排除当前工具／pending-tool 归并优先级并跳过本 Run 的重复结果捕获。User 内容块中的 ToolResult 是新工具结果，不属于 User-only 后缀。该判定只影响 Observation；原有精确父节点、两秒快速续接和尾部规则继续适用，模型输入与 Generation 父边不变。
+
+收到输入的证明包含 leading system/developer、媒体和原生控制的 canonical 语义；忽略范围严格沿用既有 canonical 规则，包括交付/graph 元数据与缓存指令。进程内使用准入时的完整输入摘要；缓存不可用时，由已保存 Generation 重建收到输入边界，不把本次输出混入证明。截断、缺失、过期或无法无损重建时不推断回放。相同输入的独立 sibling、结果值变化和已有输入变化仍保留自己的工具收据，不按工具 ID 全局消费或去重。
+
 只有未满足当前工具续接条件且没有 Generation parent 时，才用保留尾部决定交互归属；先确认来源，再按以下规则分组：
 
 - 匹配区间之后没有新的 User 输入，且满足时间窗口：归入来源 Interaction。
@@ -166,6 +172,8 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 重现时分别构造纯文本 User、Assistant `AiItem`，累加 `canonical::item_value` 返回的各个语义单元经 `serde_json::to_vec` 编码后的字节数。纯文本 User 单元包含 `role`、单元素 `content` 数组及值为 null 的 `tool_calls`、`tool_call_id`、`artifact_references`；Assistant 单元包含 `role` 和单个文本 `content` 对象。第二个数值是 Assistant 原文的 UTF-8 长度，中文不转义为 ASCII。资源预算用于限制候选集合、序列化和核验成本，不是从这些小样本推断出的性能保证；截断搜索必须保持未关联。
 
 每窗口最多 512 单元/512 KiB：超限时保留最新后缀，而不是丢弃整个窗口；单个语义单元超过字节上限仍返回 `resource_limit`。进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。候选核验超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 使用不匹配边界；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
+
+收到输入的证明与已交付尾部共用 16 MiB 进程索引预算，并额外要求包含 leading 前缀的完整输入不超过 512 items/512 KiB；超限后缀仍可用于既有尾部诊断，但不能证明结果回放。输入证明只保留 canonical 摘要，不向普通 Observation 新增完整请求、签名或密文。
 
 `stravia-core` 新增 crate-private 深模块 `interaction_observation/`。外部 seam 保持小：
 

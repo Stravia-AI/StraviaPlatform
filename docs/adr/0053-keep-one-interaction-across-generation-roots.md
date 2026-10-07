@@ -12,6 +12,10 @@ status: accepted
 
 已确认的当前工具续接优先于 Generation parent 的常规观测分组与保留尾部归并：请求回传来源 Run 当前待完成工具调用的结果时，即使同时夹带新增 User 输入，也继续原 Interaction。该判定不以缺少 Generation parent 为前提；历史编辑可能使严格前缀退回较早父节点，Observation 仍以已确认的工具来源 Run 作为 `parent_run_id`，Generation 父边保持原样。只有未满足当前工具续接条件时，才应用原有 Generation parent 分组及下面的保留尾部、新 User 分支和五分钟窗口规则；历史回放中的旧工具结果不能触发该优先级。
 
+已交付来源在 HTTP 流式协议终帧交出、非流式完整 body 交付确认或 WebSocket 终帧发送成功时可用，不等待 Generation 提交与 Run finish。后续准入先处理该来源及实际交付时间；来源的晚到 finish 不得把同一 Interaction 内已经有 child 的分支重新置为 `waiting_client`。
+
+旧结果回放必须由同 Principal、未过期的已保存工具收据和完整收到输入的 canonical 严格前缀共同证明，新增后缀只能是普通 User 输入。该证明允许客户端省略 thinking-only 输出，但不忽略已有输入中的指令、媒体或控制差异，也不把 User 内的 ToolResult 当作普通追加输入。成立时不采用当前工具／pending-tool 优先级，且不重复保存该 Run 的历史结果；精确父节点、快速续接和尾部规则照常适用。相同输入的独立 sibling 和结果或已有输入变化的分支仍保留各自收据，不全局消费工具 ID。完整证明不可用时不猜测回放，不改变 Generation 父边或模型输入。
+
 没有 Generation parent 且不满足当前工具续接时，唯一且包含完整连续交互的保留尾部精确匹配也可以作为自动归并依据，但必须满足时间窗口约束。时间窗口限制的是这条尾部归并路径；时间接近本身不是任务续接证据，不能放宽唯一性、完整性或 Principal 隔离。
 
 保留尾部路径确认来源后，若匹配区间之后还有新的 User 输入，则创建新的 Connect Client Interaction 节点，并在诊断树中连接到来源 Interaction，而不是归入原 Interaction。两个交互分别汇总状态、Confirmed Upstream Usage 和 Debug Bundle 范围；该连接表达诊断来源，不建立 Generation Chain 执行父边。

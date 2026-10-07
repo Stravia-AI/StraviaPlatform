@@ -2740,6 +2740,84 @@ async fn target_thinking_explicit_level_rejects_all_hidden_targets_without_upstr
 }
 
 #[tokio::test]
+async fn tmp_explicit_level_skips_all_hidden_target_and_next_priority_serves() {
+    let (_data_dir, gateway, first_captured, key) =
+        gateway_with_captured_thinking("hidden-failover-model", true, "ok", None).await;
+    let first_provider = gateway
+        .admin()
+        .get_model("hidden-failover-model")
+        .await
+        .expect("Route")
+        .targets[0]
+        .provider_id()
+        .to_string();
+    let (second_url, second_captured) = serve_openai_capture_text("second").await;
+    let second_provider = add_captured_thinking_provider(&gateway, second_url).await;
+    set_thinking_targets(
+        &gateway,
+        "hidden-failover-model",
+        vec![
+            thinking_target(&first_provider, &[], 20),
+            thinking_target(&second_provider, &[ThinkingLevel::High], 10),
+        ],
+    )
+    .await;
+    let mut request = AiRequest::new("hidden-failover-model", Vec::new());
+    request.reasoning.level = Some(ThinkingLevel::High);
+    let result = gateway
+        .model_turn
+        .execute(TurnInput::new(Principal::new(key.id), request))
+        .await;
+    println!(
+        "TMP explicit: err={:?} all_hidden_calls={} next_calls={}",
+        result.as_ref().err().map(|error| error.code.clone()),
+        first_captured.lock().len(),
+        second_captured.lock().len()
+    );
+}
+
+#[tokio::test]
+async fn tmp_route_default_level_reaches_all_hidden_target() {
+    let (_data_dir, gateway, first_captured, key) = gateway_with_captured_thinking(
+        "hidden-default-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::High),
+    )
+    .await;
+    let first_provider = gateway
+        .admin()
+        .get_model("hidden-default-model")
+        .await
+        .expect("Route")
+        .targets[0]
+        .provider_id()
+        .to_string();
+    let (second_url, second_captured) = serve_openai_capture_text("second").await;
+    let second_provider = add_captured_thinking_provider(&gateway, second_url).await;
+    set_thinking_targets(
+        &gateway,
+        "hidden-default-model",
+        vec![
+            thinking_target(&first_provider, &[], 20),
+            thinking_target(&second_provider, &[ThinkingLevel::High], 10),
+        ],
+    )
+    .await;
+    let request = AiRequest::new("hidden-default-model", Vec::new());
+    let result = gateway
+        .model_turn
+        .execute(TurnInput::new(Principal::new(key.id), request))
+        .await;
+    println!(
+        "TMP default: err={:?} all_hidden_calls={} next_calls={}",
+        result.as_ref().err().map(|error| error.code.clone()),
+        first_captured.lock().len(),
+        second_captured.lock().len()
+    );
+}
+
+#[tokio::test]
 async fn route_default_thinking_level_is_dropped_when_no_level_is_supported() {
     let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
         "empty-support-model",

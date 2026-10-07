@@ -30,6 +30,7 @@ struct DiscoverInput<'a> {
     input_overflow: bool,
     ingress_received_at: i64,
     now: i64,
+    replayed_client_tool_results: bool,
 }
 
 /// Caller-confirmed admission inputs: the received client items plus the facts
@@ -49,7 +50,8 @@ pub(crate) struct AdmissionFacts {
 }
 
 /// One admission's resolved placement plus the diagnostic event to persist.
-/// Carries no request or store types; the writer only persists it.
+/// The writer persists placement and moves the already captured received window
+/// into the bounded cache; it never recaptures or interprets request history.
 pub(super) struct Attribution {
     pub interaction_id: String,
     pub parent_run_id: Option<String>,
@@ -67,6 +69,8 @@ pub(super) struct Attribution {
     /// The canonical request failed to serialize for fingerprinting; the
     /// writer marks the run's trace partial as `observation_gap`.
     pub fingerprint_gap: bool,
+    pub received_input: Option<Window>,
+    pub replayed_client_tool_results: bool,
 }
 
 /// Materialized tail evidence for one requested source.
@@ -82,6 +86,14 @@ pub(super) enum SourceWindow {
 /// same production merge path through an in-memory adapter.
 #[async_trait]
 pub(super) trait AttributionEvidence {
+    /// Persisted receipts only: a cached admission alone is not receipt evidence.
+    async fn client_tool_result_sources(
+        &self,
+        principal: &str,
+        tool_ids: &[String],
+        now: i64,
+    ) -> anyhow::Result<Vec<(String, Option<String>)>>;
+
     async fn pending_tool_sources(
         &self,
         principal: &str,
@@ -99,7 +111,9 @@ pub(super) trait AttributionEvidence {
         now: i64,
     ) -> anyhow::Result<Vec<(String, String, Option<String>)>>;
 
-    /// Tail windows behind persisted sources, in exactly the requested order.
+    /// Windows behind persisted sources, in exactly the requested order.
+    /// `received_input_only` captures the client-input boundary before that
+    /// source's output, so restart recovery cannot mistake output for a receipt.
     /// Missing node ids are resolved from their source runs. Generation Chain
     /// visits shared ancestors once per materialized chain, while this seam
     /// retains only windows belonging to the requested candidates.
@@ -108,6 +122,7 @@ pub(super) trait AttributionEvidence {
         principal: &str,
         sources: &[(&str, Option<&str>)],
         preferred_head: Option<&str>,
+        received_input_only: bool,
     ) -> anyhow::Result<Vec<SourceWindow>>;
 
     async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>>;
@@ -138,6 +153,17 @@ impl ObservationEvidence {
 
 #[async_trait]
 impl AttributionEvidence for ObservationEvidence {
+    async fn client_tool_result_sources(
+        &self,
+        principal: &str,
+        tool_ids: &[String],
+        now: i64,
+    ) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        self.store
+            .client_tool_result_sources(principal, tool_ids, now)
+            .await
+    }
+
     async fn pending_tool_sources(
         &self,
         principal: &str,
@@ -166,6 +192,7 @@ impl AttributionEvidence for ObservationEvidence {
         principal: &str,
         sources: &[(&str, Option<&str>)],
         preferred_head: Option<&str>,
+        received_input_only: bool,
     ) -> anyhow::Result<Vec<SourceWindow>> {
         let mut resolved_nodes = Vec::with_capacity(sources.len());
         for (source_run_id, node) in sources {
@@ -223,7 +250,7 @@ impl AttributionEvidence for ObservationEvidence {
             }
             let available = self
                 .generations
-                .visit_ancestor_client_items(&principal, node, |visited_node, items| {
+                .visit_ancestor_client_items(&principal, node, |visited_node, items, input_end| {
                     let Some(positions) = candidate_positions.get(visited_node) else {
                         return;
                     };
@@ -233,9 +260,18 @@ impl AttributionEvidence for ObservationEvidence {
                     if windows[last].is_some() {
                         return;
                     }
-                    let captured = Window::capture(items)
-                        .map(SourceWindow::Captured)
-                        .unwrap_or(SourceWindow::ResourceLimit);
+                    let items = if received_input_only {
+                        &items[..input_end]
+                    } else {
+                        items
+                    };
+                    let captured = if received_input_only {
+                        Window::capture_received_input(items)
+                    } else {
+                        Window::capture(items)
+                    }
+                    .map(SourceWindow::Captured)
+                    .unwrap_or(SourceWindow::ResourceLimit);
                     for index in duplicates {
                         windows[*index] = Some(captured.clone());
                     }
@@ -304,13 +340,20 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         now: i64,
     ) -> Attribution {
         let items = &facts.client_request.items;
-        let (input, input_overflow) = match Window::capture(items) {
+        let (input, input_overflow) = match Window::capture_received_input(items) {
             Some(window) => (Some(window), false),
             None => (None, !items.is_empty()),
         };
         let (canonical_fingerprint, fingerprint_gap) =
             request_fingerprint(&facts.client_request, &start.id);
         let mut parent_evidence_error = None;
+        let replayed_client_tool_results = match input.as_ref() {
+            Some(input) => {
+                self.replayed_client_tool_results(&start.principal, input, now)
+                    .await
+            }
+            None => false,
+        };
         let parent = match facts.generation_parent_id.as_deref() {
             Some(node) => match self
                 .evidence
@@ -337,6 +380,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 input_overflow,
                 ingress_received_at,
                 now,
+                replayed_client_tool_results,
             })
             .await;
         let assignment = self.grouping.assign(
@@ -345,7 +389,8 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 principal: &start.principal,
                 canonical_fingerprint: &canonical_fingerprint,
                 has_new_user: facts.has_new_user,
-                has_matching_pending_tool_result: facts.has_matching_pending_tool_result,
+                has_matching_pending_tool_result: facts.has_matching_pending_tool_result
+                    && !replayed_client_tool_results,
                 generation_parent_id: facts.generation_parent_id.as_deref(),
                 ingress_received_at,
             },
@@ -365,6 +410,8 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             ingress_received_at,
             parent_evidence_error,
             fingerprint_gap,
+            received_input: input,
+            replayed_client_tool_results,
         }
     }
 
@@ -379,6 +426,70 @@ impl<E: AttributionEvidence> RunAttribution<E> {
     ) {
         self.tail
             .insert(run_id, window, expires_at, principal, interaction_id);
+    }
+
+    pub(super) fn cache_received_input(&mut self, run_id: String, window: Window, expires_at: i64) {
+        self.tail.cache_received_input(run_id, window, expires_at);
+    }
+
+    async fn replayed_client_tool_results(
+        &self,
+        principal: &str,
+        input: &Window,
+        now: i64,
+    ) -> bool {
+        let Some(ids) = input.current_tail_tool_ids() else {
+            return false;
+        };
+        let sources = match self
+            .evidence
+            .client_tool_result_sources(principal, &ids, now)
+            .await
+        {
+            Ok(sources) => sources,
+            Err(error) => {
+                tracing::debug!(
+                    cause = %super::writer::redacted_persist_cause(&error),
+                    "received tool-result evidence lookup failed"
+                );
+                return false;
+            }
+        };
+        if sources.len() > MAX_CANDIDATES {
+            return false;
+        }
+        let mut unloaded = Vec::new();
+        for (run, node) in &sources {
+            if let Some(old) = self.tail.received_input(run, now) {
+                if old.is_received_prefix_with_only_new_users(input) {
+                    return true;
+                }
+            } else {
+                unloaded.push((run.as_str(), node.as_deref()));
+            }
+        }
+        if unloaded.is_empty() {
+            return false;
+        }
+        let windows = match self
+            .evidence
+            .source_windows(principal, &unloaded, None, true)
+            .await
+        {
+            Ok(windows) => windows,
+            Err(error) => {
+                tracing::debug!(
+                    cause = %super::writer::redacted_persist_cause(&error),
+                    "received client-input evidence materialization failed"
+                );
+                return false;
+            }
+        };
+        windows.len() == unloaded.len()
+            && windows.iter().any(|window| {
+                matches!(window, SourceWindow::Captured(old)
+                if old.is_received_prefix_with_only_new_users(input))
+            })
     }
 
     pub(super) fn sweep(&mut self, now: i64) {
@@ -446,7 +557,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             let sources = [(run_id.as_str(), None)];
             let windows = self
                 .evidence
-                .source_windows(principal, &sources, None)
+                .source_windows(principal, &sources, None, false)
                 .await
                 .ok()?;
             match windows.into_iter().next()? {
@@ -485,6 +596,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             input_overflow,
             ingress_received_at,
             now,
+            replayed_client_tool_results,
         } = discovery;
         if input_overflow {
             return (None, Some(tail_status_event("resource_limit")));
@@ -493,9 +605,10 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             return (None, None);
         };
         // 历史编辑可能只保留较早的生成前缀；当前工具结果仍能确认实际续接来源。
-        if let Some(source) = self
-            .current_tool_source(principal, input, ingress_received_at, now)
-            .await
+        if !replayed_client_tool_results
+            && let Some(source) = self
+                .current_tool_source(principal, input, ingress_received_at, now)
+                .await
         {
             return (Some(source), None);
         }
@@ -548,7 +661,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 .collect();
             let windows = match self
                 .evidence
-                .source_windows(principal, &sources, generation_parent_id)
+                .source_windows(principal, &sources, generation_parent_id, false)
                 .await
             {
                 Ok(windows) if windows.len() == unloaded.len() => windows,
@@ -646,6 +759,8 @@ mod tests {
     /// production merge path reads it through the same seam the store uses.
     #[derive(Default)]
     struct MemoryEvidence {
+        /// Persisted result receipts: principal, IDs, input snapshot, expiry.
+        received_results: HashMap<String, (String, Vec<String>, Vec<AiItem>, i64)>,
         /// `(tool_id, run_id, interaction_id, principal)` pending-tool rows.
         pending_tools: Vec<(String, String, String, String)>,
         /// `run_id -> tail source`.
@@ -659,6 +774,25 @@ mod tests {
 
     #[async_trait]
     impl AttributionEvidence for MemoryEvidence {
+        async fn client_tool_result_sources(
+            &self,
+            principal: &str,
+            tool_ids: &[String],
+            now: i64,
+        ) -> anyhow::Result<Vec<(String, Option<String>)>> {
+            Ok(self
+                .received_results
+                .iter()
+                .filter(|(_, (owner, ids, _, expiry))| {
+                    owner == principal
+                        && *expiry > now
+                        && ids.iter().any(|id| tool_ids.contains(id))
+                })
+                .take(MAX_CANDIDATES + 1)
+                .map(|(run, _)| (run.clone(), Some(run.clone())))
+                .collect())
+        }
+
         async fn pending_tool_sources(
             &self,
             principal: &str,
@@ -706,19 +840,30 @@ mod tests {
             principal: &str,
             sources: &[(&str, Option<&str>)],
             _preferred_head: Option<&str>,
+            received_input_only: bool,
         ) -> anyhow::Result<Vec<SourceWindow>> {
             Ok(sources
                 .iter()
                 .map(|(source_run_id, _)| {
-                    let items = self
-                        .tail_sources
-                        .get(*source_run_id)
-                        .filter(|(owner, _, _, _)| owner == principal)
-                        .and_then(|(_, _, _, items)| items.as_deref());
+                    let items = if received_input_only {
+                        self.received_results
+                            .get(*source_run_id)
+                            .filter(|(owner, _, _, _)| owner == principal)
+                            .map(|(_, _, items, _)| items.as_slice())
+                    } else {
+                        self.tail_sources
+                            .get(*source_run_id)
+                            .filter(|(owner, _, _, _)| owner == principal)
+                            .and_then(|(_, _, _, items)| items.as_deref())
+                    };
                     match items {
-                        Some(items) => Window::capture(items)
-                            .map(SourceWindow::Captured)
-                            .unwrap_or(SourceWindow::ResourceLimit),
+                        Some(items) => if received_input_only {
+                            Window::capture_received_input(items)
+                        } else {
+                            Window::capture(items)
+                        }
+                        .map(SourceWindow::Captured)
+                        .unwrap_or(SourceWindow::ResourceLimit),
                         None => SourceWindow::Unavailable,
                     }
                 })
@@ -990,6 +1135,318 @@ mod tests {
         let assigned = attribution.admit(&start("run"), &facts, 1, 1).await;
         assert_eq!(assigned.grouping_reason, "unmatched_parent");
         assert!(assigned.parent_evidence_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn received_prefix_reconstructs_real_generation_input_without_output_or_graph_metadata() {
+        use crate::generation_chain::{GenerationChain, GenerationSource};
+        use std::{sync::Arc, time::Duration};
+        use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+        use stravia_runtime_contract::protocol::ir::{AiResponse, OpenResponsesExt, ProtocolExt};
+
+        let backend = Arc::new(crate::turn_chain::test_store().await);
+        let chain =
+            GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+        let principal = Principal::new("owner");
+        let request = |items| {
+            let mut request = AiRequest::new("model", items);
+            request.ext = Some(ProtocolExt::OpenResponses(OpenResponsesExt::default()));
+            request
+        };
+        let source = GenerationSource::Hook {
+            protocol: OPEN_RESPONSES_2026_04_24,
+        };
+        let mut root = chain
+            .begin(principal.clone(), request(vec![user("task")]))
+            .await
+            .unwrap();
+        let mut output = AiResponse::new("root-response", "model");
+        output.items = vec![tool_call("call-1")];
+        root.stage(&mut output, &source, None);
+        root.persist().await.unwrap();
+
+        let incoming = vec![user("task"), tool_call("call-1"), tool_result("call-1")];
+        let mut receipt = chain
+            .begin(principal.clone(), request(incoming.clone()))
+            .await
+            .unwrap();
+        let mut thinking = AiResponse::new("thinking-response", "model");
+        thinking.items = vec![AiItem::thinking("not replayed", None)];
+        receipt.stage(&mut thinking, &source, None);
+        receipt.persist().await.unwrap();
+        let receipt_id = receipt.id().to_owned();
+        drop(receipt);
+        drop(root);
+        drop(chain);
+
+        let restarted = GenerationChain::from_turn_chain(backend, Duration::from_secs(60), None);
+        let mut replay = incoming.clone();
+        replay.push(user("reminder"));
+        let current = Window::capture_received_input(&replay).unwrap();
+        let mut visited_receipt = false;
+        assert!(
+            restarted
+                .visit_ancestor_client_items(&principal, &receipt_id, |node, items, input_end| {
+                    if node != receipt_id {
+                        return;
+                    }
+                    visited_receipt = true;
+                    assert_eq!(input_end, incoming.len());
+                    assert!(items.len() > input_end);
+                    assert_ne!(
+                        serde_json::to_value(&items[..input_end]).unwrap(),
+                        serde_json::to_value(&incoming).unwrap(),
+                        "stored ancestor call carries server graph IDs/provenance"
+                    );
+                    let reconstructed =
+                        Window::capture_received_input(&items[..input_end]).unwrap();
+                    assert!(reconstructed.is_received_prefix_with_only_new_users(&current));
+                    let mut different_result = replay.clone();
+                    different_result[2] =
+                        AiItem::function_call_output("call-1", serde_json::json!("changed"));
+                    assert!(!reconstructed.is_received_prefix_with_only_new_users(
+                        &Window::capture_received_input(&different_result).unwrap()
+                    ));
+                    let mut different_instruction = replay.clone();
+                    let mut instruction = user("new instructions");
+                    instruction.role = Role::System;
+                    different_instruction.insert(0, instruction);
+                    assert!(!reconstructed.is_received_prefix_with_only_new_users(
+                        &Window::capture_received_input(&different_instruction).unwrap()
+                    ));
+                })
+                .await
+                .unwrap()
+        );
+        assert!(visited_receipt);
+    }
+
+    #[tokio::test]
+    async fn received_input_replay_declines_current_tool_priority_in_memory_and_after_restart() {
+        for cached in [false, true] {
+            let received = vec![user("task"), tool_call("call-1"), tool_result("call-1")];
+            let mut evidence = MemoryEvidence::default();
+            evidence.received_results.insert(
+                "thinking-run".into(),
+                (
+                    "owner".into(),
+                    vec!["call-1".into()],
+                    received.clone(),
+                    i64::MAX,
+                ),
+            );
+            evidence.delivered.insert("source-run".into(), 1);
+            evidence.parents.insert(
+                "source-node".into(),
+                (
+                    "owner".into(),
+                    observed_parent("source-interaction", "source-run", Some(1)),
+                ),
+            );
+            let mut attribution = RunAttribution::new(evidence);
+            completed_tail_source(
+                &mut attribution,
+                "source-run",
+                "source-interaction",
+                "owner",
+                &received[..2],
+            );
+            if cached {
+                // Deliberately differ from Generation's snapshot: cache must win.
+                attribution
+                    .evidence
+                    .received_results
+                    .get_mut("thinking-run")
+                    .unwrap()
+                    .2 = vec![user("unavailable cached history")];
+                attribution.cache_received_input(
+                    "thinking-run".into(),
+                    Window::capture_received_input(&received).unwrap(),
+                    i64::MAX,
+                );
+            }
+            let mut replay = received;
+            replay.push(user("reminder"));
+            let mut request = facts(replay);
+            request.generation_parent_id = Some("source-node".into());
+            request.has_new_user = true;
+            request.has_matching_pending_tool_result = true;
+            let assigned = attribution
+                .admit(&start("reminder-run"), &request, 5_000, 5_000)
+                .await;
+            assert!(assigned.replayed_client_tool_results);
+            assert!(assigned.received_input.is_some());
+            assert_eq!(assigned.grouping_reason, "new_user");
+            assert_ne!(assigned.interaction_id, "source-interaction");
+            assert_eq!(
+                assigned.parent_interaction_id.as_deref(),
+                Some("source-interaction")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn received_input_proof_does_not_hide_a_new_user_block_tool_result() {
+        let received = vec![
+            user("task"),
+            tool_call("call-1"),
+            tool_call("call-2"),
+            tool_result("call-1"),
+        ];
+        let mut evidence = MemoryEvidence::default();
+        evidence.received_results.insert(
+            "received-run".into(),
+            (
+                "owner".into(),
+                vec!["call-1".into()],
+                received.clone(),
+                i64::MAX,
+            ),
+        );
+        evidence.delivered.insert("source-run".into(), 1);
+        let mut attribution = RunAttribution::new(evidence);
+        completed_tail_source(
+            &mut attribution,
+            "source-run",
+            "source-interaction",
+            "owner",
+            &received[..3],
+        );
+        let mut next_result = user("");
+        next_result.content = stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+            stravia_runtime_contract::protocol::ir::ContentBlock::ToolResult {
+                tool_use_id: "call-2".into(),
+                content: serde_json::json!("second tool result"),
+                content_kind: None,
+                is_error: Some(false),
+                cache_control: None,
+            },
+        ]);
+        let mut incoming = received;
+        incoming.push(next_result);
+        let assigned = attribution
+            .admit(&start("next-result-run"), &facts(incoming), 10, 10)
+            .await;
+        assert!(!assigned.replayed_client_tool_results);
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
+    }
+
+    #[tokio::test]
+    async fn receipt_proof_preserves_siblings_and_changed_result_or_user_branches() {
+        let received = vec![
+            user("task"),
+            tool_call("call-1"),
+            tool_result("call-1"),
+            user("original branch"),
+        ];
+        let mut changed_result = received.clone();
+        changed_result[2] =
+            AiItem::function_call_output("call-1", serde_json::json!("other result"));
+        changed_result.push(user("reminder"));
+        let mut changed_user = received.clone();
+        changed_user[3] = user("different branch");
+        changed_user.push(user("reminder"));
+        let mut new_assistant = received.clone();
+        new_assistant.push(AiItem::output_text("new answer"));
+        new_assistant.push(tool_result("call-1"));
+        for items in [
+            received.clone(),
+            changed_result,
+            changed_user,
+            new_assistant,
+        ] {
+            let mut evidence = MemoryEvidence::default();
+            evidence.received_results.insert(
+                "received-run".into(),
+                (
+                    "owner".into(),
+                    vec!["call-1".into()],
+                    received.clone(),
+                    i64::MAX,
+                ),
+            );
+            evidence.delivered.insert("source-run".into(), 1);
+            let mut attribution = RunAttribution::new(evidence);
+            completed_tail_source(
+                &mut attribution,
+                "source-run",
+                "source-interaction",
+                "owner",
+                &received[..2],
+            );
+            let assigned = attribution
+                .admit(&start("branch"), &facts(items), 10, 10)
+                .await;
+            assert!(!assigned.replayed_client_tool_results);
+            assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+            assert_eq!(assigned.interaction_id, "source-interaction");
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_admission_without_persisted_receipt_is_not_replay_evidence() {
+        let received = vec![user("task"), tool_call("call-1"), tool_result("call-1")];
+        let mut evidence = MemoryEvidence::default();
+        evidence.delivered.insert("source-run".into(), 1);
+        let mut attribution = RunAttribution::new(evidence);
+        completed_tail_source(
+            &mut attribution,
+            "source-run",
+            "source-interaction",
+            "owner",
+            &received[..2],
+        );
+        attribution.cache_received_input(
+            "unreceived-run".into(),
+            Window::capture_received_input(&received).unwrap(),
+            i64::MAX,
+        );
+        let mut replay = received;
+        replay.push(user("reminder"));
+        let assigned = attribution
+            .admit(&start("branch"), &facts(replay), 10, 10)
+            .await;
+        assert!(!assigned.replayed_client_tool_results);
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+    }
+
+    #[tokio::test]
+    async fn expired_or_other_principal_receipts_do_not_authorize_cached_replay() {
+        let received = vec![user("task"), tool_call("call-1"), tool_result("call-1")];
+        for (principal, expiry) in [("other-owner", i64::MAX), ("owner", 10)] {
+            let mut evidence = MemoryEvidence::default();
+            evidence.received_results.insert(
+                "received-run".into(),
+                (
+                    principal.into(),
+                    vec!["call-1".into()],
+                    received.clone(),
+                    expiry,
+                ),
+            );
+            evidence.delivered.insert("source-run".into(), 1);
+            let mut attribution = RunAttribution::new(evidence);
+            completed_tail_source(
+                &mut attribution,
+                "source-run",
+                "source-interaction",
+                "owner",
+                &received[..2],
+            );
+            attribution.cache_received_input(
+                "received-run".into(),
+                Window::capture_received_input(&received).unwrap(),
+                i64::MAX,
+            );
+            let mut replay = received.clone();
+            replay.push(user("reminder"));
+            let assigned = attribution
+                .admit(&start("branch"), &facts(replay), 10, 10)
+                .await;
+            assert!(!assigned.replayed_client_tool_results);
+            assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        }
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use super::RunEvent;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::canonical;
 
@@ -18,6 +18,13 @@ const MIN_ANSWER_BYTES: usize = 64;
 pub(super) struct Window {
     units: Vec<Unit>,
     bytes: usize,
+    complete: bool,
+    /// Canonical received-item identity, including the system/developer prefix
+    /// and private controls deliberately projected away by tail diagnostics.
+    /// Delivery/graph metadata is not client-input content: reconstructed
+    /// ancestors retain server-output provenance, not client-replay provenance.
+    /// Absent whenever a complete input cannot fit the capture limits.
+    received_items: Option<Vec<([u8; 32], bool)>>,
 }
 #[derive(Clone)]
 struct Unit {
@@ -67,16 +74,82 @@ impl Window {
                         return None;
                     }
                     units.reverse();
-                    return Some(Self { units, bytes });
+                    return Some(Self {
+                        units,
+                        bytes,
+                        complete: false,
+                        received_items: None,
+                    });
                 }
                 bytes += unit.bytes;
                 units.push(unit);
             }
         }
         units.reverse();
-        Some(Self { units, bytes })
+        Some(Self {
+            units,
+            bytes,
+            complete: true,
+            received_items: None,
+        })
     }
+    pub(super) fn capture_received_input(items: &[AiItem]) -> Option<Self> {
+        let mut window = Self::capture(items)?;
+        // Delivered outputs and ordinary retained tails never compute this.
+        if window.complete && window.current_tail_tool_ids().is_some() {
+            window.received_items = Self::capture_received_items(items);
+        }
+        Some(window)
+    }
+    fn capture_received_items(items: &[AiItem]) -> Option<Vec<([u8; 32], bool)>> {
+        if items.len() > MAX_UNITS {
+            return None;
+        }
+        let mut received = Vec::with_capacity(items.len());
+        let mut bytes = 0usize;
+        for item in items {
+            let mut value = canonical::item_value(item);
+            value.sort_all_objects();
+            let encoded = serde_json::to_vec(&value).ok()?;
+            bytes = bytes.checked_add(encoded.len())?;
+            if bytes > MAX_WINDOW_BYTES {
+                return None;
+            }
+            let user_only = item.role == stravia_runtime_contract::protocol::ir::Role::User
+                && value.as_array().is_some_and(|units| {
+                    units.iter().all(|unit| {
+                        unit.get("role").and_then(Value::as_str) == Some("user")
+                            && unit.get("native_compaction").is_none()
+                    })
+                });
+            received.push((Sha256::digest(&encoded).into(), user_only));
+        }
+        Some(received)
+    }
+
+    pub(super) fn is_received_prefix_with_only_new_users(&self, input: &Self) -> bool {
+        let (Some(old), Some(new)) = (&self.received_items, &input.received_items) else {
+            return false;
+        };
+        !old.is_empty()
+            && old.len() < new.len()
+            && new.starts_with(old)
+            && new[old.len()..].iter().all(|(_, user)| *user)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.bytes
+            + self.received_items.as_ref().map_or(0, |items| {
+                items.capacity() * std::mem::size_of::<([u8; 32], bool)>()
+            })
+    }
+
     pub(super) fn append(&mut self, mut output: Self) -> bool {
+        // A delivered input+output tail is never a received-input proof.
+        self.received_items = None;
+        self.complete = false;
+        output.received_items = None;
+        output.complete = false;
         while !self.units.is_empty()
             && (self.bytes + output.bytes > MAX_WINDOW_BYTES
                 || self.units.len() + output.units.len() > MAX_UNITS)
@@ -187,6 +260,10 @@ impl Window {
 #[derive(Default)]
 pub(super) struct TailIndex {
     windows: HashMap<String, Window>,
+    received_inputs: HashMap<String, Window>,
+    received_expiries: HashMap<String, i64>,
+    /// Insertion order breaks equal-expiry ties during receipt-priority eviction.
+    cache_order: VecDeque<(bool, String)>,
     interactions: HashMap<String, String>,
     principals: HashMap<String, String>,
     last_hashes: HashMap<String, Vec<String>>,
@@ -196,6 +273,9 @@ pub(super) struct TailIndex {
 }
 impl TailIndex {
     pub(super) fn sweep(&mut self, now: i64) {
+        self.received_expiries.retain(|_, expiry| *expiry > now);
+        self.received_inputs
+            .retain(|id, _| self.received_expiries.contains_key(id));
         self.expiries.retain(|_, expiry| *expiry > now);
         self.windows.retain(|id, _| self.expiries.contains_key(id));
         self.interactions
@@ -210,7 +290,79 @@ impl TailIndex {
             runs.retain(|id| self.expiries.contains_key(id));
             !runs.is_empty()
         });
-        self.bytes = self.windows.values().map(|window| window.bytes).sum();
+        self.cache_order.retain(|(received, run)| {
+            if *received {
+                self.received_inputs.contains_key(run)
+            } else {
+                self.windows.contains_key(run)
+            }
+        });
+        self.bytes = self
+            .windows
+            .values()
+            .chain(self.received_inputs.values())
+            .map(Window::retained_bytes)
+            .sum();
+    }
+    pub(super) fn cache_received_input(&mut self, run: String, window: Window, expires_at: i64) {
+        if window.received_items.as_ref().is_none_or(Vec::is_empty)
+            || self.received_inputs.contains_key(&run)
+        {
+            return;
+        }
+        // New receipts must not lose their proof merely because old delivered
+        // tails filled the cache. Persisted sources remain reconstructible.
+        while self.bytes + window.retained_bytes() > MAX_INDEX_BYTES {
+            let Some(position) = self
+                .cache_order
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (received, run))| {
+                    if *received {
+                        self.received_expiries.get(run)
+                    } else {
+                        self.expiries.get(run)
+                    }
+                })
+                .map(|(position, _)| position)
+            else {
+                return;
+            };
+            let Some((received, oldest)) = self.cache_order.remove(position) else {
+                return;
+            };
+            if received {
+                if let Some(window) = self.received_inputs.remove(&oldest) {
+                    self.bytes = self.bytes.saturating_sub(window.retained_bytes());
+                }
+                self.received_expiries.remove(&oldest);
+            } else {
+                if let Some(window) = self.windows.remove(&oldest) {
+                    self.bytes = self.bytes.saturating_sub(window.retained_bytes());
+                }
+                self.expiries.remove(&oldest);
+                self.principals.remove(&oldest);
+                self.interactions.remove(&oldest);
+                self.last_hashes.retain(|_, runs| {
+                    runs.retain(|run| run != &oldest);
+                    !runs.is_empty()
+                });
+                self.pending_tools.retain(|_, runs| {
+                    runs.retain(|run| run != &oldest);
+                    !runs.is_empty()
+                });
+            }
+        }
+        self.bytes += window.retained_bytes();
+        self.cache_order.push_back((true, run.clone()));
+        self.received_expiries.insert(run.clone(), expires_at);
+        self.received_inputs.insert(run, window);
+    }
+
+    pub(super) fn received_input(&self, run: &str, now: i64) -> Option<&Window> {
+        (self.received_expiries.get(run).copied()? > now)
+            .then(|| self.received_inputs.get(run))
+            .flatten()
     }
     pub(super) fn insert(
         &mut self,
@@ -220,10 +372,12 @@ impl TailIndex {
         principal: impl Into<String>,
         interaction_id: impl Into<String>,
     ) {
-        if self.windows.contains_key(&run) || self.bytes + window.bytes > MAX_INDEX_BYTES {
+        if self.windows.contains_key(&run) || self.bytes + window.retained_bytes() > MAX_INDEX_BYTES
+        {
             return;
         }
-        self.bytes += window.bytes;
+        self.bytes += window.retained_bytes();
+        self.cache_order.push_back((false, run.clone()));
         if let Some(hash) = window.last_hash_hex() {
             let runs = self.last_hashes.entry(hash).or_default();
             if !runs.iter().any(|id| id == &run) {
@@ -502,6 +656,111 @@ mod tests {
             tool_call_id: None,
             meta: None,
         }
+    }
+
+    #[test]
+    fn received_prefix_proof_is_exact_and_requires_only_new_users() {
+        let mut system = user("instructions");
+        system.role = stravia_runtime_contract::protocol::ir::Role::System;
+        let old_items = vec![
+            system,
+            user("task"),
+            AiItem::thinking("private", None),
+            AiItem::function_call_output("call", serde_json::json!("result")),
+        ];
+        let old = Window::capture_received_input(&old_items).unwrap();
+        let mut replay = old_items.clone();
+        replay.push(user("reminder"));
+        assert!(old.is_received_prefix_with_only_new_users(
+            &Window::capture_received_input(&replay).unwrap()
+        ));
+        assert!(!old.is_received_prefix_with_only_new_users(&old));
+        for index in 0..old_items.len() {
+            let mut changed = replay.clone();
+            changed[index].content =
+                stravia_runtime_contract::protocol::ir::MessageContent::Text("changed".into());
+            assert!(!old.is_received_prefix_with_only_new_users(
+                &Window::capture_received_input(&changed).unwrap()
+            ));
+        }
+        replay.push(AiItem::output_text("new output"));
+        assert!(!old.is_received_prefix_with_only_new_users(
+            &Window::capture_received_input(&replay).unwrap()
+        ));
+    }
+
+    #[test]
+    fn received_prefix_proof_declines_truncation_and_instruction_overflow() {
+        let mut items = vec![user("bounded"); MAX_UNITS - 1];
+        items.push(AiItem::function_call_output(
+            "call",
+            serde_json::json!("result"),
+        ));
+        let old = Window::capture_received_input(&items).unwrap();
+        let mut overflow = items.clone();
+        overflow.push(user("reminder"));
+        let truncated = Window::capture_received_input(&overflow).unwrap();
+        assert!(!old.is_received_prefix_with_only_new_users(&truncated));
+        assert!(truncated.received_items.is_none());
+
+        let mut instructions = user(&"s".repeat(MAX_WINDOW_BYTES));
+        instructions.role = stravia_runtime_contract::protocol::ir::Role::System;
+        let result = AiItem::function_call_output("call", serde_json::json!("result"));
+        let old =
+            Window::capture_received_input(&[instructions.clone(), user("task"), result.clone()])
+                .unwrap();
+        let new =
+            Window::capture_received_input(&[instructions, user("task"), result, user("reminder")])
+                .unwrap();
+        assert!(!old.is_received_prefix_with_only_new_users(&new));
+    }
+
+    #[test]
+    fn received_inputs_share_tail_budget_and_expire_without_indexing_tool_sources() {
+        let window = Window::capture_received_input(&[
+            user("task"),
+            AiItem::function_call_output("call", serde_json::json!("result")),
+        ])
+        .unwrap();
+        let mut index = TailIndex::default();
+        index.cache_received_input("received".into(), window.clone(), 10);
+        assert!(index.received_input("received", 9).is_some());
+        assert!(index.received_input("received", 10).is_none());
+        assert!(index.fingerprint_runs(&window, "owner").is_empty());
+        assert_eq!(index.bytes, window.retained_bytes());
+        index.sweep(10);
+        assert_eq!(index.bytes, 0);
+    }
+
+    #[test]
+    fn new_received_input_evicts_oldest_equal_expiry_tail_under_shared_budget() {
+        let window = Window::capture_received_input(&[
+            user(&"x".repeat(400 * 1024)),
+            AiItem::function_call_output("call", serde_json::json!("result")),
+        ])
+        .unwrap();
+        let mut index = TailIndex::default();
+        let count = MAX_INDEX_BYTES / window.retained_bytes();
+        for entry in 0..count {
+            index.insert(
+                format!("tail-{entry}"),
+                window.clone(),
+                20,
+                "owner",
+                "interaction",
+            );
+        }
+        assert!(index.window("tail-0").is_some());
+        index.cache_received_input("new-receipt".into(), window.clone(), 20);
+        assert!(index.received_input("new-receipt", 11).is_some());
+        assert!(index.window("tail-0").is_none());
+        assert!(index.window("tail-1").is_some());
+        assert!(
+            !index
+                .fingerprint_runs(&window, "owner")
+                .contains(&"tail-0".into())
+        );
+        assert!(index.bytes <= MAX_INDEX_BYTES);
     }
 
     /// Loads candidate windows through the index exactly as Run Attribution's

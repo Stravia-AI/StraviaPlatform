@@ -217,6 +217,7 @@ pub async fn handler(
 struct OutgoingMessage {
     message: Message,
     delivered: Option<tokio::sync::oneshot::Sender<()>>,
+    run_delivery: Option<Arc<Mutex<crate::proxy::dispatcher::WebSocketRunDelivery>>>,
 }
 
 type SharedRunDelivery =
@@ -276,8 +277,22 @@ async fn serve(
             {
                 writer_terminal_started.store(true, Ordering::Release);
             }
+            // Utf8Bytes clones share the frame bytes; keep the successful-send
+            // observation without copying the wire payload.
+            let sent_text = message
+                .run_delivery
+                .as_ref()
+                .and_then(|_| match &message.message {
+                    Message::Text(text) => Some(text.clone()),
+                    _ => None,
+                });
             if sink.send(message.message).await.is_err() {
                 break;
+            }
+            if let (Some(delivery), Some(text)) = (message.run_delivery, sent_text) {
+                // The authoritative socket Sent seam, before ACK can wake a
+                // forwarding task or a continuation can rely on this output.
+                delivery.lock().sent_text(&text);
             }
             if let Some(delivered) = message.delivered {
                 let _ = delivered.send(());
@@ -564,6 +579,7 @@ async fn serve(
                         .send(OutgoingMessage {
                             message: Message::Pong(payload),
                             delivered: Some(delivered),
+                            run_delivery: None,
                         })
                         .await
                         .is_err()
@@ -835,6 +851,7 @@ async fn forward_sse_frames(
                 .send(OutgoingMessage {
                     message: Message::Text(data.to_owned().into()),
                     delivered: Some(delivered),
+                    run_delivery: delivery.cloned(),
                 })
                 .await
                 .is_err()
@@ -846,9 +863,6 @@ async fn forward_sse_frames(
                         .finish("delivery_failed", Some("websocket_write_failed".into()));
                 }
                 return false;
-            }
-            if let Some(delivery) = delivery {
-                delivery.lock().sent_text(data);
             }
             progress.lock().observe_delivered(data);
         }
@@ -926,6 +940,7 @@ async fn send_run_timeout(
             .send(OutgoingMessage {
                 message: Message::Text(text.clone().into()),
                 delivered: Some(delivered),
+                run_delivery: None,
             })
             .await
             .is_err()
@@ -1026,6 +1041,7 @@ async fn send_error_text(outgoing: &mpsc::Sender<OutgoingMessage>, text: String)
         .send(OutgoingMessage {
             message: Message::Text(text.into()),
             delivered: Some(delivered),
+            run_delivery: None,
         })
         .await
         .is_ok()
@@ -1062,6 +1078,7 @@ mod tests {
             let Some(OutgoingMessage {
                 message: Message::Text(event),
                 delivered: Some(delivered),
+                ..
             }) = rx.recv().await
             else {
                 panic!("forwarded event");
@@ -1084,6 +1101,7 @@ mod tests {
             let OutgoingMessage {
                 message: Message::Text(event),
                 delivered: Some(delivered),
+                ..
             } = rx.recv().await.expect("error event")
             else {
                 panic!("text error event");
@@ -1108,6 +1126,7 @@ mod tests {
             let OutgoingMessage {
                 message: Message::Text(event),
                 delivered: Some(delivered),
+                ..
             } = rx.recv().await.expect("connection limit event")
             else {
                 panic!("text connection limit event");
@@ -1149,6 +1168,7 @@ mod tests {
                 let OutgoingMessage {
                     message: Message::Text(event),
                     delivered: Some(delivered),
+                    ..
                 } = rx.recv().await.expect("timeout event")
                 else {
                     panic!("text timeout event");
@@ -1174,6 +1194,7 @@ mod tests {
         tx.send(OutgoingMessage {
             message: Message::Text("queued".into()),
             delivered: None,
+            run_delivery: None,
         })
         .await
         .expect("fill outgoing queue");

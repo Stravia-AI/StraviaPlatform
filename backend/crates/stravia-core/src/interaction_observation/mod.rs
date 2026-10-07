@@ -1118,11 +1118,12 @@ impl RunObserver {
         }
     }
 
-    /// Call only after successful delivery and Generation commit, with client-visible output.
+    /// 仅在完整客户端交付成功后调用；归属证据不等待 Generation 提交。
     pub(crate) fn observe_client_completion(
         &self,
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
         output: &[stravia_runtime_contract::protocol::ir::AiItem],
+        delivered_at: i64,
     ) {
         self.inner.queued_text.lock().take();
         let window = tail::Window::capture(input).and_then(|mut window| {
@@ -1139,6 +1140,7 @@ impl RunObserver {
                 run_id: self.inner.run_id.clone(),
                 principal: self.inner.principal.clone(),
                 window,
+                delivered_at,
             })
             .is_err()
         {
@@ -1882,6 +1884,249 @@ mod snapshot_tests {
                 },
                 facts,
             )
+    }
+
+    #[tokio::test]
+    async fn delivered_tool_result_resumes_before_source_generation_commit() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let source = test_run(&observation, "early-tool-source", facts(Vec::new()));
+        source.record(RunEvent::ClientToolHandoff {
+            tool_id: "early-call".into(),
+            name: "probe".into(),
+            input: None,
+        });
+        let call = AiItem::function_call(ToolCall {
+            id: "early-call".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        });
+        let delivered_at = writer::now();
+        source.observe_client_completion(&[], std::slice::from_ref(&call), delivered_at);
+        observation.flush().await?;
+
+        let items = vec![
+            call,
+            AiItem::function_call_output("early-call", serde_json::json!("result")),
+        ];
+        let child = test_run(&observation, "early-tool-child", facts(items.clone()));
+        child.capture_client_tool_results(&items);
+        child.publish_input_preview();
+        child.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        // 客户端已经回传；源 Run 的 Generation 提交和终态可以稍后才完成。
+        source.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(delivered_at),
+            status: "waiting_client".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let forest = observation.query_forest(Default::default()).await?;
+        let interactions: Vec<_> = forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .collect();
+        assert_eq!(interactions.len(), 1, "delivered handoff must not split");
+        let detail = observation
+            .get_interaction(&interactions[0].id, Default::default())
+            .await?
+            .expect("interaction");
+        let source_run = detail
+            .runs
+            .iter()
+            .find(|run| run.id == source.run_id())
+            .unwrap();
+        let child_run = detail
+            .runs
+            .iter()
+            .find(|run| run.id == child.run_id())
+            .unwrap();
+        assert_eq!(child_run.parent_run_id.as_deref(), Some(source.run_id()));
+        assert_eq!(source_run.status, "superseded");
+        assert_eq!(detail.interaction.status, "completed");
+        let finished: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_finished'",
+        )
+        .bind(source.run_id())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stored_payload(&finished)?["status"], "superseded");
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn received_input_replay_deduplicates_results_without_erasing_forks() -> anyhow::Result<()>
+    {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let user = |text: &str| AiItem {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let question = user("run the probe");
+        let call = AiItem::function_call(ToolCall {
+            id: "history-call".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        });
+        let delivered_at = writer::now();
+        let finish = |run: &RunObserver, status: &str| {
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: Some(writer::now()),
+                status: status.into(),
+                terminal_reason: None,
+                generation_node_id: Some(format!("node-{}", run.run_id())),
+                generation_root_id: Some("node-history-source".into()),
+            });
+        };
+        let source = test_run(
+            &observation,
+            "history-source",
+            facts(vec![question.clone()]),
+        );
+        source.record(RunEvent::ClientToolHandoff {
+            tool_id: "history-call".into(),
+            name: "probe".into(),
+            input: None,
+        });
+        source.observe_client_completion(
+            std::slice::from_ref(&question),
+            std::slice::from_ref(&call),
+            delivered_at,
+        );
+        finish(&source, "waiting_client");
+        observation.flush().await?;
+
+        let original = vec![
+            question,
+            call,
+            AiItem::function_call_output("history-call", serde_json::json!("first result")),
+        ];
+        let continuation_facts = |items: Vec<AiItem>, new_user| {
+            let mut admission = facts(items);
+            admission.has_new_user = new_user;
+            admission.has_matching_pending_tool_result = true;
+            admission.generation_parent_id = Some("node-history-source".into());
+            admission.generation_root_id = Some("node-history-source".into());
+            admission
+        };
+        let first = test_run(
+            &observation,
+            "history-received",
+            continuation_facts(original.clone(), false),
+        );
+        first.capture_client_tool_results(&original);
+        first.publish_input_preview();
+        first.observe_client_completion(
+            &original,
+            &[AiItem::output_text(
+                "the client does not replay this answer",
+            )],
+            writer::now(),
+        );
+        finish(&first, "completed");
+        observation.flush().await?;
+
+        let mut replay = original.clone();
+        replay.push(user("continue the work"));
+        let mut ingress = observation.observe_ingress(IngressStart {
+            id: "history-replay".into(),
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            protocol: "responses".into(),
+        });
+        // 固定跨过 rapid continuation 窗口，不靠 sleep 决定分组结果。
+        ingress.received_at = delivered_at + 5_000;
+        let replay_run = ingress.admit(
+            RunStart {
+                id: "history-replay".into(),
+                principal: "owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            },
+            continuation_facts(replay.clone(), true),
+        );
+        replay_run.capture_client_tool_results(&replay);
+        replay_run.publish_input_preview();
+        finish(&replay_run, "completed");
+        observation.flush().await?;
+
+        let admitted: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_admitted'",
+        )
+        .bind(replay_run.run_id())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stored_payload(&admitted)?["grouping_reason"], "new_user");
+        let replay_results: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE run_id=? AND kind='client_tool_result'",
+        )
+        .bind(replay_run.run_id())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(replay_results, 0, "history is not another tool receipt");
+
+        let mut changed_result = original.clone();
+        changed_result[2] =
+            AiItem::function_call_output("history-call", serde_json::json!("branch result"));
+        let mut changed_user = original.clone();
+        changed_user[0] = user("a different branch");
+        for (id, input, expected) in [
+            ("history-sibling", original, "first result"),
+            ("history-different-result", changed_result, "branch result"),
+            ("history-different-user", changed_user, "first result"),
+        ] {
+            let branch = test_run(&observation, id, continuation_facts(input.clone(), false));
+            branch.capture_client_tool_results(&input);
+            branch.publish_input_preview();
+            finish(&branch, "completed");
+            observation.flush().await?;
+            let result: Vec<u8> = sqlx::query_scalar(
+                "SELECT payload FROM observation_events WHERE run_id=? AND kind='client_tool_result'",
+            )
+            .bind(branch.run_id())
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(stored_payload(&result)?["content"], expected);
+        }
+        let results: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE kind='client_tool_result' AND tool_id='history-call'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(results, 4, "each independent branch keeps its own receipt");
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
