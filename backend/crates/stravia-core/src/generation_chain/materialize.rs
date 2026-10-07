@@ -91,6 +91,15 @@ fn materialize_generation_nodes_inner(
             ));
         }
         fold_client_history(&mut client_items, &mut persisted);
+        let response = &mut persisted.effective_output;
+        crate::model_turn::support::restore_chat_reasoning_field(
+            &mut response.items,
+            0,
+            response
+                .vendor
+                .ingress
+                .get(stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META),
+        );
         effective_items.append(&mut persisted.effective_output.items);
         client_history = persisted.client_history;
         effective_request = persisted.effective_request;

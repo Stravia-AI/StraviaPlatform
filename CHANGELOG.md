@@ -55,6 +55,9 @@
 
 ### Fixed
 
+- Fixed explicit empty and null OpenAI-compatible reasoning fields being lost during synchronous/streaming responses, hidden model rounds, and cross-protocol history replay. Missing fields remain missing, real reasoning stays canonical, and native Responses/Anthropic/Gemini output does not gain fake thinking items. Update Stravia and rebuilt affected Vendor Plugins; reasoning fields already absent from old records cannot be reconstructed.
+- Fixed cross-protocol tool-result shapes: Anthropic now distinguishes business JSON arrays from native content blocks and serializes business JSON into legal text results; Gemini retains object results and wraps scalar/array results in its required response object. Tool-call associations and native blocks remain intact.
+- Chat request projection now uses the standard string carrier for a single visible text block after separating assistant reasoning and tool calls, avoiding rejected single-element content arrays on text-only compatible upstreams. Text bytes, multiple text blocks, and multimodal content are preserved.
 - Models without registered modalities now default to text input and text output in model lists, details, manual-model drafts, and capability queries. Explicit modality lists, including empty lists, remain unchanged; the fallback does not rewrite stored snapshots or prevent later metadata enrichment.
 - Normalized remaining CRLF/mixed text sources and regenerated schema references to LF, and added a root EditorConfig LF setting alongside the existing Git checkout rules. Non-newline source content, database schema, and applied migration history are unchanged.
 - Fixed Request History attribution when client tool results arrive immediately after an HTTP/SSE or WebSocket terminal response but before its Generation is saved. The delivered source is now available before the continuation is admitted, and late completion no longer restores an already-continued branch to `waiting_client`.

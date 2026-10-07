@@ -421,10 +421,6 @@ fn thinking_and_reasoning_plaintext_joins_into_reasoning_content() {
         assistant["reasoning_content"],
         "first thought\nsummary\ndetail"
     );
-    assert_eq!(
-        assistant["content"],
-        serde_json::json!([{"type": "text", "text": "answer"}])
-    );
     let wire = body.to_string();
     assert!(!wire.contains("opaque-sig"), "{wire}");
     assert!(!wire.contains("cipher-text"), "{wire}");

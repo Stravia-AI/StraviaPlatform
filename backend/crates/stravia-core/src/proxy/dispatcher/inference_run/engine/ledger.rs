@@ -31,6 +31,7 @@ pub(super) struct HiddenRoundState {
     pub(super) items: Vec<AiItem>,
     pub(super) usage: Usage,
     pub(super) round_count: u32,
+    chat_reasoning_field: Option<serde_json::Value>,
 }
 
 /// Platform executions whose History Markers the client has already seen.
@@ -117,6 +118,9 @@ impl RunLedger {
     /// visible response.
     pub(super) fn record_hidden_round(&self, response: &AiResponse) {
         let mut state = lock(&self.hidden_rounds);
+        if let Some(value) = crate::model_turn::support::explicit_chat_reasoning_field(response) {
+            state.chat_reasoning_field = Some(value.clone());
+        }
         state.items.extend(
             response
                 .items
@@ -141,6 +145,17 @@ impl RunLedger {
         }
         if !state.items.is_empty() {
             response.items.splice(0..0, state.items.iter().cloned());
+        }
+        // 最后一轮有明确字段时以其为准；缺字段不能抹掉隐藏轮真实存在的字段。
+        if let Some(value) = &state.chat_reasoning_field {
+            response
+                .vendor
+                .ingress
+                .entry(
+                    stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META
+                        .into(),
+                )
+                .or_insert_with(|| value.clone());
         }
         add_usage(&mut response.usage, &state.usage);
     }

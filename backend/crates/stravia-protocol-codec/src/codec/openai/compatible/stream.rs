@@ -10,6 +10,7 @@ use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Role;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
 use stravia_runtime_contract::protocol::ir::usage::Usage;
+use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
 
 // ── Non-streaming response parser ──
 
@@ -80,6 +81,9 @@ impl OpenAIResponseParser {
             .unwrap_or("")
             .to_string();
         let reasoning_content = message.and_then(extract_reasoning_from_message);
+        let empty_reasoning = message
+            .and_then(|message| empty_reasoning_field(message, reasoning_content.as_deref()))
+            .cloned();
 
         let stop_reason = choice
             .and_then(|c| c.get("finish_reason"))
@@ -117,6 +121,12 @@ impl OpenAIResponseParser {
         ai_resp
             .items
             .extend(tool_calls.into_iter().map(AiItem::function_call));
+        if let Some(value) = empty_reasoning {
+            ai_resp
+                .vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), value);
+        }
         ai_resp.stop_reason = stop_reason;
         ai_resp.usage = usage;
         Ok(ai_resp)
@@ -157,6 +167,11 @@ impl OpenAIResponseFormatter {
                 .as_object_mut()
                 .expect("message is an object")
                 .insert("reasoning_content".into(), Value::String(reasoning));
+        } else if let Some(value) = empty_reasoning_metadata(resp) {
+            message
+                .as_object_mut()
+                .expect("message is an object")
+                .insert("reasoning_content".into(), value.clone());
         }
         if !tool_calls.is_empty() {
             message
@@ -193,6 +208,13 @@ fn visible_reasoning_text(resp: &AiResponse) -> String {
     reasoning
 }
 
+fn empty_reasoning_metadata(resp: &AiResponse) -> Option<&Value> {
+    resp.vendor
+        .ingress
+        .get(CHAT_REASONING_FIELD_META)
+        .filter(|value| value.is_null() || value.as_str() == Some(""))
+}
+
 pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
     let reasoning = visible_reasoning_text(resp);
     let output = resp.output_text();
@@ -211,6 +233,11 @@ pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
     }
 
     let tool_calls = resp.tool_calls().cloned().collect::<Vec<_>>();
+    let reasoning_field = if reasoning.is_empty() {
+        empty_reasoning_metadata(resp).cloned()
+    } else {
+        Some(Value::String(reasoning))
+    };
     AiItem {
         role: Role::Assistant,
         content: if blocks.is_empty() {
@@ -220,9 +247,9 @@ pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
         },
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         tool_call_id: None,
-        meta: (!reasoning.is_empty()).then(|| {
+        meta: reasoning_field.map(|value| {
             stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(serde_json::json!({
-                "reasoning_content": reasoning,
+                "reasoning_content": value,
             }))
         }),
     }
@@ -255,6 +282,7 @@ pub struct OpenAIStreamParser {
     done: bool,
     think_buffer: String,
     in_think_block: bool,
+    reasoning_field: Option<Value>,
 }
 
 impl Default for OpenAIStreamParser {
@@ -271,6 +299,7 @@ impl OpenAIStreamParser {
             done: false,
             think_buffer: String::new(),
             in_think_block: false,
+            reasoning_field: None,
         }
     }
 }
@@ -359,7 +388,16 @@ impl OpenAIStreamParser {
         };
 
         if let Some(delta) = choice.get("delta") {
-            if let Some(reasoning) = extract_reasoning_from_message(delta)
+            let reasoning = extract_reasoning_from_message(delta);
+            if let Some(value) = empty_reasoning_field(delta, reasoning.as_deref())
+                && self.reasoning_field.as_ref() != Some(value)
+            {
+                self.reasoning_field = Some(value.clone());
+                deltas.push(AiStreamDelta::ResponseMetadata {
+                    metadata: serde_json::json!({CHAT_REASONING_FIELD_META: value}),
+                });
+            }
+            if let Some(reasoning) = reasoning
                 && !reasoning.is_empty()
             {
                 deltas.push(AiStreamDelta::ThinkingDelta(reasoning));
@@ -487,6 +525,7 @@ pub struct OpenAIStreamFormatter {
     id: String,
     model: String,
     saw_tool_call: bool,
+    saw_reasoning: bool,
 }
 
 impl Default for OpenAIStreamFormatter {
@@ -502,6 +541,7 @@ impl OpenAIStreamFormatter {
             id: stravia_runtime_contract::identifier::new_id(),
             model: String::new(),
             saw_tool_call: false,
+            saw_reasoning: false,
         }
     }
 }
@@ -524,9 +564,26 @@ impl OpenAIStreamFormatter {
                     });
                     events.push(SseEvent::new(None, chunk.to_string()));
                 }
+                AiStreamDelta::ResponseMetadata { metadata } => {
+                    // 已公开的真实推理不能被后续 empty/null 字段覆盖。
+                    if !self.saw_reasoning
+                        && let Some(value) = metadata
+                            .get(CHAT_REASONING_FIELD_META)
+                            .filter(|value| value.is_null() || value.as_str() == Some(""))
+                    {
+                        let chunk = serde_json::json!({
+                            "id": self.id,
+                            "object": "chat.completion.chunk",
+                            "model": self.model,
+                            "choices": [{"index": 0, "delta": {"reasoning_content": value}, "finish_reason": null}]
+                        });
+                        events.push(SseEvent::new(None, chunk.to_string()));
+                    }
+                }
                 AiStreamDelta::ThinkingDelta(text)
                 | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
                 | AiStreamDelta::ReasoningSummaryDelta { text, .. } => {
+                    self.saw_reasoning |= !text.is_empty();
                     let chunk = serde_json::json!({
                         "id": self.id,
                         "object": "chat.completion.chunk",
@@ -688,6 +745,21 @@ fn extract_usage(v: &Value) -> Usage {
 fn first_u64(obj: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .find_map(|k| obj.get(*k).and_then(|v| v.as_u64()))
+}
+
+fn empty_reasoning_field<'a>(message: &'a Value, text: Option<&str>) -> Option<&'a Value> {
+    let fields = ["reasoning_content", "reasoning"];
+    match text {
+        Some("") => fields
+            .iter()
+            .filter_map(|field| message.get(*field))
+            .find(|value| value.as_str() == Some("")),
+        None => fields
+            .iter()
+            .filter_map(|field| message.get(*field))
+            .find(|value| value.is_null()),
+        _ => None,
+    }
 }
 
 pub(crate) fn extract_reasoning_from_message(message: &Value) -> Option<String> {

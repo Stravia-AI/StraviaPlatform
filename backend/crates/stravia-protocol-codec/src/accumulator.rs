@@ -10,6 +10,7 @@ use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Usage;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
+use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
 
 /// Ordered source part identity: `(is_reasoning_content, index)`.
 /// The explicit category keeps summaries before content without reserving bits
@@ -37,6 +38,7 @@ pub struct StreamResponseAccumulator {
     pub id: String,
     pub model: String,
     response_metadata: Option<serde_json::Value>,
+    chat_reasoning_field: Option<serde_json::Value>,
     google_response_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     items: Vec<AccumulatedItem>,
     tool_calls: Vec<Option<ToolCall>>,
@@ -193,7 +195,21 @@ impl StreamResponseAccumulator {
                 }
             }
             AiStreamDelta::ResponseMetadata { metadata } => {
-                self.response_metadata = Some(metadata.clone());
+                if let Some(object) = metadata.as_object()
+                    && let Some(value) = object.get(CHAT_REASONING_FIELD_META)
+                {
+                    if value.is_null() || value.as_str() == Some("") {
+                        self.chat_reasoning_field = Some(value.clone());
+                    }
+                    // Chat 字段存在性不是 Responses profile；单独信号不能抹掉上游 profile。
+                    if object.len() > 1 {
+                        let mut profile = object.clone();
+                        profile.remove(CHAT_REASONING_FIELD_META);
+                        self.response_metadata = Some(serde_json::Value::Object(profile));
+                    }
+                } else {
+                    self.response_metadata = Some(metadata.clone());
+                }
             }
             AiStreamDelta::ProtectedThinkingStart { .. } => {}
             AiStreamDelta::ThinkingDelta(text) => {
@@ -406,6 +422,7 @@ impl StreamResponseAccumulator {
             id,
             model,
             response_metadata,
+            chat_reasoning_field,
             google_response_metadata,
             items,
             tool_calls,
@@ -509,6 +526,11 @@ impl StreamResponseAccumulator {
         }
         resp.stop_reason = stop_reason;
         resp.usage = usage;
+        if let Some(value) = chat_reasoning_field {
+            resp.vendor
+                .ingress
+                .insert(CHAT_REASONING_FIELD_META.into(), value);
+        }
         if let Some(metadata) = google_response_metadata {
             resp.vendor.ingress.insert(
                 "__google_response_metadata".into(),
@@ -855,6 +877,43 @@ mod tests {
         assert!(response.items[1].function_call_ref().is_some());
         assert!(response.items[2].thinking_ref().is_some());
     }
+
+    #[test]
+    fn separates_explicit_chat_reasoning_from_response_profile() {
+        use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+        for value in [serde_json::json!(""), serde_json::Value::Null] {
+            let mut accumulator = StreamResponseAccumulator::default();
+            accumulator.apply_all(&[
+                AiStreamDelta::ResponseMetadata {
+                    metadata: serde_json::json!({"temperature": 0.4, "metadata": {"trace": "kept"}}),
+                },
+                AiStreamDelta::ResponseMetadata {
+                    metadata: serde_json::json!({CHAT_REASONING_FIELD_META: value.clone()}),
+                },
+                AiStreamDelta::TextDelta("answer".into()),
+            ]);
+
+            let response = accumulator.into_ai_response();
+            assert_eq!(
+                response.vendor.ingress.get(CHAT_REASONING_FIELD_META),
+                Some(&value)
+            );
+            assert_eq!(
+                response.vendor.ingress["__open_responses_response_profile"],
+                serde_json::json!({"temperature": 0.4, "metadata": {"trace": "kept"}})
+            );
+            assert_eq!(response.items.len(), 1);
+            assert_eq!(response.items[0].output_text_ref(), Some("answer"));
+            let formatted = crate::codec::open_responses::formatter::ResponsesResponseFormatter
+                .format_response(&response);
+            assert!(formatted.get(CHAT_REASONING_FIELD_META).is_none());
+            assert_eq!(formatted["temperature"], 0.4);
+            assert_eq!(formatted["output"].as_array().unwrap().len(), 1);
+            assert_eq!(formatted["output"][0]["type"], "message");
+        }
+    }
+
     #[test]
     fn merges_completed_item_metadata_without_reverting_transformed_text() {
         let mut accumulator = StreamResponseAccumulator::default();

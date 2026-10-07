@@ -8,6 +8,7 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
 
 pub struct ResponsesResponseFormatter;
 
@@ -180,7 +181,13 @@ impl ResponsesResponseFormatter {
                 "__open_responses_response_profile",
             ] {
                 if let Some(profile) = resp.vendor.ingress.get(key).and_then(Value::as_object) {
-                    resource.extend(profile.clone());
+                    // Chat 字段存在性只供内部历史转换使用，不能穿透到 Responses 资源。
+                    resource.extend(
+                        profile
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != CHAT_REASONING_FIELD_META)
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    );
                 }
             }
             if status == "failed" {

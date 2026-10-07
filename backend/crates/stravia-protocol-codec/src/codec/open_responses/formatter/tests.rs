@@ -2,6 +2,62 @@ use super::*;
 use stravia_runtime_contract::protocol::ir::Usage;
 
 #[test]
+fn chat_reasoning_presence_does_not_become_a_responses_item_or_resource_field() {
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    for value in [serde_json::json!(""), serde_json::Value::Null] {
+        let mut response = AiResponse::new("resp_presence", "model");
+        response
+            .vendor
+            .ingress
+            .insert(CHAT_REASONING_FIELD_META.into(), value.clone());
+        response.vendor.ingress.insert(
+            "__open_responses_response_profile".into(),
+            serde_json::json!({"temperature": 0.4, CHAT_REASONING_FIELD_META: value}),
+        );
+        response.items.push(AiItem::output_text("answer"));
+
+        let formatted = ResponsesResponseFormatter.format_response(&response);
+        assert!(formatted.get(CHAT_REASONING_FIELD_META).is_none());
+        assert_eq!(formatted["temperature"], 0.4);
+        let output = formatted["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["text"], "answer");
+    }
+}
+
+#[test]
+fn chat_reasoning_presence_keeps_real_reasoning_and_opaque_items() {
+    use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+
+    let mut response = AiResponse::new("resp_real_reasoning", "model");
+    response
+        .vendor
+        .ingress
+        .insert(CHAT_REASONING_FIELD_META.into(), Value::Null);
+    response.items = vec![
+        AiItem::reasoning(
+            vec!["real summary".into()],
+            vec!["real thought".into()],
+            Some("opaque-signature".into()),
+        ),
+        AiItem::unknown(serde_json::json!({"type": "stravia:agent_result", "result": "kept"})),
+    ];
+
+    let formatted = ResponsesResponseFormatter.format_response(&response);
+    assert!(formatted.get(CHAT_REASONING_FIELD_META).is_none());
+    let output = formatted["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[0]["summary"][0]["text"], "real summary");
+    assert_eq!(output[0]["content"][0]["text"], "real thought");
+    assert_eq!(output[0]["encrypted_content"], "opaque-signature");
+    assert_eq!(output[1]["type"], "stravia:agent_result");
+    assert_eq!(output[1]["result"], "kept");
+}
+
+#[test]
 fn formats_cache_write_tokens_when_known() {
     let mut response = AiResponse::new("resp_usage", "model");
     response.usage = Usage {
