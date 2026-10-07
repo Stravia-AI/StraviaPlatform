@@ -4,6 +4,8 @@ Status: accepted
 
 Stravia persists each Provider Model as the Provider instance’s editable metadata snapshot. Its explicit state distinguishes `unregistered`, `imported` with a source stamp, and `edited` with any known previous source. An ID-only discovery does not invent capabilities, modalities, or context limits. A later discovery may supply the first real specification only while the snapshot remains unregistered; normal reconciliation preserves imported and edited specifications. Administrators can explicitly re-import one complete Provider Catalog Entry when they want current catalog values.
 
+Missing modalities are the effective-value exception: administration, manual-model preparation, capability queries, and runtime consumers default to text input and text output. Explicit modality lists, including empty lists, take precedence. This fallback does not write a declaration into an existing stored snapshot or make ID-only discovery count as an imported specification; context, reasoning efforts, and pricing remain unknown.
+
 ## Considered Options
 
 A sparse overlay would keep unedited fields current but requires inheritance, tombstones, deep merge, conflict display, and two simultaneous facts in every caller. Continuous full synchronization is simpler to read but silently overwrites local corrections. A persisted snapshot makes the editable record the single fact consumed by administration and future cost calculation, at the cost of intentionally stale metadata until explicit re-import.

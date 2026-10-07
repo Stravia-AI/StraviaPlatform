@@ -215,7 +215,6 @@ pub(super) fn model_turn_error_status(
         "target_rpm_exceeded" | "allowance_suspended" => StatusCode::TOO_MANY_REQUESTS,
         "target_rpm_queue_full" => StatusCode::SERVICE_UNAVAILABLE,
         "input_modality_unsupported"
-        | "thinking_level_unsupported"
         | "compaction_unsupported"
         | "compaction_target_mismatch"
         | "invalid_compaction_state"

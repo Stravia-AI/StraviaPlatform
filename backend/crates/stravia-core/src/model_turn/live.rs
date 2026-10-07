@@ -1210,7 +1210,6 @@ async fn prepare_attempt(
     {
         provider_request.reasoning.display = Some("omitted".into());
     }
-    let mut default_level_applied = false;
     // 与 generation_chain 的继承判定一致：任何显式推理指令都阻止默认档介入。
     if !provider_request.reasoning.enabled
         && provider_request.reasoning.level.is_none()
@@ -1222,7 +1221,6 @@ async fn prepare_attempt(
         match ThinkingLevel::from_wire(value) {
             Ok(level) => {
                 provider_request.reasoning.level = Some(level);
-                default_level_applied = true;
             }
             Err(_) => {
                 tracing::warn!(
@@ -1233,7 +1231,7 @@ async fn prepare_attempt(
             }
         }
     }
-    if let Some(requested) = provider_request.reasoning.level {
+    if provider_request.reasoning.level.is_some() || provider_request.reasoning.effort.is_some() {
         let mut supported = ThinkingLevel::ALL;
         let mut count = 0;
         for level in ThinkingLevel::ALL {
@@ -1244,17 +1242,14 @@ async fn prepare_attempt(
                 count += 1;
             }
         }
-        provider_request.reasoning.level = match requested.clamp(&supported[..count]) {
-            Some(level) => Some(level),
-            // 默认档只是偏好；显式要求则必须换到有可用档位的 Target。
-            None if default_level_applied => None,
-            None => {
-                return Err(AttemptFailure::reroutable(
-                    "thinking_level_unsupported",
-                    "Target has no Supported Thinking Level for this request",
-                ));
-            }
-        };
+        provider_request.reasoning.level = provider_request
+            .reasoning
+            .level
+            .and_then(|requested| requested.clamp(&supported[..count]));
+        // 未配置可用档位时交给上游默认行为，不让客户端 effort 改变 Target 选择。
+        if count == 0 {
+            provider_request.reasoning.effort = None;
+        }
     }
 
     gateway

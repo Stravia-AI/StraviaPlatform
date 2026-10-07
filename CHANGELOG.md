@@ -13,6 +13,7 @@
 
 ### Changed
 
+- Requests selecting a Target without configured thinking levels now omit upstream effort parameters and continue on that Target, leaving reasoning intensity to the upstream rather than failing over solely because the client specified an effort. Configured level mappings and independent reasoning controls remain unchanged.
 - Confirmed Responses, Gemini, native Anthropic, and Claude Code paths now request native thinking summaries by default without changing reasoning intensity. Explicit suppression and supported summary formats take precedence; unconfirmed compatible adapters retain their existing behavior. Antigravity family selection preserves `includeThoughts`. Rebuild and re-import affected standalone plugins to receive their wire changes.
 - DataTable now keeps its state and callbacks in one owner while private header, row, and paginator components handle rendering. Existing capabilities, public Props, bindings, callback order, and the single-table DOM structure remain unchanged.
 - Localized known Antigravity quota labels in Chinese, preserving unknown upstream names and stable guard keys. Codex credit balances and individual spend limits now use credits rather than an unsupported USD currency label, without scaling or currency conversion. Re-import the rebuilt Codex plugin and refresh allowances; the label translations require the updated WebUI.
@@ -54,6 +55,7 @@
 
 ### Fixed
 
+- Models without registered modalities now default to text input and text output in model lists, details, manual-model drafts, and capability queries. Explicit modality lists, including empty lists, remain unchanged; the fallback does not rewrite stored snapshots or prevent later metadata enrichment.
 - Normalized remaining CRLF/mixed text sources and regenerated schema references to LF, and added a root EditorConfig LF setting alongside the existing Git checkout rules. Non-newline source content, database schema, and applied migration history are unchanged.
 - Fixed Request History attribution when client tool results arrive immediately after an HTTP/SSE or WebSocket terminal response but before its Generation is saved. The delivered source is now available before the continuation is admitted, and late completion no longer restores an already-continued branch to `waiting_client`.
 - Fixed old tool results being counted again or treated as fresh continuations when clients omit thinking-only output and append a user reminder to previously received input. Verified replay is excluded from observation capture without changing model input or Generation parentage; independent sibling branches, changed results, and new tool results inside user messages remain intact. Existing observations are not rewritten; no database migration is required.

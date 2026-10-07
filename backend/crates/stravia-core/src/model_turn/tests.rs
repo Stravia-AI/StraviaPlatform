@@ -2538,28 +2538,18 @@ async fn route_default_thinking_level_clamps_to_the_nearest_supported_level() {
 
 #[tokio::test]
 async fn target_thinking_uses_selected_mapping_instead_of_route_intersection() {
-    // Distinct cases: no shared levels, a shared level below the request, and a
-    // Hidden first Target that must reroute with the original requested level.
-    for (first_levels, second_levels, requested, first_selected, expected) in [
+    // 没有共同档位、共同档位低于请求：都应使用选中 Target 自己的映射。
+    for (first_levels, second_levels, requested, expected) in [
         (
             vec![ThinkingLevel::Low],
             vec![ThinkingLevel::High],
             ThinkingLevel::Low,
-            true,
             "low",
         ),
         (
             vec![ThinkingLevel::Low, ThinkingLevel::High],
             vec![ThinkingLevel::Low],
             ThinkingLevel::High,
-            true,
-            "high",
-        ),
-        (
-            Vec::new(),
-            vec![ThinkingLevel::Low, ThinkingLevel::High],
-            ThinkingLevel::Medium,
-            false,
             "high",
         ),
     ] {
@@ -2586,27 +2576,17 @@ async fn target_thinking_uses_selected_mapping_instead_of_route_intersection() {
         .await;
         let mut request = AiRequest::new("target-thinking-model", Vec::new());
         request.reasoning.level = Some(requested);
-        let selected_capture = if first_selected {
-            &first_capture
-        } else {
-            &second_capture
-        };
         let body = captured_reasoning_effort(
             &gateway,
-            selected_capture,
+            &first_capture,
             &key.id,
             "target-thinking-model",
             request,
         )
         .await;
         assert_eq!(body["reasoning_effort"], expected, "request {requested:?}");
-        let unselected_capture = if first_selected {
-            &second_capture
-        } else {
-            &first_capture
-        };
         assert!(
-            unselected_capture.lock().is_empty(),
+            second_capture.lock().is_empty(),
             "unselected Target must not receive an upstream request"
         );
     }
@@ -2700,7 +2680,7 @@ async fn target_thinking_failover_restarts_from_original_level() {
 }
 
 #[tokio::test]
-async fn target_thinking_explicit_level_rejects_all_hidden_targets_without_upstream_call() {
+async fn target_thinking_unconfigured_target_sends_without_effort_instead_of_failing_over() {
     let (_data_dir, gateway, captured, key) =
         gateway_with_captured_thinking("hidden-thinking-model", true, "ok", None).await;
     let provider = gateway
@@ -2718,24 +2698,36 @@ async fn target_thinking_explicit_level_rejects_all_hidden_targets_without_upstr
         "hidden-thinking-model",
         vec![
             thinking_target(&provider, &[], 20),
-            thinking_target(&second_provider, &[], 10),
+            thinking_target(&second_provider, &[ThinkingLevel::High], 10),
         ],
     )
     .await;
-    let mut request = AiRequest::new("hidden-thinking-model", Vec::new());
-    request.reasoning.level = Some(ThinkingLevel::High);
-    let result = gateway
-        .model_turn
-        .execute(TurnInput::new(Principal::new(key.id), request))
-        .await;
-    let error = result
-        .err()
-        .expect("an explicit level must not be silently dropped");
-    assert_eq!(error.code, "thinking_level_unsupported");
-    assert!(captured.lock().is_empty(), "no upstream call is permitted");
+    let request = stravia_protocol_codec::codec::open_responses::decoder::ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "hidden-thinking-model",
+            "input": "Keep the preferred Target",
+            "reasoning": {"effort": "high", "summary": "auto"}
+        }))
+        .expect("decode explicit client effort");
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "hidden-thinking-model",
+        request,
+    )
+    .await;
+    assert_eq!(body["model"], "upstream-model");
+    assert_eq!(body["messages"][0]["content"], "Keep the preferred Target");
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(
+        body.get("reasoning")
+            .and_then(|value| value.get("effort"))
+            .is_none()
+    );
     assert!(
         second_capture.lock().is_empty(),
-        "no upstream call is permitted"
+        "missing effort mappings must not skip the preferred Target"
     );
 }
 

@@ -416,7 +416,7 @@ _避免使用_：模型可用性、占位默认规格、从字段值推断人工
 
 ## Model Specification
 
-Model Specification（模型规格）是模型记录中已登记的上下文与输入输出限额、输入输出模态和功能声明；对 Provider Model，以已保存且可人工编辑的快照为准。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；信息缺失不等于不支持。
+Model Specification（模型规格）是模型记录中已登记的上下文与输入输出限额、输入输出模态和功能声明；对 Provider Model，以已保存且可人工编辑的快照为准。未登记模态时，有效规格默认文本输入、文本输出；显式模态列表（包括空列表）优先，回退不改变原始快照的登记状态。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；其他信息缺失不等于不支持。
 _避免使用_：实测能力、实际可用能力、把未登记称为不支持
 
 ## Selection Policy
@@ -589,7 +589,7 @@ _避免使用_：Advertised Thinking Levels、Visible Thinking Levels、Supporte
 
 ## Default Thinking Level
 
-Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不在 Supported Thinking Levels 中的档位；运行时与客户端显式档位统一按选中 Target 的非 Hidden Mapping 匹配，不受 Route 的 Supported Thinking Levels 钳制。客户端显式给出的任何推理指令优先于它。若选中 Target 的 Mapping 全为 Hidden，客户端显式档位跳过该 Target 并继续可用的 failover；Route 默认档位则在该 Target 上丢弃默认，按未指定继续，由上游模型自行决定。
+Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不在 Supported Thinking Levels 中的档位；运行时与客户端显式档位统一按选中 Target 的非 Hidden Mapping 匹配，不受 Route 的 Supported Thinking Levels 钳制。客户端显式给出的任何推理指令优先于它。若选中 Target 的 Mapping 全为 Hidden，则无论档位来自客户端还是 Route 默认值，都清除本次上游请求的 level 和 effort，保留其他推理指令并继续请求该 Target；不因未配置档位而跳过 Target，由上游模型自行决定推理强度。
 _避免使用_：Route Reasoning Default、Fallback Effort、Implicit Thinking
 
 ## Target Thinking Control
