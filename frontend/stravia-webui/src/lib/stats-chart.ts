@@ -107,12 +107,8 @@ function columnOf(start: number, bucketMs: number): { key: number; row: number }
 }
 
 function tokenTotal(row: TokenStats): number | null {
-  const parts = [
-    row.total_input_tokens,
-    row.total_output_tokens,
-    row.total_cache_read_tokens,
-    row.total_cache_write_tokens,
-  ]
+  // 管理输入已包含缓存；缓存分项不能再次增加总用量。
+  const parts = [row.total_input_tokens, row.total_output_tokens]
   if (parts.every((value) => value == null)) return null
   return parts.reduce<number>((sum, value) => sum + (value ?? 0), 0)
 }

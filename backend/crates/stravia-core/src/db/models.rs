@@ -829,6 +829,7 @@ pub struct WebAccessSettings {
 pub struct StatsOverview {
     /// 保留期内的客户端请求数，包括准入前拒绝；内部轮次和重试不重复计数。
     pub total_requests: i64,
+    /// 已完成 attempt 已知上游总输入的合计；不扣缓存，不因缓存未知而丢弃输入。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_cache_read_tokens: Option<i64>,
@@ -849,6 +850,7 @@ pub struct StatsSeries {
     pub request_count: i64,
     /// 本桶内最终失败的客户端请求数；同一请求的内部轮次和重试只计一次。
     pub error_count: i64,
+    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_cache_read_tokens: Option<i64>,
@@ -862,6 +864,7 @@ pub struct StatsSeries {
 pub struct ModelStats {
     pub model: String,
     pub request_count: i64,
+    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_reasoning_tokens: Option<i64>,
@@ -876,8 +879,8 @@ pub struct ProviderStats {
     /// 涉及该服务的最终失败请求数；跨服务失败可分别计入多个服务。
     pub error_count: i64,
     pub avg_duration_ms: Option<f64>,
-    /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ净生成耗时。
-    /// 组内任一已完成 attempt 未报告输出或耗时，或总生成耗时为零时为 null。
+    /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ完整上游耗时。
+    /// 不扣首 Token 等待；任一已完成 attempt 未报告输出或耗时，或总耗时为零时为 null。
     pub avg_output_tps: Option<f64>,
 }
 
@@ -886,6 +889,7 @@ pub struct ApiKeyStats {
     pub api_key_id: String,
     pub api_key_name: String,
     pub request_count: i64,
+    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,

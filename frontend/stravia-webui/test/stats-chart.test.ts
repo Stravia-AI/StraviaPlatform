@@ -49,6 +49,34 @@ describe('latency chart', () => {
 })
 
 describe('activity grid', () => {
+  test.each([
+    [100, 20, null, null, 120],
+    [100, 20, 80, 10, 120],
+    [100, null, null, null, 100],
+    [null, 20, 80, 10, 20],
+    [null, null, 80, 10, null],
+    [null, null, null, null, null],
+    [0, 0, 80, 10, 0],
+  ])(
+    'counts reported input/output without adding cache subsets (%s/%s/%s/%s)',
+    (input, output, read, write, expected) => {
+      const end = Date.UTC(2026, 8, 17)
+      const grid = buildActivityGrid(
+        [
+          {
+            bucket_start: end,
+            total_input_tokens: input,
+            total_output_tokens: output,
+            total_cache_read_tokens: read,
+            total_cache_write_tokens: write,
+          },
+        ],
+        { endMs: end, spanMs: DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0 },
+      )
+      expect(grid.cells.find((cell) => cell.start === end)?.tokens).toBe(expected)
+    },
+  )
+
   test.each([900_000, HOUR_MS, 6 * HOUR_MS, DAY_MS])(
     'omits future buckets while retaining current and past zero usage (%i ms)',
     (bucketMs) => {

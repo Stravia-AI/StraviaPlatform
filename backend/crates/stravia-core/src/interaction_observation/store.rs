@@ -4,8 +4,7 @@ use sqlx::{Connection, PgPool, Row, SqlitePool};
 use std::sync::Arc;
 
 use super::types::{
-    ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome,
-    RunStart, project_event_for_management,
+    ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome, RunStart,
 };
 
 /// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
@@ -2546,7 +2545,7 @@ async fn load_events_sqlite(
     let rows=sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE sequence > ? ORDER BY sequence LIMIT 512").bind(after).fetch_all(pool).await?;
     rows.into_iter()
         .map(|r| {
-            Ok(project_event_for_management(ObservationEvent {
+            Ok(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -2556,7 +2555,7 @@ async fn load_events_sqlite(
                 payload: serde_json::from_slice(&crate::storage_codec::decode(
                     &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
-            }))
+            })
         })
         .collect()
 }
@@ -2564,7 +2563,7 @@ async fn load_events_postgres(pool: &PgPool, after: i64) -> anyhow::Result<Vec<O
     let rows=sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE sequence > $1 ORDER BY sequence LIMIT 512").bind(after).fetch_all(pool).await?;
     rows.into_iter()
         .map(|r| {
-            Ok(project_event_for_management(ObservationEvent {
+            Ok(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -2574,7 +2573,7 @@ async fn load_events_postgres(pool: &PgPool, after: i64) -> anyhow::Result<Vec<O
                 payload: serde_json::from_slice(&crate::storage_codec::decode(
                     &r.try_get::<Vec<u8>, _>(6)?,
                 )?)?,
-            }))
+            })
         })
         .collect()
 }
@@ -2714,9 +2713,8 @@ mod tests {
             .await?
             .unwrap();
         let expected = ConfirmedUsage {
-            // Management input is projected per attempt: (12 - 5) + max(3 - 9, 0).
-            // The attempt with unknown cache reads remains unknown instead of assuming zero.
-            input_tokens: Some(7),
+            // Reported total input stays known independently of cache coverage.
+            input_tokens: Some(23),
             // Output already includes reasoning; reasoning remains a diagnostic breakdown only.
             output_tokens: Some(9),
             cache_read_tokens: Some(14),
@@ -2724,7 +2722,7 @@ mod tests {
             reasoning_tokens: Some(3),
             coverage: Some(UsageCoverage {
                 attempt_count: 4,
-                missing_input_tokens: 2,
+                missing_input_tokens: 1,
                 missing_output_tokens: 1,
                 missing_cache_read_tokens: 2,
                 missing_cache_write_tokens: 4,
@@ -2743,7 +2741,7 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-reported"
             })
             .expect("reported management usage event");
-        assert_eq!(reported_usage.payload["usage"]["input_tokens"], 7);
+        assert_eq!(reported_usage.payload["usage"]["input_tokens"], 12);
         assert_eq!(reported_usage.payload["usage"]["cache_read_tokens"], 5);
         let overcached_usage = events
             .iter()
@@ -2754,7 +2752,7 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-overcached"
             })
             .expect("overcached management usage event");
-        assert_eq!(overcached_usage.payload["usage"]["input_tokens"], 0);
+        assert_eq!(overcached_usage.payload["usage"]["input_tokens"], 3);
         let unknown_cache_usage = events
             .iter()
             .find(|event| {
@@ -2764,10 +2762,7 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-unknown-cache"
             })
             .expect("unknown-cache management usage event");
-        assert_eq!(
-            unknown_cache_usage.payload["usage"]["input_tokens"],
-            Value::Null
-        );
+        assert_eq!(unknown_cache_usage.payload["usage"]["input_tokens"], 8);
         Ok(())
     }
 
@@ -2814,7 +2809,7 @@ mod tests {
                 .interaction
                 .usage
                 .input_tokens,
-            Some(7)
+            Some(23)
         );
         pool.close().await;
         Ok(())

@@ -24,7 +24,7 @@ pub(super) struct Window {
     /// Delivery/graph metadata is not client-input content: reconstructed
     /// ancestors retain server-output provenance, not client-replay provenance.
     /// Absent whenever a complete input cannot fit the capture limits.
-    received_items: Option<Vec<([u8; 32], bool)>>,
+    received_items: Option<Vec<([u8; 32], bool, bool)>>,
 }
 #[derive(Clone)]
 struct Unit {
@@ -96,12 +96,12 @@ impl Window {
     pub(super) fn capture_received_input(items: &[AiItem]) -> Option<Self> {
         let mut window = Self::capture(items)?;
         // Delivered outputs and ordinary retained tails never compute this.
-        if window.complete && window.current_tail_tool_ids().is_some() {
+        if window.complete {
             window.received_items = Self::capture_received_items(items);
         }
         Some(window)
     }
-    fn capture_received_items(items: &[AiItem]) -> Option<Vec<([u8; 32], bool)>> {
+    fn capture_received_items(items: &[AiItem]) -> Option<Vec<([u8; 32], bool, bool)>> {
         if items.len() > MAX_UNITS {
             return None;
         }
@@ -122,7 +122,22 @@ impl Window {
                             && unit.get("native_compaction").is_none()
                     })
                 });
-            received.push((Sha256::digest(&encoded).into(), user_only));
+            // A User-role tool-result block is canonical Tool content. Only
+            // assistant/tool units may extend a proven historical input.
+            let continuation_only = value.as_array().is_some_and(|units| {
+                !units.is_empty()
+                    && units.iter().all(|unit| {
+                        matches!(
+                            unit.get("role").and_then(Value::as_str),
+                            Some("assistant" | "tool")
+                        )
+                    })
+            });
+            received.push((
+                Sha256::digest(&encoded).into(),
+                user_only,
+                continuation_only,
+            ));
         }
         Some(received)
     }
@@ -134,13 +149,28 @@ impl Window {
         !old.is_empty()
             && old.len() < new.len()
             && new.starts_with(old)
-            && new[old.len()..].iter().all(|(_, user)| *user)
+            && new[old.len()..].iter().all(|(_, user, _)| *user)
+    }
+
+    /// Strict received-input identity includes every item, not merely the
+    /// projected diagnostic tail. A changed prefix or any appended User fails.
+    pub(super) fn is_received_prefix_with_tool_continuation(&self, input: &Self) -> bool {
+        let (Some(old), Some(new)) = (&self.received_items, &input.received_items) else {
+            return false;
+        };
+        !old.is_empty()
+            && old.len() < new.len()
+            && new.starts_with(old)
+            && new[old.len()..]
+                .iter()
+                .all(|(_, _, continuation)| *continuation)
+            && input.current_tail_tool_ids().is_some()
     }
 
     fn retained_bytes(&self) -> usize {
         self.bytes
             + self.received_items.as_ref().map_or(0, |items| {
-                items.capacity() * std::mem::size_of::<([u8; 32], bool)>()
+                items.capacity() * std::mem::size_of::<([u8; 32], bool, bool)>()
             })
     }
 

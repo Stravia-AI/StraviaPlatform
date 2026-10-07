@@ -98,6 +98,7 @@ function eventRun(sequences: number[]): RunDetail {
     client_output_committed: true,
     started_at: 1_000,
     finished_at: 2_000,
+    delivery_completed_at: 2_000,
     usage,
     trace: null,
     events: sequences.map((sequence) => ({

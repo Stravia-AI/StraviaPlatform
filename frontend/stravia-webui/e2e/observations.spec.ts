@@ -100,6 +100,7 @@ function runFor(item: InteractionSummary): RunDetail {
     client_output_committed: item.status === 'completed',
     started_at: item.started_at,
     finished_at: item.status === 'completed' ? item.last_active_at : null,
+    delivery_completed_at: item.status === 'completed' ? item.last_active_at : null,
     usage: item.usage,
     events: [
       {
@@ -2747,6 +2748,7 @@ test.describe('Interaction Observation canvas', () => {
           started_at: startedAt + 299_006,
           status: 'running',
           finished_at: null,
+          delivery_completed_at: null,
           events: [
             ordinary(
               16,

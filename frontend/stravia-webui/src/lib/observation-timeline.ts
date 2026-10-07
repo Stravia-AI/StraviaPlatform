@@ -1,5 +1,5 @@
-import { formatDuration, formatList, formatTime, generationMsOf } from '$lib/format'
-import { attemptTpsInput, observationEventSummary } from '$lib/observation-event-summary'
+import { computeTps, formatDuration, formatList, formatTime } from '$lib/format'
+import { observationEventSummary } from '$lib/observation-event-summary'
 import { payloadCount, payloadRecord, payloadString } from '$lib/observation-payload'
 import * as m from '$lib/paraglide/messages.js'
 import type { FailedRequestDetail, InteractionDetail, ObservationEvent, RunDetail } from '$lib/types/observation'
@@ -95,6 +95,7 @@ export interface RunUpstream {
 
 export interface RunMetrics {
   upstream: RunUpstream[]
+  durationMs: number | null
   firstTokenMs: number | null
   tps: number | null
 }
@@ -102,13 +103,14 @@ export interface RunMetrics {
 /**
  * Run 摘要描述实际产出结果的上游尝试：有已完成尝试时取全部已完成尝试（平台工具循环会有多个模型轮次），
  * 否则取最近一次开始的尝试，避免回退前失败的尝试冒充服务方。同一尝试的修订完成事件以最后一条为准。
- * 首字取第一个服务尝试；速度为服务尝试的输出合计除以净生成耗时合计。
+ * 首字取第一个服务尝试；速度使用 Run 已确认输出和从接收到交付结束的完整生命周期，
+ * 包含重试、回退和平台工具耗时，不受尝试修订事件的记录时间影响。
  */
-export function runMetrics(events: readonly ObservationEvent[]): RunMetrics {
+export function runMetrics(run: RunDetail): RunMetrics {
   const started = new Map<string, RunUpstream>()
   const finished = new Map<string, Record<string, unknown>>()
   let lastStarted: string | null = null
-  for (const event of events) {
+  for (const event of run.events) {
     const payload = payloadRecord(event.payload)
     const id = payloadString(payload.attempt_id)
     if (!id) continue
@@ -125,28 +127,26 @@ export function runMetrics(events: readonly ObservationEvent[]): RunMetrics {
 
   const upstream = new Map<string, RunUpstream>()
   let firstTokenMs: number | null = null
-  let outputTokens = 0
-  let generationMs = 0
-  let completeUsage = true
   for (const id of serving) {
     const target = started.get(id)
     if (target) upstream.set(`${target.model}\u0000${target.provider ?? ''}`, target)
     const payload = finished.get(id)
     if (!payload) continue
     if (firstTokenMs === null && payloadCount(payload.first_token_ms)) firstTokenMs = payload.first_token_ms
-    const input = attemptTpsInput(payload)
-    const generation = generationMsOf(input)
-    if (input.output_tokens != null && generation != null) {
-      outputTokens += input.output_tokens
-      generationMs += generation
-    } else {
-      completeUsage = false
-    }
   }
+  const endAt =
+    run.status === 'running'
+      ? null
+      : (run.delivery_completed_at ?? (run.status !== 'completed' ? run.finished_at : null))
+  const durationMs = endAt == null ? null : endAt - run.started_at
   return {
     upstream: [...upstream.values()],
+    durationMs,
     firstTokenMs,
-    tps: completeUsage && generationMs > 0 ? outputTokens / (generationMs / 1000) : null,
+    tps: computeTps({
+      output_tokens: (run.usage.coverage?.missing_output_tokens ?? 0) > 0 ? null : run.usage.output_tokens,
+      duration_ms: durationMs,
+    }),
   }
 }
 
@@ -173,7 +173,7 @@ export function deriveTimeline(
 
   const timelines = new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)]))
   const streams = new Map(orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [])]))
-  const metrics = new Map(orderedRuns.map((run) => [run.id, runMetrics(timelines.get(run.id) ?? [])]))
+  const metrics = new Map(orderedRuns.map((run) => [run.id, runMetrics(run)]))
   const failureItems = failure ? streamItems(orderedEvents(failure.events)) : []
 
   const baseTime = interaction?.interaction.started_at ?? failure?.request.started_at ?? null
@@ -185,6 +185,8 @@ export function deriveTimeline(
   }
 
   function runEndAt(run: RunDetail): number {
+    const duration = metrics.get(run.id)?.durationMs
+    if (duration != null) return run.started_at + duration
     if (run.finished_at != null) return run.finished_at
     return timelines.get(run.id)?.at(-1)?.occurred_at ?? run.started_at
   }

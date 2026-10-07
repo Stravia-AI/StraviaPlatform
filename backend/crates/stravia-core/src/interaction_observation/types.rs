@@ -11,6 +11,7 @@ pub type ObservationStream = Pin<Box<dyn Stream<Item = ObservationUpdate> + Send
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmedUsage {
+    /// 上游报告的总输入 Token；缓存字段未知不影响已知输入。
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
@@ -24,6 +25,7 @@ pub struct ConfirmedUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
 pub struct UsageCoverage {
     pub attempt_count: i64,
+    /// 仅计入未报告总输入的 attempt，与缓存覆盖无关。
     pub missing_input_tokens: i64,
     pub missing_output_tokens: i64,
     pub missing_cache_read_tokens: i64,
@@ -72,29 +74,6 @@ impl ConfirmedUsage {
             }),
         }
     }
-}
-
-pub(super) fn project_event_for_management(mut event: ObservationEvent) -> ObservationEvent {
-    if event.kind != "target_attempt_finished" {
-        return event;
-    }
-    let Some(usage) = event
-        .payload
-        .get_mut("usage")
-        .and_then(Value::as_object_mut)
-    else {
-        return event;
-    };
-    let projected_input = usage
-        .get("input_tokens")
-        .and_then(Value::as_i64)
-        .zip(usage.get("cache_read_tokens").and_then(Value::as_i64))
-        .map(|(input, cache_read)| input.saturating_sub(cache_read).max(0));
-    usage.insert(
-        "input_tokens".into(),
-        projected_input.map(Value::from).unwrap_or(Value::Null),
-    );
-    event
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +653,8 @@ pub struct RunDetail {
     pub client_output_committed: bool,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    /// 实际客户端交付结束时间，独立于观测终态写入时间。
+    pub delivery_completed_at: Option<i64>,
     pub usage: ConfirmedUsage,
     pub events: Vec<ObservationEvent>,
     pub trace: Option<TraceManifest>,
@@ -790,4 +771,47 @@ pub struct DownloadTicket {
 /// Late provider item IDs never change this identity.
 pub(crate) fn canonical_item_block_id(scope: &str, item_ordinal: usize) -> String {
     format!("{scope}:item:{item_ordinal}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_usage_aggregates_each_known_field_independently() {
+        let attempts = [
+            ConfirmedUsage {
+                input_tokens: Some(12528),
+                output_tokens: Some(896),
+                ..Default::default()
+            },
+            ConfirmedUsage {
+                input_tokens: Some(0),
+                cache_read_tokens: Some(0),
+                ..Default::default()
+            },
+            ConfirmedUsage {
+                cache_read_tokens: Some(5),
+                cache_write_tokens: Some(0),
+                ..Default::default()
+            },
+        ];
+        let usage = ConfirmedUsage::aggregate(attempts.iter());
+        assert_eq!(usage.input_tokens, Some(12528));
+        assert_eq!(usage.output_tokens, Some(896));
+        assert_eq!(usage.cache_read_tokens, Some(5));
+        assert_eq!(usage.cache_write_tokens, Some(0));
+        assert_eq!(usage.reasoning_tokens, None);
+        assert_eq!(
+            usage.coverage,
+            Some(UsageCoverage {
+                attempt_count: 3,
+                missing_input_tokens: 1,
+                missing_output_tokens: 2,
+                missing_cache_read_tokens: 1,
+                missing_cache_write_tokens: 2,
+                missing_reasoning_tokens: 3,
+            })
+        );
+    }
 }
