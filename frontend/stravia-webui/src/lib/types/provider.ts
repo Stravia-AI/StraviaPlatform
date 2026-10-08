@@ -283,6 +283,7 @@ export interface ProviderConfigurationPreviewInput {
   /** Supplier profile type ID; the backend field name remains `vendor_id`. */
   vendor_id: string
   channel: string
+  protocol?: string
   base_url: string
   options: Record<string, unknown>
   credentials: Record<string, unknown>

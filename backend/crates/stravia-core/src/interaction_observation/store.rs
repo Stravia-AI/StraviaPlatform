@@ -119,8 +119,147 @@ impl ObservationStore {
         })
     }
 
+    /// 成功交付先结算客户端分支；Finish 再补齐执行度量，后台活动独立保留。
+    /// 交付时间是幂等键，既有失败和真实 User 中断均不可被晚到收据覆盖。
+    pub(super) async fn persist_client_completion(
+        &self,
+        run_id: &str,
+        interaction_id: &str,
+        delivered_at: i64,
+        waiting_client: bool,
+        expires_at: i64,
+    ) -> anyhow::Result<Option<ObservationEvent>> {
+        let requested = if waiting_client {
+            "waiting_client"
+        } else {
+            "completed"
+        };
+        match self {
+            Self::Sqlite(pool, _, write_gate) => {
+                let _write_gate = write_gate.lock().await;
+                let mut tx = pool.begin().await?;
+                let seq = next_sqlite(&mut tx).await?;
+                let row: Option<(String, Option<String>, bool, i64, Option<i64>)> = sqlx::query_as(
+                    "UPDATE inference_run_observations SET
+                        status=CASE
+                            WHEN status='failed' THEN status
+                            WHEN user_interrupted=1 THEN 'user_interrupted'
+                            WHEN status NOT IN ('running','waiting_client') THEN status
+                            WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
+                            ELSE ?1 END,
+                        delivery_completed_at=?2,finished_at=COALESCE(finished_at,MAX(started_at,?2)),
+                        last_active_at=MAX(last_active_at,?2),last_event_sequence=?3
+                    WHERE id=?4 AND delivery_completed_at IS NULL
+                    RETURNING status,terminal_reason,user_interrupted,last_active_at,finished_at",
+                ).bind(requested).bind(delivered_at).bind(seq).bind(run_id).fetch_optional(&mut *tx).await?;
+                let Some((status, mut reason, interrupted, recorded_at, finished_at)) = row else {
+                    return Ok(None);
+                };
+                if matches!(status.as_str(), "user_interrupted" | "superseded") {
+                    reason = Some(status.clone());
+                    sqlx::query(
+                        "UPDATE inference_run_observations SET terminal_reason=? WHERE id=?",
+                    )
+                    .bind(&reason)
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let payload = serde_json::json!({
+                    "status": status, "reason": reason, "user_interrupted": interrupted,
+                    "delivery_completed_at": delivered_at, "finished_at": finished_at,
+                });
+                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
+                insert_event_sqlite(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: recorded_at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_state_changed",
+                        payload: &payload,
+                        expires_at,
+                    },
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(Some(event(
+                    seq,
+                    recorded_at,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    payload,
+                )))
+            }
+            Self::Postgres(pool, _) => {
+                let mut tx = pool.begin().await?;
+                let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let row: Option<(String, Option<String>, bool, i64, Option<i64>)> = sqlx::query_as(
+                    "UPDATE inference_run_observations SET
+                        status=CASE
+                            WHEN status='failed' THEN status
+                            WHEN user_interrupted THEN 'user_interrupted'
+                            WHEN status NOT IN ('running','waiting_client') THEN status
+                            WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
+                            ELSE $1 END,
+                        delivery_completed_at=$2,finished_at=COALESCE(finished_at,GREATEST(started_at,$2)),
+                        last_active_at=GREATEST(last_active_at,$2),last_event_sequence=$3
+                    WHERE id=$4 AND delivery_completed_at IS NULL
+                    RETURNING status,terminal_reason,user_interrupted,last_active_at,finished_at",
+                ).bind(requested).bind(delivered_at).bind(seq).bind(run_id).fetch_optional(&mut *tx).await?;
+                let Some((status, mut reason, interrupted, recorded_at, finished_at)) = row else {
+                    return Ok(None);
+                };
+                if matches!(status.as_str(), "user_interrupted" | "superseded") {
+                    reason = Some(status.clone());
+                    sqlx::query(
+                        "UPDATE inference_run_observations SET terminal_reason=$1 WHERE id=$2",
+                    )
+                    .bind(&reason)
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let payload = serde_json::json!({
+                    "status": status, "reason": reason, "user_interrupted": interrupted,
+                    "delivery_completed_at": delivered_at, "finished_at": finished_at,
+                });
+                recompute_status_postgres(&mut tx, interaction_id, seq).await?;
+                insert_event_postgres(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: recorded_at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_state_changed",
+                        payload: &payload,
+                        expires_at,
+                    },
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(Some(event(
+                    seq,
+                    recorded_at,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    payload,
+                )))
+            }
+        }
+    }
+
     // 一次写入尾源所需的全部字段，拆结构体只会增加调用点噪声。
-    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.writer.persist_tail_source",
@@ -133,15 +272,12 @@ impl ObservationStore {
         principal: &str,
         last_unit_hash: &str,
         pending_tool_ids: &[String],
-        delivered_at: i64,
         expires_at: i64,
     ) -> anyhow::Result<()> {
         match self {
             Self::Sqlite(pool, _, write_gate) => {
                 let _write_gate = write_gate.lock().await;
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,?) WHERE id=?")
-                    .bind(delivered_at).bind(run_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET interaction_id=excluded.interaction_id,principal=excluded.principal,last_unit_hash=excluded.last_unit_hash,expires_at=excluded.expires_at")
                     .bind(run_id).bind(interaction_id).bind(principal).bind(last_unit_hash).bind(expires_at).execute(&mut *tx).await?;
                 sqlx::query("DELETE FROM observation_pending_tools WHERE run_id=?")
@@ -156,8 +292,6 @@ impl ObservationStore {
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,$1) WHERE id=$2")
-                    .bind(delivered_at).bind(run_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(run_id) DO UPDATE SET interaction_id=EXCLUDED.interaction_id,principal=EXCLUDED.principal,last_unit_hash=EXCLUDED.last_unit_hash,expires_at=EXCLUDED.expires_at")
                     .bind(run_id).bind(interaction_id).bind(principal).bind(last_unit_hash).bind(expires_at).execute(&mut *tx).await?;
                 sqlx::query("DELETE FROM observation_pending_tools WHERE run_id=$1")
@@ -3033,6 +3167,254 @@ mod tests {
                 3,
                 i64::MAX,
             )
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_receipt_fifo_settlement_preserves_interruption_and_failure()
+    -> anyhow::Result<()> {
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        for (case, waiting, user_first, finish_first, failed, expected) in [
+            ("sent-admit-finish", false, false, false, false, "completed"),
+            ("sent-finish-admit", false, false, true, false, "completed"),
+            (
+                "admit-sent-finish",
+                false,
+                true,
+                false,
+                false,
+                "user_interrupted",
+            ),
+            ("undelivered", false, true, false, false, "user_interrupted"),
+            (
+                "tool-handoff",
+                true,
+                false,
+                false,
+                false,
+                "user_interrupted",
+            ),
+            ("failure-wins", false, true, false, true, "failed"),
+        ] {
+            admit_waiting_scenario_run(&store, case, case, None).await?;
+            store
+                .persist_run_event(
+                    case,
+                    case,
+                    &RunEvent::PlatformToolStarted {
+                        model_turn_id: "background".into(),
+                        tool_id: format!("background-{case}"),
+                        name: "probe".into(),
+                        input: None,
+                    },
+                    1,
+                    i64::MAX,
+                )
+                .await?;
+            if waiting {
+                store
+                    .persist_run_event(
+                        case,
+                        case,
+                        &RunEvent::ClientToolHandoff {
+                            tool_id: format!("call-{case}"),
+                            name: "probe".into(),
+                            input: None,
+                        },
+                        1,
+                        i64::MAX,
+                    )
+                    .await?;
+            }
+            if user_first {
+                admit_new_user_after_receipt(&store, case, 2).await?;
+            }
+            if case != "undelivered" {
+                assert!(
+                    store
+                        .persist_client_completion(case, case, 3, waiting, i64::MAX)
+                        .await?
+                        .is_some()
+                );
+                assert!(
+                    store
+                        .persist_client_completion(case, case, 4, waiting, i64::MAX)
+                        .await?
+                        .is_none()
+                );
+            }
+            if finish_first {
+                finish_scenario_run(&store, case, case, "completed").await?;
+            }
+            if !user_first {
+                admit_new_user_after_receipt(&store, case, 5).await?;
+            }
+            if !finish_first {
+                store
+                    .finish_run(
+                        case,
+                        case,
+                        &RunOutcome {
+                            client_output_committed: false,
+                            delivery: None,
+                            delivery_completed_at: (case != "undelivered").then_some(3),
+                            status: if failed {
+                                "failed"
+                            } else if waiting {
+                                "waiting_client"
+                            } else if case == "undelivered" {
+                                "interrupted"
+                            } else {
+                                "completed"
+                            }
+                            .into(),
+                            terminal_reason: None,
+                            generation_node_id: Some(case.into()),
+                            generation_root_id: Some(case.into()),
+                        },
+                        6,
+                        i64::MAX,
+                    )
+                    .await?;
+            }
+            let detail = store
+                .get_interaction(case, ForestQuery::default())
+                .await?
+                .unwrap();
+            let run = &detail.runs[0];
+            assert_eq!(run.status, expected, "{case}");
+            assert_eq!(
+                run.delivery_completed_at,
+                (case != "undelivered").then_some(3),
+                "{case}"
+            );
+            assert!(run.finished_at.is_some(), "{case}");
+            let background: i64 = sqlx::query_scalar(
+                "SELECT background_active FROM inference_run_observations WHERE id=?",
+            )
+            .bind(case)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(background, 1, "{case}");
+        }
+        admit_waiting_scenario_run(&store, "resolved", "resolved-parent", None).await?;
+        admit_waiting_scenario_run(
+            &store,
+            "resolved",
+            "resolved-child",
+            Some("resolved-parent"),
+        )
+        .await?;
+        store
+            .persist_client_completion("resolved-parent", "resolved", 3, true, i64::MAX)
+            .await?;
+        finish_scenario_run(&store, "resolved", "resolved-parent", "waiting_client").await?;
+        let detail = store
+            .get_interaction("resolved", ForestQuery::default())
+            .await?
+            .unwrap();
+        let parent = detail
+            .runs
+            .iter()
+            .find(|run| run.id == "resolved-parent")
+            .unwrap();
+        assert_eq!(parent.status, "superseded");
+        assert!(!parent.user_interrupted);
+        // 已经失败的 Run 即使收到晚到收据，也不能被“成功交付”洗成成功。
+        admit_waiting_scenario_run(
+            &store,
+            "failed-before-receipt",
+            "failed-before-receipt",
+            None,
+        )
+        .await?;
+        store
+            .finish_run(
+                "failed-before-receipt",
+                "failed-before-receipt",
+                &RunOutcome {
+                    client_output_committed: false,
+                    delivery: None,
+                    delivery_completed_at: None,
+                    status: "failed".into(),
+                    terminal_reason: Some("terminal_fault".into()),
+                    generation_node_id: None,
+                    generation_root_id: None,
+                },
+                3,
+                i64::MAX,
+            )
+            .await?;
+        assert!(
+            store
+                .persist_client_completion(
+                    "failed-before-receipt",
+                    "failed-before-receipt",
+                    4,
+                    false,
+                    i64::MAX
+                )
+                .await?
+                .is_some()
+        );
+        let detail = store
+            .get_interaction("failed-before-receipt", ForestQuery::default())
+            .await?
+            .unwrap();
+        assert_eq!(detail.runs[0].status, "failed");
+        admit_waiting_scenario_run(&store, "restart-receipt", "restart-receipt", None).await?;
+        store
+            .persist_client_completion("restart-receipt", "restart-receipt", 3, false, i64::MAX)
+            .await?;
+        store.recover_after_restart().await?;
+        let detail = store
+            .get_interaction("restart-receipt", ForestQuery::default())
+            .await?
+            .unwrap();
+        assert_eq!(detail.runs[0].status, "completed");
+        assert_eq!(detail.runs[0].finished_at, Some(3));
+        Ok(())
+    }
+
+    async fn admit_new_user_after_receipt(
+        store: &ObservationStore,
+        parent: &str,
+        at: i64,
+    ) -> anyhow::Result<()> {
+        let child = format!("{parent}-new-user");
+        store
+            .admit(Admission {
+                metadata: None,
+                start: &RunStart {
+                    id: child.clone(),
+                    principal: "alice".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                interaction_id: &child,
+                generation_root_id: Some(&child),
+                generation_parent_id: Some(parent),
+                has_new_user: true,
+                ingress_received_at: at,
+                parent_run_id: Some(parent),
+                parent_interaction_id: Some(parent),
+                debug_enabled: false,
+                inferred_retry: false,
+                grouping_reason: "new_user",
+                diagnostic_source_run_id: None,
+                interrupt_parent: true,
+                now: at,
+                expires_at: i64::MAX,
+            })
             .await?;
         Ok(())
     }

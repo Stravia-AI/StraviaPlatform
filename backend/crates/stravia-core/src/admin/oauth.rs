@@ -737,6 +737,7 @@ impl AdminService {
                         .channel
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("OAuth Provider channel is missing"))?,
+                    protocol: Some(provider.protocol.clone()),
                     base_url: provider.base_url.clone(),
                     options: serde_json::from_str(&provider.vendor_options)?,
                     credentials: std::collections::BTreeMap::new(),
@@ -966,6 +967,7 @@ impl AdminService {
                         .channel
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("OAuth Provider channel is missing"))?,
+                    protocol: Some(updated.protocol.clone()),
                     base_url: updated.base_url.clone(),
                     options: serde_json::from_str(&updated.vendor_options)?,
                     credentials: std::collections::BTreeMap::new(),

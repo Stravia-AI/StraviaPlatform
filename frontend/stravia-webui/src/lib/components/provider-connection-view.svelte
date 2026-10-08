@@ -240,6 +240,7 @@ async function testConnection(): Promise<void> {
         <ProviderConfigFields
           fields={configFields}
           configGroups={descriptor.config_groups}
+          protocol={provider.protocol}
           bind:values={draft.fields.values}
           {configuredSecretFields}
           issues={previewIssues}

@@ -572,6 +572,10 @@ impl Operation<'_, '_> {
                 }
                 self.emitted_delta = true;
                 self.lifecycle.streamed = true;
+                if matches!(&delta, AiStreamDelta::Usage(_)) {
+                    // 尚未提交输出的失败也保留上游已报告用量，不提前确认累计中的快照。
+                    self.attempt.observe_delta(&delta);
+                }
                 if !self.lifecycle.committed {
                     if matches!(
                         delta,
@@ -637,7 +641,9 @@ impl Operation<'_, '_> {
         delta: AiStreamDelta,
         publication: &VendorPublicationFence,
     ) -> Result<(), AttemptFailure> {
-        self.attempt.observe_delta(&delta);
+        if !matches!(&delta, AiStreamDelta::Usage(_)) || !self.emitted_delta {
+            self.attempt.observe_delta(&delta);
+        }
         send_vendor_output(
             self.lifecycle.output,
             publication,

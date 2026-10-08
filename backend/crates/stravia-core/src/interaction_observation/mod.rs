@@ -909,20 +909,23 @@ impl IngressObserver {
             visible_redaction: Mutex::new(std::collections::BTreeMap::new()),
             protected,
         });
-        if self
-            .observation
-            .inner
-            .writer
-            .try_send(WriterCommand::Admit(Box::new(writer::AdmitPayload {
-                start,
-                facts,
-                received_at: self.received_at,
-                metadata: std::mem::take(&mut self.metadata),
-                debug_enabled,
-                trace: inner.trace.clone(),
-                discarded_trace,
-            })))
-            .is_err()
+        // 没有成功收据与最终清理的保留槽，就不创建可被后续 User 误判的运行投影。
+        if inner.completion.lock().is_none()
+            || inner.finalization.lock().is_none()
+            || self
+                .observation
+                .inner
+                .writer
+                .try_send(WriterCommand::Admit(Box::new(writer::AdmitPayload {
+                    start,
+                    facts,
+                    received_at: self.received_at,
+                    metadata: std::mem::take(&mut self.metadata),
+                    debug_enabled,
+                    trace: inner.trace.clone(),
+                    discarded_trace,
+                })))
+                .is_err()
         {
             inner.gap.store(true, Ordering::Release);
             self.observation
@@ -1119,27 +1122,37 @@ impl RunObserver {
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
         output: &[stravia_runtime_contract::protocol::ir::AiItem],
         delivered_at: i64,
+        waiting_client: bool,
     ) {
+        let _boundary = self.inner.event_boundary.lock();
+        if self.inner.terminal.load(Ordering::Acquire) || self.inner.failure.lock().is_some() {
+            return;
+        }
+        // 收据使用准入时的保留槽；不能让队列压力改变 Sent/Admit 的顺序。
+        let Some(permit) = self.inner.completion.lock().take() else {
+            return;
+        };
         self.inner.queued_text.lock().take();
         let window = tail::Window::capture(input).and_then(|mut window| {
             window
                 .append(tail::Window::capture(output)?)
                 .then_some(window)
         });
-        if self
-            .inner
-            .observation
-            .inner
-            .writer
-            .try_send(WriterCommand::Tail {
-                run_id: self.inner.run_id.clone(),
-                principal: self.inner.principal.clone(),
-                window,
-                delivered_at,
-            })
-            .is_err()
-        {
+        let writer = permit.send(WriterCommand::ClientCompletion {
+            run_id: self.inner.run_id.clone(),
+            principal: self.inner.principal.clone(),
+            window,
+            delivered_at,
+            waiting_client,
+        });
+        if writer.is_closed() {
             self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
@@ -1487,9 +1500,7 @@ impl RunObserver {
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         let finished_at = writer::now();
-        if !matches!(outcome.status.as_str(), "completed" | "waiting_client")
-            && let Some(error) = self.inner.failure.lock().as_ref()
-        {
+        if let Some(error) = self.inner.failure.lock().as_ref() {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
         }
@@ -1882,6 +1893,137 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn delivered_final_receipt_settles_before_finish_without_tail_window()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "receipt-no-window", facts(Vec::new()));
+        let delivered_at = writer::now();
+        run.observe_client_completion(&[], &[], delivered_at, false);
+        run.observe_client_completion(&[], &[], delivered_at + 1, false);
+        observation.flush().await?;
+        let row: (String, Option<i64>, Option<i64>, bool) = sqlx::query_as(
+            "SELECT status,delivery_completed_at,finished_at,user_interrupted FROM inference_run_observations WHERE id='receipt-no-window'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(
+            row,
+            (
+                "completed".into(),
+                Some(delivered_at),
+                Some(delivered_at),
+                false
+            )
+        );
+        run.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(delivered_at),
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE run_id='receipt-no-window' AND kind='run_state_changed'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_failure_cannot_be_successfulized_by_receipt_or_finish() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "failed-receipt", facts(Vec::new()));
+        run.record_failure(FailureDiagnostic::platform(
+            "terminal_fault",
+            "The stream failed.",
+            502,
+        ));
+        run.observe_client_completion(&[], &[], writer::now(), false);
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        let row: (String, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT status,delivery_completed_at,terminal_reason FROM inference_run_observations WHERE id='failed-receipt'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(row, ("failed".into(), None, Some("terminal_fault".into())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reserved_receipt_survives_full_queue_and_finish_uses_finalization()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "full-queue-receipt", facts(Vec::new()));
+        // 当前线程在下一次 await 前不消费队列，固定 FIFO 饱和而不依赖时钟。
+        for _ in 0..writer::QUEUE_CAPACITY {
+            let (done, _receiver) = oneshot::channel();
+            if observation
+                .inner
+                .writer
+                .try_send(WriterCommand::Barrier(done))
+                .is_err()
+            {
+                break;
+            }
+        }
+        assert_eq!(observation.inner.writer.capacity(), 0);
+        run.observe_client_completion(&[], &[], writer::now(), false);
+        run.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        assert!(run.inner.pending_finish.lock().is_some());
+        let rejected_projection = test_run(&observation, "no-receipt-slot", facts(Vec::new()));
+        assert!(rejected_projection.inner.gap.load(Ordering::Acquire));
+        drop(rejected_projection);
+        drop(run);
+        observation.flush().await?;
+        let row: (String, Option<i64>) = sqlx::query_as(
+            "SELECT status,finished_at FROM inference_run_observations WHERE id='full-queue-receipt'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(row.0, "completed");
+        assert!(row.1.is_some());
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE run_id='full-queue-receipt' AND kind='run_finished'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(count, 1);
+        let missing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inference_run_observations WHERE id='no-receipt-slot'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(missing, 0);
+        assert!(
+            observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .runs
+                .contains_key("no-receipt-slot")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delivered_tool_result_resumes_before_source_generation_commit() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
 
@@ -1900,7 +2042,7 @@ mod snapshot_tests {
             arguments: "{}".into(),
         });
         let delivered_at = writer::now();
-        source.observe_client_completion(&[], std::slice::from_ref(&call), delivered_at);
+        source.observe_client_completion(&[], std::slice::from_ref(&call), delivered_at, true);
         observation.flush().await?;
 
         let items = vec![
@@ -2014,6 +2156,7 @@ mod snapshot_tests {
             std::slice::from_ref(&question),
             std::slice::from_ref(&call),
             delivered_at,
+            true,
         );
         finish(&source, "waiting_client");
         observation.flush().await?;
@@ -2044,6 +2187,7 @@ mod snapshot_tests {
                 "the client does not replay this answer",
             )],
             writer::now(),
+            false,
         );
         finish(&first, "completed");
         observation.flush().await?;
@@ -3028,7 +3172,7 @@ mod snapshot_tests {
                 name: "probe".into(),
                 input: None,
             });
-            run.observe_client_completion(input, std::slice::from_ref(&call), writer::now());
+            run.observe_client_completion(input, std::slice::from_ref(&call), writer::now(), true);
             run.finish(RunOutcome {
                 client_output_committed: true,
                 delivery: None,

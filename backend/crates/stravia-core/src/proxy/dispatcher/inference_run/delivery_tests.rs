@@ -1,6 +1,92 @@
 use super::*;
 
 #[tokio::test]
+async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_projection() {
+    let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let observation = InteractionObservation::new(
+        Some(pool.clone()),
+        None,
+        directory.path().to_path_buf(),
+        7,
+        false,
+        crate::generation_chain::test_chain().await,
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(()))),
+    )
+    .await;
+    for (id, waiting, expected) in [
+        ("final-sent", false, "completed"),
+        ("tool-sent", true, "waiting_client"),
+    ] {
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: id.into(),
+                method: "POST".into(),
+                path: "/v1/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(
+                RunStart {
+                    id: id.into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                AdmissionFacts {
+                    client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                        "model",
+                        Vec::new(),
+                    ),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
+        let terminal = RunTerminalContext::new(
+            None,
+            None,
+            Vec::new(),
+            Compaction::sqlite(pool.clone()),
+            stravia_runtime_contract::Principal::new("owner"),
+            crate::model_turn::CompactionPublications::default(),
+        );
+        if waiting {
+            terminal.mark_waiting_client();
+        }
+        let sent_at = chrono::Utc::now().timestamp_millis();
+        terminal.publish_client_completion(&observer, sent_at);
+        terminal.publish_client_completion(&observer, sent_at + 1);
+        observation.flush().await.unwrap();
+        let row: (String, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT status,delivery_completed_at,finished_at FROM inference_run_observations WHERE id=?",
+        ).bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(row, (expected.into(), Some(sent_at), Some(sent_at)));
+        observer.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: Some(sent_at),
+            status: expected.into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await.unwrap();
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE run_id=? AND kind='run_state_changed'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(receipts, 1);
+    }
+}
+
+#[tokio::test]
 async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

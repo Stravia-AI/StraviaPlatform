@@ -52,11 +52,12 @@ pub(super) enum WriterCommand {
         expired_before: Option<i64>,
         done: oneshot::Sender<anyhow::Result<()>>,
     },
-    Tail {
+    ClientCompletion {
         run_id: String,
         principal: String,
         window: Option<super::tail::Window>,
         delivered_at: i64,
+        waiting_client: bool,
     },
     Admit(Box<AdmitPayload>),
     Event {
@@ -346,17 +347,37 @@ pub(super) fn spawn(
                     });
                     let _ = done.send(result);
                 }
-                Some(WriterCommand::Tail {
+                Some(WriterCommand::ClientCompletion {
                     run_id,
                     principal,
                     window,
                     delivered_at,
+                    waiting_client,
                 }) => {
                     let at = now();
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
-                    if let Some(window) = window
-                        && let Some(interaction) = attribution.interaction_for_run(&run_id)
+                    let Some(interaction) = attribution.interaction_for_run(&run_id) else {
+                        continue;
+                    };
+                    // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获。
+                    match store
+                        .persist_client_completion(
+                            &run_id,
+                            interaction,
+                            delivered_at,
+                            waiting_client,
+                            expiry,
+                        )
+                        .await
                     {
+                        Ok(Some(event)) => publish(&updates, &trace_sequence, event),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
+                            pending_gaps.insert(interaction.to_owned(), at);
+                        }
+                    }
+                    if let Some(window) = window {
                         let pending = window.pending_tool_ids().unwrap_or_default();
                         if let Some(hash) = window.last_hash_hex()
                             && let Err(error) = store
@@ -366,12 +387,12 @@ pub(super) fn spawn(
                                     &principal,
                                     &hash,
                                     &pending,
-                                    delivered_at,
                                     expiry,
                                 )
                                 .await
                         {
                             tracing::warn!(%run_id, %error, "tail source persistence failed");
+                            pending_gaps.insert(interaction.to_owned(), at);
                         }
                         attribution.insert_tail_source(
                             run_id,

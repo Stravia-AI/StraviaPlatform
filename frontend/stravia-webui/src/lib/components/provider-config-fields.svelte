@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import { SvelteMap } from 'svelte/reactivity'
 import { localeState } from '$lib/localization.svelte'
 import { resolvePluginText } from '$lib/plugin-text'
+import { visibleProviderConfigFields } from '$lib/provider-connection-draft'
 import type { ProviderValidationIssue, VendorConfigField, LocalizedText } from '$lib/types'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -16,6 +17,7 @@ interface Props {
   fields: VendorConfigField[]
   configGroups?: Array<{ id: string; label: LocalizedText }>
   values?: Record<string, unknown>
+  protocol?: string
   configuredSecretFields?: string[]
   satisfiedSecretFields?: string[]
   issues?: ProviderValidationIssue[]
@@ -28,6 +30,7 @@ let {
   fields,
   configGroups = [],
   values = $bindable({}),
+  protocol = '',
   configuredSecretFields = [],
   satisfiedSecretFields = [],
   issues = [],
@@ -38,16 +41,7 @@ let {
 
 const availableSecretFields = $derived(new Set([...configuredSecretFields, ...satisfiedSecretFields]))
 const groupLabels = $derived(new Map(configGroups.map((group) => [group.id, group.label])))
-const visibleFields = $derived(
-  fields.filter((field) => {
-    const condition = field.visible_when
-    if (!condition) return true
-    if (!Object.prototype.hasOwnProperty.call(values, condition.field) && availableSecretFields.has(condition.field)) {
-      return true
-    }
-    return Object.is(values[condition.field], condition.equals)
-  }),
-)
+const visibleFields = $derived(visibleProviderConfigFields(fields, values, protocol, availableSecretFields))
 const unmatchedIssues = $derived(
   issues.filter((issue) => issue.field && !visibleFields.some((field) => field.key === issue.field)),
 )

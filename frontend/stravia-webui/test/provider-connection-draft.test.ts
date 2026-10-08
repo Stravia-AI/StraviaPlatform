@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   ProviderConnectionDraftController,
+  visibleProviderConfigFields,
   type ProviderConnectionDraftFields,
   type ProviderConnectionDraftTarget,
   type ProviderConnectionSubmission,
@@ -12,7 +13,50 @@ import type {
   ProviderConfigurationPreviewInput,
   ProviderDescriptor,
   VendorChannelDescriptor,
+  VendorConfigField,
 } from '../src/lib/types'
+
+test('protocol changes hide fields and their stale dependent values without clearing the draft', () => {
+  const fields: VendorConfigField[] = [
+    {
+      key: 'reasoning_field',
+      label: { 'en-US': 'Reasoning field' },
+      kind: { type: 'string', multiline: false },
+      required: false,
+      secret: false,
+      visible_when: { field: '$protocol', equals: 'openai-compatible' },
+    },
+    {
+      key: 'custom_reasoning_field',
+      label: { 'en-US': 'Custom reasoning field' },
+      kind: { type: 'string', multiline: false },
+      required: true,
+      secret: false,
+      visible_when: { field: 'reasoning_field', equals: 'custom' },
+    },
+    {
+      key: 'ensure_reasoning_field',
+      label: { 'en-US': 'Fill missing reasoning' },
+      kind: { type: 'bool' },
+      required: false,
+      secret: false,
+      visible_when: { field: '$protocol', equals: 'openai-compatible' },
+    },
+  ]
+  const values = { reasoning_field: 'custom', custom_reasoning_field: 'analysis_text', ensure_reasoning_field: true }
+  expect(visibleProviderConfigFields(fields, values, 'openai-compatible').map((field) => field.key)).toEqual([
+    'reasoning_field',
+    'custom_reasoning_field',
+    'ensure_reasoning_field',
+  ])
+  expect(visibleProviderConfigFields(fields, values, 'anthropic-messages')).toEqual([])
+  expect(values.custom_reasoning_field).toBe('analysis_text')
+  values.reasoning_field = 'reasoning_content'
+  expect(visibleProviderConfigFields(fields, values, 'openai-compatible').map((field) => field.key)).toEqual([
+    'reasoning_field',
+    'ensure_reasoning_field',
+  ])
+})
 
 const channel: VendorChannelDescriptor = {
   id: 'default',

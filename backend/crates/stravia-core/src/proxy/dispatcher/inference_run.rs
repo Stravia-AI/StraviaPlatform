@@ -899,9 +899,13 @@ impl RunTerminalContext {
         }
         shared.delivery_completed_at.get_or_insert(delivered_at);
         shared.client_completion_published = true;
-        if let Some(output) = &shared.client_output {
-            observer.observe_client_completion(&shared.client_input, output, delivered_at);
-        } else {
+        observer.observe_client_completion(
+            &shared.client_input,
+            shared.client_output.as_deref().unwrap_or_default(),
+            delivered_at,
+            shared.waiting_client,
+        );
+        if shared.client_output.is_none() {
             observer.record(RunEvent::ObservationGap {
                 reason: "client_history_projection_unavailable".into(),
             });

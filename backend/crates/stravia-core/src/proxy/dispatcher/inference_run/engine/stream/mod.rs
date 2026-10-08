@@ -404,6 +404,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     LegAdvance::Aborted => aborted = true,
                 }
             }
+            if aborted && let Some(partial_response) = leg.take_partial_response() {
+                response = partial_response;
+            }
             drop(leg);
             drop(hook_leg);
             let mut owned_run = Some(inference_run);
@@ -617,15 +620,22 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     })
                     .flatten()
                     .cloned();
-                    let error = [native_error.unwrap_or_else(|| AiStreamDelta::StreamError {
-                        error: terminal_failure.take().unwrap_or_else(|| {
-                            stravia_runtime_contract::protocol::ir::AiError::new(
-                                stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
-                                "stream aborted",
-                            )
+                    let has_usage = response.usage.required_components_known
+                        || response.usage.prompt_tokens > 0
+                        || response.usage.completion_tokens > 0;
+                    let error = [
+                        AiStreamDelta::Usage(response.usage),
+                        native_error.unwrap_or_else(|| AiStreamDelta::StreamError {
+                            error: terminal_failure.take().unwrap_or_else(|| {
+                                stravia_runtime_contract::protocol::ir::AiError::new(
+                                    stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
+                                    "stream aborted",
+                                )
+                            }),
                         }),
-                    })];
-                    if delivery.send_deltas(&error).await == DeliveryProgress::Sent {
+                    ];
+                    let error = if has_usage { &error[..] } else { &error[1..] };
+                    if delivery.send_deltas(error).await == DeliveryProgress::Sent {
                         let _ = delivery.finish_stream("failed".into()).await;
                     }
                 }

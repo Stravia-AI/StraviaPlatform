@@ -129,6 +129,10 @@ impl OpenAIResponseParser {
             })
             .unwrap_or_default();
 
+        if stop_reason.as_deref() == Some("tool_calls") && tool_calls.is_empty() {
+            anyhow::bail!("upstream tool_calls terminal contains no representable tool call");
+        }
+
         let usage = extract_usage(&resp);
 
         let mut ai_resp = AiResponse::new(id, model);
@@ -302,6 +306,8 @@ pub struct OpenAIStreamParser {
     in_think_block: bool,
     reasoning_field: Option<Value>,
     reasoning_source: Option<Arc<str>>,
+    saw_tool_call: bool,
+    pending_tool_terminal_error: bool,
 }
 
 impl Default for OpenAIStreamParser {
@@ -320,6 +326,8 @@ impl OpenAIStreamParser {
             in_think_block: false,
             reasoning_field: None,
             reasoning_source: None,
+            saw_tool_call: false,
+            pending_tool_terminal_error: false,
         }
     }
 
@@ -344,7 +352,10 @@ impl OpenAIStreamParser {
                 if let Some(data) = line.strip_prefix("data: ") {
                     let data = data.trim();
                     if data == "[DONE]" {
-                        if !self.done {
+                        if self.pending_tool_terminal_error {
+                            deltas.extend(self.flush_pending_text());
+                            self.emit_pending_terminal_error(&mut deltas);
+                        } else if !self.done {
                             self.done = true;
                             deltas.push(AiStreamDelta::Done {
                                 stop_reason: "stop".to_string(),
@@ -368,15 +379,30 @@ impl OpenAIStreamParser {
             ai_deltas.extend(self.parse_chunk(&format!("{remaining}\n\n"))?);
         }
         ai_deltas.extend(self.flush_pending_text());
+        self.emit_pending_terminal_error(&mut ai_deltas);
         Ok(ai_deltas)
     }
 }
 
 impl OpenAIStreamParser {
+    fn emit_pending_terminal_error(&mut self, deltas: &mut Vec<AiStreamDelta>) {
+        if !self.pending_tool_terminal_error {
+            return;
+        }
+        self.pending_tool_terminal_error = false;
+        deltas.push(AiStreamDelta::StreamError {
+            error: stravia_runtime_contract::protocol::ir::AiError::new(
+                stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                "upstream tool_calls terminal contains no representable tool call",
+            ),
+        });
+    }
+
     fn parse_openai_chunk(&mut self, chunk: &Value, deltas: &mut Vec<AiStreamDelta>) -> Result<()> {
         if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
             deltas.extend(self.flush_pending_text());
             self.done = true;
+            self.pending_tool_terminal_error = false;
             deltas.push(AiStreamDelta::StreamError {
                 error: stravia_runtime_contract::protocol::ir::AiError::new(
                     stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
@@ -408,7 +434,7 @@ impl OpenAIStreamParser {
             .and_then(|a| a.first())
         else {
             let u = extract_usage(chunk);
-            if u.prompt_tokens > 0 || u.completion_tokens > 0 {
+            if u.required_components_known || u.prompt_tokens > 0 || u.completion_tokens > 0 {
                 deltas.push(AiStreamDelta::Usage(u));
             }
             return Ok(());
@@ -444,6 +470,7 @@ impl OpenAIStreamParser {
                         let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         // 续包常把未出现的 name/id 写成空字符串；空值不是新的 tool call。
                         if !name.is_empty() || !id.is_empty() {
+                            self.saw_tool_call = true;
                             deltas.push(AiStreamDelta::ToolCallStart {
                                 index: idx,
                                 id: id.to_string(),
@@ -453,6 +480,7 @@ impl OpenAIStreamParser {
                         if let Some(args) = func.get("arguments").and_then(|v| v.as_str())
                             && !args.is_empty()
                         {
+                            self.saw_tool_call = true;
                             deltas.push(AiStreamDelta::ToolCallDelta {
                                 index: idx,
                                 arguments: args.to_string(),
@@ -468,13 +496,18 @@ impl OpenAIStreamParser {
             && !reason.is_empty()
         {
             self.done = true;
-            deltas.push(AiStreamDelta::Done {
-                stop_reason: reason.to_string(),
-            });
+            if reason == "tool_calls" && !self.saw_tool_call {
+                // 独立 usage 尾帧仍需消费；语义错误在流结束后交付，避免丢掉同批增量。
+                self.pending_tool_terminal_error = true;
+            } else {
+                deltas.push(AiStreamDelta::Done {
+                    stop_reason: reason.to_string(),
+                });
+            }
         }
 
         let u = extract_usage(chunk);
-        if u.prompt_tokens > 0 || u.completion_tokens > 0 {
+        if u.required_components_known || u.prompt_tokens > 0 || u.completion_tokens > 0 {
             deltas.push(AiStreamDelta::Usage(u));
         }
         Ok(())

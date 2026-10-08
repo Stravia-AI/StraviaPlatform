@@ -1,5 +1,9 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
+import {
+  observation_no_visible_output,
+  observation_output_delivered_no_preview,
+} from '../src/lib/paraglide/messages.js'
 import type {
   ConfirmedUsage,
   FailedRequestSummary,
@@ -1816,7 +1820,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     opal.failed_request = true
     opal.client_output_delivered = true
-    opal.visible_tail = ''
+    opal.visible_tail = '\n'
     fixture.addInteraction(opal)
     const quartz = interaction(
       'interaction-quartz',
@@ -1828,7 +1832,7 @@ test.describe('Interaction Observation canvas', () => {
       275_000,
     )
     quartz.client_output_delivered = false
-    quartz.visible_tail = ''
+    quartz.visible_tail = ' \t\r\n'
     fixture.addInteraction(quartz)
 
     await page.goto('/logs')
@@ -1837,16 +1841,29 @@ test.describe('Interaction Observation canvas', () => {
     await expect(opalNode.getByText('Completed', { exact: true })).toBeVisible()
     await expect(opalNode.getByText('Earlier request failed', { exact: true })).toBeVisible()
     const deliveredPreview = opalNode.getByRole('button', { name: 'Model output preview', exact: true })
-    await expect(deliveredPreview).toContainText('Output delivered; no text preview is available.')
+    const deliveredEmpty = observation_output_delivered_no_preview({}, { locale: 'en-US' })
+    await expect(deliveredPreview).toContainText(deliveredEmpty)
     await deliveredPreview.click()
-    await expect(page.getByRole('tooltip')).toContainText('Output delivered; no text preview is available.')
+    await expect(page.getByRole('tooltip')).toContainText(deliveredEmpty)
     await page.keyboard.press('Escape')
 
     const undeliveredPreview = node(page, 'Quartz', 'running').getByRole('button', {
       name: 'Model output preview',
       exact: true,
     })
-    await expect(undeliveredPreview).toContainText('No output sent to the client yet.')
+    await expect(undeliveredPreview).toContainText(observation_no_visible_output({}, { locale: 'en-US' }))
+
+    fixture.emit({
+      sequence: 41,
+      occurred_at: startedAt + 285_000,
+      interaction_id: opal.id,
+      run_id: `run-${opal.id}`,
+      rejection_id: null,
+      kind: 'client_visible_content',
+      payload: { text: '    const original = 1;\n', item: 'text:0', block_id: 'block:0', complete: true },
+    })
+    await expect(deliveredPreview.locator('pre code')).toHaveText('const original = 1;\n')
+    await expect(deliveredPreview).not.toContainText(deliveredEmpty)
   })
 
   test('a zero-output terminal failure stays hidden when live events update it', async ({ page }) => {

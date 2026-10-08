@@ -1362,6 +1362,18 @@ impl ResponsesStreamParser {
                 });
             }
             "error" | "response.failed" => {
+                if event == "response.failed" {
+                    let response = payload
+                        .get("response")
+                        .ok_or_else(|| anyhow::anyhow!("response.failed missing response"))?;
+                    if response.get("status").and_then(Value::as_str) != Some("failed") {
+                        anyhow::bail!("response.failed response status does not match the event");
+                    }
+                    let usage = parse_dated_usage(response)?;
+                    if usage.required_components_known {
+                        deltas.push(AiStreamDelta::Usage(usage));
+                    }
+                }
                 let error = payload
                     .pointer("/response/error")
                     .or_else(|| payload.get("error"))
@@ -1390,10 +1402,6 @@ impl ResponsesStreamParser {
                     deltas.push(AiStreamDelta::StreamError { error });
                 }
                 if event == "response.failed" {
-                    if payload.pointer("/response/status").and_then(Value::as_str) != Some("failed")
-                    {
-                        anyhow::bail!("response.failed response status does not match the event");
-                    }
                     self.terminated = true;
                 }
             }

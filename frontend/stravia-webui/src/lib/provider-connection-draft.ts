@@ -24,6 +24,30 @@ export function emptyProviderConnectionDraft(): ProviderConnectionDraftFields {
   return { name: '', baseUrl: '', protocol: '', useProxy: false, values: {} }
 }
 
+/** 条件读取当前协议而不写入 vendor_options；隐藏父字段同时隐藏其依赖字段。 */
+export function visibleProviderConfigFields(
+  fields: VendorConfigField[],
+  values: Record<string, unknown>,
+  protocol: string,
+  availableSecretFields?: ReadonlySet<string>,
+): VendorConfigField[] {
+  return fields.filter((field) => {
+    let current = field
+    for (let depth = 0; depth <= fields.length; depth++) {
+      const condition = current.visible_when
+      if (!condition) return true
+      if (condition.field === '$protocol') return condition.equals === protocol
+      const retainedSecret =
+        !Object.prototype.hasOwnProperty.call(values, condition.field) && availableSecretFields?.has(condition.field)
+      if (!retainedSecret && !Object.is(values[condition.field], condition.equals)) return false
+      const parent = fields.find((candidate) => candidate.key === condition.field)
+      if (!parent) return false
+      current = parent
+    }
+    return false
+  })
+}
+
 /**
  * 连接目标：create = 编辑器中选中的 descriptor/channel；
  * edit = 已保存 provider 及其 descriptor/channel。undefined 表示尚不可提交。
@@ -347,6 +371,7 @@ export class ProviderConnectionDraftController {
       provider_id: target.kind === 'edit' ? target.provider.id : undefined,
       vendor_id: target.descriptor.provider_id,
       channel: target.channel.id,
+      protocol: this.#fields.protocol || target.channel.protocol || undefined,
       base_url: this.#fields.baseUrl.trim(),
       options: providerConfigValues(
         this.#fields.values,

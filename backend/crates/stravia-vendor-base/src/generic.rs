@@ -77,7 +77,12 @@ pub(crate) fn execute(
             if operation == Operation::ConfigValidation && vendor_id == "custom" =>
         {
             check_channel(vendor_id, channel, &provider)?;
-            let issues = selected_custom_reasoning_field(&request.options)
+            let reasoning_config = if protocol_for(vendor_id, &provider)? == OPENAI_CHAT_PROTOCOL {
+                selected_custom_reasoning_field(&request.options)
+            } else {
+                Ok(None)
+            };
+            let issues = reasoning_config
                 .err()
                 .map(|field| ValidationIssue {
                     field: Some(field.into()),

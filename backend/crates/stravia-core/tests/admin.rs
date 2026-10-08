@@ -144,6 +144,42 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
 }
 
 #[tokio::test]
+async fn custom_configuration_preview_ignores_inactive_chat_reasoning_fields() -> anyhow::Result<()>
+{
+    let (data_dir, gw) = build_gateway().await?;
+    let input = |protocol: &str| ProviderConfigurationPreviewInput {
+        provider_id: None,
+        vendor_id: "custom".into(),
+        channel: "default".into(),
+        protocol: Some(protocol.into()),
+        base_url: "http://127.0.0.1:9/v1".into(),
+        options: std::collections::BTreeMap::from([("reasoning_field".into(), "custom".into())]),
+        credentials: Default::default(),
+    };
+    let native = gw
+        .admin()
+        .preview_provider_configuration(input("anthropic-messages"))
+        .await?;
+    assert!(native.issues.is_empty(), "{:?}", native.issues);
+
+    let chat = gw
+        .admin()
+        .preview_provider_configuration(input("openai-compatible"))
+        .await?;
+    assert_eq!(
+        chat.issues
+            .iter()
+            .map(|issue| (issue.field.as_deref(), issue.code.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Some("custom_reasoning_field"), "required")]
+    );
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
     let groq = gw
@@ -179,6 +215,7 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
             provider_id: None,
             vendor_id: azure_choice.id.clone(),
             channel: azure_channel.id.clone(),
+            protocol: None,
             base_url: String::new(),
             options: azure_options.clone(),
             credentials: azure_credentials.clone(),
@@ -243,6 +280,7 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
             provider_id: Some(azure.id.clone()),
             vendor_id: "azure-cognitive-services".to_string(),
             channel: "default".to_string(),
+            protocol: None,
             base_url: azure.base_url.clone(),
             options: std::collections::BTreeMap::from([(
                 "resourceName".to_string(),
@@ -331,6 +369,7 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
             provider_id: None,
             vendor_id: sap_choice.id.clone(),
             channel: sap_channel.id.clone(),
+            protocol: None,
             base_url: String::new(),
             options: sap_options.clone(),
             credentials: sap_credentials.clone(),
@@ -385,6 +424,7 @@ async fn provider_configuration_preview_uses_real_cloudflare_validation() -> any
             provider_id: None,
             vendor_id: "cloudflare-ai-gateway".into(),
             channel: "default".into(),
+            protocol: None,
             base_url: String::new(),
             options: Default::default(),
             credentials: std::collections::BTreeMap::from([(
@@ -413,6 +453,7 @@ async fn provider_configuration_preview_uses_real_cloudflare_validation() -> any
             provider_id: None,
             vendor_id: "cloudflare-ai-gateway".to_string(),
             channel: "default".to_string(),
+            protocol: None,
             base_url: String::new(),
             options: std::collections::BTreeMap::from([
                 ("accountId".to_string(), "account_1".into()),

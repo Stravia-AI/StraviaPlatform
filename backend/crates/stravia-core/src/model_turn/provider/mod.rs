@@ -340,6 +340,15 @@ impl AttemptObservation {
         self.finish_thinking();
         if self.observer.is_some() {
             let mut items = self.thinking_items.lock();
+            let usage = &items.accumulator.usage;
+            if !self.usage_confirmed.load(Ordering::Acquire)
+                && (usage.required_components_known
+                    || usage.cache_read_tokens.is_some()
+                    || usage.cache_creation_tokens.is_some()
+                    || usage.reasoning_tokens.is_some())
+            {
+                self.confirm_usage(usage);
+            }
             let (response, ordinals) =
                 std::mem::take(&mut items.accumulator).into_ai_response_with_ordinals();
             for (item, ordinal) in response.items.iter().zip(ordinals) {
@@ -408,8 +417,141 @@ fn confirmed_usage(usage: &stravia_runtime_contract::protocol::ir::Usage) -> Con
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::retain_diagnostic_metadata;
-    use stravia_runtime_contract::protocol::ir::AiItemMetadata;
+    use super::{AttemptObservation, retain_diagnostic_metadata};
+    use crate::interaction_observation::{
+        AdmissionFacts, IngressStart, InteractionObservation, RunEvent, RunStart,
+    };
+    use std::sync::Arc;
+    use stravia_runtime_contract::protocol::ir::{AiItemMetadata, AiRequest, AiStreamDelta, Usage};
+
+    #[tokio::test]
+    async fn terminal_attempt_retains_reported_usage_without_inventing_unknown_counts()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            false,
+            crate::generation_chain::test_chain().await,
+            Some(Arc::new(tokio::sync::Mutex::new(()))),
+        )
+        .await;
+        let reported = Usage {
+            prompt_tokens: 7,
+            completion_tokens: 3,
+            required_components_known: true,
+            ..Default::default()
+        };
+        let revised = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            required_components_known: true,
+            ..Default::default()
+        };
+        let cases = [
+            (vec![Usage::default()], None, (None, None, None)),
+            (
+                vec![reported.clone(), Usage::default()],
+                None,
+                (Some(7), Some(3), None),
+            ),
+            (
+                vec![
+                    reported.clone(),
+                    Usage {
+                        required_components_known: true,
+                        ..Default::default()
+                    },
+                ],
+                None,
+                (Some(0), Some(0), None),
+            ),
+            (
+                vec![reported.clone(), revised.clone()],
+                None,
+                (Some(10), Some(4), None),
+            ),
+            (
+                vec![Usage {
+                    cache_read_tokens: Some(0),
+                    ..Default::default()
+                }],
+                None,
+                (None, None, Some(0)),
+            ),
+            (vec![reported], Some(revised), (Some(10), Some(4), None)),
+        ];
+        for (index, (deltas, terminal_usage, expected)) in cases.into_iter().enumerate() {
+            let id = format!("terminal-usage-{index}");
+            let run = observation
+                .observe_ingress(IngressStart {
+                    id: id.clone(),
+                    method: "POST".into(),
+                    path: "/v1/responses".into(),
+                    protocol: "responses".into(),
+                })
+                .admit(
+                    RunStart {
+                        id: id.clone(),
+                        principal: "owner".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    },
+                    AdmissionFacts {
+                        client_request: AiRequest::new("model", Vec::new()),
+                        has_new_user: true,
+                        has_matching_pending_tool_result: false,
+                        generation_root_id: None,
+                        generation_parent_id: None,
+                    },
+                );
+            run.record(RunEvent::ModelTurnStarted {
+                model_turn_id: id.clone(),
+                route_id: "route".into(),
+                model_display_name: None,
+                estimated_input_tokens: None,
+            });
+            let attempt = AttemptObservation::new(
+                Some(run),
+                id,
+                "target".into(),
+                "provider".into(),
+                "Provider".into(),
+                "model".into(),
+                "responses".into(),
+                "http://localhost".into(),
+                None,
+            );
+            for usage in deltas {
+                attempt.observe_delta(&AiStreamDelta::Usage(usage));
+            }
+            let status = if let Some(usage) = terminal_usage {
+                attempt.confirm_usage(&usage);
+                "completed"
+            } else {
+                "failed"
+            };
+            attempt.finish(status, None, None, None, None);
+            attempt.finish("completed", None, None, None, None);
+            observation.flush().await?;
+            let row: (String, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+                "SELECT status,input_tokens,output_tokens,cache_read_tokens FROM target_attempt_observations WHERE id=?",
+            )
+            .bind(&attempt.id)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(row.0, status, "case {index}");
+            assert_eq!((row.1, row.2, row.3), expected, "case {index}");
+        }
+        observation.shutdown().await;
+        Ok(())
+    }
 
     #[test]
     fn diagnostic_metadata_retains_reference_without_wire_state() -> anyhow::Result<()> {

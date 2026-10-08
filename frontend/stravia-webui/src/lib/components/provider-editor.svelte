@@ -407,6 +407,7 @@ function saveProvider(): void {
             <ProviderConfigFields
               fields={configFields}
               configGroups={selectedOption.descriptor.config_groups}
+              protocol={draft.fields.protocol || selectedOption.channel.protocol || ''}
               bind:values={draft.fields.values}
               satisfiedSecretFields={oauthSessionSecretFields}
               issues={previewIssues}

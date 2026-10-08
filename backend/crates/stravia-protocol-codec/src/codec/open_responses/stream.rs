@@ -73,7 +73,6 @@ pub struct ResponsesStreamFormatter {
     usage: Usage,
     started: bool,
     completed: bool,
-    failed: bool,
     next_output_index: usize,
     next_sequence_number: u64,
     reasoning_item_id: Option<String>,
@@ -116,7 +115,6 @@ impl ResponsesStreamFormatter {
             usage: Usage::default(),
             started: false,
             completed: false,
-            failed: false,
             next_output_index: 0,
             next_sequence_number: 0,
             reasoning_item_id: None,
@@ -1085,8 +1083,11 @@ impl ResponsesStreamFormatter {
         &mut self,
         status: &str,
         incomplete_details: serde_json::Value,
+        error: serde_json::Value,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
+        let failed = status == "failed";
+        let default_item_status = if failed { "incomplete" } else { "completed" };
 
         self.seal_reasoning_item(&mut events);
 
@@ -1122,7 +1123,7 @@ impl ResponsesStreamFormatter {
                     "call_id": call.call_id,
                     "name": call.name,
                     "arguments": call.arguments,
-                    "status": call.status.map(AiItemStatus::as_str).unwrap_or("completed")
+                    "status": call.status.map(AiItemStatus::as_str).unwrap_or(default_item_status)
                 }
             });
             events.push(SseEvent::new(
@@ -1228,7 +1229,10 @@ impl ResponsesStreamFormatter {
                 content_by_index.insert(*content_index, part);
             }
             let content = content_by_index.into_values().collect::<Vec<_>>();
-            let item_status = message.status.map(AiItemStatus::as_str).unwrap_or(status);
+            let item_status = message
+                .status
+                .map(AiItemStatus::as_str)
+                .unwrap_or(if failed { default_item_status } else { status });
             let item = serde_json::json!({
                 "type": "message",
                 "id": message.item_id,
@@ -1331,7 +1335,7 @@ impl ResponsesStreamFormatter {
                     "item": {
                         "type": "message",
                         "id": self.msg_id,
-                        "status": "completed",
+                        "status": default_item_status,
                         "role": "assistant",
                         "content": content
                     }
@@ -1345,7 +1349,7 @@ impl ResponsesStreamFormatter {
                 serde_json::json!({
                     "type": "message",
                     "id": self.msg_id,
-                    "status": "completed",
+                    "status": default_item_status,
                     "role": "assistant",
                     "content": indexed_message_content
                         .iter()
@@ -1366,7 +1370,7 @@ impl ResponsesStreamFormatter {
                     "call_id": call.call_id,
                     "name": call.name,
                     "arguments": call.arguments,
-                    "status": call.status.map(AiItemStatus::as_str).unwrap_or("completed")
+                    "status": call.status.map(AiItemStatus::as_str).unwrap_or(default_item_status)
                 }),
             ));
         }
@@ -1408,7 +1412,7 @@ impl ResponsesStreamFormatter {
             status,
             output,
             incomplete_details,
-            serde_json::Value::Null,
+            error,
             usage,
         );
         self.apply_response_profile(&mut response);
@@ -1860,13 +1864,13 @@ impl ResponsesStreamFormatter {
                     }
                 }
                 AiStreamDelta::Usage(u) => {
-                    if u.prompt_tokens > 0 {
+                    if u.required_components_known || u.prompt_tokens > 0 {
                         self.usage.prompt_tokens = u.prompt_tokens;
                     }
-                    if u.total_tokens > 0 {
+                    if u.required_components_known || u.total_tokens > 0 {
                         self.usage.total_tokens = u.total_tokens;
                     }
-                    if u.completion_tokens > 0 {
+                    if u.required_components_known || u.completion_tokens > 0 {
                         self.usage.completion_tokens = u.completion_tokens;
                     }
                     if u.cache_read_tokens.is_some() {
@@ -1881,10 +1885,12 @@ impl ResponsesStreamFormatter {
                     if u.server_tool_use.is_some() {
                         self.usage.server_tool_use = u.server_tool_use.clone();
                     }
-                    self.usage.required_components_known = u.required_components_known;
+                    self.usage.required_components_known |= u.required_components_known;
                 }
                 AiStreamDelta::StreamError { error } => {
-                    self.failed = true;
+                    if self.completed {
+                        break;
+                    }
                     self.completed = true;
                     let public_error = error
                         .raw
@@ -1893,31 +1899,21 @@ impl ResponsesStreamFormatter {
                         .and_then(|raw| raw.pointer("/response/error").or_else(|| raw.get("error")))
                         .cloned()
                         .unwrap_or_else(|| public_stream_error(error));
-                    events.push(SseEvent::new(
-                        Some("error"),
-                        serde_json::json!({
-                            "type": "error",
-                            "error": public_error.clone(),
-                        })
-                        .to_string(),
-                    ));
-                    let mut response = response_resource_snapshot(
-                        &self.resp_id,
-                        &self.model,
+                    // 已开始的响应只用失败终态交付，客户端才能消费完整内容与用量快照。
+                    if !self.started {
+                        events.push(SseEvent::new(
+                            Some("error"),
+                            serde_json::json!({
+                                "type": "error",
+                                "error": public_error.clone(),
+                            })
+                            .to_string(),
+                        ));
+                    }
+                    events.extend(self.emit_terminal(
                         "failed",
-                        Vec::new(),
                         serde_json::Value::Null,
                         public_error,
-                        serde_json::Value::Null,
-                    );
-                    self.apply_response_profile(&mut response);
-                    events.push(SseEvent::new(
-                        Some("response.failed"),
-                        serde_json::json!({
-                            "type": "response.failed",
-                            "response": response,
-                        })
-                        .to_string(),
                     ));
                     break;
                 }
@@ -1932,6 +1928,7 @@ impl ResponsesStreamFormatter {
                             incomplete_details
                                 .clone()
                                 .unwrap_or(serde_json::Value::Null),
+                            serde_json::Value::Null,
                         ),
                     );
                 }
@@ -1955,9 +1952,11 @@ impl ResponsesStreamFormatter {
                             }
                         })
                     });
-                    events.extend(
-                        self.emit_terminal(status, details.unwrap_or(serde_json::Value::Null)),
-                    );
+                    events.extend(self.emit_terminal(
+                        status,
+                        details.unwrap_or(serde_json::Value::Null),
+                        serde_json::Value::Null,
+                    ));
                 }
                 AiStreamDelta::Done { .. } => {}
                 _ => {}
@@ -1972,7 +1971,11 @@ impl ResponsesStreamFormatter {
         let mut events = Vec::new();
         if !self.completed {
             self.completed = true;
-            events.extend(self.emit_terminal("completed", serde_json::Value::Null));
+            events.extend(self.emit_terminal(
+                "completed",
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ));
         }
         self.finalize_events(&mut events);
         events.push(SseEvent::new(None, "[DONE]"));

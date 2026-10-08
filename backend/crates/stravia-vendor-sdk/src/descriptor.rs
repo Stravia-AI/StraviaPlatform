@@ -269,10 +269,15 @@ pub struct ChannelDescriptor {
 /// Simple conditional display for a config field. No expressions or scripts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldCondition {
-    /// Key of another field in the same form.
+    /// Key of another field in the same form, or `$protocol` for the selected
+    /// connection protocol. This context is not a persisted option.
     pub field: String,
     /// Show this field only when `field` currently equals this value.
     pub equals: serde_json::Value,
+}
+
+impl FieldCondition {
+    pub const PROTOCOL_CONTEXT: &'static str = "$protocol";
 }
 
 /// One selectable value of an enum config field.
@@ -333,6 +338,37 @@ pub struct ConfigField {
     pub pattern: Option<String>,
     #[serde(default)]
     pub visible_when: Option<FieldCondition>,
+}
+
+impl ConfigField {
+    /// Evaluate this field and its dependency chain against the selected
+    /// protocol and normalized configuration. A hidden parent hides dependents;
+    /// missing dependencies and cycles are inactive.
+    pub fn is_active(
+        &self,
+        fields: &[Self],
+        values: &BTreeMap<String, serde_json::Value>,
+        protocol: Option<&str>,
+    ) -> bool {
+        let mut current = self;
+        // 每次只沿一个条件前进；有界遍历避免循环声明导致无限递归。
+        for _ in 0..=fields.len() {
+            let Some(condition) = current.visible_when.as_ref() else {
+                return true;
+            };
+            if condition.field == FieldCondition::PROTOCOL_CONTEXT {
+                return protocol.is_some_and(|value| condition.equals.as_str() == Some(value));
+            }
+            if values.get(&condition.field) != Some(&condition.equals) {
+                return false;
+            }
+            let Some(parent) = fields.iter().find(|field| field.key == condition.field) else {
+                return false;
+            };
+            current = parent;
+        }
+        false
+    }
 }
 
 /// Named form section; fields reference its stable `id` through `group`.
@@ -700,6 +736,9 @@ impl ProviderDescriptor {
             if field.key.is_empty() {
                 return Err(DescriptorError::EmptyConfigFieldKey);
             }
+            if field.key == FieldCondition::PROTOCOL_CONTEXT {
+                return Err(DescriptorError::ReservedConfigFieldKey(field.key.clone()));
+            }
             if let Some(group) = &field.group
                 && !group_ids.contains(group.as_str())
             {
@@ -714,10 +753,14 @@ impl ProviderDescriptor {
             {
                 return Err(DescriptorError::InvalidBounds(field.key.clone()));
             }
-            if let Some(cond) = &field.visible_when
-                && !field_keys.contains(cond.field.as_str())
-            {
-                return Err(DescriptorError::UnknownConditionField(cond.field.clone()));
+            if let Some(cond) = &field.visible_when {
+                if cond.field == FieldCondition::PROTOCOL_CONTEXT {
+                    if cond.equals.as_str().is_none_or(str::is_empty) {
+                        return Err(DescriptorError::InvalidProtocolCondition(field.key.clone()));
+                    }
+                } else if !field_keys.contains(cond.field.as_str()) {
+                    return Err(DescriptorError::UnknownConditionField(cond.field.clone()));
+                }
             }
             if let ConfigFieldKind::Enum { options } = &field.kind {
                 if options.is_empty() {
@@ -817,6 +860,8 @@ pub enum DescriptorError {
     DuplicateConfigField,
     #[error("config field key must not be empty")]
     EmptyConfigFieldKey,
+    #[error("config field key `{0}` is reserved for form context")]
+    ReservedConfigFieldKey(String),
     #[error("secret config field `{0}` must not declare a default")]
     SecretDefault(String),
     #[error("config field `{0}` has invalid numeric bounds")]
@@ -829,6 +874,8 @@ pub enum DescriptorError {
     NetworkFieldNotString(String),
     #[error("visible_when references unknown config field `{0}`")]
     UnknownConditionField(String),
+    #[error("config field `{0}` protocol condition must compare a non-empty protocol string")]
+    InvalidProtocolCondition(String),
     #[error("origin scheme `{0}` is not one of http/https/ws/wss")]
     BadOriginScheme(String),
     #[error("origin host `{0}` is empty or contains a wildcard")]
@@ -1033,6 +1080,31 @@ mod tests {
             manifest["providers"][0]["channels"][0]["name"] = invalid;
             assert!(serde_json::from_value::<VendorDescriptor>(manifest).is_err());
         }
+    }
+
+    #[test]
+    fn protocol_condition_is_distinct_from_unknown_configuration_fields() {
+        let mut profile = provider("alpha");
+        profile.config_fields.push(
+            serde_json::from_value(serde_json::json!({
+                "key": "reasoning_field",
+                "label": {"en-US": "Reasoning field"},
+                "kind": {"type": "string"},
+                "visible_when": {"field": "$protocol", "equals": "test"}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(profile.validate(), Ok(()));
+
+        profile.config_fields[0]
+            .visible_when
+            .as_mut()
+            .unwrap()
+            .field = "unknown".into();
+        assert_eq!(
+            profile.validate(),
+            Err(DescriptorError::UnknownConditionField("unknown".into()))
+        );
     }
 
     #[test]

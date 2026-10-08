@@ -220,29 +220,131 @@ fn stream_formatter_classifies_failures_without_leaking_diagnostics() {
         ),
     ] {
         let mut formatter = ResponsesStreamFormatter::new();
-        let mut events = formatter.format_deltas(&[AiStreamDelta::StreamError { error }]);
+        let mut events = formatter.format_deltas(&[
+            AiStreamDelta::MessageStart {
+                id: "resp-failed".into(),
+                model: "model".into(),
+            },
+            AiStreamDelta::StreamError { error },
+        ]);
         events.extend(formatter.format_done());
 
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].event.as_deref(), Some("error"));
-        assert_eq!(events[1].event.as_deref(), Some("response.failed"));
-        assert_eq!(events[2].event, None);
-        assert_eq!(events[2].data, "[DONE]");
-        let error: serde_json::Value = serde_json::from_str(&events[0].data).expect("error JSON");
-        let failed: serde_json::Value = serde_json::from_str(&events[1].data).expect("failed JSON");
-        assert_eq!(error["type"], "error");
-        assert_eq!(error["error"]["type"], expected_code);
-        assert_eq!(error["error"]["code"], expected_code);
         assert!(
-            error.get("code").is_none(),
-            "error payload must remain nested"
+            !events.iter().any(|event| matches!(
+                event.event.as_deref(),
+                Some("error" | "response.completed")
+            ))
         );
-        assert!(!error.to_string().contains(sensitive_diagnostic));
-        assert_eq!(error["sequence_number"], 0);
+        let bodies = event_bodies(&events);
+        let failed = bodies
+            .iter()
+            .find(|body| body["type"] == "response.failed")
+            .expect("failed terminal");
         assert_eq!(failed["type"], "response.failed");
         assert_eq!(failed["response"]["status"], "failed");
-        assert_eq!(failed["response"]["error"], error["error"]);
-        assert_eq!(failed["sequence_number"], 1);
+        assert_eq!(failed["response"]["error"]["type"], expected_code);
+        assert_eq!(failed["response"]["error"]["code"], expected_code);
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.data.contains(sensitive_diagnostic))
+        );
+    }
+}
+
+#[test]
+fn failed_terminal_preserves_content_and_known_or_unknown_usage() {
+    use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
+
+    for usage in [None, Some((0, 0)), Some((10, 1))] {
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut deltas = vec![
+            AiStreamDelta::MessageStart {
+                id: "resp-failed".into(),
+                model: "model".into(),
+            },
+            AiStreamDelta::TextDelta("answer".into()),
+            AiStreamDelta::ThinkingDelta("thought".into()),
+        ];
+        if let Some((prompt_tokens, completion_tokens)) = usage {
+            deltas.push(AiStreamDelta::Usage(Usage {
+                prompt_tokens: 99,
+                completion_tokens: 99,
+                total_tokens: 198,
+                required_components_known: true,
+                ..Usage::default()
+            }));
+            deltas.push(AiStreamDelta::Usage(Usage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                required_components_known: true,
+                ..Usage::default()
+            }));
+            deltas.push(AiStreamDelta::Usage(Usage::default()));
+        }
+        deltas.push(AiStreamDelta::StreamError {
+            error: AiError::new(AiErrorKind::StreamMidError, "private diagnostic"),
+        });
+        let mut events = formatter.format_deltas(&deltas);
+        events.extend(formatter.format_done());
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.event.as_deref(),
+                Some("error" | "response.completed")
+            ))
+        );
+        let bodies = event_bodies(&events);
+        let failed = bodies
+            .iter()
+            .find(|body| body["type"] == "response.failed")
+            .expect("failed terminal");
+        let output = failed["response"]["output"].as_array().unwrap();
+        assert!(
+            output
+                .iter()
+                .any(|item| item["type"] == "message" && item["content"][0]["text"] == "answer")
+        );
+        assert!(
+            output
+                .iter()
+                .any(|item| item["type"] == "reasoning" && item["content"][0]["text"] == "thought")
+        );
+        if let Some((input, output)) = usage {
+            assert_eq!(failed["response"]["usage"]["input_tokens"], input);
+            assert_eq!(failed["response"]["usage"]["output_tokens"], output);
+        } else {
+            assert!(failed["response"]["usage"].is_null());
+        }
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.data.contains("private diagnostic"))
+        );
+        let mut parser = super::super::parser::ResponsesStreamParser::new();
+        let mut decoded_usage = None;
+        let mut saw_failure = false;
+        'consume: for event in &events {
+            let chunk = format!(
+                "event: {}\ndata: {}\n\n",
+                event.event.as_deref().unwrap_or("message"),
+                event.data,
+            );
+            for delta in parser.parse_chunk(&chunk).expect("valid failed response") {
+                match delta {
+                    AiStreamDelta::Usage(usage) => {
+                        decoded_usage = Some((usage.prompt_tokens, usage.completion_tokens));
+                    }
+                    AiStreamDelta::StreamError { .. } => {
+                        saw_failure = true;
+                        break 'consume;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_failure);
+        assert_eq!(decoded_usage, usage);
     }
 }
 

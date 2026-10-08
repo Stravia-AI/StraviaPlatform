@@ -261,7 +261,11 @@ Usage 仅在 input/output totals、cached tokens 和 reasoning tokens 全部可�
 
 Provider event 的原始 sequence、indices 和 response ID 不直接透传。目标 stream session 基于最终输出重新分配 sequence 和 indices，保证 Hook、tool loop 或协议转换插入/删除事件后仍满足 wire ordering。
 
-普通生成在 Client Output Commit 后失败时保留 dated schema 的嵌套 `error` 对象，按 `error` → `response.failed` → `[DONE]` 结束，不伪造 `response.completed`。传输中断、超时和临时上游不可用使用兼容的 `server_error` code；永久请求错误、鉴权拒绝、配额耗尽以及未分类的本地 Hook/投影失败不统一标成瞬态错误。公开 message 保持安全通用文案，不泄漏上游诊断。解码与格式化共用错误分类，已知永久上游错误在进入重试策略前就获得其 canonical 类别；`insufficient_quota` 优先于上游笼统的 `rate_limit_error` type。客户端显式远程压缩仍沿用既有原生错误透传例外。
+普通生成在 response 已开始后失败时，以 `response.failed` → `[DONE]` 结束，不先发送会让客户端提前停止读取的独立 `error`，也不伪造 `response.completed`。失败快照保留已生成的正文、思考、工具项和上游已报告的 usage；没有明确完成状态的输出项使用合法的 `incomplete` 状态，而不是 response 级别的 `failed`。尚未开始 response 的格式化失败仍可发送独立 `error` 后结束失败 response。
+
+失败 response 保留 dated schema 的嵌套 `error` 对象。传输中断、超时和临时上游不可用使用兼容的 `server_error` code；永久请求错误、鉴权拒绝、配额耗尽以及未分类的本地 Hook/投影失败不统一标成瞬态错误。公开 message 保持安全通用文案，不泄漏上游诊断。解码与格式化共用错误分类，已知永久上游错误在进入重试策略前就获得其 canonical 类别；`insufficient_quota` 优先于上游笼统的 `rate_limit_error` type。客户端显式远程压缩仍沿用既有原生错误透传例外。
+
+OpenAI-compatible Chat 上游报告 `finish_reason="tool_calls"` 却没有任何实际工具调用时，按协议错误处理，而不是成功的空工具响应。流式解码保留错误终态后的独立 usage 尾帧，再发布失败；失败快照解码同样先发布已知 usage，再发布错误，使在首个错误处停止的客户端仍能取得用量。明确报告的零保留为零；未报告的用量保持未知，不用默认零补齐。
 
 公开错误类别只是客户端恢复判断的输入，不承诺一定可安全重放；Stravia 不因此增加重试预算、重放已提交输出或改变工具执行边界。
 
@@ -456,7 +460,7 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 处理为 fail closed：
 
 - HTTP/SSE commit 前：规范化 HTTP error；
-- stream commit 后：发送 `error` → `response.failed` → `[DONE]`；
+- stream commit 后：已开始的 response 发送携带部分输出与已报告 usage 的 `response.failed` → `[DONE]`；
 - 不猜测修复硬语义、不因该错误切换 Target；结构安全的 additive rolling 字段不属于 protocol violation。
 
 普通生成请求的原始 Provider code/message/body 只进入受现有 redaction policy 管理的内部日志；客户端只看到稳定 Stravia error taxonomy。客户端显式远程压缩是例外：保留上游错误的状态与原生 error 字段，HTTP、SSE 和 WebSocket 交付保持一致；平台内部、Hook 和投影错误仍使用既有屏蔽规则，不因请求包含压缩控制而暴露内部细节。
@@ -510,7 +514,7 @@ Codex 官方客户端已[移除旧 `/responses/compact` 实现](https://github.c
 | representability failure | 400 `unsupported_feature` 或具体 invalid parameter code |
 | WS 已有 in-flight response | WS error 409 `response_in_progress`，连接保持 |
 | pre-commit Provider failure | normalized HTTP error |
-| post-commit stream failure | `error` → `response.failed` → `[DONE]` |
+| post-commit stream failure | `response.failed`（部分输出、已报告 usage、嵌套 error）→ `[DONE]` |
 
 `[DONE]` 是 transport terminator，不是 canonical item，也不计入 `sequence_number`。
 

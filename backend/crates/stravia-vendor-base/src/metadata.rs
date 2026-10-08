@@ -545,6 +545,10 @@ fn custom_standard() -> (
     reasoning_field.default_json = Some(Value::String("protocol_default".into()));
     reasoning_field.group = Some("advanced".into());
     reasoning_field.max_length = None;
+    reasoning_field.visible_when = Some(stravia_vendor_sdk::FieldCondition {
+        field: stravia_vendor_sdk::FieldCondition::PROTOCOL_CONTEXT.into(),
+        equals: Value::String("openai-compatible".into()),
+    });
     let mut custom_reasoning_field = string_field(
         "custom_reasoning_field",
         crate::messages::custom_reasoning_field(),
@@ -575,7 +579,10 @@ fn custom_standard() -> (
         max: None,
         max_length: None,
         pattern: None,
-        visible_when: None,
+        visible_when: Some(stravia_vendor_sdk::FieldCondition {
+            field: stravia_vendor_sdk::FieldCondition::PROTOCOL_CONTEXT.into(),
+            equals: Value::String("openai-compatible".into()),
+        }),
     });
     descriptor
 }

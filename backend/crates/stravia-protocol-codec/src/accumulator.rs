@@ -356,7 +356,35 @@ impl StreamResponseAccumulator {
                 self.completed_items
                     .insert(*index, completed_item_semantic_shell(item));
             }
-            AiStreamDelta::Usage(usage) => self.usage = usage.clone(),
+            AiStreamDelta::Usage(usage) => {
+                // 用量帧是快照而非增量；未知字段不抹掉已报告值，明确的零仍可修订。
+                if usage.required_components_known {
+                    self.usage.prompt_tokens = usage.prompt_tokens;
+                    self.usage.completion_tokens = usage.completion_tokens;
+                    self.usage.total_tokens = usage.total_tokens;
+                    self.usage.required_components_known = true;
+                } else if !self.usage.required_components_known {
+                    if usage.prompt_tokens > 0 {
+                        self.usage.prompt_tokens = usage.prompt_tokens;
+                    }
+                    if usage.completion_tokens > 0 {
+                        self.usage.completion_tokens = usage.completion_tokens;
+                    }
+                    if usage.total_tokens > 0 {
+                        self.usage.total_tokens = usage.total_tokens;
+                    }
+                }
+                self.usage.cache_read_tokens =
+                    usage.cache_read_tokens.or(self.usage.cache_read_tokens);
+                self.usage.cache_creation_tokens = usage
+                    .cache_creation_tokens
+                    .or(self.usage.cache_creation_tokens);
+                self.usage.reasoning_tokens =
+                    usage.reasoning_tokens.or(self.usage.reasoning_tokens);
+                if let Some(server_tool_use) = &usage.server_tool_use {
+                    self.usage.server_tool_use = Some(server_tool_use.clone());
+                }
+            }
             AiStreamDelta::ResponseTerminal {
                 status,
                 incomplete_details,
@@ -849,6 +877,52 @@ pub fn ensure_tool_index(tool_calls: &mut Vec<Option<ToolCall>>, index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_snapshots_preserve_known_fields_and_accept_reported_zero() {
+        let mut accumulator = StreamResponseAccumulator::default();
+        accumulator.apply_all(&[
+            AiStreamDelta::Usage(Usage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+                total_tokens: 10,
+                required_components_known: true,
+                ..Default::default()
+            }),
+            AiStreamDelta::Usage(Usage {
+                cache_read_tokens: Some(0),
+                ..Default::default()
+            }),
+            AiStreamDelta::Usage(Usage::default()),
+        ]);
+        let usage = &accumulator.usage;
+        assert!(usage.required_components_known);
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (7, 3, 10)
+        );
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        accumulator.apply(&AiStreamDelta::Usage(Usage {
+            required_components_known: true,
+            ..Default::default()
+        }));
+        let response = accumulator.into_ai_response();
+        assert!(response.usage.required_components_known);
+        assert_eq!(
+            (
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                response.usage.total_tokens
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(response.usage.cache_read_tokens, Some(0));
+        assert_eq!(response.usage.reasoning_tokens, None);
+    }
 
     #[test]
     fn preserves_stream_item_arrival_order() {

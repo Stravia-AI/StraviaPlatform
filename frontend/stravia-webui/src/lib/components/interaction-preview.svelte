@@ -23,6 +23,7 @@ let {
   textStart?: number
   snapshotKey?: number
 } = $props()
+const hasVisibleText = $derived(/\S/.test(text ?? ''))
 let open = $state(false)
 let pinned = $state(false)
 let trigger = $state<HTMLButtonElement | null>(null)
@@ -63,7 +64,7 @@ async function handleKeydown(event: KeyboardEvent) {
 {#snippet markdown(animate: boolean)}
   <div class="preview-markdown" style:--markdown-first-margin={contextLabel ? '0.35rem' : '0'}>
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
-    {#if text}
+    {#if text !== null && hasVisibleText}
       {#if tail}
         <StreamingMarkdown {text} active={animate} {textStart} {snapshotKey} />
       {:else}
@@ -101,7 +102,12 @@ async function handleKeydown(event: KeyboardEvent) {
     }}>
     {#snippet child({ props })}
       <button {...props} aria-describedby={open ? contentId : undefined}>
-        <div class={['preview-viewport', tail ? 'tail-preview' : 'input-preview', !text && 'text-muted-foreground']}>
+        <div
+          class={[
+            'preview-viewport',
+            tail ? 'tail-preview' : 'input-preview',
+            !hasVisibleText && 'text-muted-foreground',
+          ]}>
           {@render markdown(active)}
         </div>
       </button>

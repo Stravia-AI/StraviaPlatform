@@ -64,7 +64,7 @@ Generation parent 存在但对应父观察不可用时，新准入记录 `genera
 4. 既无活动分支，也无最终生成响应，且仍有因客户端连接关闭或等待超时结束等待的叶分支：`disconnected`，显示“已断开”；
 5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
 
-`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。`visible_tail` 在每个 Model Turn 开始时（已有输出且尚未以空行结尾）追加一个空行，使预览按 Markdown 段落分隔各 Turn 的输出。`visible_tail` 为空而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。
+`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。`visible_tail` 在每个 Model Turn 开始时（已有输出且尚未以空行结尾）追加一个空行，使预览按 Markdown 段落分隔各 Turn 的输出。`visible_tail` 为空或仅包含空白字符，而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。该判断不修改 Markdown 原文或代码缩进，也不把思考内容替换为公开正文。
 
 响应完成不等于后台工具完成。仅在最后一个 `RunObserver` 释放、确认不会再产生该 Run 的事件后，writer 才把残留运行中的 Model Turn／Target attempt 记为 `interrupted`，释放残留活动计数并追加 `unfinished_observation_activity` gap。后台执行持有的观察句柄继续保护真实活动；收口不改写 Run 的交付状态、Generation 关联或已确认 usage，不将缺失的结束事实推断为成功。
 
@@ -80,9 +80,11 @@ WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run �
 
 启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，以 `run_state_changed` 承载，事件 payload 为 `{"status":"interrupted","reason":"process_restarted"}`；不再单独持久化 `process_restarted` kind。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage、`last_active_at` 和 `expires_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或过期。
 
-HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。终帧被 delivery stream 交出时，同步投递实际客户端投影与交付时间，先于生产任务恢复和 Generation Chain 提交；非流式响应沿用完整 body 交付确认。writer 在后续准入前处理该来源索引和 `delivery_completed_at`，使立即回传工具结果的请求不依赖来源 Generation 已落盘。最终状态与已提交节点关联仍在提交尝试后记录；后续 finish 保留最早实际交付时间。协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。
+HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。终帧被 delivery stream 交出时，同步投递交付收据，先于生产任务恢复和 Generation Chain 提交；非流式响应沿用完整 body 交付确认。收据使用准入时保留的队列槽，按事件顺序先于后续准入持久化 `delivery_completed_at` 和分支终态：最终响应为 `completed`，工具交接为 `waiting_client`，已有同 Interaction 续接则保留 `superseded`。已记录的真实失败或中断不改为成功；后台工具活动独立保留。
 
-WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前同步登记已交付来源；不能把生产任务开始转发或消息入队当成交付。最终状态与工具交接仍使用流生产任务的最终结果。交付发布沿用已经取得的 Vendor fences，并重新检查取消、deadline 和 epoch，不等待新的写者之后重新取得读锁。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
+收据不依赖可捕获的历史窗口；窗口可用时再登记客户端投影的来源索引，使立即回传工具结果的请求不依赖来源 Generation 已落盘。观察尚无结束时间时先以实际交付时间收口，迟到 finish 补充执行结束时间与已提交节点关联，保留最早实际交付时间，不把已经交付的最终响应因新 User 准入改为 `user_interrupted`。缺少保留队列槽或收据持久化失败时显式记录 observation gap，不伪造持续运行的投影。协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。
+
+WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前同步登记交付收据与可用的已交付来源；不能把生产任务开始转发或消息入队当成交付。收据按已发送结果登记最终响应或工具等待，流生产任务随后补充执行终态和 Generation 关联。交付发布沿用已经取得的 Vendor fences，并重新检查取消、deadline 和 epoch，不等待新的写者之后重新取得读锁。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
 
 `prefers-reduced-motion: reduce` 下，`running` 使用静态绿色圆点，不播放呼吸动画。
 
@@ -97,6 +99,7 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。概览按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
 - 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游口径及 reasoning 子项；管理统计、列表、详情、事件查询、携带用量的 SSE 与 Bundle 汇总和事件使用同一总输入语义，不再执行净输入投影。历史查询立即使用新口径，无需改写数据库或新增并行字段；轻量全局 SSE 通知仍不携带事件正文；
 - 每个实际上游 attempt 的 usage 最多记一次；
+- 流式 usage 在接收时观察，不以客户端输出已经提交为前提。正常完成以 Vendor 的完整返回值确认；失败或取消没有完整返回值时，以已收到的最后已知快照确认。多帧报告是同一 attempt 的修订，不重复累加；未知字段不抹掉已知值，明确报告的零可覆盖先前数值，完全未报告的字段保持 `null`；
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
 - Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`。失败或未完成 attempt 不参与这些成功尝试统计，但不否认其在 Run、Interaction 与 Bundle 中已报告的用量；

@@ -25,6 +25,8 @@ pub struct ProviderConfigurationPreviewInput {
     pub provider_id: Option<String>,
     pub vendor_id: String,
     pub channel: String,
+    #[serde(default)]
+    pub protocol: Option<String>,
     pub base_url: String,
     #[serde(default)]
     pub options: BTreeMap<String, Value>,
@@ -58,6 +60,7 @@ pub(super) struct NormalizedConfiguration {
 
 pub(super) fn validate_configuration_fields(
     descriptor: &ProviderDescriptor,
+    protocol: &str,
     mut options: BTreeMap<String, Value>,
     credentials: BTreeMap<String, Value>,
 ) -> anyhow::Result<NormalizedConfiguration> {
@@ -117,10 +120,7 @@ pub(super) fn validate_configuration_fields(
 
     let mut issues = Vec::new();
     for field in &descriptor.config_fields {
-        let active = field
-            .visible_when
-            .as_ref()
-            .is_none_or(|condition| merged.get(&condition.field) == Some(&condition.equals));
+        let active = field.is_active(&descriptor.config_fields, &merged, Some(protocol));
         let value = merged.get(&field.key);
         if active && field.required && value.is_none_or(empty_value) {
             issues.push(ValidationIssue {
@@ -150,6 +150,7 @@ pub(super) fn validate_configuration_fields(
 
 pub(super) fn validate_persisted_configuration_fields(
     descriptor: &ProviderDescriptor,
+    protocol: &str,
     options: Map<String, Value>,
     credentials: BTreeMap<String, Value>,
     allow_missing_secrets: bool,
@@ -169,7 +170,12 @@ pub(super) fn validate_persisted_configuration_fields(
     };
     let NormalizedConfiguration {
         options, issues, ..
-    } = validate_configuration_fields(descriptor, options.into_iter().collect(), credentials_json)?;
+    } = validate_configuration_fields(
+        descriptor,
+        protocol,
+        options.into_iter().collect(),
+        credentials_json,
+    )?;
     anyhow::ensure!(
         issues.is_empty(),
         "vendor configuration validation failed: {}",

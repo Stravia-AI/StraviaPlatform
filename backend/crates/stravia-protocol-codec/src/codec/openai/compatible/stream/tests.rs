@@ -3,6 +3,164 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 #[test]
+fn tool_calls_terminal_requires_a_representable_unary_call() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    for calls in [
+        serde_json::json!([]),
+        serde_json::json!([{"function": {"arguments": ""}}]),
+    ] {
+        assert!(
+            OpenAIChatCompletionsV1
+                .decode_response(serde_json::json!({
+                    "choices": [{"message": {"content": "answer", "reasoning_content": "thought",
+                        "tool_calls": calls}, "finish_reason": "tool_calls"}]
+                }))
+                .is_err()
+        );
+    }
+    let response = OpenAIChatCompletionsV1
+        .decode_response(serde_json::json!({
+            "choices": [{"message": {"tool_calls": [{"id": "call", "function": {
+                "name": "ping", "arguments": ""
+            }}]}, "finish_reason": "tool_calls"}]
+        }))
+        .unwrap();
+    assert_eq!(response.tool_calls().next().unwrap().arguments, "");
+    let response = OpenAIChatCompletionsV1
+        .decode_response(serde_json::json!({
+            "choices": [{"message": {"reasoning_content": "thought"}, "finish_reason": "stop"}]
+        }))
+        .unwrap();
+    assert!(response.tool_calls().next().is_none());
+    assert!(response.reasoning_items().next().is_some());
+}
+
+#[test]
+fn invalid_tool_terminal_preserves_content_and_tail_usage_before_one_error() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolTransform;
+
+    let upstream = [
+        data_sse(r#"{"id":"chat","model":"model","choices":[{"delta":{"content":"answer<","reasoning_content":"thought"},"finish_reason":null}]}"#),
+        data_sse(r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#),
+        data_sse(r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#),
+        data_sse(r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#),
+        data_sse("[DONE]"),
+        data_sse("[DONE]"),
+    ].concat();
+    for chunk_size in [1, 7, upstream.len()] {
+        let mut decoder = ProtocolTransform::decode_stream_with(&OpenAIChatCompletionsV1).unwrap();
+        let mut deltas = Vec::new();
+        for chunk in upstream.as_bytes().chunks(chunk_size) {
+            deltas.extend(decoder.decode_chunk(chunk).unwrap());
+        }
+        deltas.extend(decoder.finish().unwrap());
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::Done { .. }))
+        );
+        let text: String = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "answer<");
+        assert!(
+            deltas.iter().any(
+                |delta| matches!(delta, AiStreamDelta::ThinkingDelta(text) if text == "thought")
+            )
+        );
+        let errors: Vec<_> = deltas
+            .iter()
+            .enumerate()
+            .filter_map(|(index, delta)| match delta {
+                AiStreamDelta::StreamError { error } => Some((index, error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1);
+        let (error_index, error) = errors[0];
+        assert!(error.status_code.is_none());
+        assert!(error.raw.is_none());
+        assert!(deltas[..error_index].iter().any(|delta| matches!(delta, AiStreamDelta::Usage(usage) if usage.prompt_tokens == 10 && usage.completion_tokens == 1)));
+        assert_eq!(error_index, deltas.len() - 1);
+    }
+}
+
+#[test]
+fn invalid_tool_terminal_at_eof_preserves_known_zero_usage_and_is_not_repeated() {
+    let mut parser = OpenAIStreamParser::new();
+    let mut deltas = parser.parse_chunk(&[
+        data_sse(r#"{"choices":[{"delta":{"reasoning_content":"thought","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":"tool_calls"}]}"#),
+        data_sse(r#"{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}"#),
+    ].concat()).unwrap();
+    assert!(!deltas.iter().any(|delta| matches!(
+        delta,
+        AiStreamDelta::Done { .. } | AiStreamDelta::StreamError { .. }
+    )));
+    deltas.extend(parser.finish().unwrap());
+    assert!(deltas.iter().any(|delta| matches!(delta, AiStreamDelta::Usage(usage) if usage.required_components_known && usage.prompt_tokens == 0 && usage.completion_tokens == 0)));
+    assert!(matches!(
+        deltas.last(),
+        Some(AiStreamDelta::StreamError { .. })
+    ));
+    assert!(parser.finish().unwrap().is_empty());
+    assert!(parser.parse_chunk(&data_sse("[DONE]")).unwrap().is_empty());
+}
+
+#[test]
+fn tool_terminal_and_thinking_only_stop_remain_successful() {
+    for (frames, reason) in [
+        (
+            vec![
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"","arguments":""}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"ping","arguments":""}}]},"finish_reason":"tool_calls"}]}"#,
+            ],
+            "tool_calls",
+        ),
+        (
+            vec![
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"arguments":""}}]},"finish_reason":"tool_calls"}]}"#,
+            ],
+            "tool_calls",
+        ),
+        (
+            vec![
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ],
+            "tool_calls",
+        ),
+        (
+            vec![
+                r#"{"choices":[{"delta":{"reasoning_content":"thought"},"finish_reason":"stop"}]}"#,
+            ],
+            "stop",
+        ),
+    ] {
+        let mut parser = OpenAIStreamParser::new();
+        let mut deltas = Vec::new();
+        for frame in frames {
+            deltas.extend(parser.parse_chunk(&data_sse(frame)).unwrap());
+        }
+        deltas.extend(parser.parse_chunk(&data_sse("[DONE]")).unwrap());
+        deltas.extend(parser.finish().unwrap());
+        assert!(deltas.iter().any(
+            |delta| matches!(delta, AiStreamDelta::Done { stop_reason } if stop_reason == reason)
+        ));
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::StreamError { .. }))
+        );
+    }
+}
+
+#[test]
 fn configured_reasoning_field_stream_replays_only_the_selected_text() {
     use crate::accumulator::StreamResponseAccumulator;
     use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;

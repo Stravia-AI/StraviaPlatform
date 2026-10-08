@@ -5,6 +5,7 @@ enum MidStreamFailure {
     Transport,
     Protocol,
     Quota,
+    Terminal,
 }
 
 struct MidStreamFailureExecutor {
@@ -44,7 +45,42 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
                     Some(stravia_runtime_contract::protocol::ir::AiErrorKind::QuotaExceeded);
                 error
             }
+            MidStreamFailure::Terminal => ModelTurnError::new(
+                "upstream_stream_error",
+                "tool_calls terminal without a tool call",
+            ),
         };
+        let (first, second, terminal) = if matches!(self.failure, MidStreamFailure::Terminal) {
+            (
+                AiStreamDelta::TextDelta("\n".into()),
+                AiStreamDelta::ThinkingDelta("stream thought".into()),
+                Ok(CanonicalEvent::Delta(AiStreamDelta::StreamError {
+                    error: stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                        "tool_calls terminal without a tool call",
+                    ),
+                })),
+            )
+        } else {
+            (
+                AiStreamDelta::ToolCallStart {
+                    index: 0,
+                    id: "call-partial".into(),
+                    name: "write_file".into(),
+                },
+                AiStreamDelta::ToolCallDelta {
+                    index: 0,
+                    arguments: r#"{"path":"unfinished"#.into(),
+                },
+                Err(failure),
+            )
+        };
+        let (prompt_tokens, completion_tokens) =
+            if matches!(self.failure, MidStreamFailure::Terminal) {
+                (0, 0)
+            } else {
+                (7, 3)
+            };
         let request = input.request;
         let route = stravia_runtime_contract::hook::RouteContext {
             model_id: request.model.clone(),
@@ -56,16 +92,18 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
             route,
             request,
             [
-                Ok(CanonicalEvent::Delta(AiStreamDelta::ToolCallStart {
-                    index: 0,
-                    id: "call-partial".into(),
-                    name: "write_file".into(),
-                })),
-                Ok(CanonicalEvent::Delta(AiStreamDelta::ToolCallDelta {
-                    index: 0,
-                    arguments: r#"{"path":"unfinished"#.into(),
-                })),
-                Err(failure),
+                Ok(CanonicalEvent::Delta(first)),
+                Ok(CanonicalEvent::Delta(second)),
+                Ok(CanonicalEvent::Delta(AiStreamDelta::Usage(
+                    stravia_runtime_contract::protocol::ir::usage::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                        required_components_known: true,
+                        ..Default::default()
+                    },
+                ))),
+                terminal,
             ],
         );
         turn.streamed = true;
@@ -143,6 +181,11 @@ async fn mid_stream_failures_preserve_public_retry_classification() {
             "quota_exceeded",
             "private upstream quota diagnostic",
         ),
+        (
+            MidStreamFailure::Terminal,
+            "server_error",
+            "tool_calls terminal without a tool call",
+        ),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut request = AiRequest::new("mid-stream-failure", Vec::new());
@@ -183,28 +226,40 @@ async fn mid_stream_failures_preserve_public_retry_classification() {
             .filter(|data| *data != "[DONE]")
             .map(|data| serde_json::from_str::<serde_json::Value>(data).expect("SSE JSON"))
             .collect::<Vec<_>>();
-        let arguments_index = events
-            .iter()
-            .position(|event| event["type"] == "response.function_call_arguments.delta")
-            .expect("partial tool arguments are delivered before reset");
-        let error_index = events
-            .iter()
-            .position(|event| event["type"] == "error")
-            .expect("stream error event");
         let failed_index = events
             .iter()
             .position(|event| event["type"] == "response.failed")
             .expect("failed terminal event");
-        assert!(arguments_index < error_index && error_index < failed_index);
-        let error = &events[error_index];
-        assert_eq!(error["error"]["type"], expected_code);
-        assert_eq!(error["error"]["code"], expected_code);
-        assert!(
-            error.get("code").is_none(),
-            "error payload must remain nested"
-        );
-        assert_eq!(events[failed_index]["response"]["status"], "failed");
-        assert_eq!(events[failed_index]["response"]["error"], error["error"]);
+        let failed = &events[failed_index]["response"];
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["error"]["type"], expected_code);
+        assert_eq!(failed["error"]["code"], expected_code);
+        let (input, output_tokens) = if matches!(failure, MidStreamFailure::Terminal) {
+            (0, 0)
+        } else {
+            (7, 3)
+        };
+        assert_eq!(failed["usage"]["input_tokens"], input);
+        assert_eq!(failed["usage"]["output_tokens"], output_tokens);
+        assert_eq!(failed["usage"]["total_tokens"], input + output_tokens);
+        let output = failed["output"].as_array().expect("failed output snapshot");
+        if matches!(failure, MidStreamFailure::Terminal) {
+            assert!(
+                output.iter().any(|item| {
+                    item["type"] == "message" && item["content"][0]["text"] == "\n"
+                })
+            );
+            assert!(output.iter().any(|item| {
+                item["type"] == "reasoning" && item["content"][0]["text"] == "stream thought"
+            }));
+        } else {
+            assert!(output.iter().any(|item| {
+                item["type"] == "function_call"
+                    && item["call_id"] == "call-partial"
+                    && item["arguments"] == r#"{"path":"unfinished"#
+            }));
+        }
+        assert!(!events.iter().any(|event| event["type"] == "error"));
         assert!(
             !events
                 .iter()
@@ -1451,14 +1506,27 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
             "{}: {body}",
             failure.id()
         );
-        let stream_error = body
+        let failed = body
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
             .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-            .find(|event| event["type"] == "error")
-            .expect("post-commit stream error");
-        assert_eq!(stream_error["error"]["code"], "unknown");
-        assert!(stream_error.get("code").is_none());
+            .find(|event| event["type"] == "response.failed")
+            .expect("post-commit failed response");
+        assert_eq!(failed["response"]["status"], "failed");
+        assert_eq!(failed["response"]["error"]["code"], "unknown");
+        assert!(
+            failed["response"]["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["type"] == "message"
+                        && item["content"].as_array().unwrap().iter().any(|part| {
+                            part["type"] == "output_text"
+                                && part["text"].as_str().unwrap().contains("committed output")
+                        })
+                })
+        );
         assert!(
             !body.contains("must not replace committed output")
                 && !body.contains("late Hook error"),

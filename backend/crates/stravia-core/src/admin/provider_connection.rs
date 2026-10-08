@@ -154,6 +154,24 @@ impl AdminService {
         } else {
             channel.protocol.clone().unwrap_or_default()
         };
+        let mut protocol = input
+            .protocol
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(protocol);
+        if protocol.trim().len() != protocol.len() {
+            protocol = protocol.trim().to_owned();
+        }
+        if !channel.protocols.is_empty() {
+            anyhow::ensure!(
+                channel
+                    .protocols
+                    .iter()
+                    .any(|option| option.value == protocol),
+                "Vendor `{}` channel `{}` does not support protocol `{protocol}`",
+                descriptor.provider_id,
+                channel.id
+            );
+        }
         let supports_config_validation = channel
             .capabilities
             .contains(&stravia_vendor_sdk::Capability::ConfigValidation);
@@ -181,7 +199,12 @@ impl AdminService {
             options,
             credentials,
             mut issues,
-        } = validate_configuration_fields(validation_descriptor, input.options, credentials)?;
+        } = validate_configuration_fields(
+            validation_descriptor,
+            &protocol,
+            input.options,
+            credentials,
+        )?;
 
         if issues.is_empty() && supports_config_validation {
             let provider = stravia_vendor_sdk::ProviderSnapshot {
@@ -331,6 +354,7 @@ impl AdminService {
             issues,
         } = validate_configuration_fields(
             &auth_candidate_descriptor,
+            &protocol,
             candidate.options.clone(),
             credentials,
         )?;
@@ -560,6 +584,7 @@ impl AdminService {
                 };
                 let (vendor_options, credentials) = validate_persisted_configuration_fields(
                     &descriptor,
+                    &channel.protocol,
                     vendor_options,
                     credentials,
                     auth_mode == "oauth",
@@ -582,6 +607,7 @@ impl AdminService {
                             provider_id: None,
                             vendor_id: provider.id.clone(),
                             channel: channel.id.clone(),
+                            protocol: Some(channel.protocol.clone()),
                             base_url: base_url.clone(),
                             options: vendor_options.clone().into_iter().collect(),
                             credentials: credentials.clone(),
@@ -638,6 +664,23 @@ impl AdminService {
                     .await
                     .map(str::to_owned);
                 let oauth_requested = channel.auth.is_some();
+                let protocol = protocol
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| channel.protocol.clone())
+                    .unwrap_or_default();
+                if !channel.protocols.is_empty() {
+                    anyhow::ensure!(
+                        channel
+                            .protocols
+                            .iter()
+                            .any(|option| option.value == protocol),
+                        "Vendor `{vendor}` channel `{}` does not support protocol `{protocol}`",
+                        channel.id
+                    );
+                }
                 if oauth_requested && !allow_oauth {
                     anyhow::bail!(
                         r#"{{"code":"AUTH_SESSION_REQUIRED","message":"OAuth providers must be created from a completed authentication session"}}"#
@@ -661,6 +704,7 @@ impl AdminService {
                 };
                 let (vendor_options, credentials) = validate_persisted_configuration_fields(
                     &descriptor,
+                    &protocol,
                     vendor_options,
                     credentials,
                     oauth_requested,
@@ -678,32 +722,13 @@ impl AdminService {
                             provider_id: None,
                             vendor_id: vendor.clone(),
                             channel: channel.id.clone(),
+                            protocol: Some(protocol.clone()),
                             base_url: base_url.clone(),
                             options: vendor_options.clone().into_iter().collect(),
                             credentials: credentials.clone(),
                         })
                         .await?;
                     ensure_configuration_accepted(&preview, &base_url)?;
-                }
-                let protocol = protocol
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .or_else(|| channel.protocol.clone())
-                    .unwrap_or_default();
-                // Merged profiles (e.g. `custom`) advertise every selectable
-                // egress protocol in `protocols`; other vendors keep their
-                // stored wire-protocol key without membership checks.
-                if !channel.protocols.is_empty() {
-                    anyhow::ensure!(
-                        channel
-                            .protocols
-                            .iter()
-                            .any(|option| option.value == protocol),
-                        "Vendor `{vendor}` channel `{}` does not support protocol `{protocol}`",
-                        channel.id
-                    );
                 }
                 Ok((
                     CreateProviderRecord {
@@ -978,6 +1003,7 @@ impl AdminService {
         };
         let (options, credentials) = validate_persisted_configuration_fields(
             &descriptor,
+            &current.protocol,
             options,
             credentials,
             auth_mode == "oauth",
@@ -989,6 +1015,7 @@ impl AdminService {
                 provider_id: Some(id.to_owned()),
                 vendor_id: vendor.clone(),
                 channel: channel.clone(),
+                protocol: Some(current.protocol.clone()),
                 base_url: base_url.clone(),
                 options: options.clone().into_iter().collect(),
                 credentials: credentials.clone(),
@@ -1216,6 +1243,7 @@ impl AdminService {
                     provider_id: Some(provider.id.clone()),
                     vendor_id: vendor_id.to_owned(),
                     channel: channel_id.to_owned(),
+                    protocol: Some(provider.protocol.clone()),
                     base_url: provider.base_url.clone(),
                     options: serde_json::from_str(&provider.vendor_options)?,
                     credentials: std::collections::BTreeMap::new(),

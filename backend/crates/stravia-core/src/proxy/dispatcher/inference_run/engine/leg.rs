@@ -418,6 +418,14 @@ impl ModelLegConsume {
         self.completion.empty_response()
     }
 
+    pub(super) fn take_partial_response(&mut self) -> Option<AiResponse> {
+        self.response.take().or_else(|| {
+            self.accumulator
+                .take()
+                .map(StreamResponseAccumulator::into_ai_response)
+        })
+    }
+
     /// Consume one canonical event. Synchronous: Hook stream transformation is
     /// in-process, so the pump never suspends inside `feed`.
     pub(super) fn feed(
