@@ -25,6 +25,8 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_FORECAST_SPAN_MILLIS: i64 = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PARALLEL_REFRESHES: usize = 4;
+// 9999-12-31T00:00:00Z and later are upstream "never resets" placeholders.
+const NO_RESET_SENTINEL_MILLIS: i64 = 253_402_214_400_000;
 
 type SharedFetch =
     Shared<BoxFuture<'static, Result<Option<ProviderAllowanceSnapshot>, Arc<anyhow::Error>>>>;
@@ -841,8 +843,10 @@ fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allo
         limit,
         used_percent,
         window_seconds: item.window_seconds,
-        // 上游对未启用/未开始计时的窗口会返回 0 作为占位；epoch 0 不是有效重置时间。
-        reset_at: item.resets_at_unix_ms.filter(|millis| *millis > 0),
+        // Keep placeholder dates out of both the UI and reset-window forecast filtering.
+        reset_at: item
+            .resets_at_unix_ms
+            .filter(|millis| *millis > 0 && *millis < NO_RESET_SENTINEL_MILLIS),
         condition,
         forecast: ExhaustionForecast::default(),
     };
@@ -1244,17 +1248,91 @@ mod tests {
     }
 
     #[test]
-    fn non_positive_reset_timestamp_means_no_reset() {
-        for raw in [0, -1] {
+    fn reset_timestamps_keep_only_real_positive_dates() {
+        // Plugins have already normalized seconds/date strings to milliseconds at this seam.
+        let sentinel_seconds = 253_402_214_400_i64;
+        for raw in [
+            0,
+            -1,
+            sentinel_seconds * 1000,
+            253_402_214_400_000,
+            253_402_300_799_999,
+            i64::MAX,
+        ] {
             let mut item = sdk_item("USD");
             item.resets_at_unix_ms = Some(raw);
-            assert_eq!(map_allowance(item).expect("allowance").reset_at, None);
+            item.condition = Some("exhausted".into());
+            item.remaining = Some(sdk_amount("0", Some("USD")));
+            let allowance = map_allowance(item).expect("allowance");
+            assert_eq!(allowance.reset_at, None, "raw timestamp: {raw}");
+            assert_eq!(allowance.remaining.as_ref().expect("remaining").value, 0.0);
+            assert_eq!(allowance.condition, Some(AllowanceCondition::Exhausted));
         }
-        let mut item = sdk_item("USD");
-        item.resets_at_unix_ms = Some(1_790_000_000_000);
+        for raw in [1, 1_790_000_000_000, 253_402_214_399_999] {
+            let mut item = sdk_item("USD");
+            item.resets_at_unix_ms = Some(raw);
+            assert_eq!(map_allowance(item).expect("allowance").reset_at, Some(raw));
+        }
         assert_eq!(
-            map_allowance(item).expect("allowance").reset_at,
-            Some(1_790_000_000_000)
+            map_allowance(sdk_item("USD")).expect("allowance").reset_at,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn sentinel_reset_uses_non_reset_forecast_and_records_no_reset_timeline() {
+        let first_at = 1_790_000_000_000;
+        let second_at = first_at + MIN_FORECAST_SPAN_MILLIS;
+        let mut item = sdk_item("USD");
+        item.resets_at_unix_ms = Some(253_402_214_400_000);
+        item.window_seconds = Some(24 * 60 * 60);
+        item.remaining = Some(sdk_amount("20", Some("USD")));
+        let mut snapshot = ProviderAllowanceSnapshot {
+            guard_supported: true,
+            missing_guarded_keys: Vec::new(),
+            suspension: None,
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            catalog_provider_id: "vendor".into(),
+            channel: "default".into(),
+            plan_label: None,
+            status: ProviderAllowanceStatus::Fresh,
+            allowances: vec![map_allowance(item).expect("allowance")],
+            models: Vec::new(),
+            fetched_at: None,
+            error: None,
+        };
+        let store = AllowanceSampleStore::memory();
+        store
+            .record_snapshot_at(&snapshot, first_at)
+            .await
+            .expect("first sample");
+        snapshot.allowances[0]
+            .remaining
+            .as_mut()
+            .expect("remaining")
+            .value = 10.0;
+        store
+            .record_snapshot_at(&snapshot, second_at)
+            .await
+            .expect("second sample");
+
+        let samples = store
+            .list_for_item("provider", "balance_usd", first_at)
+            .await
+            .expect("samples");
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().all(|sample| sample.reset_at.is_none()));
+
+        apply_forecasts(&mut snapshot, &store, second_at)
+            .await
+            .expect("forecast");
+        let forecast = &snapshot.allowances[0].forecast;
+        assert_eq!(forecast.status, ExhaustionForecastStatus::WillExhaust);
+        assert_eq!(forecast.projected_remaining_percent, None);
+        assert_eq!(
+            forecast.exhausts_at,
+            Some(second_at + MIN_FORECAST_SPAN_MILLIS)
         );
     }
 

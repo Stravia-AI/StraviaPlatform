@@ -1349,8 +1349,6 @@
   "allowances_forecast_exhausts_at": "{provider} · {item} may exhaust {time}",
   "allowances_forecast_exhausted_at_resets": "{provider} · {item} exhausted at {time}, resets {reset}",
   "allowances_forecast_exhausted_item_resets": "{provider} · {item} is exhausted, resets {reset}",
-  "allowances_provider_empty": "{items} exhausted",
-  "allowances_provider_empty_resets": "{items} exhausted · resets {time}",
   "allowances_filter_empty": "No allowances match these filters.",
   "allowances_show_model_allowances": "Show model allowances for {provider}",
   "allowances_refresh_all": "Refresh all",

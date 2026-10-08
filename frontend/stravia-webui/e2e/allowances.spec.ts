@@ -505,8 +505,6 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(emptyWindows).toContainText('Beta account')
   await expect(emptyWindows).toContainText('Weekly window')
   await expect(emptyWindows).not.toContainText('Alpha account')
-  await expect(matrix.getByTestId('allowance-provider-provider-beta')).toContainText('Weekly window exhausted')
-  await expect(matrix.getByTestId('allowance-provider-provider-alpha')).not.toContainText('Weekly window exhausted')
   await expect(page.getByRole('heading', { name: 'Reset timeline' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Exhaustion forecast' })).toBeVisible()
   await expect(page.getByText('Based on the current window')).toBeVisible()

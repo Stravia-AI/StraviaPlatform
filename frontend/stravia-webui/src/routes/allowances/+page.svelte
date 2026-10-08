@@ -23,14 +23,13 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { formatList, formatLogTime } from '$lib/format'
+import { formatLogTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
 import { formatAllowanceAmount, formatAllowancePercent } from '$lib/provider-allowance-format'
 import { ProviderAllowanceRead } from '$lib/provider-allowance-read.svelte'
 import type { ProviderAllowanceReadEntry } from '$lib/provider-allowance-read'
 import {
   effectiveAllowanceCondition,
-  exhaustedAllowances,
   forecastBucket,
   nextRelevantResetAt,
   remainingPercent,
@@ -259,19 +258,6 @@ function conditionTone(condition: AllowanceCondition | undefined): string {
     default:
       return 'border-border bg-muted/30'
   }
-}
-
-function providerEmptyHint(allowances: Allowance[]): string | undefined {
-  const empty = exhaustedAllowances(allowances)
-  if (empty.length === 0) return undefined
-  const items = formatList(
-    empty.map((allowance) => allowanceLabel(allowance)),
-    localeState.current,
-  )
-  const resetAt = nextRelevantResetAt(empty)
-  return resetAt == null
-    ? m.allowances_provider_empty({ items })
-    : m.allowances_provider_empty_resets({ items, time: formatLogTime(resetAt, localeState.current) })
 }
 
 function forecastItemCopy(item: VisibleAllowance): string {
@@ -643,7 +629,6 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   {@const suspension = snapshot ? snapshot.suspension : provider.target.suspension}
   {@const presentation = snapshot && snapshot.status !== 'fresh' ? statusPresentation(snapshot.status) : undefined}
   {@const providerCondition = worstAllowanceCondition(provider.allowances.map(effectiveAllowanceCondition))}
-  {@const emptyHint = providerEmptyHint(provider.allowances)}
   {@const refreshingProvider = provider.refreshing}
   {@const expandable = providerExpandable(provider)}
   {@const expanded = expandable && expandedProviderIds.has(providerId)}
@@ -699,7 +684,6 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
             <p class="font-technical mt-0.5 text-xs break-all text-muted-foreground">
               {provider.target.catalog_provider_id} / {provider.target.channel}
             </p>
-            {#if emptyHint}<p class="mt-0.5 text-xs text-muted-foreground">{emptyHint}</p>{/if}
           </div>
         </div>
         <div class="col-span-2 ps-6 @3xl:col-span-1 @3xl:col-start-2 @3xl:row-start-1 @3xl:ps-0">

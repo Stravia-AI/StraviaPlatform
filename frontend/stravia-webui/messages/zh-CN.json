@@ -1343,8 +1343,6 @@
   "allowances_forecast_exhausts_at": "{provider} · {item} 预计于 {time} 耗尽",
   "allowances_forecast_exhausted_at_resets": "{provider} · {item} 已于 {time} 耗尽，{reset} 重置",
   "allowances_forecast_exhausted_item_resets": "{provider} · {item} 已耗尽，{reset} 重置",
-  "allowances_provider_empty": "{items}已耗尽",
-  "allowances_provider_empty_resets": "{items}已耗尽 · {time} 重置",
   "allowances_filter_empty": "没有符合当前筛选的额度。",
   "allowances_show_model_allowances": "展开 {provider} 的模型额度",
   "allowances_refresh_all": "全部刷新",

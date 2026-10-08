@@ -60,6 +60,8 @@
 
 ### Fixed
 
+- Removed the repeated allowance hint beneath model-service names, leaving per-item details in the expanded row. The host now treats non-positive reset timestamps and dates at or after `9999-12-31T00:00:00Z` as no reset, so placeholder dates neither appear as reset times nor exclude historical samples from balance-trend forecasts. Real reset times before that boundary, allowance values, backend conditions, and API contracts remain unchanged. Update the host and WebUI; no plugin rebuild is required.
+
 - Fixed CI regressions by aligning thinking-effort and token-speed checks with the existing contracts, selecting the named Token breakdown region without ambiguous chart labels, and settling asynchronous observation admission before advancing the WebSocket expiry test clock. Restored Rust formatting compliance for embedded provider icon changes and reused a named query-row type for SQLite/PostgreSQL client completion to satisfy Clippy; product behavior and timeout policies are unchanged.
 
 - OpenAI-compatible Chat responses ending with `tool_calls` but no actual tool calls now fail instead of becoming successful empty responses. Started Responses streams deliver one `response.failed` snapshot without an earlier standalone error, preserving partial text, thinking, and reported trailing usage for clients that stop at the first error. Failed attempts also retain reported usage in observations, including before output commitment; unknown fields do not erase known counts, and reported zero remains zero.
