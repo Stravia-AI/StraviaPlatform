@@ -267,6 +267,8 @@ export interface ProviderDescriptor {
   provider_id: string
   /** Optional catalog identity used for related model metadata and provider branding. */
   catalog_id: string | null
+  /** Standalone SVG returned by the host icon endpoint; never injected into the DOM. */
+  icon_svg?: string
   display_name: string
   description: string | null
   channels: VendorChannelDescriptor[]

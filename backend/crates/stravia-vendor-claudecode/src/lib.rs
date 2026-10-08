@@ -66,6 +66,11 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some(CATALOG_ID.into()),
+            icon_svg: Some(
+                stravia_vendor_common::icons::provider_svg("anthropic")
+                    .expect("Anthropic brand SVG is embedded")
+                    .into(),
+            ),
             display_name: "Claude Code".into(),
             description: Some(
                 "Claude subscription OAuth channel shaped as the Claude Code CLI.".into(),

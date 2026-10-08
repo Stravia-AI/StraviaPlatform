@@ -446,6 +446,9 @@ pub enum VendorKind {
     Dedicated,
 }
 
+/// Maximum SVG payload size, shared with the host's remote icon body limit.
+pub const MAX_PROVIDER_ICON_BYTES: usize = 512 * 1024;
+
 /// One provider profile implemented by a vendor package.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderDescriptor {
@@ -453,6 +456,10 @@ pub struct ProviderDescriptor {
     pub provider_id: String,
     /// Optional catalog identity used to group related provider profiles.
     pub catalog_id: Option<String>,
+    /// Standalone SVG served as an image, never injected into the host DOM.
+    /// Takes precedence over catalog logos and website favicons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_svg: Option<String>,
     pub display_name: String,
     pub description: Option<String>,
     /// Non-empty; each carries its own capability set.
@@ -571,6 +578,24 @@ impl VendorDescriptor {
 
 impl ProviderDescriptor {
     fn validate(&self) -> Result<(), DescriptorError> {
+        if let Some(svg) = &self.icon_svg {
+            if svg.len() > MAX_PROVIDER_ICON_BYTES {
+                return Err(DescriptorError::ProviderIconTooLarge(self.provider_id.clone()));
+            }
+            let mut root = svg.trim_start();
+            if root.starts_with("<?xml") {
+                root = root
+                    .split_once("?>")
+                    .map(|(_, rest)| rest.trim_start())
+                    .unwrap_or_default();
+            }
+            if !root.strip_prefix("<svg").is_some_and(|rest| {
+                rest.starts_with('>') || rest.starts_with('/') || rest.starts_with(char::is_whitespace)
+            }) || !root.contains('>')
+            {
+                return Err(DescriptorError::InvalidProviderIcon(self.provider_id.clone()));
+            }
+        }
         if self.display_name.trim().is_empty() {
             return Err(DescriptorError::EmptyProviderDisplayName(
                 self.provider_id.clone(),
@@ -828,6 +853,10 @@ pub enum DescriptorError {
     DuplicateProvider(String),
     #[error("catalog_id `{0}` must contain only lowercase ASCII letters, digits, '.', '-', or '_'")]
     InvalidCatalogId(String),
+    #[error("provider `{0}` icon_svg exceeds 512 KiB")]
+    ProviderIconTooLarge(String),
+    #[error("provider `{0}` icon_svg must contain an SVG image")]
+    InvalidProviderIcon(String),
     #[error("provider `{0}` display_name must not be empty")]
     EmptyProviderDisplayName(String),
     #[error("provider must declare at least one channel")]
@@ -926,6 +955,7 @@ mod tests {
         ProviderDescriptor {
             provider_id: provider_id.into(),
             catalog_id: None,
+            icon_svg: None,
             display_name: provider_id.into(),
             description: None,
             channels: vec![ChannelDescriptor {
@@ -966,6 +996,52 @@ mod tests {
             kind,
             providers,
         }
+    }
+
+    #[test]
+    fn provider_icon_is_optional_on_the_wire() {
+        let profile = provider("alpha");
+        let wire = serde_json::to_value(&profile).unwrap();
+        assert!(wire.get("icon_svg").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProviderDescriptor>(wire).unwrap().icon_svg,
+            None
+        );
+        let mut embedded = profile;
+        embedded.icon_svg = Some("<svg/>".into());
+        let wire = serde_json::to_value(&embedded).unwrap();
+        assert_eq!(wire["icon_svg"], "<svg/>");
+        assert_eq!(serde_json::from_value::<ProviderDescriptor>(wire).unwrap(), embedded);
+    }
+
+    #[test]
+    fn provider_icon_rejects_empty_and_non_svg_payloads() {
+        for payload in ["", " \n", "<html/>", "<?xml version=\"1.0\"?><html/>", "<svg-script/>", "<svg"] {
+            let mut profile = provider("alpha");
+            profile.icon_svg = Some(payload.into());
+            assert_eq!(
+                manifest("alpha", VendorKind::Dedicated, vec![profile]).validate(),
+                Err(DescriptorError::InvalidProviderIcon("alpha".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn provider_icon_accepts_svg_and_enforces_the_byte_limit() {
+        let mut profile = provider("alpha");
+        profile.icon_svg = Some(" \n<?xml version=\"1.0\"?>\n<svg/>".into());
+        assert!(manifest("alpha", VendorKind::Dedicated, vec![profile.clone()]).validate().is_ok());
+        let mut svg = String::from("<svg>");
+        svg.extend(std::iter::repeat_n(' ', MAX_PROVIDER_ICON_BYTES - "<svg></svg>".len()));
+        svg.push_str("</svg>");
+        profile.icon_svg = Some(svg.clone());
+        assert!(manifest("alpha", VendorKind::Dedicated, vec![profile.clone()]).validate().is_ok());
+        svg.push(' ');
+        profile.icon_svg = Some(svg);
+        assert_eq!(
+            manifest("alpha", VendorKind::Dedicated, vec![profile]).validate(),
+            Err(DescriptorError::ProviderIconTooLarge("alpha".into()))
+        );
     }
 
     #[test]

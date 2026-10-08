@@ -60,6 +60,11 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some(CATALOG_ID.into()),
+            icon_svg: Some(
+                stravia_vendor_common::icons::provider_svg("openai")
+                    .expect("OpenAI brand SVG is embedded")
+                    .into(),
+            ),
             display_name: "OpenAI Codex".into(),
             description: Some(
                 "ChatGPT OAuth channel using Open Responses, hosted search, and image generation."

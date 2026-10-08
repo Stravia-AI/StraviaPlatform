@@ -46,6 +46,7 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: None,
+            icon_svg: Some(include_str!("assets/antigravity.svg").into()),
             display_name: "Antigravity".into(),
             description: Some("Third-party OAuth access may violate Google's terms and lead to account suspension.".into()),
             channels: vec![ChannelDescriptor {

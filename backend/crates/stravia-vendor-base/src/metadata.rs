@@ -357,6 +357,7 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         .collect();
     Some(ProviderDescriptor {
         provider_id: vendor_id.to_owned(),
+        icon_svg: stravia_vendor_common::icons::provider_svg(vendor_id).map(str::to_owned),
         catalog_id: CATALOG_VENDOR_IDS
             .contains(&vendor_id)
             .then(|| vendor_id.to_owned()),
@@ -413,6 +414,12 @@ pub(crate) fn catalog_profile_descriptor(
     descriptor.display_name = name.to_owned();
     descriptor.description = Some(format!("Built-in {name} vendor component"));
     descriptor.implementation = Some(npm.to_owned());
+    // The final catalog identity, not its borrowed npm implementation, owns
+    // the mark. Unknown identities must also clear any template brand.
+    let icon = stravia_vendor_common::icons::provider_svg(id);
+    if descriptor.icon_svg.as_deref() != icon {
+        descriptor.icon_svg = icon.map(str::to_owned);
+    }
     for channel in &mut descriptor.channels {
         if channel.id != "default" {
             continue;
@@ -448,6 +455,7 @@ pub(crate) fn compatible_catalog_descriptor(
     }
     ProviderDescriptor {
         provider_id: id.to_owned(),
+        icon_svg: stravia_vendor_common::icons::provider_svg(id).map(str::to_owned),
         catalog_id: Some(id.to_owned()),
         display_name: name.to_owned(),
         description: Some(format!("Built-in {name} vendor component")),

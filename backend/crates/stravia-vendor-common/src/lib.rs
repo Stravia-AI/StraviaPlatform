@@ -1,6 +1,7 @@
 //! Shared request, response, error, URL, and thinking utilities for Stravia vendor guests.
 
 pub mod common;
+pub mod icons;
 pub mod thinking;
 
 pub use common::{

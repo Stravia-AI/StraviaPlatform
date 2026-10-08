@@ -118,6 +118,7 @@ impl VendorGuest for ManagementContractVendor {
             providers: vec![ProviderDescriptor {
                 provider_id: profile.vendor_id().into(),
                 catalog_id: None,
+                icon_svg: None,
                 display_name: "Management Lifecycle Fixture".into(),
                 description: None,
                 channels: vec![ChannelDescriptor {

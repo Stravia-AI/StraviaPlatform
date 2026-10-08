@@ -1645,6 +1645,7 @@ fn descriptor_base(
         .collect();
     ProviderDescriptor {
         provider_id: vendor_id.into(),
+        icon_svg: stravia_vendor_common::icons::provider_svg(vendor_id).map(str::to_owned),
         catalog_id: Some(vendor_id.into()),
         display_name: display_name.into(),
         description: Some(format!("Built-in {display_name} vendor integration")),

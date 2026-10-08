@@ -35,6 +35,7 @@ fn openai_descriptor() -> ProviderDescriptor {
     ]);
     ProviderDescriptor {
         provider_id: VENDOR_ID.into(),
+        icon_svg: stravia_vendor_common::icons::provider_svg(VENDOR_ID).map(str::to_owned),
         catalog_id: Some(VENDOR_ID.into()),
         display_name: "OpenAI".into(),
         description: Some("OpenAI API-key integration for ordinary API endpoints.".into()),
