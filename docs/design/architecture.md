@@ -801,7 +801,7 @@ Route ID 存于 `models.model_id`，客户端请求中的 `model` 值以大小�
 
 SQL adapter 的私有行类型、运行时 `RouteConfig` 与管理 `RouteView` 分离。运行时拥有完整 Target 集合，不包含 SQLx JSON 包装；管理投影附加展示、规格和能力信息。`ProviderId`、`UpstreamModelId` 与 `TargetId` 区分各自的身份空间，`TargetDestination` 始终包含 Provider 与非空白上游模型。所有能力共用这一要求，搜索也不例外；Target 写入不接受缺省、`null` 或空白 `model`。
 
-SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_backends.model` 约束为非空且非空白；所属 Route 和其他 Target 保留，不推导或填入虚假模型。仅有无模型 Target 的 Route 升级后没有可执行 Target，管理员必须重新绑定真实 Provider Model。迁移同时从 `rpm_admission` 中删除无模型目的地；共享池随后由 0013 删除，详见 §8.4。
+SQLite/PostgreSQL migration 0012 删除旧的无模型 Target，并将 `model_backends.model` 约束为非空且非空白；所属 Route 和其他 Target 保留，不推导或填入虚假模型。仅有无模型 Target 的 Route 升级后没有可执行 Target，管理员必须重新绑定真实 Provider Model。迁移同时从 `rpm_admission` 中删除无模型目的地；共享池随后由 0014 删除，详见 §8.4。
 
 `targets` 是唯一 Target 写入入口，不接受调用方指定 Target ID；`target_provider` / `target_model` 仅保留为派生读投影。更新省略 `targets` 时，事务完全保留现有 Target 行、身份和策略；显式提交时才原子替换，校验或持久化失败不得留下部分修改。`display_name` 与 `default_thinking_level` 省略表示不改，`null` 表示清除；`targets`、`model_id`、`balance`、`is_enabled` 不接受 `null`。补丁序列化必须省略未提供字段。WebUI 仅修改显示名称时不重新提交 Target 集合。
 
