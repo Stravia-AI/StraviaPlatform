@@ -5,9 +5,10 @@ ARG RUST_VERSION=1.98.1
 FROM oven/bun:${BUN_VERSION}-debian AS web-builder
 WORKDIR /src
 
-# Keep dependency installation cached until a workspace manifest or lockfile changes.
+# Keep dependency installation cached until workspace manifests, the lockfile, or patches change.
 COPY package.json bun.lock ./
 COPY frontend/stravia-webui/package.json frontend/stravia-webui/package.json
+COPY patches/ patches/
 RUN --mount=type=cache,id=stravia-bun,target=/root/.bun/install/cache,sharing=locked \
     bun --bun run bun ci
 
