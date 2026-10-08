@@ -27,6 +27,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY backend backend
 COPY --from=web-builder /src/frontend/stravia-webui/dist frontend/stravia-webui/dist
+# Vendor plugins embed the original SVGs; compiled WebUI assets cannot replace these inputs.
+COPY --from=web-builder /src/frontend/stravia-webui/src/assets/icons frontend/stravia-webui/src/assets/icons
 
 # Cache downloads and compiled dependencies without carrying build artifacts into the runtime image.
 RUN --mount=type=cache,id=stravia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

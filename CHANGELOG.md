@@ -32,7 +32,7 @@
 
 ### Fixed
 
-- Fixed Docker source builds failing to install locked WebUI dependencies because the declared Bun patch files were missing from the dependency-installation stage.
+- Fixed Docker source builds missing required inputs: declared Bun patches are copied before locked WebUI installation, and original brand SVGs are available when compiling embedded Vendor Plugin marks.
 - Fixed thinking and tool-history replay across Chat Completions, Responses, Anthropic, Gemini, Command Code, and Devin, including failover, protected payload boundaries, late signatures, empty/null reasoning fields, and `previous_response_id` continuation. Genuine native signatures remain preserved; official Gemini migration handling does not apply to unverified/custom endpoints.
 - Fixed immediate client-tool continuation attribution and duplicate historical user/tool observations. Confirmed delivery settles before later admission and is no longer mislabeled as interrupted by late finalization; old observations are not rewritten.
 - Failed Responses streams deliver one `response.failed` snapshot with partial output and confirmed usage. Chat responses claiming `tool_calls` without actual calls now fail instead of returning empty success. Failure statistics count final client-request failures once, excluding recovered retries, cancellations, and active requests; Debug Bundles retain confirmed late usage.

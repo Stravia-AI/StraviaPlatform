@@ -4,7 +4,7 @@ Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 是�
 
 Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像。
 
-容器 WebUI 依赖安装层必须同时复制 workspace manifests、`bun.lock` 和 `patches/`，再运行锁定安装；补丁变化必须使该层缓存失效。不得因补丁仅用于桌面测试而从容器安装输入或 `patchedDependencies` 中移除它。
+容器 WebUI 依赖安装层必须同时复制 workspace manifests、`bun.lock` 和 `patches/`，再运行锁定安装；补丁变化必须使该层缓存失效。不得因补丁仅用于桌面测试而从容器安装输入或 `patchedDependencies` 中移除它。Rust 编译层还必须保留 `frontend/stravia-webui/src/assets/icons/` 的原始 SVG，供 Vendor Plugins 编译时内嵌品牌图标；WebUI 的 `dist` 不能替代这些源文件。
 
 ## 首次生成和托管密钥
 
