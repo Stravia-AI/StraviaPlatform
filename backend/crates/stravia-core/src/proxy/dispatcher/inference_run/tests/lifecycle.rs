@@ -1610,8 +1610,9 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
 }
 
 #[tokio::test]
-async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
-    let (base_url, calls) = serve_openai_sequence(vec![openai_response("must not run")]).await;
+async fn explicit_thinking_is_omitted_when_the_route_opens_no_levels() {
+    let (base_url, calls, requests) =
+        serve_openai_sequence_with_requests(vec![openai_response("upstream defaults")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -1675,9 +1676,24 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
         "/v1/chat/completions",
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    drop(response);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("client response");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("client response JSON");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "upstream defaults"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    {
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1);
+        let request: serde_json::Value =
+            serde_json::from_str(requests[0].split_once("\r\n\r\n").expect("HTTP body").1)
+                .expect("upstream request JSON");
+        assert!(request.get("reasoning_effort").is_none(), "{request}");
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 

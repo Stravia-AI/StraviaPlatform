@@ -129,6 +129,7 @@ impl ObservationStore {
         waiting_client: bool,
         expires_at: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
+        type CompletionRow = (String, Option<String>, bool, i64, Option<i64>);
         let requested = if waiting_client {
             "waiting_client"
         } else {
@@ -139,7 +140,7 @@ impl ObservationStore {
                 let _write_gate = write_gate.lock().await;
                 let mut tx = pool.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                let row: Option<(String, Option<String>, bool, i64, Option<i64>)> = sqlx::query_as(
+                let row: Option<CompletionRow> = sqlx::query_as(
                     "UPDATE inference_run_observations SET
                         status=CASE
                             WHEN status='failed' THEN status
@@ -200,7 +201,7 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                let row: Option<(String, Option<String>, bool, i64, Option<i64>)> = sqlx::query_as(
+                let row: Option<CompletionRow> = sqlx::query_as(
                     "UPDATE inference_run_observations SET
                         status=CASE
                             WHEN status='failed' THEN status

@@ -422,6 +422,19 @@ async fn local_websocket_expiry_and_cancellation_do_not_capture_received_close()
     let network = network(&server.url, Arc::new(VendorWebSocketPool::default()))
         .with_observer(Some(observer));
     let socket = checkout(&network, &server.url).await;
+    // Admission persists asynchronously through SQLx. Settle it before advancing
+    // Tokio's clock so the transport-age probe cannot expire its pool-acquire timeout.
+    observation.flush().await.unwrap();
+    assert_eq!(
+        observation
+            .query_forest(crate::interaction_observation::ForestQuery::default())
+            .await
+            .unwrap()
+            .roots
+            .len(),
+        1,
+        "WebSocket capture run must be admitted before the expiry probe"
+    );
     tokio::time::pause();
     tokio::time::advance(MAX_WEBSOCKET_AGE).await;
     let expired = socket.next().await.unwrap_err();

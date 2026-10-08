@@ -41,7 +41,10 @@ impl Gateway {
             .vendor
             .as_deref()
             .and_then(|vendor| self.vendor_plugins.descriptor(vendor).ok());
-        if let Some(svg) = descriptor.as_ref().and_then(|descriptor| descriptor.icon_svg.as_ref()) {
+        if let Some(svg) = descriptor
+            .as_ref()
+            .and_then(|descriptor| descriptor.icon_svg.as_ref())
+        {
             return Ok(ProviderIcon {
                 body: svg.as_bytes().to_vec(),
                 content_type: "image/svg+xml",

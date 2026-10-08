@@ -580,7 +580,9 @@ impl ProviderDescriptor {
     fn validate(&self) -> Result<(), DescriptorError> {
         if let Some(svg) = &self.icon_svg {
             if svg.len() > MAX_PROVIDER_ICON_BYTES {
-                return Err(DescriptorError::ProviderIconTooLarge(self.provider_id.clone()));
+                return Err(DescriptorError::ProviderIconTooLarge(
+                    self.provider_id.clone(),
+                ));
             }
             let mut root = svg.trim_start();
             if root.starts_with("<?xml") {
@@ -590,10 +592,14 @@ impl ProviderDescriptor {
                     .unwrap_or_default();
             }
             if !root.strip_prefix("<svg").is_some_and(|rest| {
-                rest.starts_with('>') || rest.starts_with('/') || rest.starts_with(char::is_whitespace)
+                rest.starts_with('>')
+                    || rest.starts_with('/')
+                    || rest.starts_with(char::is_whitespace)
             }) || !root.contains('>')
             {
-                return Err(DescriptorError::InvalidProviderIcon(self.provider_id.clone()));
+                return Err(DescriptorError::InvalidProviderIcon(
+                    self.provider_id.clone(),
+                ));
             }
         }
         if self.display_name.trim().is_empty() {
@@ -1004,19 +1010,31 @@ mod tests {
         let wire = serde_json::to_value(&profile).unwrap();
         assert!(wire.get("icon_svg").is_none());
         assert_eq!(
-            serde_json::from_value::<ProviderDescriptor>(wire).unwrap().icon_svg,
+            serde_json::from_value::<ProviderDescriptor>(wire)
+                .unwrap()
+                .icon_svg,
             None
         );
         let mut embedded = profile;
         embedded.icon_svg = Some("<svg/>".into());
         let wire = serde_json::to_value(&embedded).unwrap();
         assert_eq!(wire["icon_svg"], "<svg/>");
-        assert_eq!(serde_json::from_value::<ProviderDescriptor>(wire).unwrap(), embedded);
+        assert_eq!(
+            serde_json::from_value::<ProviderDescriptor>(wire).unwrap(),
+            embedded
+        );
     }
 
     #[test]
     fn provider_icon_rejects_empty_and_non_svg_payloads() {
-        for payload in ["", " \n", "<html/>", "<?xml version=\"1.0\"?><html/>", "<svg-script/>", "<svg"] {
+        for payload in [
+            "",
+            " \n",
+            "<html/>",
+            "<?xml version=\"1.0\"?><html/>",
+            "<svg-script/>",
+            "<svg",
+        ] {
             let mut profile = provider("alpha");
             profile.icon_svg = Some(payload.into());
             assert_eq!(
@@ -1030,12 +1048,23 @@ mod tests {
     fn provider_icon_accepts_svg_and_enforces_the_byte_limit() {
         let mut profile = provider("alpha");
         profile.icon_svg = Some(" \n<?xml version=\"1.0\"?>\n<svg/>".into());
-        assert!(manifest("alpha", VendorKind::Dedicated, vec![profile.clone()]).validate().is_ok());
+        assert!(
+            manifest("alpha", VendorKind::Dedicated, vec![profile.clone()])
+                .validate()
+                .is_ok()
+        );
         let mut svg = String::from("<svg>");
-        svg.extend(std::iter::repeat_n(' ', MAX_PROVIDER_ICON_BYTES - "<svg></svg>".len()));
+        svg.extend(std::iter::repeat_n(
+            ' ',
+            MAX_PROVIDER_ICON_BYTES - "<svg></svg>".len(),
+        ));
         svg.push_str("</svg>");
         profile.icon_svg = Some(svg.clone());
-        assert!(manifest("alpha", VendorKind::Dedicated, vec![profile.clone()]).validate().is_ok());
+        assert!(
+            manifest("alpha", VendorKind::Dedicated, vec![profile.clone()])
+                .validate()
+                .is_ok()
+        );
         svg.push(' ');
         profile.icon_svg = Some(svg);
         assert_eq!(

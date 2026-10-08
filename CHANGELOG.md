@@ -60,6 +60,8 @@
 
 ### Fixed
 
+- Fixed CI regressions by aligning thinking-effort and token-speed checks with the existing contracts, selecting the named Token breakdown region without ambiguous chart labels, and settling asynchronous observation admission before advancing the WebSocket expiry test clock. Restored Rust formatting compliance for embedded provider icon changes and reused a named query-row type for SQLite/PostgreSQL client completion to satisfy Clippy; product behavior and timeout policies are unchanged.
+
 - OpenAI-compatible Chat responses ending with `tool_calls` but no actual tool calls now fail instead of becoming successful empty responses. Started Responses streams deliver one `response.failed` snapshot without an earlier standalone error, preserving partial text, thinking, and reported trailing usage for clients that stop at the first error. Failed attempts also retain reported usage in observations, including before output commitment; unknown fields do not erase known counts, and reported zero remains zero.
 - Confirmed client delivery now settles final responses and tool handoffs before later request admission, even without a capturable history window. Late execution finalization no longer mislabels an already-delivered final response as user-interrupted; genuine failures, interruptions, and independent background activity remain intact.
 - Request History cards now show their empty-state hint for whitespace-only output instead of an empty Markdown box. Original Markdown indentation remains unchanged, and thinking is not substituted for public output.

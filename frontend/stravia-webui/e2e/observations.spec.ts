@@ -1087,7 +1087,8 @@ test.describe('Interaction Observation canvas', () => {
     })
     await expect(runRow(runCount)).toContainText('live-upstream-model · Live Service')
     await expect(runRow(runCount)).toContainText('First token 800 ms')
-    await expect(runRow(runCount)).toContainText('50 tok/s')
+    // Attempt completion does not end client delivery: the running Run must not borrow the attempt's speed.
+    await expect(runRow(runCount).getByTitle('Token speed', { exact: true })).toHaveText('– tok/s')
     await expect(runRow(runCount)).toBeInViewport()
     await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
 
@@ -2676,11 +2677,12 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    // 任一完成尝试缺少耗时，Run 汇总速度即未知；完整计时的单次尝试仍展示自身速度。
+    // This Run is still delivering, so its speed is unknown independently of finished attempts.
     const runRow = diagnostics.locator('button[data-run="run-interaction-cinder"]')
     await expect(runRow.getByTitle('Token speed', { exact: true })).toHaveText('– tok/s')
     await runRow.click()
-    await expect(diagnostics.locator('.stream-row[data-sequence="12"]')).toContainText('100 tok/s')
+    // Attempt-local output / full duration: 1110 / 18.75 = 59.2; first-token wait is not subtracted.
+    await expect(diagnostics.locator('.stream-row[data-sequence="12"]')).toContainText('59.2 tok/s')
     const groups = diagnostics.locator('button[data-group="tools"]')
     await expect(groups).toHaveCount(2)
     await expect(groups.first()).toHaveAccessibleName(/^Bash × 4 · Sent to client/)
