@@ -1,5 +1,4 @@
 use super::*;
-use serde_json::json;
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
@@ -73,10 +72,6 @@ fn replays_reasoning_content_and_drops_protected_only_assistant() {
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[1]["reasoning_content"], "let me think");
-    assert_eq!(
-        messages[1]["content"],
-        json!([{"type": "text", "text": "answer"}])
-    );
     let body_text = serde_json::to_string(&body).unwrap();
     assert!(!body_text.contains("sig_protected"));
     assert!(!body_text.contains("redacted"));

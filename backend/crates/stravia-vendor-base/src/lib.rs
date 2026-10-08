@@ -298,6 +298,14 @@ pub(crate) fn decode_inference(
         .map(Box::new)
         .map(OperationOutput::Infer);
     };
+    decode_inference_with_adapter(host, adapter, response)
+}
+
+pub(crate) fn decode_inference_with_adapter(
+    host: &GuestHost,
+    adapter: &dyn stravia_protocol_codec::transform::ProtocolAdapter,
+    response: stravia_vendor_sdk::HttpResponse,
+) -> Result<OperationOutput, PluginError> {
     let classify = generic::inference_error_classifier_for(adapter.id().protocol);
     let status = response.status()?;
     let headers = response.headers()?;

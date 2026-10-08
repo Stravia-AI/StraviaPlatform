@@ -503,6 +503,9 @@ fn custom_standard() -> (
 ) {
     let mut descriptor = standard("Custom", None);
     descriptor.1[0].capabilities.insert(Capability::Compact);
+    descriptor.1[0]
+        .capabilities
+        .insert(Capability::ConfigValidation);
     // The merged Custom profile owns the four selectable egress protocols the
     // retired `protocol-*` vendors used to expose as separate profiles.
     descriptor.1[0].protocols = CUSTOM_PROTOCOLS
@@ -512,6 +515,68 @@ fn custom_standard() -> (
             label: label(),
         })
         .collect();
+    let mut reasoning_field = string_field(
+        "reasoning_field",
+        crate::messages::reasoning_field(),
+        false,
+        false,
+    );
+    reasoning_field.description = Some(crate::messages::reasoning_field_description());
+    reasoning_field.kind = ConfigFieldKind::Enum {
+        options: vec![
+            stravia_vendor_sdk::EnumOption {
+                value: "protocol_default".into(),
+                label: crate::messages::reasoning_field_protocol_default(),
+            },
+            stravia_vendor_sdk::EnumOption {
+                value: "reasoning_content".into(),
+                label: crate::messages::reasoning_field_reasoning_content(),
+            },
+            stravia_vendor_sdk::EnumOption {
+                value: "reasoning".into(),
+                label: crate::messages::reasoning_field_reasoning(),
+            },
+            stravia_vendor_sdk::EnumOption {
+                value: "custom".into(),
+                label: crate::messages::reasoning_field_custom(),
+            },
+        ],
+    };
+    reasoning_field.default_json = Some(Value::String("protocol_default".into()));
+    reasoning_field.group = Some("advanced".into());
+    reasoning_field.max_length = None;
+    let mut custom_reasoning_field = string_field(
+        "custom_reasoning_field",
+        crate::messages::custom_reasoning_field(),
+        false,
+        true,
+    );
+    custom_reasoning_field.description =
+        Some(crate::messages::custom_reasoning_field_description());
+    custom_reasoning_field.group = Some("advanced".into());
+    custom_reasoning_field.max_length = Some(128);
+    custom_reasoning_field.visible_when = Some(stravia_vendor_sdk::FieldCondition {
+        field: "reasoning_field".into(),
+        equals: Value::String("custom".into()),
+    });
+    descriptor
+        .2
+        .extend([reasoning_field, custom_reasoning_field]);
+    descriptor.2.push(ConfigField {
+        key: "ensure_reasoning_field".into(),
+        label: crate::messages::ensure_reasoning_field(),
+        description: Some(crate::messages::ensure_reasoning_field_description()),
+        kind: ConfigFieldKind::Bool,
+        required: false,
+        default_json: Some(Value::Bool(false)),
+        group: Some("advanced".into()),
+        secret: false,
+        min: None,
+        max: None,
+        max_length: None,
+        pattern: None,
+        visible_when: None,
+    });
     descriptor
 }
 
@@ -628,6 +693,15 @@ fn config_groups(fields: &[ConfigField]) -> Vec<ConfigGroup> {
         groups.push(ConfigGroup {
             id: "connection".into(),
             label: crate::messages::connection_group(),
+        });
+    }
+    if fields
+        .iter()
+        .any(|field| field.group.as_deref() == Some("advanced"))
+    {
+        groups.push(ConfigGroup {
+            id: "advanced".into(),
+            label: crate::messages::advanced_group(),
         });
     }
     groups

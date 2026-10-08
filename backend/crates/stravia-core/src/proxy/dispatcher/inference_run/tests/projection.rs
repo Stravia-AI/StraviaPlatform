@@ -1,6 +1,363 @@
 use super::*;
 
 #[tokio::test]
+async fn custom_provider_can_require_reasoning_content_on_every_assistant_turn() {
+    use axum::Json;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use serde_json::{Value, json};
+
+    let (captured_tx, mut captured_rx) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let captured_tx = captured_tx.clone();
+            async move {
+                let valid = body["messages"].as_array().unwrap().iter().all(|message| {
+                    message["role"] != "assistant"
+                        || message
+                            .get("reasoning_content")
+                            .is_some_and(Value::is_string)
+                });
+                captured_tx.send(body).unwrap();
+                if valid {
+                    Json(openai_response("accepted reasoning history")).into_response()
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": {
+                            "type": "invalid_request_error",
+                            "message": "Every assistant message requires a string reasoning_content"
+                        }})),
+                    )
+                        .into_response()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let model = "custom-reasoning-history";
+    configure_route(&gateway, model, &[format!("http://{address}/v1")]).await;
+    let provider = gateway.admin().list_providers().await.unwrap().remove(0);
+    gateway
+        .admin()
+        .update_provider(
+            &provider.id,
+            crate::db::models::UpdateProvider {
+                vendor_options: Some(serde_json::Map::from_iter([(
+                    "ensure_reasoning_field".into(),
+                    json!(true),
+                )])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("save the base Custom reasoning compatibility option");
+
+    let authorization = authorized_headers(&gateway)
+        .await
+        .get(header::AUTHORIZATION)
+        .unwrap()
+        .clone();
+    let router = crate::proxy::server::create_router(gateway.clone());
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(header::AUTHORIZATION, authorization)
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "user", "content": "first question"},
+                            {"role": "assistant", "content": "ordinary reply"},
+                            {"role": "assistant", "content": "null reasoning", "reasoning_content": null},
+                            {"role": "assistant", "content": "empty reasoning", "reasoning_content": ""},
+                            {"role": "assistant", "content": "planning", "tool_calls": [
+                                {"id": "call_weather", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"Paris\"}"}},
+                                {"id": "call_clock", "type": "function", "function": {"name": "clock", "arguments": "{}"}}
+                            ]},
+                            {"role": "tool", "tool_call_id": "call_weather", "content": "sunny"},
+                            {"role": "tool", "tool_call_id": "call_clock", "content": "noon"},
+                            {"role": "assistant", "content": "final reply", "reasoning_content": "  preserve this reasoning exactly\n"},
+                            {"role": "user", "content": "continue"}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let delivered = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&delivered)
+    );
+    let delivered: Value = serde_json::from_slice(&delivered).unwrap();
+    assert_eq!(
+        delivered["choices"][0]["message"]["content"],
+        "accepted reasoning history"
+    );
+
+    let body = captured_rx.recv().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    for (content, reasoning) in [
+        ("ordinary reply", ""),
+        ("null reasoning", ""),
+        ("empty reasoning", ""),
+        ("planning", ""),
+        ("final reply", "  preserve this reasoning exactly\n"),
+    ] {
+        let message = messages
+            .iter()
+            .find(|message| message["content"] == content)
+            .unwrap_or_else(|| panic!("missing assistant turn {content}: {messages:?}"));
+        assert_eq!(message["reasoning_content"], reasoning, "{content}");
+    }
+    let calls = messages
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .map(|call| {
+            (
+                call["id"].as_str().unwrap(),
+                (
+                    call["function"]["name"].as_str().unwrap(),
+                    serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap())
+                        .unwrap(),
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        calls,
+        std::collections::BTreeMap::from([
+            ("call_weather", ("weather", json!({"city": "Paris"}))),
+            ("call_clock", ("clock", json!({}))),
+        ])
+    );
+    for (id, result) in [("call_weather", "sunny"), ("call_clock", "noon")] {
+        let message = messages
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+            .unwrap();
+        assert_eq!(message["content"], result, "{id}");
+    }
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message["role"] != "assistant")
+            .all(|message| !message
+                .as_object()
+                .unwrap()
+                .contains_key("reasoning_content"))
+    );
+    drop(router);
+    server.abort();
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
+async fn custom_provider_round_trip_maps_the_selected_reasoning_field() {
+    use axum::Json;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use serde_json::{Value, json};
+
+    let (captured_tx, mut captured_rx) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let captured_tx = captured_tx.clone();
+            async move {
+                let messages = body["messages"].as_array().unwrap();
+                let valid = messages.iter().all(|message| {
+                    message["role"] != "assistant"
+                        || (message["analysis_text"].is_string()
+                            && message.get("reasoning_content").is_none())
+                });
+                let final_turn = messages
+                    .iter()
+                    .any(|message| message["tool_call_id"] == "call_echo");
+                captured_tx.send(body).unwrap();
+                if !valid {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": {
+                            "type": "invalid_request_error",
+                            "message": "Assistant history requires analysis_text, not reasoning_content"
+                        }})),
+                    )
+                        .into_response();
+                }
+                let mut response =
+                    openai_response(if final_turn { "finished" } else { "calling" });
+                response["choices"][0]["message"]["analysis_text"] =
+                    json!(if final_turn { "done thinking" } else { "  custom thought\n" });
+                if !final_turn {
+                    response["choices"][0]["message"]["tool_calls"] = json!([{
+                        "id": "call_echo",
+                        "type": "function",
+                        "function": {"name": "echo", "arguments": "{\"value\":\"yes\"}"}
+                    }]);
+                    response["choices"][0]["finish_reason"] = json!("tool_calls");
+                }
+                Json(response).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let model = "custom-reasoning-field";
+    configure_route(&gateway, model, &[format!("http://{address}/v1")]).await;
+    let provider = gateway.admin().list_providers().await.unwrap().remove(0);
+    let rejected = gateway
+        .admin()
+        .update_provider(
+            &provider.id,
+            crate::db::models::UpdateProvider {
+                vendor_options: Some(serde_json::Map::from_iter([
+                    ("reasoning_field".into(), json!("custom")),
+                    ("custom_reasoning_field".into(), json!("content")),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        rejected.is_err(),
+        "a reasoning field must not overwrite visible content"
+    );
+    assert_eq!(
+        gateway
+            .admin()
+            .list_providers()
+            .await
+            .unwrap()
+            .remove(0)
+            .vendor_options,
+        provider.vendor_options,
+        "rejected configuration must not change the saved provider"
+    );
+    gateway
+        .admin()
+        .update_provider(
+            &provider.id,
+            crate::db::models::UpdateProvider {
+                vendor_options: Some(serde_json::Map::from_iter([
+                    ("reasoning_field".into(), json!("custom")),
+                    ("custom_reasoning_field".into(), json!("analysis_text")),
+                    ("ensure_reasoning_field".into(), json!(true)),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("save the selected upstream reasoning field");
+    let authorization = authorized_headers(&gateway)
+        .await
+        .get(header::AUTHORIZATION)
+        .unwrap()
+        .clone();
+    let router = crate::proxy::server::create_router(gateway.clone());
+    let request = |messages: Value| {
+        Request::post("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header(header::AUTHORIZATION, authorization.clone())
+            .body(Body::from(
+                json!({"model": model, "messages": messages}).to_string(),
+            ))
+            .unwrap()
+    };
+    let mut history = json!([
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "foreign answer"},
+        {"role": "user", "content": "call echo"}
+    ]);
+    let response = router
+        .clone()
+        .oneshot(request(history.clone()))
+        .await
+        .unwrap();
+    let status = response.status();
+    let delivered = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&delivered)
+    );
+    let delivered: Value = serde_json::from_slice(&delivered).unwrap();
+    let assistant = delivered["choices"][0]["message"].clone();
+    assert!(assistant["content"].as_str().unwrap().contains("calling"));
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_echo");
+    let first = captured_rx.recv().await.unwrap();
+    assert_eq!(first["messages"][1]["analysis_text"], "");
+
+    let messages = history.as_array_mut().unwrap();
+    messages.push(assistant);
+    messages.push(json!({"role": "tool", "tool_call_id": "call_echo", "content": "yes"}));
+    messages.push(json!({"role": "user", "content": "finish"}));
+    let response = router.clone().oneshot(request(history)).await.unwrap();
+    let status = response.status();
+    let delivered = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&delivered)
+    );
+    let delivered: Value = serde_json::from_slice(&delivered).unwrap();
+    assert!(
+        delivered["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("finished")
+    );
+    let replayed = captured_rx.recv().await.unwrap();
+    let messages = replayed["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|message| {
+        message["role"] == "assistant" && message["analysis_text"] == "  custom thought\n"
+    }));
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .all(|message| message["analysis_text"].is_string()
+                && message.get("reasoning_content").is_none())
+    );
+    assert!(messages.iter().any(|message| {
+        message["role"] == "tool"
+            && message["tool_call_id"] == "call_echo"
+            && message["content"] == "yes"
+    }));
+    drop(router);
+    server.abort();
+    close_test_gateway(gateway, data_dir).await;
+}
+
+#[tokio::test]
 async fn responses_delivered_protected_thinking_replay_preserves_parent() {
     use axum::Json;
     use axum::response::IntoResponse;

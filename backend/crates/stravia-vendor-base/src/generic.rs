@@ -3,6 +3,7 @@ use stravia_vendor_common::common;
 use stravia_vendor_common::thinking;
 
 use serde_json::{Value, json};
+use stravia_protocol_codec::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
 use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
@@ -72,6 +73,26 @@ pub(crate) fn execute(
                 validate_cloudflare_config(&provider, &request.options),
             ))
         }
+        OperationInput::ConfigValidation { provider, request }
+            if operation == Operation::ConfigValidation && vendor_id == "custom" =>
+        {
+            check_channel(vendor_id, channel, &provider)?;
+            let issues = selected_custom_reasoning_field(&request.options)
+                .err()
+                .map(|field| ValidationIssue {
+                    field: Some(field.into()),
+                    code: "invalid_reasoning_field".into(),
+                    message: crate::messages::reasoning_field_invalid(),
+                })
+                .into_iter()
+                .collect();
+            Ok(OperationOutput::ConfigValidation(
+                ConfigValidationResponse {
+                    issues,
+                    proposed_base_url: None,
+                },
+            ))
+        }
         other => Err(common::unsupported(
             other.operation().as_str(),
             vendor_id,
@@ -105,7 +126,18 @@ pub(crate) fn execute_inference(
     }
     let preserve_upstream_errors = protocol == OPEN_RESPONSES_PROTOCOL
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
+    let reasoning_source = if provider.provider_id == "custom" && protocol == OPENAI_CHAT_PROTOCOL {
+        selected_custom_reasoning_field(&provider.options).map_err(|field| {
+            common::plugin_error(
+                ErrorKind::Invalid,
+                format!("invalid Custom reasoning field configuration: {field}"),
+            )
+        })?
+    } else {
+        None
+    };
     let mut encoded = crate::encode_inference_request(protocol, &request)?;
+    prepare_custom_reasoning_history(provider, protocol, reasoning_source, &mut encoded.body);
     let mut headers = common::header_pairs(&encoded.headers)?;
     for (name, value) in &provider.client_headers {
         set_header(&mut headers, name, value.clone());
@@ -148,7 +180,90 @@ pub(crate) fn execute_inference(
         };
         return decoded.map(Box::new).map(OperationOutput::Infer);
     }
+    if let Some(field) = reasoning_source {
+        let adapter = OpenAIChatCompletionsV1::with_response_reasoning_field(field);
+        return crate::decode_inference_with_adapter(host, &adapter, response);
+    }
     crate::decode_inference(host, protocol, response)
+}
+
+fn selected_custom_reasoning_field(
+    options: &BTreeMap<String, Value>,
+) -> Result<Option<&str>, &'static str> {
+    let field = match options.get("reasoning_field") {
+        None => return Ok(None),
+        Some(Value::String(value)) => match value.as_str() {
+            "protocol_default" => return Ok(None),
+            "reasoning_content" => "reasoning_content",
+            "reasoning" => "reasoning",
+            "custom" => options
+                .get("custom_reasoning_field")
+                .and_then(Value::as_str)
+                .filter(|field| !field.is_empty() && field.trim() == *field)
+                .ok_or("custom_reasoning_field")?,
+            _ => return Err("reasoning_field"),
+        },
+        Some(_) => return Err("reasoning_field"),
+    };
+    if field.starts_with("__")
+        || matches!(
+            field,
+            "role"
+                | "content"
+                | "name"
+                | "tool_calls"
+                | "tool_call_id"
+                | "function_call"
+                | "refusal"
+                | "audio"
+                | "annotations"
+                | "reasoning_details"
+        )
+    {
+        return Err("custom_reasoning_field");
+    }
+    Ok(Some(field))
+}
+
+fn prepare_custom_reasoning_history(
+    provider: &ProviderSnapshot,
+    protocol: &str,
+    reasoning_source: Option<&str>,
+    body: &mut Value,
+) {
+    if provider.provider_id != "custom" || protocol != OPENAI_CHAT_PROTOCOL {
+        return;
+    }
+    let field = reasoning_source.unwrap_or("reasoning_content");
+    let ensure = provider
+        .options
+        .get("ensure_reasoning_field")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if field == "reasoning_content" && !ensure {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(fields) = message.as_object_mut() else {
+            continue;
+        };
+        if field != "reasoning_content"
+            && let Some(reasoning) = fields.remove("reasoning_content")
+        {
+            // canonical 思考是权威来源，只在出站边界换成上游选择的载体。
+            fields.insert(field.into(), reasoning);
+        }
+        if ensure && fields.get(field).is_none_or(Value::is_null) {
+            // 只补齐上游模板要求的字段，不伪造推理，也不改写权威历史。
+            fields.insert(field.into(), Value::String(String::new()));
+        }
+    }
 }
 
 /// Google's documented imported-history validator control, not a native signature.
