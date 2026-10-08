@@ -150,6 +150,33 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 - 现有 `protocol-openai-chat-completions`、`protocol-open-responses`、`protocol-anthropic-messages`、`protocol-gemini` 四个独立 Profile 入口并入 Custom。迁移已有连接时保留连接 UUID、凭据与 Route；具体选择标识、WIT 版本及迁移 SQL 是满足该迁移约束的实现选择，本轮不另设产品策略。
 - 该合并已实现：base 只注册一个 `custom` Profile，其 channel 通过 `protocols` 枚举声明可选协议；管理写入按该枚举校验，不接受任意协议字符串。存量 `protocol-*` 连接由迁移 `0059` 改写为 `custom`，保留 UUID、凭据、protocol 值与 Route。
 
+### Custom 的思考字段映射与补齐
+
+base 插件为 `custom` Profile 声明思考字段配置。管理员在 Custom 连接的「连接设置 → 高级设置」中选择上游思考字段，并按需开启缺失补齐；字段、中英文说明及分组均由插件描述符提供，宿主复用动态表单，不添加 Core 或 WebUI 的供应商专属逻辑。
+
+|选项|默认值|契约|
+|---|---|---|
+|`reasoning_field`|`"protocol_default"`|可选协议默认、`"reasoning_content"`、`"reasoning"` 或 `"custom"`；显式选择同时控制上游响应读取和 assistant 历史回放的字段。|
+|`custom_reasoning_field`|未设置|选择 `"custom"` 时必填，最多 128 字符，不能带首尾空白、使用 `__` 前缀或覆盖 `role`、`content`、`tool_calls` 等协议保留字段。它是 message/delta 的直接属性名，不解析嵌套路径。|
+|`ensure_reasoning_field`|`false`|独立控制是否把 assistant 历史中缺失或为 `null` 的所选字段补为 `""`；不要求开启补齐才能映射真实思考。|
+
+创建或更新 Provider 时，通过既有 `vendor_options` 保存配置。例如，上游使用 `analysis_text`，且要求每条 assistant 历史都包含字符串字段：
+
+```json
+{
+  "vendor_options": {
+    "reasoning_field": "custom",
+    "custom_reasoning_field": "analysis_text",
+    "ensure_reasoning_field": true
+  }
+}
+```
+
+- 仅作用于 Custom 的 OpenAI-compatible Chat Completions。显式选择的字段是上游 `message` 和流式 `delta` 中的字符串属性；缺失、`null`、空字符串保持区别，非字符串且非 `null` 的值显式报错，不回退读取其他思考别名。协议默认沿用标准 codec 的读取行为，补齐时使用 `reasoning_content`。
+- 上游响应读入 canonical 思考后，客户端仍按自身协议接收响应；Chat 客户端使用标准 `reasoning_content`，不需要识别上游私有字段。后续 assistant 历史按所选字段回传上游，包括带工具调用的消息；原有真实思考、空白字符和空字符串不被改写，其他角色及工具调用关联保持不变。
+- 补齐关闭时，字段映射仍然生效，但缺失与 `null` 不被改写。补齐仅发生在上游请求体中，不回写权威历史、不生成虚假思考，也不改变推理强度或开启思考；它用于适配 IFM 等要求每条 assistant 历史都有字符串字段的模板，不能恢复已经丢失的真实推理内容。相关区别见 [reasoning context 调研](../research/reasoning-context-replay.md)。
+- Open Responses、Anthropic Messages 与 Gemini 继续使用各自原生的思考结构；这三个选项不会改写它们的上游请求、响应读取或历史回放。
+
 ## 已确认的技术栈与插件契约
 
 - 唯一目标技术栈为 Wasmtime + WebAssembly Component Model + WIT，不同时提供 Extism 或另一套自定义 Core Wasm ABI。

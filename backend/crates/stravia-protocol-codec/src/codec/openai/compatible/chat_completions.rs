@@ -11,10 +11,25 @@ use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 use crate::transform::{ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder};
 use http::header::HeaderMap;
 use serde_json::Value;
+use std::sync::Arc;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct OpenAIChatCompletionsV1;
+
+impl OpenAIChatCompletionsV1 {
+    /// 仅从指定的 message/delta 字符串属性读取上游思考；缺失与 null 保持区别。
+    /// 请求编码和客户端响应编码仍使用标准 Chat 契约。
+    pub fn with_response_reasoning_field(field: impl Into<Arc<str>>) -> impl ProtocolAdapter {
+        ResponseReasoningFieldAdapter {
+            field: field.into(),
+        }
+    }
+}
+
+struct ResponseReasoningFieldAdapter {
+    field: Arc<str>,
+}
 
 const CAPS: EndpointCapabilities = EndpointCapabilities {
     streaming: true,
@@ -65,6 +80,47 @@ impl ProtocolAdapter for OpenAIChatCompletionsV1 {
         Ok(WireStreamEncoder::OpenAi(
             super::stream::OpenAIStreamFormatter::new(),
         ))
+    }
+}
+
+impl ProtocolAdapter for ResponseReasoningFieldAdapter {
+    fn id(&self) -> ProtocolEndpoint {
+        OpenAIChatCompletionsV1.id()
+    }
+
+    fn capabilities(&self) -> &'static EndpointCapabilities {
+        OpenAIChatCompletionsV1.capabilities()
+    }
+
+    fn decode_request(&self, body: Value) -> anyhow::Result<AiRequest> {
+        OpenAIChatCompletionsV1.decode_request(body)
+    }
+
+    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+        OpenAIChatCompletionsV1.encode_request(request)
+    }
+
+    fn request_path(&self, model: &str, stream: bool) -> String {
+        OpenAIChatCompletionsV1.request_path(model, stream)
+    }
+
+    fn decode_response(&self, body: Value) -> anyhow::Result<AiResponse> {
+        super::stream::OpenAIResponseParser
+            .parse_response_with_reasoning_field(body, Some(&self.field))
+    }
+
+    fn encode_response(&self, response: &AiResponse) -> Value {
+        OpenAIChatCompletionsV1.encode_response(response)
+    }
+
+    fn stream_decoder(&self) -> Result<WireStreamDecoder, TransformError> {
+        Ok(WireStreamDecoder::OpenAi(
+            super::stream::OpenAIStreamParser::with_reasoning_field(Arc::clone(&self.field)),
+        ))
+    }
+
+    fn stream_encoder(&self) -> Result<WireStreamEncoder, TransformError> {
+        OpenAIChatCompletionsV1.stream_encoder()
     }
 }
 

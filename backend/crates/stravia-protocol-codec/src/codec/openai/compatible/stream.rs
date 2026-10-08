@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::SseEvent;
 use stravia_runtime_contract::protocol::ir::AiItem;
@@ -47,6 +48,14 @@ fn unwrap_gateway_envelope(resp: Value) -> Result<Value> {
 
 impl OpenAIResponseParser {
     pub(crate) fn parse_response(&self, resp: Value) -> Result<AiResponse> {
+        self.parse_response_with_reasoning_field(resp, None)
+    }
+
+    pub(crate) fn parse_response_with_reasoning_field(
+        &self,
+        resp: Value,
+        reasoning_source: Option<&str>,
+    ) -> Result<AiResponse> {
         let resp = unwrap_gateway_envelope(resp)?;
         if resp.get("choices").is_none() {
             tracing::warn!(
@@ -80,9 +89,18 @@ impl OpenAIResponseParser {
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string();
-        let reasoning_content = message.and_then(extract_reasoning_from_message);
+        let reasoning_content = message
+            .map(|message| extract_selected_reasoning(message, reasoning_source))
+            .transpose()?
+            .flatten();
         let empty_reasoning = message
-            .and_then(|message| empty_reasoning_field(message, reasoning_content.as_deref()))
+            .and_then(|message| {
+                selected_empty_reasoning_field(
+                    message,
+                    reasoning_content.as_deref(),
+                    reasoning_source,
+                )
+            })
             .cloned();
 
         let stop_reason = choice
@@ -283,6 +301,7 @@ pub struct OpenAIStreamParser {
     think_buffer: String,
     in_think_block: bool,
     reasoning_field: Option<Value>,
+    reasoning_source: Option<Arc<str>>,
 }
 
 impl Default for OpenAIStreamParser {
@@ -300,6 +319,14 @@ impl OpenAIStreamParser {
             think_buffer: String::new(),
             in_think_block: false,
             reasoning_field: None,
+            reasoning_source: None,
+        }
+    }
+
+    pub(crate) fn with_reasoning_field(field: Arc<str>) -> Self {
+        Self {
+            reasoning_source: Some(field),
+            ..Self::new()
         }
     }
 }
@@ -326,7 +353,7 @@ impl OpenAIStreamParser {
                         continue;
                     }
                     let chunk = serde_json::from_str::<Value>(data)?;
-                    self.parse_openai_chunk(&chunk, &mut deltas);
+                    self.parse_openai_chunk(&chunk, &mut deltas)?;
                 }
             }
         }
@@ -346,7 +373,7 @@ impl OpenAIStreamParser {
 }
 
 impl OpenAIStreamParser {
-    fn parse_openai_chunk(&mut self, chunk: &Value, deltas: &mut Vec<AiStreamDelta>) {
+    fn parse_openai_chunk(&mut self, chunk: &Value, deltas: &mut Vec<AiStreamDelta>) -> Result<()> {
         if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
             deltas.extend(self.flush_pending_text());
             self.done = true;
@@ -360,7 +387,7 @@ impl OpenAIStreamParser {
                 )
                 .with_raw(chunk.clone()),
             });
-            return;
+            return Ok(());
         }
         if !self.started
             && let (Some(id), Some(model)) = (
@@ -384,13 +411,16 @@ impl OpenAIStreamParser {
             if u.prompt_tokens > 0 || u.completion_tokens > 0 {
                 deltas.push(AiStreamDelta::Usage(u));
             }
-            return;
+            return Ok(());
         };
 
         if let Some(delta) = choice.get("delta") {
-            let reasoning = extract_reasoning_from_message(delta);
-            if let Some(value) = empty_reasoning_field(delta, reasoning.as_deref())
-                && self.reasoning_field.as_ref() != Some(value)
+            let reasoning = extract_selected_reasoning(delta, self.reasoning_source.as_deref())?;
+            if let Some(value) = selected_empty_reasoning_field(
+                delta,
+                reasoning.as_deref(),
+                self.reasoning_source.as_deref(),
+            ) && self.reasoning_field.as_ref() != Some(value)
             {
                 self.reasoning_field = Some(value.clone());
                 deltas.push(AiStreamDelta::ResponseMetadata {
@@ -447,6 +477,7 @@ impl OpenAIStreamParser {
         if u.prompt_tokens > 0 || u.completion_tokens > 0 {
             deltas.push(AiStreamDelta::Usage(u));
         }
+        Ok(())
     }
 
     fn parse_text_with_think_tags(&mut self, text: &str, deltas: &mut Vec<AiStreamDelta>) {
@@ -760,6 +791,32 @@ fn empty_reasoning_field<'a>(message: &'a Value, text: Option<&str>) -> Option<&
             .find(|value| value.is_null()),
         _ => None,
     }
+}
+
+fn extract_selected_reasoning(message: &Value, source: Option<&str>) -> Result<Option<String>> {
+    let Some(field) = source else {
+        return Ok(extract_reasoning_from_message(message));
+    };
+    match message.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => anyhow::bail!("upstream reasoning field `{field}` must be a string or null"),
+    }
+}
+
+fn selected_empty_reasoning_field<'a>(
+    message: &'a Value,
+    text: Option<&str>,
+    source: Option<&str>,
+) -> Option<&'a Value> {
+    let Some(field) = source else {
+        return empty_reasoning_field(message, text);
+    };
+    message.get(field).filter(|value| match text {
+        Some("") => value.as_str() == Some(""),
+        None => value.is_null(),
+        _ => false,
+    })
 }
 
 pub(crate) fn extract_reasoning_from_message(message: &Value) -> Option<String> {
