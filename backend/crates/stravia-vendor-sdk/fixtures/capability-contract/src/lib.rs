@@ -117,6 +117,7 @@ impl VendorGuest for CapabilityContractVendor {
             providers: vec![ProviderDescriptor {
                 provider_id: profile.provider_id().into(),
                 catalog_id: (profile == Profile::DedicatedDeepseek).then(|| "deepseek".into()),
+                icon_svg: None,
                 display_name: format!("Capability Contract ({})", profile_name(profile)),
                 description: None,
                 channels: vec![ChannelDescriptor {

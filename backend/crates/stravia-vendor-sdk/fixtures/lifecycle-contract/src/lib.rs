@@ -45,6 +45,7 @@ impl VendorGuest for LifecycleContractVendor {
             providers: vec![ProviderDescriptor {
                 provider_id: build_value("STRAVIA_FIXTURE_PROVIDER_ID", "fixture.lifecycle").into(),
                 catalog_id: None,
+                icon_svg: None,
                 display_name: "Lifecycle Contract Fixture".into(),
                 description: None,
                 channels: vec![ChannelDescriptor {

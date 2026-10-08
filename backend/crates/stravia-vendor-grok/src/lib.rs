@@ -98,6 +98,11 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some("xai".into()),
+            icon_svg: Some(
+                stravia_vendor_common::icons::provider_svg("xai")
+                    .expect("xAI brand SVG is embedded")
+                    .into(),
+            ),
             display_name: "xAI Grok".into(),
             description: Some("Grok OAuth access through the xAI CLI service".into()),
             channels: vec![ChannelDescriptor {

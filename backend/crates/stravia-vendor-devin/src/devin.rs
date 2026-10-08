@@ -81,6 +81,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: "devin".into(),
             catalog_id: Some("devin".into()),
+            icon_svg: Some(include_str!("assets/devin.svg").into()),
             display_name: "Devin".into(),
             description: Some("Devin CLI OAuth and Connect-RPC API".into()),
             channels: vec![ChannelDescriptor {

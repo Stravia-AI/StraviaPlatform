@@ -336,6 +336,35 @@ mod tests {
     }
 
     #[test]
+    fn derive_profiles_uses_catalog_brand_instead_of_shared_implementation() {
+        let body = r#"{
+            "openai": {"id": "openai", "name": "OpenAI", "npm": "@ai-sdk/openai"},
+            "meta": {"id": "meta", "name": "Meta", "npm": "@ai-sdk/openai"},
+            "perplexity-agent": {"id": "perplexity-agent", "name": "Perplexity Agent", "npm": "@ai-sdk/openai"},
+            "unknown-openai": {"id": "unknown-openai", "name": "Unknown", "npm": "@ai-sdk/openai"},
+            "anthropic": {"id": "anthropic", "name": "Anthropic", "npm": "@ai-sdk/anthropic"},
+            "thinkingmachines": {"id": "thinkingmachines", "name": "Thinking Machines", "npm": "@ai-sdk/anthropic"}
+        }"#;
+        let profiles = derive_profiles(body).expect("index parses");
+        let icon = |id: &str| {
+            profiles
+                .iter()
+                .find(|profile| profile.provider_id == id)
+                .expect("profile exists")
+                .icon_svg
+                .as_deref()
+        };
+        for id in ["openai", "meta", "perplexity-agent", "anthropic"] {
+            assert_eq!(icon(id), stravia_vendor_common::icons::provider_svg(id));
+            assert!(icon(id).is_some());
+        }
+        assert_ne!(icon("meta"), icon("openai"));
+        assert_ne!(icon("perplexity-agent"), icon("openai"));
+        assert_eq!(icon("unknown-openai"), None);
+        assert_eq!(icon("thinkingmachines"), None);
+    }
+
+    #[test]
     fn derive_profiles_rejects_mismatched_ids() {
         let body = r#"{"a": {"id": "b", "name": "B", "npm": "@ai-sdk/openai"}}"#;
         assert!(derive_profiles(body).is_err());

@@ -25,6 +25,8 @@ tasks:
       - backend/crates/stravia-vendor-base/Cargo.toml
       - backend/crates/stravia-vendor-base/build.rs
       - backend/crates/stravia-vendor-base/src/**/*.rs
+      - backend/crates/stravia-vendor-base/src/assets/**/*.svg
+      - frontend/stravia-webui/src/assets/icons/*.svg
       - backend/crates/stravia-vendor-base/messages/*.json
       - backend/crates/stravia-core/assets/providers.stravia.json
       - backend/crates/stravia-vendor-common/Cargo.toml
@@ -54,6 +56,8 @@ tasks:
       - backend/crates/stravia-vendor-*/Cargo.toml
       - backend/crates/stravia-vendor-*/build.rs
       - backend/crates/stravia-vendor-*/src/**/*.rs
+      - backend/crates/stravia-vendor-*/src/assets/**/*.svg
+      - frontend/stravia-webui/src/assets/icons/*.svg
       - backend/crates/stravia-vendor-*/messages/*.json
       - backend/crates/stravia-vendor-sdk/build-support/**/*.rs
       - backend/crates/stravia-vendor-sdk/wit/**/*.wit

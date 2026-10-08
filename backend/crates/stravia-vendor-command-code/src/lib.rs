@@ -104,6 +104,7 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some(VENDOR_ID.into()),
+            icon_svg: Some(include_str!("assets/command-code.svg").into()),
             display_name: "Command Code".into(),
             description: Some(
                 "Command Code CLI-compatible inference, model discovery, and allowance".into(),

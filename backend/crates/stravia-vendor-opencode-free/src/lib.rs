@@ -336,6 +336,11 @@ pub fn descriptor() -> VendorDescriptor {
             provider_id: VENDOR_ID.into(),
             // 目录 ID 复用 `opencode` 以共享目录图标；本插件不消费目录模型。
             catalog_id: Some("opencode".into()),
+            icon_svg: Some(
+                stravia_vendor_common::icons::provider_svg("opencode")
+                    .expect("OpenCode brand SVG is embedded")
+                    .into(),
+            ),
             display_name: "OpenCode Zen Free".into(),
             description: Some(
                 "Free-tier models on OpenCode Zen. Works without an API key; anonymous use is IP-rate-limited upstream."

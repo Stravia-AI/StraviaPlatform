@@ -2039,7 +2039,7 @@ async fn seed_oauth_credential(
     Ok(())
 }
 
-// ── provider_icon: host-resolved catalog logo / website favicon ─────────────
+// ── provider_icon: embedded SVG / catalog logo / website favicon ────────────
 
 const ICON_TEST_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>"#;
 const ICON_TEST_PNG: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -2072,16 +2072,16 @@ fn seed_catalog_favicon(
     Ok(())
 }
 
-async fn saved_openai_provider(gw: &Gateway, base_url: &str) -> anyhow::Result<Provider> {
+async fn saved_icon_provider(gw: &Gateway, vendor: &str, base_url: &str) -> anyhow::Result<Provider> {
     let provider = gw
         .storage
         .providers()
         .create(CreateProviderRecord {
-            name: "Saved OpenAI".to_string(),
-            vendor: Some("openai".to_string()),
+            name: "Saved icon provider".to_string(),
+            vendor: Some(vendor.to_string()),
             protocol: "openai-compatible".to_string(),
             base_url: base_url.to_string(),
-            preset_key: Some("openai".to_string()),
+            preset_key: Some(vendor.to_string()),
             channel: Some("default".to_string()),
             models_source: None,
             static_models: None,
@@ -2098,9 +2098,10 @@ async fn saved_openai_provider(gw: &Gateway, base_url: &str) -> anyhow::Result<P
 #[tokio::test]
 async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    seed_catalog_logo(&gw.config.data_dir, "deepseek", ICON_TEST_SVG)?;
+    assert!(gw.admin().vendor_metadata("custom")?.icon_svg.is_none());
+    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
 
-    let icon = gw.provider_icon("deepseek").await?;
+    let icon = gw.provider_icon("custom").await?;
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
@@ -2113,8 +2114,8 @@ async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> an
 #[tokio::test]
 async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let provider = saved_openai_provider(&gw, "https://api.openai.com/v1").await?;
-    seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
+    let provider = saved_icon_provider(&gw, "custom", "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
 
     let icon = gw.provider_icon(&provider.id).await?;
 
@@ -2129,7 +2130,7 @@ async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyh
 #[tokio::test]
 async fn provider_icon_falls_back_to_the_connection_origin_favicon() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
+    let provider = saved_icon_provider(&gw, "custom", "https://icon-test.invalid/v1").await?;
     // `https://icon-test.invalid` sanitizes to this cache file name; the logo
     // fetch is unscripted and fails, so only the favicon cache can serve.
     seed_catalog_favicon(
@@ -2151,8 +2152,8 @@ async fn provider_icon_falls_back_to_the_connection_origin_favicon() -> anyhow::
 #[tokio::test]
 async fn provider_icon_prefers_the_catalog_logo_over_a_website_favicon() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let provider = saved_openai_provider(&gw, "https://icon-test.invalid/v1").await?;
-    seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
+    let provider = saved_icon_provider(&gw, "custom", "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
     seed_catalog_favicon(
         &gw.config.data_dir,
         "https---icon-test.invalid",
@@ -2163,6 +2164,51 @@ async fn provider_icon_prefers_the_catalog_logo_over_a_website_favicon() -> anyh
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_prefers_embedded_svg_for_provider_and_catalog_identities() -> anyhow::Result<()> {
+    let (data_dir, gw) = build_gateway().await?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
+    let descriptor = gw.admin().vendor_metadata("openai-codex")?;
+    let svg = descriptor.icon_svg.as_deref().expect("Codex embeds its brand SVG");
+    let catalog_id = descriptor.catalog_id.as_deref().expect("Codex declares a catalog identity");
+    let catalog_descriptor = gw.admin().vendor_metadata(catalog_id)?;
+    let catalog_svg = catalog_descriptor.icon_svg.as_deref().expect("OpenAI embeds its brand SVG");
+    assert_ne!(descriptor.provider_id, catalog_id);
+    seed_catalog_logo(&gw.config.data_dir, &descriptor.provider_id, ICON_TEST_SVG)?;
+    seed_catalog_logo(&gw.config.data_dir, catalog_id, ICON_TEST_SVG)?;
+
+    // Exact provider identity wins over a different profile sharing its catalog id.
+    for (key, expected) in [(descriptor.provider_id.as_str(), svg), (catalog_id, catalog_svg)] {
+        let icon = gw.provider_icon(key).await?;
+        assert_eq!(icon.content_type, "image/svg+xml");
+        assert_eq!(icon.body, expected.as_bytes());
+        assert_ne!(icon.body, ICON_TEST_SVG);
+    }
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_icon_prefers_embedded_svg_for_a_saved_connection() -> anyhow::Result<()> {
+    let (data_dir, gw) = build_gateway().await?;
+    let descriptor = gw.admin().vendor_metadata("openai")?;
+    let svg = descriptor.icon_svg.as_deref().expect("OpenAI embeds its brand SVG");
+    let provider = saved_icon_provider(&gw, "openai", "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
+    seed_catalog_favicon(&gw.config.data_dir, "https---icon-test.invalid", ICON_TEST_PNG)?;
+
+    let icon = gw.provider_icon(&provider.id).await?;
+    assert_eq!(icon.content_type, "image/svg+xml");
+    assert_eq!(icon.body, svg.as_bytes());
+    assert_ne!(icon.body, ICON_TEST_SVG);
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;

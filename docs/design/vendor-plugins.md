@@ -81,9 +81,12 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 
 ### Provider 图标标识
 
+- `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有受保护的图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。
+- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 按最终 Provider/Catalog 身份精确匹配仓库已有 SVG；共享协议实现不构成共享品牌的依据，未知身份清空模板图标，`custom` 和通用 OpenAI-compatible 不声明品牌图标。七个专属插件均内嵌适用标志；Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
+- 更换图标需要重建并重新导入独立插件；仅更新宿主不会改写已安装组件。`base` 随宿主更新。品牌名称和图形归各自权利人所有，公开下载地址不等同于再分发授权。
 - 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。
 - 按选定 ID 获取目录图标失败后才进入网站图标回退；已经选择 `catalog_id` 时，不再追加一次 `provider_id` 目录图标尝试。网站图标来源优先使用插件明确声明的官网地址；没有官网声明时，使用已保存连接 `base_url` 的 origin。不得把文档地址自动视为官网，也不得猜测域名。官网一旦被选为来源，获取失败后不再请求连接 origin 的 favicon。
-- 插件只声明图标身份与网站来源；宿主统一获取目录 logo 与网站 favicon，保存在 Stravia 实例磁盘缓存中并供 UI 读取。Desktop 缓存在本机实例，独立 Server 缓存在服务器实例，二者都跨进程重启复用。浏览器不再直接请求外部 favicon，也不以浏览器缓存代替实例持久缓存。
+- 插件可声明内嵌 SVG、图标身份与网站来源；只有缺少内嵌 SVG 时，宿主才统一获取目录 logo 与网站 favicon，保存在 Stravia 实例磁盘缓存中并供 UI 读取。Desktop 缓存在本机实例，独立 Server 缓存在服务器实例，二者都跨进程重启复用。浏览器不再直接请求外部 favicon，也不以浏览器缓存代替实例持久缓存。
 - 网站图标回退仅请求选定网站 origin 的 `/favicon.ico`，不请求或解析首页 HTML 寻找其他图标；接受仅通过 HTML 声明图标而未提供 `/favicon.ico` 的网站无法获取图标。宿主下载遵守既有网络访问限制，且不携带 Provider 凭据。
 - 目录 logo 与网站 favicon 统一使用 24 小时 TTL。有效缓存直接读取且不访问远端；缓存过期后在下次需要时按需更新，不新增定时刷新任务。每个已选来源更新失败且存在旧缓存时继续使用旧图标；没有缓存时才进入下一级回退。官网存在但获取失败不等同于没有官网声明。
 - 选定网站 favicon 获取失败且没有缓存时结束网络尝试；有对应内置 SVG 时显示该图标，否则 `custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。

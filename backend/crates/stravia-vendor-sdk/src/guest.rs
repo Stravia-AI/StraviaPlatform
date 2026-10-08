@@ -1131,6 +1131,7 @@ mod profile_admission_tests {
         ProviderDescriptor {
             provider_id: provider_id.into(),
             catalog_id: None,
+            icon_svg: None,
             display_name: provider_id.into(),
             description: None,
             channels: vec![ChannelDescriptor {

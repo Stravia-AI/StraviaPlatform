@@ -1,4 +1,4 @@
-//! Provider icon resolution: catalog logo first, then a website favicon.
+//! Provider icon resolution: embedded plugin SVG, catalog logo, then favicon.
 //!
 //! The request key is either a stable provider identity (`catalog_id` or
 //! `provider_id`, chosen by the caller) or a saved provider connection UUID —
@@ -30,7 +30,7 @@ impl Gateway {
         self.identity_icon(key).await
     }
 
-    /// Saved connection: catalog logo from the profile's stable identity, then
+    /// Saved connection: embedded SVG, catalog logo from the stable identity, then
     /// the declared website or — only without a website — this connection's
     /// `base_url` origin.
     async fn connection_icon(
@@ -41,6 +41,12 @@ impl Gateway {
             .vendor
             .as_deref()
             .and_then(|vendor| self.vendor_plugins.descriptor(vendor).ok());
+        if let Some(svg) = descriptor.as_ref().and_then(|descriptor| descriptor.icon_svg.as_ref()) {
+            return Ok(ProviderIcon {
+                body: svg.as_bytes().to_vec(),
+                content_type: "image/svg+xml",
+            });
+        }
         let logo_id = descriptor
             .as_ref()
             .map(|descriptor| {
@@ -70,15 +76,9 @@ impl Gateway {
         }
     }
 
-    /// Descriptor/catalog identity: catalog logo under that exact id (no
-    /// second-id guessing), then the descriptor's declared website favicon.
+    /// Descriptor/catalog identity: embedded SVG, catalog logo under that exact
+    /// id (no second-id guessing), then the declared website favicon.
     async fn identity_icon(&self, key: &str) -> anyhow::Result<ProviderIcon> {
-        if let Ok(body) = self.provider_catalog.logo(key).await {
-            return Ok(ProviderIcon {
-                body,
-                content_type: "image/svg+xml",
-            });
-        }
         let descriptors = self.vendor_plugins.descriptors();
         let descriptor = descriptors
             .iter()
@@ -88,6 +88,18 @@ impl Gateway {
                     .iter()
                     .find(|descriptor| descriptor.catalog_id.as_deref() == Some(key))
             });
+        if let Some(svg) = descriptor.and_then(|descriptor| descriptor.icon_svg.as_ref()) {
+            return Ok(ProviderIcon {
+                body: svg.as_bytes().to_vec(),
+                content_type: "image/svg+xml",
+            });
+        }
+        if let Ok(body) = self.provider_catalog.logo(key).await {
+            return Ok(ProviderIcon {
+                body,
+                content_type: "image/svg+xml",
+            });
+        }
         let origin = descriptor
             .and_then(|descriptor| descriptor.website.as_deref())
             .and_then(website_origin);
