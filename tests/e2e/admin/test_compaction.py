@@ -520,10 +520,36 @@ def test_inline_compaction_stream_preserves_upstream_error(admin_env, compaction
                 if phase == "after-text" and event.get("type") == "response.output_text.delta":
                     status, _ = http_request("GET", f"{compaction_provider[0]}/release")
                     assert status == 204
-            errors = [event["error"] for event in events if event.get("type") == "error"]
+            standalone_errors = [event["error"] for event in events if event.get("type") == "error"]
+            failures = [event for event in events if event.get("type") == "response.failed"]
+            assert len(failures) == 1, events
+            failed = failures[0]["response"]
+            assert events[-1] is failures[0], "failure must be the final JSON event"
+            assert failed["status"] == "failed"
             assert not any(event.get("type") == "response.completed" for event in events)
             if phase == "after-text":
-                assert any(event.get("type") == "response.output_text.delta" for event in events)
+                # 已提交正文的流只通过失败终态交付错误，保留完整的部分输出快照。
+                assert standalone_errors == [], events
+                text_indices = [index for index, event in enumerate(events)
+                                if event.get("type") == "response.output_text.delta"
+                                and event.get("delta") == "source answer"]
+                assert text_indices and text_indices[-1] < len(events) - 1, events
+                assert any(item["type"] == "message" and any(
+                    part.get("type") == "output_text" and part.get("text") == "source answer"
+                    for part in item.get("content", [])
+                ) for item in failed["output"]), failed
+                assert any(item["type"] == "compaction" for item in failed["output"]), failed
+                completed_items = [event["item"] for event in events
+                                   if event.get("type") == "response.output_item.done"]
+                assert failed["output"] == completed_items
+                # 上游只报告未知 usage；不能伪造零用量，也不能漏掉该字段。
+                assert failed["usage"] is None
+                errors = [failed["error"]]
+            else:
+                assert len(standalone_errors) == 1, events
+                assert not any(event.get("type") == "response.output_text.delta" for event in events)
+                assert failed["error"] == standalone_errors[0]
+                errors = standalone_errors
     assert errors == [{
         "code": "native_window_rejected", "type": "invalid_request_error",
         "message": "The upstream rejected the compacted window.",

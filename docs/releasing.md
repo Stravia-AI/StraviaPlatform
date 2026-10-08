@@ -27,6 +27,8 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 3. 推送 tag。`release.yml` 会运行完整 CI，签署四个平台产物，执行 `.github/scripts/generate-updater-manifest.py`，创建 draft Release，发布容器镜像，最后公开 Release。
 4. 任一签名 secret、`.sig`、平台产物或清单字段缺失时 workflow 必须失败。不要通过移除校验、手工上传无签名安装包或发布部分清单来绕过失败。
 
+发布回归必须遵循当前产品契约：已开始的 Responses 流只以单个 `response.failed` 收口，并保留部分输出和原生错误详情；重启恢复用例必须在上游请求仍受事件门控、尚未交付时模拟进程中断，不能以固定延迟或优雅关闭后的已完成请求代替崩溃场景。修复失败后先运行对应定向检查，再重新执行完整发布矩阵。
+
 `stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。
 
 ## 公钥轮换与恢复限制

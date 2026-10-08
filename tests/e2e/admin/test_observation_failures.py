@@ -445,6 +445,29 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
 ) -> None:
     mock_port = find_free_port()
     mock_server, _ = minimal_mock_provider(mock_port)
+    received_request = threading.Event()
+    release_request = threading.Event()
+    blocked_prompt = "interrupt this live request across restart"
+
+    class GatedProvider(mock_server.RequestHandlerClass):
+        def _read_body(self) -> dict[str, Any]:
+            body = super()._read_body()
+            if any(
+                message.get("content") == blocked_prompt
+                for message in body.get("messages", [])
+            ):
+                received_request.set()
+                release_request.wait()
+            return body
+
+        def do_POST(self) -> None:
+            try:
+                super().do_POST()
+            except (BrokenPipeError, ConnectionResetError):
+                # 被测试的进程已中断；门控释放后的上游响应没有接收方。
+                pass
+
+    mock_server.RequestHandlerClass = GatedProvider
     try:
         with tempfile.TemporaryDirectory(prefix="stravia-running-restart-e2e-") as temporary:
             data_dir = Path(temporary)
@@ -501,7 +524,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
                                 env,
                                 running_key,
                                 "observation-delay-restart",
-                                [{"role": "user", "content": "observation-delay interrupt this live request"}],
+                                [{"role": "user", "content": blocked_prompt}],
                             )
                         )
                     except Exception as error:  # The server is deliberately stopped mid-request.
@@ -521,7 +544,15 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
                     ),
                 )
                 running_id = running["id"]
+                assert received_request.wait(timeout=10.0), "upstream did not receive the live request"
+                assert request_outcome == [], "the gated request must remain undelivered"
+                assert _detail(env, running_id)["runs"][0]["status"] == "running"
             finally:
+                # 模拟未收口的进程中断，不允许优雅关闭把 running 请求转为终态。
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10.0)
+                release_request.set()
                 stop_stravia_server(process, logs)
             worker.join(timeout=10.0)
             assert request_outcome
@@ -574,6 +605,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
             finally:
                 stop_stravia_server(restarted, restarted_logs)
     finally:
+        release_request.set()
         mock_server.shutdown()
         mock_server.server_close()
 

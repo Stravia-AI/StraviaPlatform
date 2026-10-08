@@ -527,23 +527,47 @@ async fn real_wasm_stream_preserves_typed_quota_over_http_429() -> anyhow::Resul
                 && event["delta"] == "visible partial before quota"
         })
         .expect("visible partial text delta");
-    let error_index = events
+    let failed_indices = events
         .iter()
-        .position(|event| event["type"] == "error")
-        .expect("public error event");
-    let failed_index = events
-        .iter()
-        .position(|event| event["type"] == "response.failed")
-        .expect("failed terminal event");
-    assert!(partial_index < error_index && error_index < failed_index);
-    let public_error = &events[error_index]["error"];
+        .enumerate()
+        .filter_map(|(index, event)| (event["type"] == "response.failed").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failed_indices.len(),
+        1,
+        "exactly one failed terminal: {body}"
+    );
+    let failed_index = failed_indices[0];
+    assert!(partial_index < failed_index);
+    assert_eq!(
+        failed_index,
+        events.len() - 1,
+        "failure must be terminal: {body}"
+    );
+    assert!(
+        !events.iter().any(|event| event["type"] == "error"),
+        "started response must not emit a standalone error: {body}"
+    );
+    let failed_response = &events[failed_index]["response"];
+    let public_error = &failed_response["error"];
     assert_eq!(public_error["type"], "quota_exceeded");
     assert_eq!(public_error["code"], "quota_exceeded");
-    assert_eq!(events[failed_index]["response"]["status"], "failed");
-    assert_eq!(
-        events[failed_index]["response"]["error"],
-        events[error_index]["error"]
+    assert_eq!(failed_response["status"], "failed");
+    assert!(
+        failed_response["output"]
+            .as_array()
+            .expect("failed response output")
+            .iter()
+            .any(|item| {
+                item["type"] == "message"
+                    && item["status"] == "incomplete"
+                    && item["content"][0]["type"] == "output_text"
+                    && item["content"][0]["text"] == "visible partial before quota"
+            }),
+        "failure must preserve partial output: {body}"
     );
+    // fixture 未报告 usage，失败快照必须保留未知，不能补成零或漏掉字段。
+    assert_eq!(failed_response.get("usage"), Some(&serde_json::Value::Null));
     assert!(
         !events
             .iter()
