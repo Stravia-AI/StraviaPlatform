@@ -106,11 +106,14 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 全平台 TPS 使用测量对象自身的完整耗时，不扣首 Token 等待，也不使用 50ms 回退规则。首 Token 时间独立展示，不参与分母；
 - Run 耗时与 TPS 共用客户端接收到交付结束的时间：`delivery_completed_at - started_at`，包括内部重试、failover、平台工具与交付等待。分子使用 Run 的全部已报告输出，包括失败 attempt 已报告的输出；coverage 表明任一输出未知时 TPS 保持 `null`。运行中、成功但缺交付时间、无有效正耗时或输出未知时不猜测速率；失败、取消与中断等未交付终态可用 `finished_at` 收口。迟到 usage 修订不延长交付耗时，客户端跨请求执行工具的间隔不属于任一 Run；
 - Attempt TPS 使用自己的 `duration_ms`；Provider `avg_output_tps` 使用成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，不是单次 TPS 的平均值。成功样本缺输出或耗时、或总耗时为零时为 `null`；已知零输出保留为零。低延迟选路同样使用完整成功 attempt 耗时，仍按一小时成功率加权，保留 20 个成功样本、同组至少两个有效 Target 的门槛及既有亲和、优先级和 fallback；
+- 管理统计 `StatsOverview` 与 `StatsSeries` 的 `avg_output_tps` 使用同一成功 attempt 加权比率，单位为 tok/s；无成功样本、任一成功样本缺输出或 `duration_ms`、或完整耗时总和不为正时显式返回 JSON `null`，不省略字段。窗口和桶归属沿用所属 Model Turn 的开始时间与调用方时区，不按 attempt 完成时间归属，也不平均桶或 Provider 的 TPS。成功 attempt 不因随后 Model Turn 发布失败或客户端交付失败被排除。`avg_first_token_ms` 仍对已记录的首次 canonical 输出时间取平均，包含 Thinking，保留零；缺首字时间本身不使 TPS 失效。原有 `avg_duration_ms` 与部分已知 Token 累计规则不变；
 - Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`、易失 usage 或 reset 协议。
 
 请求记录的链路 Token 阈值按整个根 DAG（含子孙）的已确认总输入与输出累计，不重复加缓存分项；用量活动图与输入/输出构成图采用相同总量口径，缓存仍独立展示。尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
+
+概览与用量页共用「延迟与速度」图：首字延迟为左轴秒值和钢蓝实线，TPS 为右轴 tok/s 和钢蓝虚线，两轴独立线性缩放、从零起点自动扩展上限。概览图及其顶部汇总固定最近 24 小时，不改变其他概览指标的全时段口径；用量页保留 6 小时、24 小时、3 天和 7 天，图与窗口汇总每 30 秒刷新，折线仍按一小时分桶。顶部原始窗口汇总兼作图例；悬停或通过方向键、Home/End 聚焦时间桶时读取同桶的两项值与单位。空桶和单项 `null` 各自断线，未知显示「—」，有效零输出显示 `0 tok/s`；不插值、不补零，不额外扩展首末数据点外的占位桶。说明按钮支持焦点和触摸，明确首字延迟包含 Thinking、TPS 包含首字等待。其他耗时展示保留。两种存储及 Server/Desktop 共用 Core 计量，无需新增列、迁移或历史回填。
 
 输入估算不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求的筛选与路由调度共用同一估算：将消息 `items`、独立系统提示词 `instructions` 和工具定义 `tools` 一并计算 JSON 序列化字节数，除以 4 向上取整；工具说明与参数 schema 也属于输入，不能只按用户消息估算。它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，已有记录不重算，不从截断的输入预览或 Debug 内容回填。
 

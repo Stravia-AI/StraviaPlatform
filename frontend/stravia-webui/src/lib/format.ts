@@ -109,11 +109,6 @@ export function formatDuration(ms: number | null | undefined, locale = getLocale
   return `${formatDecimal(ms / 3_600_000, locale, 1)} h`
 }
 
-export function formatDurationSeconds(ms: number | null | undefined, locale = getLocale()): string {
-  if (ms == null || !Number.isFinite(ms)) return '–'
-  return `${formatDecimal(ms / 1000, locale, 2)} s`
-}
-
 export function formatCompactCount(value: number | null | undefined, locale = getLocale()): string {
   if (value == null || !Number.isFinite(value)) return '–'
   const count = Math.max(0, Math.floor(value))

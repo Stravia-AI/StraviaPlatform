@@ -17,6 +17,7 @@ async function stubStats(page: Page): Promise<void> {
           total_reasoning_tokens: 44_000,
           avg_duration_ms: 120,
           avg_first_token_ms: 40,
+          avg_output_tps: 25,
           error_count: 2,
         },
       },
@@ -41,6 +42,7 @@ async function stubStats(page: Page): Promise<void> {
         total_reasoning_tokens: i * 40,
         avg_duration_ms: 100 + i * 8,
         avg_first_token_ms: 30 + i,
+        avg_output_tps: 20 + i,
       })
     }
     await route.fulfill({ json: { data } })
@@ -120,6 +122,7 @@ test('token breakdown excludes cache subsets from its total', async ({ page }) =
           total_reasoning_tokens: null,
           avg_duration_ms: 1000,
           avg_first_token_ms: 500,
+          avg_output_tps: 20,
           error_count: 0,
         },
       },

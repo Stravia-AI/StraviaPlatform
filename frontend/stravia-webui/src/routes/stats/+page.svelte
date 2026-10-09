@@ -2,7 +2,7 @@
 import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
-import { BarChart, LineChart, PieChart } from 'layerchart'
+import { BarChart, PieChart } from 'layerchart'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
@@ -10,7 +10,6 @@ import { getDataTableLabels } from '$lib/data-table-labels'
 import {
   formatCompactCount,
   formatDuration,
-  formatDurationSeconds,
   formatList,
   formatLogTime,
   formatPercent,
@@ -26,6 +25,8 @@ import {
 } from '$lib/stats-chart'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
 import MetricStrip from '$lib/components/metric-strip.svelte'
+import LatencySpeedChart from '$lib/components/latency-speed-chart.svelte'
+import LatencySpeedSummary from '$lib/components/latency-speed-summary.svelte'
 import TokenActivityGrid from '$lib/components/token-activity-grid.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -40,7 +41,7 @@ const hoursNumber = $derived(Number(hours))
 const overviewQuery = createQuery(() => ({
   queryKey: ['stats-overview', hoursNumber],
   queryFn: () => admin.stats.overview(hoursNumber),
-  refetchInterval: 10_000,
+  refetchInterval: 30_000,
 }))
 const HOUR_MS = 3_600_000
 // 方格粒度跟随时间范围：6h→15 分钟，24h→1 小时，3 天→6 小时，7 天→1 天。
@@ -178,6 +179,7 @@ const activityGrid = $derived(
 // 延伸窗口里可能存在所选范围外的历史活动，不能只看 overview 的当前范围计数。
 const hasActivity = $derived(hasTraffic || activityGrid.cells.some((cell) => cell.tokens !== 0))
 const latencyChart = $derived(buildLatencyChart(seriesStats, HOUR_MS))
+const hasLatencyMetrics = $derived(latencyChart.some((point) => point.firstToken != null || point.outputTps != null))
 const errorChart = $derived(
   seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
 )
@@ -325,7 +327,7 @@ function retryAll(): void {
 {#snippet liveMeta()}
   <StatusIndicator
     compact
-    label={analyticsFetching ? m.stats_updating_10_30s() : m.stats_live_10_30s()}
+    label={analyticsFetching ? m.stats_updating_30s() : m.stats_live_30s()}
     tone={anyError ? 'error' : 'healthy'} />
 {/snippet}
 
@@ -395,33 +397,20 @@ function retryAll(): void {
       <section class="route-section min-[1280px]:col-span-5" aria-labelledby="latency-trend-title">
         <div class="route-section-header">
           <div>
-            <h2 id="latency-trend-title" class="route-section-title">{m.common_latency()}</h2>
-            <p class="route-section-description">{m.stats_average_end_end_duration()}</p>
+            <h2 id="latency-trend-title" class="route-section-title">{m.stats_latency_speed()}</h2>
+            <p class="route-section-description">{m.stats_latency_speed_description()}</p>
           </div>
-          <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
-            <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
-            <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
-            <span class="text-muted-foreground">{m.logs_duration_short()}</span>
-            <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
-          </div>
+          <LatencySpeedSummary {overview} />
         </div>
         {#if seriesQuery.error && seriesQuery.data === undefined}
           {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
-        {:else if hasTraffic && latencyChart.length > 0}<div
-            class="h-40 min-w-0"
-            aria-label={m.overview_latency_chart()}>
-            <LineChart
-              data={latencyChart}
-              x={(item: (typeof latencyChart)[number]) => item.bucket}
-              series={[
-                { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
-                { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
-              ]}
-              props={{ xAxis: { ticks: 4, format: formatBucket }, tooltip: { header: { format: formatBucket } } }} />
+        {:else if seriesQuery.isPending}<Skeleton class="h-40" />
+        {:else if hasLatencyMetrics}<div class="h-40 min-w-0">
+            <LatencySpeedChart data={latencyChart} {formatBucket} />
           </div>{:else}<Empty.Root class="h-40 border-y"
             ><Empty.Header
               ><Empty.Description
-                >{hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}</Empty.Description
+                >{hasTraffic ? m.stats_no_latency_speed_data() : m.stats_send_first_request()}</Empty.Description
               ></Empty.Header
             ></Empty.Root
           >{/if}

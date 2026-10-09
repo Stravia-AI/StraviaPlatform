@@ -235,6 +235,48 @@ describe('Stravia desktop smoke', () => {
         )
         members.push({ id: id!, content })
       }
+      // 页面外写入夹具后重新加载，避免复用启动时的空统计缓存。
+      await browser.refresh()
+      await browser.tauri.switchWindow('main')
+      await browser.maximizeWindow()
+      // 真实原生宿主使用刚完成的本地调用，不以浏览器桩响应代替 IPC 统计与绘图。
+      for (const path of ['/', '/stats']) {
+        await $(`a[href="${path}"]`).click()
+        const section = await $(
+          path === '/' ? '[aria-labelledby="latency-title"]' : '[aria-labelledby="latency-trend-title"]',
+        )
+        await section.waitForExist()
+        const chart = await section.$('[aria-label="Latency and speed chart"]')
+        await chart.waitForExist()
+        await chart.scrollIntoView({ block: 'center' })
+        await expect(chart).toBeDisplayed()
+        await expect(chart.$('[aria-label="Time to first token axis"]')).toBeDisplayed()
+        await expect(chart.$('[aria-label="TPS axis"]')).toBeDisplayed()
+        const styles = await browser.execute(() => {
+          const chart = document.querySelector('[aria-label="Latency and speed chart"]')!
+          const first = chart.querySelector('[aria-label="Time to first token"]')!
+          const tps = chart.querySelector('[aria-label="TPS"]')!
+          return { first: getComputedStyle(first).strokeDasharray, tps: getComputedStyle(tps).strokeDasharray }
+        })
+        expect(styles.first).toBe('none')
+        expect(styles.tps).not.toBe('none')
+        // 嵌入式驱动的指针移动依赖前台焦点；在真实 WebView 发送事件，不扩展窗口权限。
+        await browser.execute(() => {
+          const svg = document.querySelector('[aria-label="Latency and speed chart"] svg')!
+          const bounds = svg.getBoundingClientRect()
+          svg.dispatchEvent(
+            new PointerEvent('pointermove', {
+              bubbles: true,
+              pointerType: 'mouse',
+              clientX: bounds.x + bounds.width / 2,
+              clientY: bounds.y + bounds.height / 2,
+            }),
+          )
+        })
+        await expect($('[role="tooltip"]')).toBeDisplayed()
+        await expect($('[role="tooltip"]')).toHaveText(expect.stringContaining('tok/s'))
+        await expect($('[role="tooltip"]')).toHaveText(expect.stringMatching(/\d(?:\.\d+)? s/))
+      }
       await $('a[href="/logs"]').click()
       await $('button[aria-label="Load and show all chains"]').waitForEnabled()
       await browser.execute(() => {

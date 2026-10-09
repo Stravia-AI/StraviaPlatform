@@ -94,6 +94,12 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  (SELECT SUM(reasoning_tokens)::BIGINT FROM attempts) AS total_reasoning_tokens,
                  (SELECT AVG((finished_at - started_at)::FLOAT8) FROM turns WHERE finished_at IS NOT NULL) AS avg_duration_ms,
                  (SELECT AVG(first_token_ms::FLOAT8) FROM attempts) AS avg_first_token_ms,
+                 (SELECT CASE WHEN COUNT(*) > 0
+                                   AND COUNT(output_tokens) = COUNT(*)
+                                   AND COUNT(duration_ms) = COUNT(*)
+                                   AND SUM(duration_ms) > 0
+                              THEN SUM(output_tokens)::FLOAT8 * 1000.0 / SUM(duration_ms)::FLOAT8
+                         END FROM attempts) AS avg_output_tps,
                  (SELECT COUNT(*)::BIGINT FROM failures WHERE expires_at > $2
                     AND ($1::BIGINT IS NULL OR started_at >= $1)) AS error_count"
         )
@@ -139,7 +145,13 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                         SUM(a.cache_read_tokens)::BIGINT AS total_cache_read_tokens,
                         SUM(a.cache_write_tokens)::BIGINT AS total_cache_write_tokens,
                         SUM(a.reasoning_tokens)::BIGINT AS total_reasoning_tokens,
-                        AVG(a.first_token_ms::FLOAT8) AS avg_first_token_ms
+                        AVG(a.first_token_ms::FLOAT8) AS avg_first_token_ms,
+                        CASE WHEN COUNT(*) > 0
+                                  AND COUNT(a.output_tokens) = COUNT(*)
+                                  AND COUNT(a.duration_ms) = COUNT(*)
+                                  AND SUM(a.duration_ms) > 0
+                             THEN SUM(a.output_tokens)::FLOAT8 * 1000.0 / SUM(a.duration_ms)::FLOAT8
+                        END AS avg_output_tps
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.bucket_start
              ), buckets AS (
                  SELECT bucket_start FROM turn_stats UNION SELECT bucket_start FROM request_stats
@@ -148,7 +160,7 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                     COALESCE(e.error_count, 0)::BIGINT AS error_count,
                     a.total_input_tokens, a.total_output_tokens, a.total_cache_read_tokens,
                     a.total_cache_write_tokens, a.total_reasoning_tokens,
-                    t.avg_duration_ms, a.avg_first_token_ms
+                    t.avg_duration_ms, a.avg_first_token_ms, a.avg_output_tps
              FROM buckets b
              LEFT JOIN request_stats r ON r.bucket_start = b.bucket_start
              LEFT JOIN turn_stats t ON t.bucket_start = b.bucket_start
@@ -565,76 +577,138 @@ mod tests {
                 .await?;
             let result = async {
                 crate::migrations::migrate_postgres(&pool, None).await?;
-                let now = chrono::Utc::now().timestamp_millis();
-                let recent = now - 1_000;
-                let old = now - 2 * 60 * 60 * 1_000;
-                insert_turn(&pool, "recent", recent, "model", "key").await?;
-                insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
-                insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
-                sqlx::query("UPDATE target_attempt_observations SET duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 3000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 2990 END WHERE model_turn_id='recent'")
-                    .execute(&pool).await?;
-                // 管理统计仍只统计已完成 attempt；失败 attempt 不计入。
-                insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
-                insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
-                insert_attempt(&pool, "old-a", "old", old, 12528, None).await?;
-
                 let store = PostgresUsageStatsStore {
                     pool: pool.clone(),
                     last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
                 };
-                let overview = store.stats_overview(Some(1)).await?;
+                assert_eq!(store.stats_overview(Some(3)).await?.avg_output_tps, None);
+                assert_eq!(store.stats_overview(Some(3)).await?.avg_first_token_ms, None);
+                assert!(store.stats_series(3, 3_600_000, 0).await?.is_empty());
+                let now = chrono::Utc::now().timestamp_millis();
+                let recent = now / 3_600_000 * 3_600_000 - 5_400_000;
+                let old = now - 4 * 60 * 60 * 1_000;
+                insert_turn(&pool, "recent", recent, "model", "key").await?;
+                insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
+                insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+                sqlx::query("UPDATE target_attempt_observations SET output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE model_turn_id='recent'")
+                    .execute(&pool).await?;
+                // 后续发布和客户端交付失败不能改写已成功的上游 attempt。
+                sqlx::query("UPDATE model_turn_observations SET status='failed' WHERE id='recent'")
+                    .execute(&pool).await?;
+                sqlx::query("UPDATE inference_run_observations SET status='failed',terminal_reason='delivery_error' WHERE id='recent'")
+                    .execute(&pool).await?;
+                // 失败和未完成 attempt 即使有用量也不计入。
+                insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
+                insert_attempt(&pool, "recent-incomplete", "recent", recent, 999, None).await?;
+                sqlx::query("UPDATE target_attempt_observations SET status='running',output_tokens=999,duration_ms=1,first_token_ms=1 WHERE id='recent-incomplete'")
+                    .execute(&pool).await?;
+                sqlx::query("UPDATE target_attempt_observations SET output_tokens=999,first_token_ms=1 WHERE id='recent-failed'")
+                    .execute(&pool).await?;
+                insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
+                // attempt 自身时间在窗口内，但归属窗口由 Model Turn 开始时间决定。
+                insert_attempt(&pool, "old-a", "old", recent, 12528, None).await?;
+                sqlx::query("UPDATE target_attempt_observations SET duration_ms=NULL,provider_id='old-provider',provider_name='Old Provider' WHERE id='old-a'")
+                    .execute(&pool).await?;
+
+                let overview = store.stats_overview(Some(3)).await?;
                 assert_eq!(overview.total_input_tokens, Some(15));
-                assert_eq!(overview.total_output_tokens, Some(6));
+                assert_eq!(overview.total_output_tokens, Some(50));
                 assert_eq!(overview.total_reasoning_tokens, Some(2));
+                assert_eq!(overview.avg_output_tps, Some(5.0));
+                assert_eq!(overview.avg_first_token_ms, Some(4900.0));
+                assert_eq!(overview.avg_duration_ms, Some(10.0));
                 // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
                 let all_time = store.stats_overview(None).await?;
                 assert_eq!(all_time.total_input_tokens, Some(12543));
-                assert_eq!(all_time.total_output_tokens, Some(9));
+                assert_eq!(all_time.total_output_tokens, Some(53));
                 assert_eq!(all_time.total_cache_write_tokens, None);
+                assert_eq!(all_time.avg_output_tps, None);
 
-                let series = store.stats_series(1, 3_600_000, 0).await?;
+                let series = store.stats_series(3, 3_600_000, 0).await?;
                 assert_eq!(series.len(), 1);
                 assert_eq!(series[0].total_input_tokens, Some(15));
-                assert_eq!(series[0].total_output_tokens, Some(6));
+                assert_eq!(series[0].total_output_tokens, Some(50));
                 assert_eq!(series[0].total_reasoning_tokens, Some(2));
+                assert_eq!(series[0].avg_output_tps, Some(5.0));
+                assert_eq!(series[0].avg_first_token_ms, Some(4900.0));
+                assert_eq!(series[0].avg_duration_ms, Some(10.0));
                 assert_eq!(series[0].bucket_start % 3_600_000, 0);
 
-                let models = store.stats_by_model(Some(1)).await?;
+                let quarter = store.stats_series(3, 900_000, 0).await?;
+                assert_eq!(quarter.len(), 1);
+                assert_eq!(quarter[0].bucket_start % 900_000, 0);
+                let day = store.stats_series(3, 86_400_000, 8 * 3_600_000).await?;
+                assert_eq!(day.len(), 1);
+                // UTC+8 日桶边界对齐本地零点，bucket_start 仍是真实 UTC 时刻。
+                assert_eq!(day[0].bucket_start % 86_400_000, 16 * 3_600_000);
+
+                let models = store.stats_by_model(Some(3)).await?;
                 assert_eq!(models.len(), 1);
                 assert_eq!(models[0].total_input_tokens, Some(15));
-                assert_eq!(models[0].total_output_tokens, Some(6));
+                assert_eq!(models[0].total_output_tokens, Some(50));
                 assert_eq!(models[0].total_reasoning_tokens, Some(2));
 
-                let api_keys = store.stats_by_api_key(Some(1)).await?;
+                let api_keys = store.stats_by_api_key(Some(3)).await?;
                 assert_eq!(api_keys.len(), 1);
                 assert_eq!(api_keys[0].total_input_tokens, Some(15));
-                assert_eq!(api_keys[0].total_output_tokens, Some(6));
+                assert_eq!(api_keys[0].total_output_tokens, Some(50));
                 assert_eq!(api_keys[0].reasoning_tokens, Some(2));
 
-                let providers = store.stats_by_provider(Some(1)).await?;
-                assert_eq!(providers.len(), 1);
-                assert_eq!(providers[0].avg_output_tps, Some(1.5));
+                let providers = store.stats_by_provider(Some(3)).await?;
+                assert_eq!(providers.len(), 2);
+                assert_eq!(providers.iter().find(|provider| provider.provider == "Provider").unwrap().avg_output_tps, Some(5.0));
                 let old_model = store.stats_by_model(None).await?.into_iter()
                     .find(|model| model.model == "unknown-cache").unwrap();
                 assert_eq!(old_model.total_input_tokens, Some(12528));
-                for (column, value, expected) in [
-                    ("output_tokens", "NULL", None),
-                    ("output_tokens", "0", Some(0.0)),
-                    ("duration_ms", "NULL", None),
+                // 同组只缺一条成功样本也使 TPS 未知，但已知 Token 合计仍保留。
+                for (change, expected_tps, expected_output, expected_first, expected_input) in [
+                    ("output_tokens=CASE id WHEN 'recent-a' THEN 20 END,input_tokens=CASE id WHEN 'recent-a' THEN 12 END", None, Some(20), Some(4900.0), Some(12)),
+                    ("duration_ms=CASE id WHEN 'recent-a' THEN 1000 END", None, Some(50), Some(4900.0), Some(15)),
+                    ("duration_ms=0", None, Some(50), Some(4900.0), Some(15)),
+                    ("output_tokens=0", Some(0.0), Some(0), Some(4900.0), Some(15)),
+                    ("first_token_ms=NULL", Some(5.0), Some(50), None, Some(15)),
+                    ("first_token_ms=CASE id WHEN 'recent-a' THEN 900 END", Some(5.0), Some(50), Some(900.0), Some(15)),
+                    ("first_token_ms=CASE id WHEN 'recent-a' THEN 0 END", Some(5.0), Some(50), Some(0.0), Some(15)),
+                    ("first_token_ms=0", Some(5.0), Some(50), Some(0.0), Some(15)),
+                    ("status='failed'", None, None, None, None),
                 ] {
+                    sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+                        .execute(&pool).await?;
                     sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "UPDATE target_attempt_observations SET {column}={value} WHERE model_turn_id='recent'"
+                        "UPDATE target_attempt_observations SET {change} WHERE id IN ('recent-a','recent-b')"
                     ))).execute(&pool).await?;
-                    assert_eq!(store.stats_by_provider(Some(1)).await?[0].avg_output_tps, expected);
+                    assert_eq!(store.stats_by_provider(Some(3)).await?.into_iter().find(|provider| provider.provider == "Provider").unwrap().avg_output_tps, expected_tps, "{change}");
+                    let overview = store.stats_overview(Some(3)).await?;
+                    assert_eq!(overview.avg_output_tps, expected_tps, "{change}");
+                    assert_eq!(overview.total_output_tokens, expected_output, "{change}");
+                    assert_eq!(overview.avg_first_token_ms, expected_first, "{change}");
+                    assert_eq!(overview.total_input_tokens, expected_input, "{change}");
+                    let series = store.stats_series(3, 3_600_000, 0).await?;
+                    assert_eq!(series.len(), 1);
+                    assert_eq!(series[0].avg_output_tps, expected_tps, "{change}");
+                    assert_eq!(series[0].total_output_tokens, expected_output, "{change}");
+                    assert_eq!(series[0].avg_first_token_ms, expected_first, "{change}");
+                    assert_eq!(series[0].total_input_tokens, expected_input, "{change}");
                 }
 
-                let raw_input: Option<i64> = sqlx::query_scalar(
-                    "SELECT SUM(input_tokens)::BIGINT FROM target_attempt_observations WHERE model_turn_id='recent'",
-                )
-                .fetch_one(&pool)
-                .await?;
-                assert_eq!(raw_input, Some(15));
-                sqlx::query("DELETE FROM interaction_observations WHERE id IN ('recent','old')")
+                // 分属两桶仍按原始窗口合计计算，不平均两个桶的 TPS。
+                let next = recent + 3_600_000;
+                insert_turn(&pool, "next", next, "model", "key").await?;
+                sqlx::query("UPDATE target_attempt_observations SET status='completed',output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+                    .execute(&pool).await?;
+                // attempt 时间故意仍在第一桶，验证按所属 Model Turn 分桶。
+                sqlx::query("UPDATE target_attempt_observations SET model_turn_id='next',run_id='next',interaction_id='next' WHERE id='recent-b'")
+                    .execute(&pool).await?;
+                assert_eq!(store.stats_overview(Some(3)).await?.avg_output_tps, Some(5.0));
+                let series = store.stats_series(3, 3_600_000, 0).await?;
+                assert_eq!(series.len(), 2);
+                assert_eq!(series[0].bucket_start, recent - 1_800_000);
+                assert_eq!(series[1].bucket_start, next - 1_800_000);
+                assert_eq!(series[0].avg_output_tps, Some(20.0));
+                assert!((series[1].avg_output_tps.unwrap() - 10.0 / 3.0).abs() < 1e-12);
+                assert_eq!(series[0].avg_first_token_ms, Some(900.0));
+                assert_eq!(series[1].avg_first_token_ms, Some(8900.0));
+                sqlx::query("DELETE FROM interaction_observations WHERE id IN ('recent','old','next')")
                     .execute(&pool)
                     .await?;
                 verify_final_failure_counts(&pool).await?;
