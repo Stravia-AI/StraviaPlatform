@@ -124,7 +124,7 @@ test('localized Request Records keep one local timestamp across canvas and detai
     failed_request: true,
     client_output_delivered: true,
     usage: {
-      input_tokens: 1200,
+      input_tokens: null,
       output_tokens: 34,
       cache_read_tokens: null,
       cache_write_tokens: null,

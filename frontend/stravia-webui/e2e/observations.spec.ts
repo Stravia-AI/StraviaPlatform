@@ -34,7 +34,7 @@ const statusLabels: Record<string, string> = {
 }
 
 const usage: ConfirmedUsage = {
-  input_tokens: 920,
+  input_tokens: 600,
   output_tokens: 86,
   cache_read_tokens: 320,
   cache_write_tokens: null,
@@ -1083,7 +1083,7 @@ test.describe('Interaction Observation canvas', () => {
       status: 'completed',
       duration_ms: 2_800,
       first_token_ms: 800,
-      usage: { input_tokens: 920, output_tokens: 100, cache_read_tokens: 320, cache_write_tokens: null },
+      usage: { input_tokens: 600, output_tokens: 100, cache_read_tokens: 320, cache_write_tokens: null },
     })
     await expect(runRow(runCount)).toContainText('live-upstream-model · Live Service')
     await expect(runRow(runCount)).toContainText('First token 800 ms')
@@ -2303,7 +2303,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const atlas = node(page, 'Atlas', 'completed')
     const cardUsage = atlas.getByLabel('Reported usage')
-    await expect(cardUsage.getByTitle('Input')).toContainText('920')
+    await expect(cardUsage.getByTitle('Input')).toContainText('600')
     await expect(cardUsage.getByTitle('Output')).toContainText('86')
     await expect(cardUsage.getByTitle('Cache read')).toContainText('320')
     await expect(cardUsage.getByTitle('Cache write')).toContainText('–')
@@ -2323,7 +2323,7 @@ test.describe('Interaction Observation canvas', () => {
     // 交互 ID 在概览中常驻可复制；行内展示用量摘要。
     await expect(diagnostics.getByText('interaction-atlas', { exact: true })).toBeVisible()
     const runRow = diagnostics.locator('button[data-run="run-interaction-atlas"]')
-    await expect(runRow).toContainText('Input 920')
+    await expect(runRow).toContainText('Input 600')
     await expect(runRow).toContainText('Output 86')
     await expect(runRow).toContainText('Cache read 320')
     // 未报告的用量保持中性，不显示成 0。

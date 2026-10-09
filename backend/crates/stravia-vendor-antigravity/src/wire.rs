@@ -40,24 +40,34 @@ pub(crate) fn infer(
         .take()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| invalid("Antigravity requires an upstream model"))?;
-    let selector_effort = if let Some(table) = provider
+    let raw_thinking = if request.reasoning.target_control.is_none() {
+        request
+            .meta
+            .vendor
+            .ingress
+            .get("__google_generation_config")
+            .and_then(|config| config.get("thinkingConfig"))
+    } else {
+        None
+    };
+    let selector_budget = if let Some(table) = provider
         .model_metadata
         .as_ref()
         .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
     {
-        request.model =
-            crate::selector::resolve(table, request.reasoning.target_control.as_ref())?.into();
+        let selection = crate::selector::resolve(table, request.reasoning.target_control.as_ref())?;
+        request.model = selection.id.into();
         let effort = matches!(
             request.reasoning.target_control,
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
         );
         if effort {
-            // 档位由真实模型 ID 实现，不再把同一控制转换成 Gemini thinking budget。
+            // CLI 同时选择真实 ID 与该档位的目录预算；不再生成第二个 level 控制。
             request.reasoning.target_control = None;
             request.reasoning.effort = None;
             request.reasoning.budget_tokens = None;
         }
-        effort
+        selection.thinking_budget
     } else {
         if let Some(selector) = provider
             .model_metadata
@@ -66,7 +76,7 @@ pub(crate) fn infer(
         {
             request.model = selector.into();
         }
-        false
+        None
     };
     if request.embedding.is_some() {
         return Err(common::plugin_error(
@@ -98,16 +108,26 @@ pub(crate) fn infer(
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Gemini request must be an object"))?;
-    if selector_effort
-        && let Some(config) = object
-            .get_mut("generationConfig")
-            .and_then(Value::as_object_mut)
-        && let Some(thinking) = config
-            .get_mut("thinkingConfig")
-            .and_then(Value::as_object_mut)
+    if let Some(thinking) = object
+        .get_mut("generationConfig")
+        .and_then(|config| config.get_mut("thinkingConfig"))
+        .and_then(Value::as_object_mut)
     {
-        thinking.remove("thinkingLevel");
-        thinking.remove("thinkingBudget");
+        if let Some(raw) = raw_thinking.and_then(Value::as_object) {
+            for field in ["thinkingLevel", "thinkingBudget"] {
+                if let Some(value) = raw.get(field) {
+                    thinking.insert(field.into(), value.clone());
+                }
+            }
+        }
+        if let Some(budget) = selector_budget.filter(|_| {
+            raw_thinking.is_none_or(|raw| {
+                raw.get("thinkingLevel").is_none() && raw.get("thinkingBudget").is_none()
+            })
+        }) {
+            thinking.remove("thinkingLevel");
+            thinking.insert("thinkingBudget".into(), json!(budget));
+        }
     }
     // 同协议 raw tools 保留原始 function response 与内置工具，再统一投影。
     if let Some(tools) = tools.filter(|tools| !tools.is_empty())
@@ -493,14 +513,33 @@ fn generation(value: &mut Value) -> Result<(), PluginError> {
             thinking,
             &["includeThoughts", "thinkingBudget", "thinkingLevel"],
         )?;
-        // CLI master 声明的是 int32，不接受公开 Gemini 的符号枚举；不能猜其编号。
-        let object = thinking.as_object_mut().expect("validated thinking config");
-        if object.get("thinkingLevel").is_some_and(|value| {
+        // CLI 1.3.2 master 的真实 enum；非法显式值不能静默丢弃。
+        if let Some(level) = thinking.get("thinkingLevel") {
+            let valid = match level {
+                Value::String(value) => matches!(
+                    value.as_str(),
+                    "UNSPECIFIED" | "LOW" | "MEDIUM" | "HIGH" | "MINIMAL" | "EXTRA_HIGH" | "MAX"
+                ),
+                Value::Number(value) => {
+                    value.as_i64().is_some_and(|value| (0..=6).contains(&value))
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(invalid(
+                    "Antigravity thinkingLevel must be a CLI ThinkingLevel enum",
+                ));
+            }
+        }
+        if thinking.get("thinkingBudget").is_some_and(|value| {
             value
                 .as_i64()
-                .is_none_or(|number| i32::try_from(number).is_err())
+                .and_then(|value| i32::try_from(value).ok())
+                .is_none_or(|value| value < -1)
         }) {
-            object.remove("thinkingLevel");
+            return Err(invalid(
+                "Antigravity thinkingBudget must be an int32 greater than or equal to -1",
+            ));
         }
     }
     if let Some(schema) = value.get_mut("responseSchema") {
@@ -741,6 +780,54 @@ impl EventFraming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_projection_accepts_cli_enum_and_rejects_invalid_explicit_controls() {
+        for level in [
+            json!("UNSPECIFIED"),
+            json!("LOW"),
+            json!("MEDIUM"),
+            json!("HIGH"),
+            json!("MINIMAL"),
+            json!("EXTRA_HIGH"),
+            json!("MAX"),
+            json!(0),
+            json!(1),
+            json!(2),
+            json!(3),
+            json!(4),
+            json!(5),
+            json!(6),
+        ] {
+            let mut body = json!({"generationConfig":{"thinkingConfig":{
+                "thinkingLevel":level, "includeThoughts":false
+            }}});
+            sanitize_request(&mut body).unwrap();
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                level
+            );
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+                false
+            );
+        }
+        for level in [
+            json!("TURBO"),
+            json!("XHIGH"),
+            json!(-1),
+            json!(7),
+            json!(1.5),
+            json!(true),
+        ] {
+            let mut body = json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":level}}});
+            assert!(sanitize_request(&mut body).is_err());
+        }
+        for budget in [json!(-2), json!(2147483648_i64), json!("4000")] {
+            let mut body = json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":budget}}});
+            assert!(sanitize_request(&mut body).is_err());
+        }
+    }
 
     #[test]
     fn recursive_projection_drops_protocol_extensions_not_application_data() {

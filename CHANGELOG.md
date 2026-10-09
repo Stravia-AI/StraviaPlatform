@@ -22,6 +22,9 @@
 ### Fixed
 
 - Function tools from Chat Completions or Anthropic Messages clients that omit `strict` are now sent to Open Responses targets with explicit `strict: false`, so upstream no longer auto-strictifies them and turns optional parameters into required ones. Chat Completions targets now preserve explicit `strict`. Rebuild and re-import affected standalone plugins (for example `openai-codex`) to receive the fix.
+- Antigravity thinking controls now follow the observed official CLI 1.3.2 contract: selected effort variants apply their catalog `thinkingBudget`, native `thinkingLevel` uses the private enum values, and valid explicit controls are no longer silently discarded. Public-thought summary selection remains independent; signatures alone are not displayed as thought text.
+- Management input values consistently show net input, summing `max(total input - cache read, 0)` per attempt across statistics, observations, chain filters, and Debug Bundle summaries. Console Chat also subtracts reported cache reads before saving input usage; its local-history upgrade removes unconvertible old input metrics while preserving messages, reasoning, replay items, output usage, and preferences. Unknown operands remain unknown; input labels and independent cache metrics are unchanged. Raw storage, exported events, protocol usage, pricing, and scheduling inputs retain their existing contracts.
+- Responses item-completion events now follow final output order and preserve authoritative native payloads, so clients that save history in completion order can reconnect to the same conversation chain. Ordinary content deltas and reasoning-summary part boundaries remain immediate; strict history matching is unchanged.
 
 ## [0.4.0] - 2026-10-08
 

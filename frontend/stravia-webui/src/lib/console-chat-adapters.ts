@@ -12,7 +12,7 @@ import type {
 } from '$lib/console-chat-types'
 
 const DATABASE_NAME = 'stravia-console-chat'
-const DATABASE_VERSION = 1
+const DATABASE_VERSION = 2
 const CONVERSATIONS = 'conversations'
 const PREFERENCES = 'preferences'
 
@@ -24,9 +24,28 @@ export class IndexedDbConversationStore implements ConversationStore {
       const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>()
       const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION)
       let blocked = false
-      request.onupgradeneeded = () => {
-        request.result.createObjectStore(CONVERSATIONS, { keyPath: 'id' })
-        request.result.createObjectStore(PREFERENCES)
+      request.onupgradeneeded = (event) => {
+        if (event.oldVersion === 0) {
+          request.result.createObjectStore(CONVERSATIONS, { keyPath: 'id' })
+          request.result.createObjectStore(PREFERENCES)
+          return
+        }
+        // v1 只保存总输入，缺少缓存依据；不能将旧值冒充净输入或补零。
+        const cursor = request.transaction!.objectStore(CONVERSATIONS).openCursor()
+        cursor.onsuccess = () => {
+          const current = cursor.result
+          if (!current) return
+          const conversation = current.value as ConsoleConversation
+          let changed = false
+          for (const message of conversation.messages) {
+            if (message.role === 'assistant' && message.usage && 'inputTokens' in message.usage) {
+              delete message.usage.inputTokens
+              changed = true
+            }
+          }
+          if (changed) current.update(conversation)
+          current.continue()
+        }
       }
       request.onerror = () => reject(request.error)
       request.onblocked = () => {
@@ -55,8 +74,10 @@ export class IndexedDbConversationStore implements ConversationStore {
 
   async load(): Promise<{ conversations: ConsoleConversation[]; preferences: ConsoleChatPreferences }> {
     const database = await this.#open()
-    const { promise, resolve, reject } =
-      Promise.withResolvers<{ conversations: ConsoleConversation[]; preferences: ConsoleChatPreferences }>()
+    const { promise, resolve, reject } = Promise.withResolvers<{
+      conversations: ConsoleConversation[]
+      preferences: ConsoleChatPreferences
+    }>()
     const transaction = database.transaction([CONVERSATIONS, PREFERENCES], 'readonly')
     const conversations = transaction.objectStore(CONVERSATIONS).getAll()
     const preferences = transaction.objectStore(PREFERENCES).get('selection')
@@ -127,7 +148,8 @@ export const consoleAdminCatalog: ConsoleAdminCatalog = {
 
 function responseError(value: unknown, status: number): Error & ConsoleChatError {
   const payload = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-  const nested = payload.error && typeof payload.error === 'object' ? (payload.error as Record<string, unknown>) : payload
+  const nested =
+    payload.error && typeof payload.error === 'object' ? (payload.error as Record<string, unknown>) : payload
   const message =
     typeof nested.message === 'string'
       ? nested.message
@@ -137,9 +159,7 @@ function responseError(value: unknown, status: number): Error & ConsoleChatError
   return Object.assign(new Error(message), {
     status,
     ...(typeof nested.code === 'string' ? { code: nested.code } : {}),
-    ...(nested.params && typeof nested.params === 'object'
-      ? { params: nested.params as Record<string, unknown> }
-      : {}),
+    ...(nested.params && typeof nested.params === 'object' ? { params: nested.params as Record<string, unknown> } : {}),
   })
 }
 

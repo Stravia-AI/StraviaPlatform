@@ -27,14 +27,14 @@ pub(super) struct BundleRejectionRecords {
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-// 已确认部分合计上游总输入与输出；缓存已包含在总输入中，不重复累计。
+// 已确认部分合计逐 attempt 净输入与输出；未知操作数不贡献净输入。
 // 不另计 reasoning；估算只补充仍在运行且尚无
 // usage 报告的 Model Turn，每轮一次，不能因 Target 重试重复累计或冒充确认用量。
 // 按根 DAG（含子孙）一次聚合，列表、计数、分页与 SSE matched 共用同一判定。
 const CHAIN_TOKEN_ROOTS: &str = "i.root_id IN (
 SELECT tokens.root_id FROM (
     SELECT m.root_id,
-        COALESCE(a.input_tokens,0)
+        COALESCE(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END,0)
         + COALESCE(a.output_tokens,0) AS token_count
     FROM interaction_observations m
     JOIN target_attempt_observations a ON a.interaction_id=m.id
@@ -50,13 +50,13 @@ SELECT tokens.root_id FROM (
 ) tokens GROUP BY tokens.root_id HAVING SUM(tokens.token_count)>=";
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
-CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 END) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -67,13 +67,13 @@ CAST(MAX(CASE WHEN r.client_output_committed THEN 1 ELSE 0 END) AS BIGINT) clien
 CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,r.delivery_completed_at,
-CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 END) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -908,8 +908,24 @@ impl ObservationStore {
         events: Vec<ObservationEvent>,
     ) -> anyhow::Result<Vec<RunDetail>> {
         let mut by_run = std::collections::HashMap::<String, Vec<ObservationEvent>>::new();
-        for event in events {
+        for mut event in events {
             if let Some(run_id) = &event.run_id {
+                // 落盘和 Bundle 保持原始 payload；只在管理 RunDetail 读取边界投影一次。
+                if event.kind == "target_attempt_finished"
+                    && let Some(usage) = event
+                        .payload
+                        .get_mut("usage")
+                        .and_then(|value| value.as_object_mut())
+                {
+                    let input = usage.get("input_tokens").and_then(|value| value.as_i64());
+                    let cache_read = usage
+                        .get("cache_read_tokens")
+                        .and_then(|value| value.as_i64());
+                    usage.insert(
+                        "input_tokens".into(),
+                        management_input_tokens(input, cache_read).into(),
+                    );
+                }
                 by_run.entry(run_id.clone()).or_default().push(event);
             }
         }
@@ -2178,7 +2194,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_known_input_survives_unknown_cache_sqlite() -> anyhow::Result<()> {
+    async fn management_net_input_requires_known_cache_sqlite() -> anyhow::Result<()> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -2271,15 +2287,16 @@ mod tests {
             )
             .await?
             .unwrap();
-        assert!(snapshot.interaction.matched);
-        assert_eq!(snapshot.interaction.usage.input_tokens, Some(12528));
+        assert!(!snapshot.interaction.matched);
+        assert_eq!(snapshot.interaction.usage.input_tokens, None);
         let coverage = snapshot.interaction.usage.coverage.unwrap();
-        assert_eq!(coverage.missing_input_tokens, 0);
+        assert_eq!(coverage.missing_input_tokens, 1);
         assert_eq!(coverage.missing_cache_read_tokens, 1);
         let runs = store
             .run_details(store.runs("known-input").await?, events)
             .await?;
-        assert_eq!(runs[0].usage.input_tokens, Some(12528));
+        assert_eq!(runs[0].usage.input_tokens, None);
+        assert!(runs[0].events[0].payload["usage"]["input_tokens"].is_null());
         assert_eq!(
             runs[0]
                 .usage
@@ -2287,33 +2304,49 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .missing_input_tokens,
-            0
+            1
         );
         assert_eq!(runs[0].delivery_completed_at, Some(13916));
         assert_eq!(runs[0].finished_at, Some(14000));
 
-        admit_chain_node(store, "cached-threshold", "cached-threshold", None, 4).await?;
-        confirm_displayed_tokens(store, "cached-threshold", 100, 50, 9000, 9000, 5).await?;
-        for (threshold, matched) in [(150, true), (151, false)] {
-            let filters = ForestQuery {
-                start_at: Some(0),
-                end_at: Some(DAY_MS),
-                min_tokens: Some(threshold),
-                ..Default::default()
-            };
-            let snapshot = store
-                .get_interaction_summary("cached-threshold", filters.clone())
-                .await?
-                .unwrap();
-            assert_eq!(snapshot.interaction.matched, matched);
-            let forest = store.query_forest(filters).await?;
-            assert_eq!(
-                forest
-                    .roots
-                    .iter()
-                    .any(|root| root.id == "cached-threshold"),
-                matched
-            );
+        for (id, cache_read, boundary) in
+            [("cached-threshold", 9000, 50), ("net-threshold", 40, 110)]
+        {
+            admit_chain_node(store, id, id, None, 4).await?;
+            confirm_displayed_tokens(store, id, 100, 50, cache_read, 9000, 5).await?;
+            for (threshold, matched) in [(boundary, true), (boundary + 1, false)] {
+                let filters = ForestQuery {
+                    start_at: Some(0),
+                    end_at: Some(DAY_MS),
+                    min_tokens: Some(threshold),
+                    ..Default::default()
+                };
+                let snapshot = store
+                    .get_interaction_summary(id, filters.clone())
+                    .await?
+                    .unwrap();
+                assert_eq!(snapshot.interaction.matched, matched);
+                assert_eq!(snapshot.interaction.usage.input_tokens, Some(boundary - 50));
+                let forest = store.query_forest(filters.clone()).await?;
+                assert_eq!(forest.roots.iter().any(|root| root.id == id), matched);
+                let changes = store
+                    .query_root_changes(RootChangesQuery {
+                        filters,
+                        roots: vec![RootChangesBaseline {
+                            root_id: id.into(),
+                            after_sequence: 0,
+                            known_interactions: Vec::new(),
+                        }],
+                    })
+                    .await?;
+                assert!(!changes.reset_required);
+                assert_eq!(changes.root_total, forest.root_total);
+                if matched {
+                    assert!(changes.changes[0].interactions[0].matched);
+                } else {
+                    assert_eq!(changes.changes[0].removal_reason.as_deref(), Some("filter"));
+                }
+            }
         }
         Ok(())
     }

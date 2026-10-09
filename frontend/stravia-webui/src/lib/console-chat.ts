@@ -22,21 +22,26 @@ export function consoleVisibleText(text: string): string {
 }
 
 function record(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null
 }
 
 function readableParts(value: unknown): string {
   if (typeof value === 'string') return value
   if (!Array.isArray(value)) return ''
-  return value.map((part) => {
-    const item = record(part)
-    return typeof item?.text === 'string' ? item.text : typeof item?.refusal === 'string' ? item.refusal : ''
-  }).join('')
+  return value
+    .map((part) => {
+      const item = record(part)
+      return typeof item?.text === 'string' ? item.text : typeof item?.refusal === 'string' ? item.refusal : ''
+    })
+    .join('')
 }
 
 export function consoleAssistantContent(message: ConsoleAssistantMessage): { text: string; thinking: string } {
   if (message.status === 'stopped') {
-    return { text: consoleVisibleText(message.partialText ?? ''), thinking: consoleVisibleText(message.partialThinking ?? '') }
+    return {
+      text: consoleVisibleText(message.partialText ?? ''),
+      thinking: consoleVisibleText(message.partialThinking ?? ''),
+    }
   }
   let text = ''
   let summary = ''
@@ -105,9 +110,15 @@ export class ConsoleChatController {
 
   constructor(private readonly options: ConsoleChatControllerOptions) {}
 
-  private now(): number { return (this.options.now ?? Date.now)() }
-  private time(): string { return new Date(this.now()).toISOString() }
-  private id(): string { return (this.options.createId ?? (() => crypto.randomUUID()))() }
+  private now(): number {
+    return (this.options.now ?? Date.now)()
+  }
+  private time(): string {
+    return new Date(this.now()).toISOString()
+  }
+  private id(): string {
+    return (this.options.createId ?? (() => crypto.randomUUID()))()
+  }
   private current(): ConsoleConversation | null {
     return this.conversations.find((conversation) => conversation.id === this.currentId) ?? null
   }
@@ -121,26 +132,35 @@ export class ConsoleChatController {
   readOnlyReasonFor(id: string): ConsoleReadOnlyReason | null {
     if (!this.catalogLoaded) return null
     const conversation = this.conversations.find((candidate) => candidate.id === id)
-    return conversation ? apiKeyReadOnlyReason(this.apiKeys.find((key) => key.id === conversation.apiKeyId), this.now()) : null
+    return conversation
+      ? apiKeyReadOnlyReason(
+          this.apiKeys.find((key) => key.id === conversation.apiKeyId),
+          this.now(),
+        )
+      : null
   }
   private blocker(): ConsoleChatBlocker | null {
     if (!this.providers.length) return 'no-services'
     if (!this.providers.some((provider) => provider.is_enabled)) return 'disabled-services'
     if (!this.models.length) return 'no-models'
-    const enabledServices = new Set(this.providers.filter((provider) => provider.is_enabled).map((provider) => provider.id))
-    const connectableModels = this.models.filter((model) => model.is_enabled &&
-      model.targets.some((target) => target.enabled && enabledServices.has(target.provider_id)))
+    const enabledServices = new Set(
+      this.providers.filter((provider) => provider.is_enabled).map((provider) => provider.id),
+    )
+    const connectableModels = this.models.filter(
+      (model) =>
+        model.is_enabled && model.targets.some((target) => target.enabled && enabledServices.has(target.provider_id)),
+    )
     if (!connectableModels.length) return 'disabled-models'
     if (!this.apiKeys.length) return 'no-keys'
-    if (!this.keys().some((key) => connectableModels.some((model) => apiKeyAllowsModel(key.model_ids, model.id)))) return 'unavailable-keys'
+    if (!this.keys().some((key) => connectableModels.some((model) => apiKeyAllowsModel(key.model_ids, model.id))))
+      return 'unavailable-keys'
     return null
   }
   get snapshot(): ConsoleChatSnapshot {
     // 响应式壳依赖值身份变化；仅复制可变的对话与消息壳，不复制原样回放的输出项。
-    const conversations = this.conversations.map((conversation) => ({
-      ...conversation,
-      messages: conversation.messages.map((message) => ({ ...message })),
-    })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    const conversations = this.conversations
+      .map((conversation) => ({ ...conversation, messages: conversation.messages.map((message) => ({ ...message })) }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     const current = conversations.find((conversation) => conversation.id === this.currentId) ?? null
     const selectedKeyId = current?.apiKeyId ?? this.draftKey
     const candidates = this.allowedModels(selectedKeyId)
@@ -163,21 +183,32 @@ export class ConsoleChatController {
       thinkingSelection: current?.thinkingSelection ?? this.draftThinking,
       thinkingLevels: [...new Set(model?.supported_thinking_levels ?? [])],
       readOnlyReason: current ? this.readOnlyReasonFor(current.id) : null,
-      retryModelAvailable: lastMessage?.role === 'assistant' &&
-        candidates.some((candidate) => candidate.model_id === lastMessage.routeId),
+      retryModelAvailable:
+        lastMessage?.role === 'assistant' && candidates.some((candidate) => candidate.model_id === lastMessage.routeId),
       blocker: this.loading || this.loadError || this.catalogError ? null : this.blocker(),
       generations: Object.fromEntries([...this.active].map(([id, request]) => [id, { ...request.generation }])),
     }
   }
-  private publish(): void { this.options.onSnapshot?.(this.snapshot) }
+  private publish(): void {
+    this.options.onSnapshot?.(this.snapshot)
+  }
   private write(operation: () => Promise<void>): Promise<boolean> {
-    const pending = this.writes.then(operation).then(() => {
-      this.storageError = null
-      return true
-    }, (error: unknown) => {
-      this.storageError = error
-      return false
-    }).then((saved) => { this.publish(); return saved })
+    const pending = this.writes
+      .then(operation)
+      .then(
+        () => {
+          this.storageError = null
+          return true
+        },
+        (error: unknown) => {
+          this.storageError = error
+          return false
+        },
+      )
+      .then((saved) => {
+        this.publish()
+        return saved
+      })
     this.writes = pending.then(() => {})
     return pending
   }
@@ -205,9 +236,12 @@ export class ConsoleChatController {
     const keys = this.keys()
     if (!keys.some((key) => key.id === this.draftKey)) this.draftKey = keys.length === 1 ? keys[0].id : null
     const models = this.allowedModels(this.draftKey)
-    if (!models.some((model) => model.id === this.draftModel)) this.draftModel = models.length === 1 ? models[0].id : null
-    if (this.draftThinking !== 'default' &&
-      !models.find((model) => model.id === this.draftModel)?.supported_thinking_levels.includes(this.draftThinking)) {
+    if (!models.some((model) => model.id === this.draftModel))
+      this.draftModel = models.length === 1 ? models[0].id : null
+    if (
+      this.draftThinking !== 'default' &&
+      !models.find((model) => model.id === this.draftModel)?.supported_thinking_levels.includes(this.draftThinking)
+    ) {
       this.draftThinking = 'default'
     }
     for (const conversation of this.conversations) {
@@ -215,7 +249,10 @@ export class ConsoleChatController {
       const model = available.find((candidate) => candidate.id === conversation.selectedModelId)
       if (!model) conversation.selectedModelId = available.length === 1 ? available[0].id : ''
       const selected = available.find((candidate) => candidate.id === conversation.selectedModelId)
-      if (conversation.thinkingSelection !== 'default' && !selected?.supported_thinking_levels.includes(conversation.thinkingSelection)) {
+      if (
+        conversation.thinkingSelection !== 'default' &&
+        !selected?.supported_thinking_levels.includes(conversation.thinkingSelection)
+      ) {
         conversation.thinkingSelection = 'default'
       }
     }
@@ -231,13 +268,19 @@ export class ConsoleChatController {
     this.loadError = null
     this.publish()
     await Promise.all([
-      this.options.store.load().then((loaded) => {
-        this.conversations = loaded.conversations
-        this.preferences = loaded.preferences
-        this.draftKey = loaded.preferences.apiKeyId ?? null
-        this.draftModel = loaded.preferences.modelId ?? null
-        this.storageError = null
-      }, (error: unknown) => { this.loadError = error; this.storageError = error }),
+      this.options.store.load().then(
+        (loaded) => {
+          this.conversations = loaded.conversations
+          this.preferences = loaded.preferences
+          this.draftKey = loaded.preferences.apiKeyId ?? null
+          this.draftModel = loaded.preferences.modelId ?? null
+          this.storageError = null
+        },
+        (error: unknown) => {
+          this.loadError = error
+          this.storageError = error
+        },
+      ),
       this.refreshCatalog(),
     ])
     this.reconcile()
@@ -273,7 +316,10 @@ export class ConsoleChatController {
     this.publish()
   }
   openConversation(id: string | null): void {
-    if (id === null) { this.newConversation(); return }
+    if (id === null) {
+      this.newConversation()
+      return
+    }
     this.currentId = id
     this.publish()
   }
@@ -293,7 +339,10 @@ export class ConsoleChatController {
     const selected = available.find((model) => model.id === id)
     if (current) {
       current.selectedModelId = selected?.id ?? ''
-      if (current.thinkingSelection !== 'default' && !selected?.supported_thinking_levels.includes(current.thinkingSelection)) {
+      if (
+        current.thinkingSelection !== 'default' &&
+        !selected?.supported_thinking_levels.includes(current.thinkingSelection)
+      ) {
         current.thinkingSelection = 'default'
       }
       void this.save(current)
@@ -310,8 +359,10 @@ export class ConsoleChatController {
     if (selection !== 'default' && !this.snapshot.thinkingLevels.includes(selection)) return
     const current = this.current()
     if (this.clearing || (current && this.deleting.has(current.id))) return
-    if (current) { current.thinkingSelection = selection; void this.save(current) }
-    else if (this.currentId === null) this.draftThinking = selection
+    if (current) {
+      current.thinkingSelection = selection
+      void this.save(current)
+    } else if (this.currentId === null) this.draftThinking = selection
     this.publish()
   }
   private reasoning(model: Route, selection: ConsoleThinkingSelection): ConsoleResponsesRequest['reasoning'] {
@@ -319,13 +370,25 @@ export class ConsoleChatController {
     return { summary: 'auto', ...(effort ? { effort: effort === 'off' ? 'none' : effort } : {}) }
   }
   private canSend(conversation?: ConsoleConversation): boolean {
-    return !this.loading && !this.loadError && !this.catalogError && !this.blocker() && !this.clearing &&
-      (!conversation || (!this.deleting.has(conversation.id) && !this.active.has(conversation.id) && !this.readOnlyReasonFor(conversation.id)))
+    return (
+      !this.loading &&
+      !this.loadError &&
+      !this.catalogError &&
+      !this.blocker() &&
+      !this.clearing &&
+      (!conversation ||
+        (!this.deleting.has(conversation.id) &&
+          !this.active.has(conversation.id) &&
+          !this.readOnlyReasonFor(conversation.id)))
+    )
   }
   async send(text: string): Promise<void> {
     if (!text.trim() || this.snapshot.missingConversation) return
     let conversation = this.current()
-    if (!this.canSend(conversation ?? undefined)) { this.refreshEligibility(); return }
+    if (!this.canSend(conversation ?? undefined)) {
+      this.refreshEligibility()
+      return
+    }
     const state = this.snapshot
     const key = this.keys().find((candidate) => candidate.id === state.selectedKeyId)
     const model = state.modelCandidates.find((candidate) => candidate.id === state.selectedModelId)
@@ -333,30 +396,50 @@ export class ConsoleChatController {
     if (!conversation) {
       const firstLine = text.trim().split(/\r?\n/, 1)[0]
       const title = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(firstLine)]
-        .slice(0, 40).map((segment) => segment.segment).join('')
+        .slice(0, 40)
+        .map((segment) => segment.segment)
+        .join('')
       conversation = {
-        id: this.id(), title, apiKeyId: key.id, apiKeyName: key.name, selectedModelId: model.id,
-        thinkingSelection: state.thinkingSelection, createdAt: this.time(), updatedAt: this.time(), messages: [],
+        id: this.id(),
+        title,
+        apiKeyId: key.id,
+        apiKeyName: key.name,
+        selectedModelId: model.id,
+        thinkingSelection: state.thinkingSelection,
+        createdAt: this.time(),
+        updatedAt: this.time(),
+        messages: [],
       }
       this.conversations.push(conversation)
       this.currentId = conversation.id
     }
     conversation.messages.push({ id: this.id(), role: 'user', text, createdAt: this.time() })
     this.remember()
-    await this.generate(conversation, {
-      model: model.model_id, stream: true, input: replay(conversation.messages),
-      reasoning: this.reasoning(model, state.thinkingSelection),
-    }, state.thinkingSelection)
+    await this.generate(
+      conversation,
+      {
+        model: model.model_id,
+        stream: true,
+        input: replay(conversation.messages),
+        reasoning: this.reasoning(model, state.thinkingSelection),
+      },
+      state.thinkingSelection,
+    )
   }
   async retry(): Promise<void> {
     const conversation = this.current()
-    if (!conversation || !this.canSend(conversation)) { this.refreshEligibility(); return }
+    if (!conversation || !this.canSend(conversation)) {
+      this.refreshEligibility()
+      return
+    }
     const last = conversation.messages.at(-1)
     if (last?.role !== 'assistant' || last.status !== 'failed') return
     const model = this.allowedModels(conversation.apiKeyId).find((candidate) => candidate.model_id === last.routeId)
     if (!model) return
     const request: ConsoleResponsesRequest = {
-      model: last.routeId, stream: true, input: replay(conversation.messages.slice(0, -1)),
+      model: last.routeId,
+      stream: true,
+      input: replay(conversation.messages.slice(0, -1)),
       reasoning: last.requestReasoning ?? this.reasoning(model, last.thinkingLevel),
     }
     conversation.messages.pop()
@@ -364,24 +447,45 @@ export class ConsoleChatController {
   }
   async regenerate(): Promise<void> {
     const conversation = this.current()
-    if (!conversation || !this.canSend(conversation)) { this.refreshEligibility(); return }
+    if (!conversation || !this.canSend(conversation)) {
+      this.refreshEligibility()
+      return
+    }
     const last = conversation.messages.at(-1)
     const model = this.snapshot.modelCandidates.find((candidate) => candidate.id === conversation.selectedModelId)
     if (last?.role !== 'assistant' || !model) return
     conversation.messages.pop()
-    await this.generate(conversation, {
-      model: model.model_id, stream: true, input: replay(conversation.messages),
-      reasoning: this.reasoning(model, conversation.thinkingSelection),
-    }, conversation.thinkingSelection)
+    await this.generate(
+      conversation,
+      {
+        model: model.model_id,
+        stream: true,
+        input: replay(conversation.messages),
+        reasoning: this.reasoning(model, conversation.thinkingSelection),
+      },
+      conversation.thinkingSelection,
+    )
   }
-  private async generate(conversation: ConsoleConversation, request: ConsoleResponsesRequest, selection: ConsoleThinkingSelection): Promise<void> {
+  private async generate(
+    conversation: ConsoleConversation,
+    request: ConsoleResponsesRequest,
+    selection: ConsoleThinkingSelection,
+  ): Promise<void> {
     const message: ConsoleAssistantMessage = {
-      id: this.id(), role: 'assistant', status: 'stopped', routeId: request.model,
-      thinkingLevel: selection, requestReasoning: { ...request.reasoning }, outputItems: [],
-      partialText: '', createdAt: this.time(),
+      id: this.id(),
+      role: 'assistant',
+      status: 'stopped',
+      routeId: request.model,
+      thinkingLevel: selection,
+      requestReasoning: { ...request.reasoning },
+      outputItems: [],
+      partialText: '',
+      createdAt: this.time(),
     }
     const active: ActiveRequest = {
-      abort: new AbortController(), message, generation: { text: '', summary: '', reasoning: '' },
+      abort: new AbortController(),
+      message,
+      generation: { text: '', summary: '', reasoning: '' },
     }
     conversation.messages.push(message)
     conversation.updatedAt = this.time()
@@ -397,11 +501,13 @@ export class ConsoleChatController {
       for await (const event of this.options.transport.stream({ apiKey, request, signal: active.abort.signal })) {
         if (!alive()) return
         const generation = active.generation
-        if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') generation.text += event.delta ?? ''
+        if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta')
+          generation.text += event.delta ?? ''
         else if (event.type === 'response.reasoning_summary_text.delta') generation.summary += event.delta ?? ''
         else if (event.type === 'response.reasoning_text.delta') generation.reasoning += event.delta ?? ''
         else if (event.type === 'error' || event.type === 'response.failed') {
-          const failure = event.response?.error ?? event.error ?? { message: event.message ?? 'Response failed', code: event.code }
+          const failure = event.response?.error ??
+            event.error ?? { message: event.message ?? 'Response failed', code: event.code }
           throw Object.assign(new Error(failure.message), failure)
         } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
           const response = event.response
@@ -409,12 +515,19 @@ export class ConsoleChatController {
           if (response.error || response.status === 'failed') {
             throw Object.assign(new Error(response.error?.message ?? 'Response failed'), response.error)
           }
-          message.status = response.status === 'incomplete' || event.type === 'response.incomplete' ? 'incomplete' : 'completed'
+          message.status =
+            response.status === 'incomplete' || event.type === 'response.incomplete' ? 'incomplete' : 'completed'
           message.outputItems = response.output ?? []
           if (response.usage) {
+            const input = response.usage.input_tokens
+            const cacheRead = response.usage.input_tokens_details?.cached_tokens
             message.usage = {
-              ...(typeof response.usage.input_tokens === 'number' ? { inputTokens: response.usage.input_tokens } : {}),
-              ...(typeof response.usage.output_tokens === 'number' ? { outputTokens: response.usage.output_tokens } : {}),
+              ...(typeof input === 'number' && typeof cacheRead === 'number'
+                ? { inputTokens: Math.max(input - cacheRead, 0) }
+                : {}),
+              ...(typeof response.usage.output_tokens === 'number'
+                ? { outputTokens: response.usage.output_tokens }
+                : {}),
             }
           }
           delete message.partialText
@@ -440,9 +553,19 @@ export class ConsoleChatController {
         delete message.partialText
         delete message.partialThinking
         message.error = chatError(error)
-        if (message.error.status === 401 || message.error.status === 403 ||
-          ['invalid_api_key', 'authentication_error', 'unauthorized', 'STRAVIA_AUTH_ERROR',
-            'STRAVIA_FORBIDDEN', 'STRAVIA_NOT_FOUND', 'model_not_found'].includes(message.error.code ?? '')) {
+        if (
+          message.error.status === 401 ||
+          message.error.status === 403 ||
+          [
+            'invalid_api_key',
+            'authentication_error',
+            'unauthorized',
+            'STRAVIA_AUTH_ERROR',
+            'STRAVIA_FORBIDDEN',
+            'STRAVIA_NOT_FOUND',
+            'model_not_found',
+          ].includes(message.error.code ?? '')
+        ) {
           await this.refreshCatalog()
         }
       }
@@ -461,7 +584,8 @@ export class ConsoleChatController {
     active.abort.abort()
     active.message.status = 'stopped'
     active.message.partialText = consoleVisibleText(active.generation.text)
-    active.message.partialThinking = consoleVisibleText(active.generation.summary) || consoleVisibleText(active.generation.reasoning)
+    active.message.partialThinking =
+      consoleVisibleText(active.generation.summary) || consoleVisibleText(active.generation.reasoning)
     conversation.updatedAt = this.time()
     this.publish()
     await this.save(conversation)
@@ -473,19 +597,22 @@ export class ConsoleChatController {
     const conversation = this.conversations.find((candidate) => candidate.id === id)
     if (!conversation || !title.trim() || this.clearing || this.deleting.has(id)) return
     const nextTitle = title.trim()
-    if (!await this.write(async () => {
-      const checkpoint = structuredClone(conversation)
-      checkpoint.title = nextTitle
-      await this.options.store.saveConversation(checkpoint)
-      conversation.title = nextTitle
-    })) throw this.storageError
+    if (
+      !(await this.write(async () => {
+        const checkpoint = structuredClone(conversation)
+        checkpoint.title = nextTitle
+        await this.options.store.saveConversation(checkpoint)
+        conversation.title = nextTitle
+      }))
+    )
+      throw this.storageError
     this.publish()
   }
   async delete(id: string): Promise<void> {
     this.deleting.add(id)
     try {
       await this.stop(id)
-      if (!await this.write(() => this.options.store.deleteConversation(id))) throw this.storageError
+      if (!(await this.write(() => this.options.store.deleteConversation(id)))) throw this.storageError
       this.conversations = this.conversations.filter((conversation) => conversation.id !== id)
       if (this.currentId === id) this.newConversation()
     } finally {
@@ -497,7 +624,7 @@ export class ConsoleChatController {
     this.clearing = true
     try {
       await this.stopAll()
-      if (!await this.write(() => this.options.store.clearConversations())) throw this.storageError
+      if (!(await this.write(() => this.options.store.clearConversations()))) throw this.storageError
       this.conversations = []
       this.newConversation()
     } finally {
@@ -507,12 +634,16 @@ export class ConsoleChatController {
   }
   findConversations(query: string): ConsoleConversation[] {
     const normalized = query.trim().toLocaleLowerCase()
-    return this.snapshot.conversations.filter((conversation) => !normalized ||
-      conversation.title.toLocaleLowerCase().includes(normalized) ||
-      conversation.messages.some((message) => {
-        const assistant = message.role === 'assistant' ? consoleAssistantContent(message) : null
-        const content = message.role === 'user' ? message.text : `${assistant?.text ?? ''}\n${assistant?.thinking ?? ''}`
-        return content.toLocaleLowerCase().includes(normalized)
-      }))
+    return this.snapshot.conversations.filter(
+      (conversation) =>
+        !normalized ||
+        conversation.title.toLocaleLowerCase().includes(normalized) ||
+        conversation.messages.some((message) => {
+          const assistant = message.role === 'assistant' ? consoleAssistantContent(message) : null
+          const content =
+            message.role === 'user' ? message.text : `${assistant?.text ?? ''}\n${assistant?.thinking ?? ''}`
+          return content.toLocaleLowerCase().includes(normalized)
+        }),
+    )
   }
 }

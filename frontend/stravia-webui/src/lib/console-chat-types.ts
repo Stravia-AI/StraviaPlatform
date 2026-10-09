@@ -4,12 +4,7 @@ export type ConsoleThinkingSelection = 'default' | ThinkingLevel
 export type ConsoleApiKey = Omit<ApiKey, 'key'>
 export type ConsoleReadOnlyReason = 'deleted' | 'disabled' | 'expired'
 export type ConsoleChatBlocker =
-  | 'no-services'
-  | 'disabled-services'
-  | 'no-models'
-  | 'disabled-models'
-  | 'no-keys'
-  | 'unavailable-keys'
+  'no-services' | 'disabled-services' | 'no-models' | 'disabled-models' | 'no-keys' | 'unavailable-keys'
 
 export interface ConsoleChatError {
   message: string
@@ -26,6 +21,7 @@ export interface ConsoleUserMessage {
 }
 
 export interface ConsoleTokenUsage {
+  /** 管理面净输入；无法确定总输入或缓存读取时不保存数值。 */
   inputTokens?: number
   outputTokens?: number
 }
@@ -73,11 +69,7 @@ export interface ConversationStore {
 }
 
 export interface ConsoleAdminCatalog {
-  read(): Promise<{
-    apiKeys: ConsoleApiKey[]
-    models: Route[]
-    providers: Pick<Provider, 'id' | 'is_enabled'>[]
-  }>
+  read(): Promise<{ apiKeys: ConsoleApiKey[]; models: Route[]; providers: Pick<Provider, 'id' | 'is_enabled'>[] }>
   revealKey(id: string): Promise<string>
 }
 
@@ -92,7 +84,11 @@ export interface ConsoleResponse {
   output?: unknown[]
   status?: string
   model?: string
-  usage?: { input_tokens?: number; output_tokens?: number }
+  usage?: {
+    input_tokens?: number | null
+    input_tokens_details?: { cached_tokens?: number | null } | null
+    output_tokens?: number | null
+  } | null
   error?: ConsoleChatError | null
   incomplete_details?: { reason?: string } | null
 }

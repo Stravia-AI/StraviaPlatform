@@ -2,6 +2,354 @@ use super::*;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 
+fn completed_history(events: &[SseEvent]) -> Vec<serde_json::Value> {
+    event_bodies(events)
+        .into_iter()
+        .filter(|body| body["type"] == "response.output_item.done")
+        .map(|body| body["item"].clone())
+        .collect()
+}
+
+#[test]
+fn reverse_tool_completions_drain_immediately_when_first_call_finishes() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let started = formatter.format_deltas(&[
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "first".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 1,
+            id: "second".into(),
+            name: "grep".into(),
+        },
+    ]);
+    assert_eq!(
+        event_bodies(&started)
+            .iter()
+            .filter(|body| body["type"] == "response.output_item.added")
+            .count(),
+        2
+    );
+    let second = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 1,
+        item: function_call_item("second", "grep", "{\"pattern\":\"x\"}"),
+    }]);
+    assert!(completed_history(&second).is_empty());
+    let first = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 0,
+        item: function_call_item("first", "read", "{\"path\":\"a\"}"),
+    }]);
+    let history = completed_history(&first);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0]["call_id"], "first");
+    assert_eq!(history[1]["call_id"], "second");
+    assert_eq!(
+        event_bodies(&first)
+            .iter()
+            .filter(|body| body["type"] == "response.function_call_arguments.done")
+            .count(),
+        2
+    );
+    assert!(
+        !event_bodies(&first)
+            .iter()
+            .any(|body| body.get("response").is_some())
+    );
+    let tail = formatter.format_deltas(&[AiStreamDelta::Done {
+        stop_reason: "tool_calls".into(),
+    }]);
+    assert!(completed_history(&tail).is_empty());
+    let terminal = event_bodies(&tail)
+        .into_iter()
+        .find(|body| body["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(
+        terminal["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+}
+
+#[test]
+fn native_multipart_completion_preserves_annotations_refusal_and_item_fields() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiItemMetadata};
+    let mut formatter = ResponsesStreamFormatter::new();
+    let annotation = serde_json::json!({"type":"url_citation", "url":"https://example.test"});
+    let mut item = AiItem::output_text("answer");
+    item.meta = Some(AiItemMetadata::boxed(serde_json::json!({
+        "__open_responses_content": [
+            {"type":"output_text", "text":"answer", "annotations":[annotation], "logprobs":[]},
+            {"type":"refusal", "refusal":"no"}
+        ],
+        "__open_responses_item_fields": {"custom_field":"kept"}
+    })));
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::TextDeltaWithMetadata {
+            text: "answer".into(),
+            logprobs: Vec::new(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(0),
+        },
+        AiStreamDelta::RefusalDeltaWithIndex {
+            text: "no".into(),
+            output_index: 0,
+            content_index: 1,
+        },
+        AiStreamDelta::Unknown {
+            raw: serde_json::json!({
+                "__open_responses_event": {
+                    "type":"response.output_text.annotation.added", "output_index":0,
+                    "content_index":0, "annotation_index":0, "annotation":annotation
+                }
+            })
+            .to_string(),
+        },
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: item.clone(),
+        },
+    ]);
+    let history = completed_history(&events);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["custom_field"], "kept");
+    assert_eq!(history[0]["content"][0]["annotations"][0], annotation);
+    assert_eq!(history[0]["content"][1]["refusal"], "no");
+    let bodies = event_bodies(&events);
+    let item_done = bodies
+        .iter()
+        .position(|body| body["type"] == "response.output_item.done")
+        .unwrap();
+    for kind in [
+        "response.output_text.annotation.added",
+        "response.output_text.done",
+        "response.refusal.done",
+        "response.content_part.done",
+    ] {
+        assert!(bodies.iter().position(|body| body["type"] == kind).unwrap() < item_done);
+    }
+    let tail = formatter.format_deltas(&[
+        AiStreamDelta::ItemDone { index: 0, item },
+        AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        },
+    ]);
+    assert!(completed_history(&tail).is_empty());
+    let terminal = event_bodies(&tail)
+        .into_iter()
+        .find(|body| body["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(
+        terminal["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+}
+
+#[test]
+fn unindexed_text_closes_before_indexed_reasoning_without_waiting_for_terminal() {
+    use stravia_runtime_contract::protocol::ir::AiItem;
+
+    let mut formatter = ResponsesStreamFormatter::new();
+    let mut events = formatter.format_deltas(&[AiStreamDelta::TextDelta("answer".into())]);
+    events.extend(formatter.format_deltas(&[
+        AiStreamDelta::ThinkingDeltaWithMetadata {
+            text: "thought".into(),
+            obfuscation: None,
+            output_index: Some(1),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), vec!["thought".into()], Some("signature".into())),
+        },
+    ]));
+    let history = completed_history(&events);
+    assert_eq!(
+        history
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["message", "reasoning"]
+    );
+    assert_eq!(history[0]["content"][0]["text"], "answer");
+    assert_eq!(history[1]["content"][0]["text"], "thought");
+    assert_eq!(history[1]["encrypted_content"], "signature");
+
+    let terminal = formatter.format_deltas(&[AiStreamDelta::Done {
+        stop_reason: "stop".into(),
+    }]);
+    assert!(completed_history(&terminal).is_empty());
+    let response = event_bodies(&terminal)
+        .into_iter()
+        .find(|body| body["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(
+        response["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+}
+
+#[test]
+fn reverse_native_completion_waits_for_authoritative_message_then_drains_tools() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+    let mut formatter = ResponsesStreamFormatter::new();
+    let open = formatter.format_deltas(&[
+        AiStreamDelta::TextDeltaWithMetadata {
+            text: "answer".into(),
+            logprobs: Vec::new(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ThinkingDeltaWithMetadata {
+            text: "thought".into(),
+            obfuscation: None,
+            output_index: Some(1),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 2,
+            id: "call".into(),
+            name: "read".into(),
+        },
+    ]);
+    assert!(
+        event_bodies(&open)
+            .iter()
+            .any(|body| body["type"] == "response.output_text.delta")
+    );
+    let higher = formatter.format_deltas(&[
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), vec!["thought".into()], Some("signature".into())),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 2,
+            tool_call: ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        },
+    ]);
+    assert!(completed_history(&higher).is_empty());
+    assert!(
+        !event_bodies(&higher)
+            .iter()
+            .any(|body| body["type"] == "response.function_call_arguments.done")
+    );
+    let lower = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 0,
+        item: AiItem::output_text("answer"),
+    }]);
+    let history = completed_history(&lower);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0]["type"], "message");
+    assert_eq!(history[1]["encrypted_content"], "signature");
+    assert_eq!(history[2]["arguments"], "{}");
+    let bodies = event_bodies(&lower);
+    let arguments_done = bodies
+        .iter()
+        .position(|body| body["type"] == "response.function_call_arguments.done")
+        .unwrap();
+    let tool_done = bodies
+        .iter()
+        .position(|body| {
+            body["type"] == "response.output_item.done" && body["item"]["type"] == "function_call"
+        })
+        .unwrap();
+    assert!(arguments_done < tool_done);
+    let tail = formatter.format_deltas(&[AiStreamDelta::Done {
+        stop_reason: "stop".into(),
+    }]);
+    assert!(completed_history(&tail).is_empty());
+    let terminal = event_bodies(&tail)
+        .into_iter()
+        .find(|body| body["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(
+        terminal["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+}
+
+#[test]
+fn sparse_native_indices_wait_for_late_lower_items_and_terminal_gaps() {
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    let mut formatter = ResponsesStreamFormatter::new();
+    let high = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 3,
+        item: AiItem::reasoning(Vec::new(), Vec::new(), Some("protected".into())),
+    }]);
+    assert!(completed_history(&high).is_empty());
+    let low = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 0,
+        item: AiItem::output_text(""),
+    }]);
+    let mut history = completed_history(&low);
+    assert_eq!(history.len(), 1);
+    let tail = formatter.format_deltas(&[AiStreamDelta::ResponseTerminal {
+        status: "incomplete".into(),
+        incomplete_details: Some(serde_json::json!({"reason":"max_output_tokens"})),
+    }]);
+    history.extend(completed_history(&tail));
+    let terminal = event_bodies(&tail)
+        .into_iter()
+        .find(|body| body["type"] == "response.incomplete")
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        terminal["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+}
+
+#[test]
+fn failed_terminal_drains_partial_items_in_canonical_order_once() {
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    let mut formatter = ResponsesStreamFormatter::new();
+    let open = formatter.format_deltas(&[
+        AiStreamDelta::TextDeltaWithMetadata {
+            text: "partial".into(),
+            logprobs: Vec::new(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("signature".into())),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 2,
+            id: "call".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 2,
+            arguments: "{\"path\":".into(),
+        },
+    ]);
+    assert!(completed_history(&open).is_empty());
+    let tail = formatter.format_deltas(&[AiStreamDelta::StreamError {
+        error: AiError::new(AiErrorKind::StreamMidError, "failed"),
+    }]);
+    let history = completed_history(&tail);
+    let terminal = event_bodies(&tail)
+        .into_iter()
+        .find(|body| body["type"] == "response.failed")
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0]["status"], "incomplete");
+    assert_eq!(history[2]["status"], "incomplete");
+    assert_eq!(
+        terminal["response"]["output"],
+        serde_json::Value::Array(history)
+    );
+    assert!(completed_history(&formatter.format_done()).is_empty());
+}
+
 #[test]
 fn chat_reasoning_presence_metadata_does_not_create_or_leak_responses_items() {
     use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
@@ -142,6 +490,15 @@ fn anthropic_live_text_thinking_text_tool_preserves_responses_chronology() {
             .find(|event| event["type"] == "response.completed")
             .expect("terminal response");
         let output = completed["response"]["output"].as_array().unwrap();
+        let native_history = bodies
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| event["item"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native_history, *output,
+            "item-done replay must preserve canonical history"
+        );
         assert_eq!(
             output
                 .iter()
@@ -1126,6 +1483,60 @@ fn closes_each_reasoning_summary_part_before_starting_the_next() {
             {"type": "summary_text", "text": "second"}
         ])
     );
+}
+
+#[test]
+fn summary_part_boundaries_do_not_wait_for_lower_output_items() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let first = formatter.format_deltas(&[AiStreamDelta::ReasoningSummaryDelta {
+        text: "first".into(),
+        obfuscation: None,
+        output_index: Some(3),
+        content_index: Some(0),
+    }]);
+    assert!(
+        event_bodies(&first)
+            .iter()
+            .any(|body| body["type"] == "response.reasoning_summary_text.delta")
+    );
+    let next = formatter.format_deltas(&[AiStreamDelta::ReasoningSummaryDelta {
+        text: "second".into(),
+        obfuscation: None,
+        output_index: Some(3),
+        content_index: Some(1),
+    }]);
+    let bodies = event_bodies(&next);
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|body| body["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+        ]
+    );
+    assert_eq!(bodies[0]["text"], "first");
+    assert_eq!(bodies[2]["summary_index"], 1);
+    let closed = formatter.format_deltas(&[AiStreamDelta::ItemDone {
+        index: 3,
+        item: stravia_runtime_contract::protocol::ir::AiItem::reasoning(
+            vec!["first".into(), "second".into()],
+            Vec::new(),
+            Some("signature".into()),
+        ),
+    }]);
+    assert!(completed_history(&closed).is_empty());
+    let tail = formatter.format_deltas(&[AiStreamDelta::Done {
+        stop_reason: "stop".into(),
+    }]);
+    assert_eq!(completed_history(&tail).len(), 1);
+    assert!(!event_bodies(&tail).iter().any(|body| {
+        body["type"] == "response.reasoning_summary_text.done"
+            || body["type"] == "response.reasoning_summary_part.done"
+    }));
 }
 
 #[test]

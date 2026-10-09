@@ -2848,8 +2848,8 @@ mod tests {
             .await?
             .unwrap();
         let expected = ConfirmedUsage {
-            // Reported total input stays known independently of cache coverage.
-            input_tokens: Some(23),
+            // Clamp per attempt before summing; unknown cache leaves net input unknown.
+            input_tokens: Some(7),
             // Output already includes reasoning; reasoning remains a diagnostic breakdown only.
             output_tokens: Some(9),
             cache_read_tokens: Some(14),
@@ -2857,7 +2857,7 @@ mod tests {
             reasoning_tokens: Some(3),
             coverage: Some(UsageCoverage {
                 attempt_count: 4,
-                missing_input_tokens: 1,
+                missing_input_tokens: 2,
                 missing_output_tokens: 1,
                 missing_cache_read_tokens: 2,
                 missing_cache_write_tokens: 4,
@@ -2876,7 +2876,7 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-reported"
             })
             .expect("reported management usage event");
-        assert_eq!(reported_usage.payload["usage"]["input_tokens"], 12);
+        assert_eq!(reported_usage.payload["usage"]["input_tokens"], 7);
         assert_eq!(reported_usage.payload["usage"]["cache_read_tokens"], 5);
         let overcached_usage = events
             .iter()
@@ -2887,7 +2887,7 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-overcached"
             })
             .expect("overcached management usage event");
-        assert_eq!(overcached_usage.payload["usage"]["input_tokens"], 3);
+        assert_eq!(overcached_usage.payload["usage"]["input_tokens"], 0);
         let unknown_cache_usage = events
             .iter()
             .find(|event| {
@@ -2897,7 +2897,57 @@ mod tests {
                 ) && event.payload["attempt_id"] == "partial-usage-unknown-cache"
             })
             .expect("unknown-cache management usage event");
-        assert_eq!(unknown_cache_usage.payload["usage"]["input_tokens"], 8);
+        assert!(unknown_cache_usage.payload["usage"]["input_tokens"].is_null());
+        // 管理事件分页在历史 watermark 上同样投影；原始 attempt 仍为总输入。
+        let through = reported_usage.sequence;
+        let historical = store
+            .get_interaction_events(
+                id,
+                crate::interaction_observation::types::InteractionEventsQuery {
+                    through_sequence: Some(through),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .unwrap();
+        assert_eq!(historical.snapshot_sequence, through);
+        let historical_events = &historical.runs[0].events;
+        assert!(
+            historical_events
+                .iter()
+                .all(|event| event.sequence <= through)
+        );
+        let historical_usage = historical_events
+            .iter()
+            .find(|event| event.sequence == through)
+            .unwrap();
+        assert_eq!(historical_usage.payload["usage"]["input_tokens"], 7);
+        for (attempt, raw_input) in [("reported", 12), ("overcached", 3), ("unknown-cache", 8)] {
+            assert_eq!(
+                store
+                    .attempt_usage(&format!("{id}-{attempt}"))
+                    .await?
+                    .unwrap()
+                    .input_tokens,
+                Some(raw_input)
+            );
+        }
+        let persisted: (Option<i64>, Option<i64>) = match store {
+            ObservationStore::Sqlite(pool, _, _) => sqlx::query_as(
+                "SELECT input_tokens,(SELECT input_tokens FROM model_turn_observations WHERE id=?) FROM interaction_observations WHERE id=?",
+            )
+            .bind(id)
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+            ObservationStore::Postgres(pool, _) => sqlx::query_as(
+                "SELECT input_tokens,(SELECT input_tokens FROM model_turn_observations WHERE id=$1) FROM interaction_observations WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+        };
+        assert_eq!(persisted, (Some(23), Some(23)));
         Ok(())
     }
 
@@ -2944,7 +2994,7 @@ mod tests {
                 .interaction
                 .usage
                 .input_tokens,
-            Some(23)
+            Some(7)
         );
         pool.close().await;
         Ok(())

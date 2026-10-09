@@ -261,6 +261,8 @@ Usage 仅在 input/output totals、cached tokens 和 reasoning tokens 全部可�
 
 Provider event 的原始 sequence、indices 和 response ID 不直接透传。目标 stream session 基于最终输出重新分配 sequence 和 indices，保证 Hook、tool loop 或协议转换插入/删除事件后仍满足 wire ordering。
 
+`response.output_item.done` 按最终 `output_index` 顺序交付，其 item 内容、身份与顺序必须和终态 `response.output` 一致，使按完成事件保存原生历史的客户端能够严格续接。文本、思考和工具的普通 delta 与 added 事件继续即时发送；仅 item 完成束等待较低索引收口，summary 分段边界不因此延迟。无索引文本切换到有索引 item 时先完成前项；带原生身份的 reasoning 等待权威 ItemDone 保留晚到签名或密文。终态统一排空剩余完成项，包括稀疏索引、失败与 incomplete，且每个 item 只完成一次。历史匹配不放宽，也不改写旧历史。
+
 普通生成在 response 已开始后失败时，以 `response.failed` → `[DONE]` 结束，不先发送会让客户端提前停止读取的独立 `error`，也不伪造 `response.completed`。失败快照保留已生成的正文、思考、工具项和上游已报告的 usage；没有明确完成状态的输出项使用合法的 `incomplete` 状态，而不是 response 级别的 `failed`。尚未开始 response 的格式化失败仍可发送独立 `error` 后结束失败 response。
 
 失败 response 保留 dated schema 的嵌套 `error` 对象。传输中断、超时和临时上游不可用使用兼容的 `server_error` code；永久请求错误、鉴权拒绝、配额耗尽以及未分类的本地 Hook/投影失败不统一标成瞬态错误。公开 message 保持安全通用文案，不泄漏上游诊断。解码与格式化共用错误分类，已知永久上游错误在进入重试策略前就获得其 canonical 类别；`insufficient_quota` 优先于上游笼统的 `rate_limit_error` type。客户端显式远程压缩仍沿用既有原生错误透传例外。

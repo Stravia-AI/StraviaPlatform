@@ -14,8 +14,31 @@ declare global {
   }
 }
 
-const model = { id: 'console-model', model_id: 'console-model', display_name: 'Console model', is_enabled: true, supported_thinking_levels: ['low', 'high'], default_thinking_level: 'low', targets: [{ enabled: true, provider_id: 'provider-console' }], created_at: '2026-01-01T00:00:00Z' }
-const key = { id: 'key-console', name: 'Console key', key: 'sk-console-test-only', is_enabled: true, expires_at: null, model_ids: ['console-model'], rpm_limit: null, mcp_access_enabled: false, transparent_injection_enabled: false, inject_web_search: false, inject_media_understanding: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
+const model = {
+  id: 'console-model',
+  model_id: 'console-model',
+  display_name: 'Console model',
+  is_enabled: true,
+  supported_thinking_levels: ['low', 'high'],
+  default_thinking_level: 'low',
+  targets: [{ enabled: true, provider_id: 'provider-console' }],
+  created_at: '2026-01-01T00:00:00Z',
+}
+const key = {
+  id: 'key-console',
+  name: 'Console key',
+  key: 'sk-console-test-only',
+  is_enabled: true,
+  expires_at: null,
+  model_ids: ['console-model'],
+  rpm_limit: null,
+  mcp_access_enabled: false,
+  transparent_injection_enabled: false,
+  inject_web_search: false,
+  inject_media_understanding: false,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
 
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -45,7 +68,11 @@ async function prepareChat(page: Page) {
         if (close) controllers[index].close()
       },
       fail(index, status, message) {
-        harness.emit(index, { type: 'response.failed', response: { status: 'failed', error: { status, message } } }, true)
+        harness.emit(
+          index,
+          { type: 'response.failed', response: { status: 'failed', error: { status, message } } },
+          true,
+        )
       },
     }
     window.consoleStreams = harness
@@ -53,15 +80,27 @@ async function prepareChat(page: Page) {
       const url = input instanceof Request ? input.url : String(input)
       if (new URL(url, location.origin).pathname !== '/v1/responses') return originalFetch(input, init)
       if (typeof init?.body !== 'string') throw new Error('Console request body must be JSON text')
-      const request: StreamRequest = { body: JSON.parse(init.body), authorization: new Headers(init.headers).get('authorization'), aborted: false }
+      const request: StreamRequest = {
+        body: JSON.parse(init.body),
+        authorization: new Headers(init.headers).get('authorization'),
+        aborted: false,
+      }
       const index = requests.push(request) - 1
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
           controllers[index] = controller
-          init?.signal?.addEventListener('abort', () => {
-            request.aborted = true
-            try { controller.error(new DOMException('Aborted', 'AbortError')) } catch { /* Already closed. */ }
-          }, { once: true })
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              request.aborted = true
+              try {
+                controller.error(new DOMException('Aborted', 'AbortError'))
+              } catch {
+                /* Already closed. */
+              }
+            },
+            { once: true },
+          )
         },
       })
       return new Response(body, { headers: { 'content-type': 'text/event-stream' } })
@@ -74,7 +113,11 @@ async function requests(page: Page) {
   return page.evaluate(() => window.consoleStreams.requests)
 }
 async function emit(page: Page, index: number, event: Record<string, unknown>, close = false) {
-  await page.evaluate(({ index, event, close }) => window.consoleStreams.emit(index, event, close), { index, event, close })
+  await page.evaluate(({ index, event, close }) => window.consoleStreams.emit(index, event, close), {
+    index,
+    event,
+    close,
+  })
 }
 async function send(page: Page, text: string, count: number) {
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill(text)
@@ -83,15 +126,43 @@ async function send(page: Page, text: string, count: number) {
   await expect(page).toHaveURL(/conversation=/)
 }
 function response(text: string) {
-  const output: Record<string, unknown>[] = [{ type: 'message', id: 'answer', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] }]
-  return { status: 'completed', model: 'console-model', output, usage: { input_tokens: 11, output_tokens: 7 } }
+  const output: Record<string, unknown>[] = [
+    {
+      type: 'message',
+      id: 'answer',
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text, annotations: [] }],
+    },
+  ]
+  return {
+    status: 'completed',
+    model: 'console-model',
+    output,
+    usage: { input_tokens: 11, input_tokens_details: { cached_tokens: 4 }, output_tokens: 7 },
+  }
 }
 async function complete(page: Page, index: number, text: string, status = 'completed') {
-  await emit(page, index, { type: `response.${status}`, response: { ...response(text), status, ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}) } }, true)
+  await emit(
+    page,
+    index,
+    {
+      type: `response.${status}`,
+      response: {
+        ...response(text),
+        status,
+        ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+      },
+    },
+    true,
+  )
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0)
 }
 
-test('streams safely, copies only visible output and persists authoritative responses across refresh', async ({ page, context }) => {
+test('streams safely, copies only visible output and persists authoritative responses across refresh', async ({
+  page,
+  context,
+}) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   await prepareChat(page)
   await page.goto('/')
@@ -102,9 +173,14 @@ test('streams safely, copies only visible output and persists authoritative resp
   await expect(answer).toContainText('Live answer')
   await expect(answer).not.toContainText('private unfinished')
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
-  const text = '## Final answer\n\n**Safe**\n\n```ts\nconst result = 42\n```\n<!-- stravia-private-marker -->\n<script>window.chatXss = true</script>'
+  const text =
+    '## Final answer\n\n**Safe**\n\n```ts\nconst result = 42\n```\n<!-- stravia-private-marker -->\n<script>window.chatXss = true</script>'
   const terminal = response(text)
-  terminal.output.unshift({ type: 'reasoning', id: 'reason', summary: [{ type: 'summary_text', text: 'Checked carefully<!-- hidden reasoning -->' }] })
+  terminal.output.unshift({
+    type: 'reasoning',
+    id: 'reason',
+    summary: [{ type: 'summary_text', text: 'Checked carefully<!-- hidden reasoning -->' }],
+  })
   await emit(page, 0, { type: 'response.completed', response: terminal }, true)
   await expect(answer.getByRole('heading', { name: 'Final answer' })).toBeVisible()
   await expect(answer.locator('pre')).toContainText('const result = 42')
@@ -112,7 +188,7 @@ test('streams safely, copies only visible output and persists authoritative resp
   await answer.getByText('Reasoning', { exact: true }).click()
   await expect(answer.getByText('Checked carefully', { exact: true })).toBeVisible()
   await expect(answer).not.toContainText('hidden reasoning')
-  await expect(answer).toContainText('Input: 11 tokens')
+  await expect(answer).toContainText('Input: 7 tokens')
   await expect(answer).toContainText('Output: 7 tokens')
   await expect(answer).not.toContainText('stravia-private-marker')
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1)
@@ -122,11 +198,113 @@ test('streams safely, copies only visible output and persists authoritative resp
   expect(await page.evaluate(() => navigator.clipboard.readText())).not.toContain('stravia-private-marker')
   await page.reload()
   await expect(answer).toContainText('Final answer')
+  await expect(answer).toContainText('Input: 7 tokens')
   await send(page, 'Continue the saved conversation', 1)
   const replay = (await requests(page))[0]
   expect(replay.authorization).toBe('Bearer sk-console-test-only')
   expect(replay.body.input).toEqual(expect.arrayContaining(terminal.output))
   await complete(page, 0, 'Continued successfully')
+})
+
+test('legacy history preserves reasoning and replay without presenting unconvertible total input', async ({ page }) => {
+  await prepareChat(page)
+  await page.goto('/api/v1/auth/state')
+  const legacyOutput = await page.evaluate(async () => {
+    const firstOutput = [
+      {
+        type: 'reasoning',
+        id: 'legacy-reason',
+        encrypted_content: 'legacy-opaque',
+        summary: [{ type: 'summary_text', text: 'Legacy readable thought' }],
+      },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Legacy first answer' }] },
+    ]
+    const secondOutput = [
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Legacy second answer' }] },
+    ]
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('stravia-console-chat', 1)
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore('conversations', { keyPath: 'id' })
+        request.result.createObjectStore('preferences')
+      }
+      request.onerror = () => reject(request.error ?? new Error('Legacy history database open failed'))
+      request.onsuccess = () => {
+        const database = request.result
+        const transaction = database.transaction(['conversations', 'preferences'], 'readwrite')
+        transaction.objectStore('conversations').put({
+          id: 'legacy',
+          title: 'Legacy conversation',
+          apiKeyId: 'key-console',
+          apiKeyName: 'Console key',
+          selectedModelId: 'console-model',
+          thinkingSelection: 'default',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+          messages: [
+            { id: 'user-1', role: 'user', text: 'Legacy first question', createdAt: '2026-01-01T00:00:00Z' },
+            {
+              id: 'answer-1',
+              role: 'assistant',
+              status: 'completed',
+              routeId: 'console-model',
+              thinkingLevel: 'default',
+              createdAt: '2026-01-01T00:00:00Z',
+              outputItems: firstOutput,
+              usage: { inputTokens: 99, outputTokens: 7 },
+            },
+            { id: 'user-2', role: 'user', text: 'Legacy second question', createdAt: '2026-01-01T00:00:00Z' },
+            {
+              id: 'answer-2',
+              role: 'assistant',
+              status: 'completed',
+              routeId: 'console-model',
+              thinkingLevel: 'default',
+              createdAt: '2026-01-01T00:00:00Z',
+              outputItems: secondOutput,
+              usage: { inputTokens: 0, outputTokens: 0 },
+            },
+          ],
+        })
+        transaction.objectStore('preferences').put({ apiKeyId: 'key-console', modelId: 'console-model' }, 'selection')
+        transaction.oncomplete = () => {
+          database.close()
+          resolve()
+        }
+        transaction.onabort = () => {
+          database.close()
+          reject(transaction.error ?? new Error('Legacy history seed transaction aborted'))
+        }
+      }
+    })
+    return { firstOutput, secondOutput }
+  })
+  await page.goto('/?conversation=legacy')
+  const answers = page.getByRole('article', { name: 'Assistant response' })
+  await expect(answers).toHaveCount(2)
+  await expect(answers.first()).toContainText('Legacy first answer')
+  await expect(answers.last()).toContainText('Legacy second answer')
+  await expect(answers.first()).toContainText('Output: 7 tokens')
+  await expect(answers.last()).toContainText('Output: 0 tokens')
+  await expect(answers.first()).not.toContainText('Input:')
+  await expect(answers.last()).not.toContainText('Input:')
+  await answers.first().getByText('Reasoning', { exact: true }).click()
+  await expect(answers.first()).toContainText('Legacy readable thought')
+  await page.reload()
+  await expect(answers.first()).not.toContainText('Input:')
+  await send(page, 'Continue legacy history', 1)
+  expect((await requests(page))[0].body.input).toEqual([
+    { role: 'user', content: 'Legacy first question' },
+    ...legacyOutput.firstOutput,
+    { role: 'user', content: 'Legacy second question' },
+    ...legacyOutput.secondOutput,
+    { role: 'user', content: 'Continue legacy history' },
+  ])
+  await complete(page, 0, 'Continued legacy answer')
+  await expect(answers.last()).toContainText('Input: 7 tokens')
+  await page.reload()
+  await expect(answers.last()).toContainText('Input: 7 tokens')
+  await expect(answers.first()).not.toContainText('Input:')
 })
 
 test('stops live output and refresh interrupts another turn without losing received content', async ({ page }) => {
@@ -152,7 +330,9 @@ test('failure requires manual retry and incomplete output remains available for 
   await page.goto('/')
   await send(page, 'Retry the same request', 1)
   await page.evaluate(() => window.consoleStreams.fail(0, 429, 'Synthetic request limit reached'))
-  await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Synthetic request limit reached')
+  await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText(
+    'Synthetic request limit reached',
+  )
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
   expect((await requests(page)).length).toBe(1)
   await page.getByRole('button', { name: 'Retry', exact: true }).click()
@@ -187,14 +367,35 @@ test('generation survives route changes and concurrent conversations appear in r
   await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('First finished in background')
 })
 
-test('management session expiry does not interrupt Key-authenticated generation or erase local history', async ({ page }) => {
+test('management session expiry does not interrupt Key-authenticated generation or erase local history', async ({
+  page,
+}) => {
   await prepareChat(page)
   let expired = false
-  await page.route('**/api/v1/auth/state', (route) => route.fulfill({ json: { mode: 'server', authenticated: !expired, setup_authorized: false, username: expired ? null : 'playwright-admin' } }))
-  await page.route('**/api/v1/auth/refresh', (route) => route.fulfill({ status: 401, json: { error: 'Session expired' } }))
+  await page.route('**/api/v1/auth/state', (route) =>
+    route.fulfill({
+      json: {
+        mode: 'server',
+        authenticated: !expired,
+        setup_authorized: false,
+        username: expired ? null : 'playwright-admin',
+      },
+    }),
+  )
+  await page.route('**/api/v1/auth/refresh', (route) =>
+    route.fulfill({ status: 401, json: { error: 'Session expired' } }),
+  )
   await page.route('**/api/v1/auth/login', async (route) => {
     expired = false
-    await route.fulfill({ json: { data: { username: 'playwright-admin', access_expires_at: Date.now() + 60_000, session_expires_at: Date.now() + 3_600_000 } } })
+    await route.fulfill({
+      json: {
+        data: {
+          username: 'playwright-admin',
+          access_expires_at: Date.now() + 60_000,
+          session_expires_at: Date.now() + 3_600_000,
+        },
+      },
+    })
   })
   await page.route('**/api/v1/models', async (route) => {
     if (expired) await route.fulfill({ status: 401, json: { error: 'Session expired' } })
@@ -228,7 +429,10 @@ test('history searches message content, renames, deletes and confirms exact clea
   }
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await expect(navigation.getByRole('link', { name: /^History title/ })).toHaveCount(5)
-  await expect(navigation.getByRole('link', { name: 'History title 5', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(navigation.getByRole('link', { name: 'History title 5', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
   await page.getByRole('button', { name: 'Collapse navigation' }).click()
   await expect(navigation.getByRole('link', { name: /^History title/ })).toHaveCount(0)
   await expect(navigation.getByRole('link', { name: 'Chat', exact: true })).toBeVisible()
@@ -266,13 +470,18 @@ test('invalidated key makes persisted conversation read-only and offers a fresh 
   await page.goto('/')
   await send(page, 'Locked key conversation', 1)
   await complete(page, 0, 'Answer remains readable')
-  catalog.keys = [{ ...key, is_enabled: false }, { ...key, id: 'replacement-key', name: 'Replacement key' }]
+  catalog.keys = [
+    { ...key, is_enabled: false },
+    { ...key, id: 'replacement-key', name: 'Replacement key' },
+  ]
   await page.reload()
   await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Answer remains readable')
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0)
   const address = page.url()
   await page.goto('/conversations')
-  await expect(page.getByRole('table').getByRole('row').filter({ hasText: 'Locked key conversation' })).toContainText('Read-only')
+  await expect(page.getByRole('table').getByRole('row').filter({ hasText: 'Locked key conversation' })).toContainText(
+    'Read-only',
+  )
   await page.goto(address)
   await page.getByRole('button', { name: 'New conversation with another Key' }).click()
   await expect(page.getByRole('button', { name: 'API Key', exact: true })).toContainText('Replacement key')
@@ -281,11 +490,41 @@ test('invalidated key makes persisted conversation read-only and offers a fresh 
 
 for (const configuration of [
   { name: 'missing services', providers: [], models: [model], keys: [key], destination: '/providers' },
-  { name: 'disabled services', providers: [{ id: 'p', is_enabled: false }], models: [model], keys: [key], destination: '/providers' },
-  { name: 'missing models', providers: [{ id: 'provider-console', is_enabled: true }], models: [], keys: [key], destination: '/models' },
-  { name: 'disabled models', providers: [{ id: 'provider-console', is_enabled: true }], models: [{ ...model, is_enabled: false }], keys: [key], destination: '/models' },
-  { name: 'missing keys', providers: [{ id: 'provider-console', is_enabled: true }], models: [model], keys: [], destination: '/api-keys' },
-  { name: 'unavailable keys', providers: [{ id: 'provider-console', is_enabled: true }], models: [model], keys: [{ ...key, expires_at: '2000-01-01T00:00:00Z' }], destination: '/api-keys' },
+  {
+    name: 'disabled services',
+    providers: [{ id: 'p', is_enabled: false }],
+    models: [model],
+    keys: [key],
+    destination: '/providers',
+  },
+  {
+    name: 'missing models',
+    providers: [{ id: 'provider-console', is_enabled: true }],
+    models: [],
+    keys: [key],
+    destination: '/models',
+  },
+  {
+    name: 'disabled models',
+    providers: [{ id: 'provider-console', is_enabled: true }],
+    models: [{ ...model, is_enabled: false }],
+    keys: [key],
+    destination: '/models',
+  },
+  {
+    name: 'missing keys',
+    providers: [{ id: 'provider-console', is_enabled: true }],
+    models: [model],
+    keys: [],
+    destination: '/api-keys',
+  },
+  {
+    name: 'unavailable keys',
+    providers: [{ id: 'provider-console', is_enabled: true }],
+    models: [model],
+    keys: [{ ...key, expires_at: '2000-01-01T00:00:00Z' }],
+    destination: '/api-keys',
+  },
 ]) {
   test(`guides ${configuration.name} to configuration instead of accepting input`, async ({ page }) => {
     const catalog = await prepareChat(page)
@@ -368,26 +607,28 @@ test('keyboard selection determines the identity, model and reasoning used for a
 })
 
 test.describe('UTC expiry boundaries', () => {
-test.use({ timezoneId: 'Asia/Shanghai' })
-test('idle conversation becomes read-only at its Key expiry boundary', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
-  const catalog = await prepareChat(page)
-  catalog.keys = [{ ...key, expires_at: '2026-01-01 00:00:10' }]
-  await page.goto('/')
-  await send(page, 'Before expiry', 1)
-  await complete(page, 0, 'Preserved answer')
-  await page.clock.fastForward(11_000)
-  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'New conversation with another Key' })).toBeVisible()
-  await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Preserved answer')
-})
+  test.use({ timezoneId: 'Asia/Shanghai' })
+  test('idle conversation becomes read-only at its Key expiry boundary', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+    const catalog = await prepareChat(page)
+    catalog.keys = [{ ...key, expires_at: '2026-01-01 00:00:10' }]
+    await page.goto('/')
+    await send(page, 'Before expiry', 1)
+    await complete(page, 0, 'Preserved answer')
+    await page.clock.fastForward(11_000)
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'New conversation with another Key' })).toBeVisible()
+    await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Preserved answer')
+  })
 })
 
 test('removed failed model offers regeneration with its available replacement', async ({ page }) => {
   const catalog = await prepareChat(page)
   await page.goto('/')
   await send(page, 'Original model question', 1)
-  catalog.models = [{ ...model, id: 'replacement-model', model_id: 'replacement-model', display_name: 'Replacement model' }]
+  catalog.models = [
+    { ...model, id: 'replacement-model', model_id: 'replacement-model', display_name: 'Replacement model' },
+  ]
   catalog.keys = [{ ...key, model_ids: ['replacement-model'] }]
   await emit(page, 0, { type: 'error', error: { code: 'STRAVIA_NOT_FOUND', message: 'Model was removed' } }, true)
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled()
@@ -412,7 +653,9 @@ test('history directory errors remain distinct from a deleted Key', async ({ pag
   await page.reload()
   await expect(page.getByRole('alert')).toContainText('Key directory unavailable')
   await expect(page.getByRole('main')).not.toContainText('Read-only')
-  await expect(page.getByRole('main').getByRole('link', { name: 'Readable despite directory error', exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('main').getByRole('link', { name: 'Readable despite directory error', exact: true }),
+  ).toBeVisible()
   unavailable = false
   await page.getByRole('button', { name: 'Refresh configuration', exact: true }).click()
   await expect(page.getByRole('alert')).toHaveCount(0)
@@ -438,7 +681,9 @@ test('failed IndexedDB clear keeps history and the confirmation retryable', asyn
   const confirmation = page.getByRole('alertdialog')
   await confirmation.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
   await expect(confirmation.getByRole('alert')).toContainText('Local deletion unavailable')
-  await expect(page.getByRole('main').getByRole('link', { name: 'Keep until clear succeeds', exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('main').getByRole('link', { name: 'Keep until clear succeeds', exact: true }),
+  ).toBeVisible()
   await confirmation.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
   await expect(confirmation).toHaveCount(0)
   await page.reload()

@@ -45,7 +45,9 @@ test('Chat does not treat a failed configuration fetch as an empty instance', as
   await expect(main.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
 })
 
-test('Usage analytics exposes a failed latency series and recovers without fabricating zero speed', async ({ page }) => {
+test('Usage analytics exposes a failed latency series and recovers without fabricating zero speed', async ({
+  page,
+}) => {
   await stubTraffic(page, { requests: 12, errors: 0 })
   let seriesFails = true
   await page.route('**/api/v1/stats/series**', async (route) => {
@@ -56,9 +58,9 @@ test('Usage analytics exposes a failed latency series and recovers without fabri
     await route.fallback()
   })
   await page.goto('/stats')
-  const latency = page.locator('section').filter({
-    has: page.getByRole('heading', { name: 'Latency and speed', exact: true }),
-  })
+  const latency = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Latency and speed', exact: true }) })
   const retry = latency.getByRole('button', { name: 'Retry', exact: true })
   await expect(retry).toBeEnabled()
   await expect(page.getByLabel('Latency and speed chart', { exact: true })).toHaveCount(0)
@@ -78,7 +80,7 @@ test('Usage analytics with traffic shows latency with output speed', async ({ pa
   await expect(latency.getByText('25 tok/s', { exact: true })).toBeVisible()
   await expect(latency.getByLabel('Latency and speed chart', { exact: true })).toBeVisible()
   await expect(latency.getByText('Duration', { exact: true })).toHaveCount(0)
-  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Input Tokens' })).toContainText('920')
+  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Input Tokens' })).toContainText('600')
   await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Output Tokens' })).toContainText('86')
   await expect(page.getByText('Total Tokens', { exact: true })).toHaveCount(0)
 })
@@ -474,7 +476,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
   await page.goto('/stats')
 
   for (const [label, value] of [
-    ['Input Tokens', '920'],
+    ['Input Tokens', '600'],
     ['Output Tokens', '86'],
     ['Cache read tokens', '320'],
     ['Cache write tokens', '12'],
@@ -489,7 +491,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'API Key usage', exact: true }) })
   const apiKeyTable = apiKeyUsage.getByRole('table', { name: 'API Key usage' })
-  await expect(apiKeyTable).toContainText('920')
+  await expect(apiKeyTable).toContainText('600')
   await expect(apiKeyTable).toContainText('86')
   await expect(apiKeyTable).toContainText('320')
   await expect(apiKeyTable).toContainText('12')
@@ -497,7 +499,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
 
   await page.setViewportSize({ width: 390, height: 800 })
   const mobileApiKeyUsage = apiKeyUsage.locator('.route-mobile-list')
-  await expect(mobileApiKeyUsage).toContainText('Input 920 · Output 86 · Cache read 320 · Cache write 12')
+  await expect(mobileApiKeyUsage).toContainText('Input 600 · Output 86 · Cache read 320 · Cache write 12')
   await expect(mobileApiKeyUsage).not.toContainText('RSN')
 
   const latency = page.locator('section').filter({ has: page.getByLabel('Latency and speed chart', { exact: true }) })
@@ -889,7 +891,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
       json: {
         data: {
           total_requests: counts.requests,
-          total_input_tokens: 920,
+          total_input_tokens: 600,
           total_output_tokens: 86,
           total_cache_read_tokens: 320,
           total_cache_write_tokens: 12,
@@ -910,7 +912,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             bucket_start: Date.UTC(2026, 7, 26),
             request_count: counts.requests,
             error_count: counts.errors,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             total_cache_read_tokens: 320,
             total_cache_write_tokens: 12,
@@ -930,7 +932,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
           {
             model: 'gpt-5',
             request_count: counts.requests,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             total_reasoning_tokens: 44,
             avg_duration_ms: 120,
@@ -947,7 +949,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             api_key_id: 'key-1',
             api_key_name: 'Desktop client',
             request_count: counts.requests,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             cache_read_tokens: 320,
             cache_write_tokens: 12,

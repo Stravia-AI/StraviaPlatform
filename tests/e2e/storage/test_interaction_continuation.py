@@ -56,6 +56,7 @@ def continuation_provider(protocol: str) -> Iterator[tuple[str, list[dict[str, A
                      "thoughtSignature": f"synthetic-protected-{round_index}-{index}"}
                     for index, call in enumerate(calls)
                 ] or [
+                    {"text": "Synthetic text before protected thought."},
                     {"text": "", "thought": True, "thoughtSignature": "synthetic-protected-final"},
                     {"text": "Synthetic tool work complete."},
                 ]
@@ -166,15 +167,20 @@ def replay_round(env: dict[str, Any], key: str, model: str, history: list[dict[s
         ]
         assert not any(event["type"] in ("response.failed", "error") for event in events), events
         response = next(event["response"] for event in events if event["type"] == "response.completed")
+        delivered_items = [
+            event["item"] for event in events if event["type"] == "response.output_item.done"
+        ]
+        assert delivered_items == response["output"], "native item-done replay changed history"
     else:
         status, response = http_request(
             "POST", f"{env['proxy']}/v1/responses", payload=payload, headers=headers,
         )
         assert status == 200, response
+        delivered_items = response["output"]
     # 回放真实交付的 item；只省略协议规定的非语义身份/状态，绝不手工改写边界。
     history.extend(
         {name: value for name, value in item.items() if name not in ("id", "status")}
-        for item in response["output"]
+        for item in delivered_items
     )
     return response
 
@@ -226,9 +232,9 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
         assert len([event for event in events if event["kind"] == "client_tool_handoff"]) == tool_count
         assert len([event for event in events if event["kind"] == "client_tool_result"]) == tool_count
         expected = (
-            {"input_tokens": 117638, "output_tokens": 2287, "cache_read_tokens": 40676}
+            {"input_tokens": 76962, "output_tokens": 2287, "cache_read_tokens": 40676}
             if protocol == "google-gemini"
-            else {"input_tokens": 148318, "output_tokens": 3699, "cache_read_tokens": 117749}
+            else {"input_tokens": 30569, "output_tokens": 3699, "cache_read_tokens": 117749}
         )
         for field, value in expected.items():
             assert current_detail["interaction"]["usage"][field] == value
@@ -240,7 +246,7 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
             988 if protocol == "google-gemini" else 1710
         )
         if protocol == "google-gemini":
-            assert current_detail["runs"][-1]["usage"]["input_tokens"] == 23570
+            assert current_detail["runs"][-1]["usage"]["input_tokens"] == 3233
         assert current_detail["interaction"]["usage"]["coverage"]["attempt_count"] == 6
         _, _, archive = download_observation_bundle(env, current_detail)
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:

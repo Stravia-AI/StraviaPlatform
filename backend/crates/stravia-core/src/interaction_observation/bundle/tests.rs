@@ -157,7 +157,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
     });
     let new = ticket(&observation).await?;
     assert!(new.through_sequence > old.through_sequence);
-    for (issued, input) in [(&old, 20), (&new, 30)] {
+    for (issued, input, raw_input) in [(&old, 16, 20), (&new, 24, 30)] {
         let (manifest, summary) = download(&observation, issued).await?;
         assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
         assert_eq!(summary["status"], "completed");
@@ -194,7 +194,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
             .rev()
             .find(|event| event["kind"] == "target_attempt_finished")
             .expect("attempt terminal");
-        assert_eq!(terminal["payload"]["usage"]["input_tokens"], input);
+        assert_eq!(terminal["payload"]["usage"]["input_tokens"], raw_input);
         assert_eq!(
             terminal["payload"]["usage"]["output_tokens"],
             if issued.through_sequence == old.through_sequence {
@@ -204,6 +204,76 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
             },
         );
     }
+    drop(run);
+    observation.shutdown().await;
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bundle_net_input_clamps_attempts_and_preserves_unknown_operands() -> anyhow::Result<()> {
+    let (_directory, pool, observation) = fixture().await?;
+    let run = admit(&observation, "net-usage-run", None);
+    run.record(RunEvent::ModelTurnStarted {
+        model_turn_id: "net-turn".into(),
+        route_id: "route".into(),
+        model_display_name: None,
+        estimated_input_tokens: None,
+    });
+    for (attempt, input, cache_read) in [
+        ("reported", Some(12), Some(5)),
+        ("overcached", Some(3), Some(9)),
+        ("unknown-cache", Some(8), None),
+        ("unknown-input", None, Some(0)),
+    ] {
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "net-turn".into(),
+            attempt_id: attempt.into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://127.0.0.1".into(),
+        });
+        run.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: "net-turn".into(),
+            attempt_id: attempt.into(),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 100,
+            first_token_ms: None,
+            usage: Some(ConfirmedUsage {
+                input_tokens: input,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: Some(100),
+                ..Default::default()
+            }),
+        });
+    }
+    run.record(RunEvent::ModelTurnFinished {
+        model_turn_id: "net-turn".into(),
+        status: "completed".into(),
+    });
+    finish(&run, "completed", None);
+    let issued = ticket(&observation).await?;
+    let (_, summary) = download(&observation, &issued).await?;
+    assert_eq!(summary["usage"]["input_tokens"], 7);
+    assert_eq!(summary["usage"]["coverage"]["attempt_count"], 4);
+    assert_eq!(summary["usage"]["coverage"]["missing_input_tokens"], 2);
+    let raw_reported = summary["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| {
+            event["kind"] == "target_attempt_finished"
+                && event["payload"]["attempt_id"] == "reported"
+        })
+        .unwrap();
+    assert_eq!(raw_reported["payload"]["usage"]["input_tokens"], 12);
+    assert_eq!(raw_reported["payload"]["usage"]["cache_read_tokens"], 5);
     drop(run);
     observation.shutdown().await;
     pool.close().await;

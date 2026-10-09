@@ -92,7 +92,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
              SELECT
                  (SELECT COUNT(*) FROM requests WHERE expires_at > ?2
                     AND (?1 IS NULL OR started_at >= ?1)) AS total_requests,
-                 (SELECT SUM(input_tokens) FROM attempts) AS total_input_tokens,
+                 (SELECT SUM(CASE WHEN input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL THEN CASE WHEN input_tokens>cache_read_tokens THEN input_tokens-cache_read_tokens ELSE 0 END END) FROM attempts) AS total_input_tokens,
                  (SELECT SUM(output_tokens) FROM attempts) AS total_output_tokens,
                  (SELECT SUM(cache_read_tokens) FROM attempts) AS total_cache_read_tokens,
                  (SELECT SUM(cache_write_tokens) FROM attempts) AS total_cache_write_tokens,
@@ -145,7 +145,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY bucket_start
              ), attempt_stats AS (
                  SELECT t.bucket_start,
-                        SUM(a.input_tokens) AS total_input_tokens,
+                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS total_input_tokens,
                         SUM(a.output_tokens) AS total_output_tokens,
                         SUM(a.cache_read_tokens) AS total_cache_read_tokens,
                         SUM(a.cache_write_tokens) AS total_cache_write_tokens,
@@ -195,7 +195,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        SUM(a.input_tokens) AS total_input_tokens,
+                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS total_input_tokens,
                         SUM(a.output_tokens) AS total_output_tokens,
                         SUM(a.reasoning_tokens) AS total_reasoning_tokens
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.model
@@ -257,7 +257,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id) AS request_count,
-                    SUM(a.input_tokens) AS total_input_tokens,
+                    SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS total_input_tokens,
                     SUM(a.output_tokens) AS total_output_tokens,
                     SUM(a.cache_read_tokens) AS cache_read_tokens,
                     SUM(a.cache_write_tokens) AS cache_write_tokens,
@@ -569,7 +569,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_stats_preserve_total_input_and_full_attempt_tps() -> anyhow::Result<()> {
+    async fn management_stats_project_net_input_and_preserve_full_attempt_tps() -> anyhow::Result<()>
+    {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -593,6 +594,9 @@ mod tests {
         insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
         sqlx::query("UPDATE target_attempt_observations SET output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE model_turn_id='recent'")
             .execute(&pool).await?;
+        let scheduling = store.route_scheduling_snapshot().await;
+        assert!(!scheduling.stale);
+        assert_eq!(scheduling.targets.len(), 1);
         // 后续发布和客户端交付失败不能改写已成功的上游 attempt。
         sqlx::query("UPDATE model_turn_observations SET status='failed' WHERE id='recent'")
             .execute(&pool)
@@ -613,7 +617,7 @@ mod tests {
             .execute(&pool).await?;
 
         let overview = store.stats_overview(Some(3)).await?;
-        assert_eq!(overview.total_input_tokens, Some(15));
+        assert_eq!(overview.total_input_tokens, Some(7));
         assert_eq!(overview.total_output_tokens, Some(50));
         assert_eq!(overview.total_reasoning_tokens, Some(2));
         assert_eq!(overview.avg_output_tps, Some(5.0));
@@ -621,14 +625,14 @@ mod tests {
         assert_eq!(overview.avg_duration_ms, Some(10.0));
         // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
         let all_time = store.stats_overview(None).await?;
-        assert_eq!(all_time.total_input_tokens, Some(12543));
+        assert_eq!(all_time.total_input_tokens, Some(7));
         assert_eq!(all_time.total_output_tokens, Some(53));
         assert_eq!(all_time.total_cache_write_tokens, None);
         assert_eq!(all_time.avg_output_tps, None);
 
         let series = store.stats_series(3, 3_600_000, 0).await?;
         assert_eq!(series.len(), 1);
-        assert_eq!(series[0].total_input_tokens, Some(15));
+        assert_eq!(series[0].total_input_tokens, Some(7));
         assert_eq!(series[0].total_output_tokens, Some(50));
         assert_eq!(series[0].total_reasoning_tokens, Some(2));
         assert_eq!(series[0].avg_output_tps, Some(5.0));
@@ -647,13 +651,13 @@ mod tests {
 
         let models = store.stats_by_model(Some(3)).await?;
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].total_input_tokens, Some(15));
+        assert_eq!(models[0].total_input_tokens, Some(7));
         assert_eq!(models[0].total_output_tokens, Some(50));
         assert_eq!(models[0].total_reasoning_tokens, Some(2));
 
         let api_keys = store.stats_by_api_key(Some(3)).await?;
         assert_eq!(api_keys.len(), 1);
-        assert_eq!(api_keys[0].total_input_tokens, Some(15));
+        assert_eq!(api_keys[0].total_input_tokens, Some(7));
         assert_eq!(api_keys[0].total_output_tokens, Some(50));
         assert_eq!(api_keys[0].reasoning_tokens, Some(2));
 
@@ -673,7 +677,7 @@ mod tests {
             .into_iter()
             .find(|model| model.model == "unknown-cache")
             .unwrap();
-        assert_eq!(old_model.total_input_tokens, Some(12528));
+        assert_eq!(old_model.total_input_tokens, None);
 
         // 同组只缺一条成功样本也使 TPS 未知，但已知 Token 合计仍保留。
         for (change, expected_tps, expected_output, expected_first, expected_input) in [
@@ -682,42 +686,36 @@ mod tests {
                 None,
                 Some(20),
                 Some(4900.0),
-                Some(12),
+                Some(7),
             ),
             (
                 "duration_ms=CASE id WHEN 'recent-a' THEN 1000 END",
                 None,
                 Some(50),
                 Some(4900.0),
-                Some(15),
+                Some(7),
             ),
-            ("duration_ms=0", None, Some(50), Some(4900.0), Some(15)),
-            (
-                "output_tokens=0",
-                Some(0.0),
-                Some(0),
-                Some(4900.0),
-                Some(15),
-            ),
-            ("first_token_ms=NULL", Some(5.0), Some(50), None, Some(15)),
+            ("duration_ms=0", None, Some(50), Some(4900.0), Some(7)),
+            ("output_tokens=0", Some(0.0), Some(0), Some(4900.0), Some(7)),
+            ("first_token_ms=NULL", Some(5.0), Some(50), None, Some(7)),
             (
                 "first_token_ms=CASE id WHEN 'recent-a' THEN 900 END",
                 Some(5.0),
                 Some(50),
                 Some(900.0),
-                Some(15),
+                Some(7),
             ),
             (
                 "first_token_ms=CASE id WHEN 'recent-a' THEN 0 END",
                 Some(5.0),
                 Some(50),
                 Some(0.0),
-                Some(15),
+                Some(7),
             ),
-            ("first_token_ms=0", Some(5.0), Some(50), Some(0.0), Some(15)),
+            ("first_token_ms=0", Some(5.0), Some(50), Some(0.0), Some(7)),
             ("status='failed'", None, None, None, None),
         ] {
-            sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+            sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 ELSE 9 END,cache_write_tokens=NULL,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
                 .execute(&pool).await?;
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE target_attempt_observations SET {change} WHERE id IN ('recent-a','recent-b')"
@@ -746,10 +744,54 @@ mod tests {
             assert_eq!(series[0].total_input_tokens, expected_input, "{change}");
         }
 
+        sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 ELSE 9 END,cache_write_tokens=NULL,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+            .execute(&pool).await?;
+        let raw_input: Option<i64> = sqlx::query_scalar(
+            "SELECT SUM(input_tokens) FROM target_attempt_observations WHERE id IN ('recent-a','recent-b')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(raw_input, Some(15));
+        // 缓存写入不扣；部分未知照常累加已知 attempt，全未知与已知零保持不同。
+        for (assignment, expected) in [
+            ("cache_write_tokens=100", Some(7)),
+            (
+                "cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 END",
+                Some(7),
+            ),
+            ("cache_read_tokens=NULL", None),
+            ("cache_read_tokens=100", Some(0)),
+            ("input_tokens=NULL,cache_read_tokens=0", None),
+            ("input_tokens=0,cache_read_tokens=0", Some(0)),
+        ] {
+            sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 ELSE 9 END,cache_write_tokens=NULL,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+                .execute(&pool).await?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE target_attempt_observations SET {assignment} WHERE id IN ('recent-a','recent-b')"
+            )))
+            .execute(&pool)
+            .await?;
+            assert_eq!(
+                store.stats_overview(Some(3)).await?.total_input_tokens,
+                expected
+            );
+            assert_eq!(
+                store.stats_series(3, 3_600_000, 0).await?[0].total_input_tokens,
+                expected
+            );
+            assert_eq!(
+                store.stats_by_model(Some(3)).await?[0].total_input_tokens,
+                expected
+            );
+            assert_eq!(
+                store.stats_by_api_key(Some(3)).await?[0].total_input_tokens,
+                expected
+            );
+        }
         // 分属两桶仍按原始窗口合计计算，不平均两个桶的 TPS。
         let next = recent + 3_600_000;
         insert_turn(&pool, "next", next, "model", "key").await?;
-        sqlx::query("UPDATE target_attempt_observations SET status='completed',output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
+        sqlx::query("UPDATE target_attempt_observations SET status='completed',input_tokens=CASE id WHEN 'recent-a' THEN 12 ELSE 3 END,cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 ELSE 9 END,cache_write_tokens=NULL,output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE id IN ('recent-a','recent-b')")
             .execute(&pool).await?;
         // attempt 时间故意仍在第一桶，验证按所属 Model Turn 分桶。
         sqlx::query("UPDATE target_attempt_observations SET model_turn_id='next',run_id='next',interaction_id='next' WHERE id='recent-b'")
