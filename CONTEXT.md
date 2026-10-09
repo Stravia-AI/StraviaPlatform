@@ -26,6 +26,11 @@ _避免使用_：关闭更新、永久忽略更新
 Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
 _避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 Connect Client 都叫客户端
 
+## 控制台对话（Console Chat）
+
+控制台对话是管理员在 Stravia 管理面中，以创建时选定的一个 API Key 所对应的 Principal 与模型进行的多轮对话。每次发送都与 Connect Client 请求一样形成 Inference Run，受该 Key 的模型访问、请求频率与透明注入设置约束，并计入其用量与观测；对话所属 Key 不可更换，Key 失效后对话只读，模型可以逐条消息更换。对话历史由管理面所在的浏览器或 Desktop 安装自行保存，不是平台 Session、Turn Chain 节点或 Generation Chain 视图。
+_避免使用_：Agent 对话、Playground、Session、Connect Client（当指控制台对话）
+
 ## Connect Client Interaction
 
 Connect Client Interaction 是归属于同一 Principal、由一个或多个 Inference Run 推进的同一次客户端交互，通常由新 User 输入发起，也可由无法归入已有交互的合法无 User 根请求发起。经充分证据确认的同一任务续接可跨多个 Generation Chain 根而共享交互归属、活动状态、Confirmed Upstream Usage 汇总与 Interaction Debug Bundle 范围；诊断归并不改变模型输入、权限或执行历史。
