@@ -829,7 +829,7 @@ pub struct WebAccessSettings {
 pub struct StatsOverview {
     /// 保留期内的客户端请求数，包括准入前拒绝；内部轮次和重试不重复计数。
     pub total_requests: i64,
-    /// 已完成 attempt 已知上游总输入的合计；不扣缓存，不因缓存未知而丢弃输入。
+    /// 已完成 attempt 的已知净输入合计：逐次 max(总输入-cache-read,0)，任一未知则跳过，全未知为 None。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_cache_read_tokens: Option<i64>,
@@ -850,7 +850,7 @@ pub struct StatsSeries {
     pub request_count: i64,
     /// 本桶内最终失败的客户端请求数；同一请求的内部轮次和重试只计一次。
     pub error_count: i64,
-    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
+    /// 已完成 attempt 的已知净输入合计；逐次扣 cache-read 并截为零，不扣 cache-write。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_cache_read_tokens: Option<i64>,
@@ -864,7 +864,7 @@ pub struct StatsSeries {
 pub struct ModelStats {
     pub model: String,
     pub request_count: i64,
-    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
+    /// 已完成 attempt 的已知净输入合计；任一操作数未知则跳过，全未知为 None。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_reasoning_tokens: Option<i64>,
@@ -889,7 +889,7 @@ pub struct ApiKeyStats {
     pub api_key_id: String,
     pub api_key_name: String,
     pub request_count: i64,
-    /// 已完成 attempt 已知上游总输入的合计，与缓存覆盖无关。
+    /// 已完成 attempt 的已知净输入合计；任一操作数未知则跳过，全未知为 None。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,

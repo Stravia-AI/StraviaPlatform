@@ -95,9 +95,9 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 用量分析总览、时间分桶和 Provider 汇总的错误数与「失败的请求」共用同一请求级查询：包括准入前拒绝，以及终态为 `failed` 且已结束的 Inference Run；排除内部恢复后成功、进行中、单纯取消、断线和中断。按请求开始时间归入窗口和分桶，并排除已过保留期的记录；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示错误；
 - 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。Provider 汇总按请求涉及的服务归属，每个服务内对同一请求去重；没有涉及任何服务的拒绝不归属 Provider，一次跨服务的最终失败可分别计入多个服务，不能将各服务错误数相加当作全局错误数。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
-- 管理面 `input_tokens` 统一表示上游报告的总输入，按 attempt 累计，不扣缓存读取或写入。缓存未知不遮蔽已知总输入；`missing_input_tokens` 只计数未报告总输入的 attempt；
+- 管理面 `input_tokens` 统一表示净输入：每个 attempt 的总输入与缓存读取均已知时，先计算 `max(input_tokens - cache_read_tokens, 0)`，再累计各 attempt 的已知净值；缓存写入不参与扣减。任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 计入该缺失；
 - output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。概览按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
-- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游口径及 reasoning 子项；管理统计、列表、详情、事件查询、携带用量的 SSE 与 Bundle 汇总和事件使用同一总输入语义，不再执行净输入投影。历史查询立即使用新口径，无需改写数据库或新增并行字段；轻量全局 SSE 通知仍不携带事件正文；
+- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游总输入及 reasoning 子项；管理统计、列表、详情、分页事件查询与 Bundle 汇总在读取边界使用净输入投影，前端不再次扣减。Bundle 导出的原始 events 保持上游值，汇总先按 attempt 合并修订再计算净输入。历史查询立即使用新口径，无需改写数据库、事件或新增接口字段；轻量全局 SSE 通知仍不携带事件正文；
 - 每个实际上游 attempt 的 usage 最多记一次；
 - 流式 usage 在接收时观察，不以客户端输出已经提交为前提。正常完成以 Vendor 的完整返回值确认；失败或取消没有完整返回值时，以已收到的最后已知快照确认。多帧报告是同一 attempt 的修订，不重复累加；未知字段不抹掉已知值，明确报告的零可覆盖先前数值，完全未报告的字段保持 `null`；
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
@@ -106,15 +106,15 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 全平台 TPS 使用测量对象自身的完整耗时，不扣首 Token 等待，也不使用 50ms 回退规则。首 Token 时间独立展示，不参与分母；
 - Run 耗时与 TPS 共用客户端接收到交付结束的时间：`delivery_completed_at - started_at`，包括内部重试、failover、平台工具与交付等待。分子使用 Run 的全部已报告输出，包括失败 attempt 已报告的输出；coverage 表明任一输出未知时 TPS 保持 `null`。运行中、成功但缺交付时间、无有效正耗时或输出未知时不猜测速率；失败、取消与中断等未交付终态可用 `finished_at` 收口。迟到 usage 修订不延长交付耗时，客户端跨请求执行工具的间隔不属于任一 Run；
 - Attempt TPS 使用自己的 `duration_ms`；Provider `avg_output_tps` 使用成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，不是单次 TPS 的平均值。成功样本缺输出或耗时、或总耗时为零时为 `null`；已知零输出保留为零。低延迟选路同样使用完整成功 attempt 耗时，仍按一小时成功率加权，保留 20 个成功样本、同组至少两个有效 Target 的门槛及既有亲和、优先级和 fallback；
-- Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
+- Interaction、Run 与 Bundle 的既有聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`；其中 `missing_input_tokens` 表示因总输入或缓存读取缺失而无法计算净输入的尝试数，其余项表示对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。统计接口不新增覆盖字段或完整性标记。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
 - 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished` 时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`、易失 usage 或 reset 协议。
 
-请求记录的链路 Token 阈值按整个根 DAG（含子孙）的已确认总输入与输出累计，不重复加缓存分项；用量活动图与输入/输出构成图采用相同总量口径，缓存仍独立展示。尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮输入估算，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
+请求记录的链路 Token 阈值按整个根 DAG（含子孙）的已确认净输入与输出累计，不加回缓存分项；用量活动图与输入/输出构成图采用相同口径，缓存仍独立展示，输入标签保持「输入」。尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮未缓存输入估算，不再次扣除缓存，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
 
 输入估算不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求的筛选与路由调度共用同一估算：将消息 `items`、独立系统提示词 `instructions` 和工具定义 `tools` 一并计算 JSON 序列化字节数，除以 4 向上取整；工具说明与参数 schema 也属于输入，不能只按用户消息估算。它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，已有记录不重算，不从截断的输入预览或 Debug 内容回填。
 
-客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零，也不改变管理面的总输入和按字段汇总口径。
+客户端响应的 Run 用量账本只合并实际执行的隐藏轮次。没有隐藏轮次时，保留终态响应已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。该规则不把未知值补零；客户端 wire 仍保留协议规定的总输入，管理面另在读取边界计算净输入。
 
 Gemini `thoughtsTokenCount` 保留为 reasoning 子项，输出仍只包含一次该部分；终态之后的累计 usage 修订覆盖同一 attempt 的快照，不作为新增用量相加。标准 Gemini 缺失缓存字段仍为未知。Antigravity 仅对已确认完整的私有终态 usage 使用其 proto3 标量缺省零语义，缺失整个 usage 或中间帧不补零；事实来源和消息存在性边界见 [Antigravity 响应协议](../research/antigravity-oauth.md#响应)。这些归一化仅影响后续请求，不补写存量事件。
 

@@ -14,6 +14,12 @@
 - Vendor request encoding consumes owned OpenAI message preprocessing and releases canonical request/JSON intermediates after body serialization. Rebuild and re-import affected standalone plugins to receive the encoding memory reductions.
 - The complete local Windows test matrix now provisions isolated Redis alongside PostgreSQL. PostgreSQL E2E also requires `STRAVIA_TEST_REDIS_URL` pointing to a dedicated test instance.
 
+### Fixed
+
+- Antigravity thinking controls now follow the observed official CLI 1.3.2 contract: selected effort variants apply their catalog `thinkingBudget`, native `thinkingLevel` uses the private enum values, and valid explicit controls are no longer silently discarded. Public-thought summary selection remains independent; signatures alone are not displayed as thought text.
+- Management input values consistently show net input, summing `max(total input - cache read, 0)` per attempt across statistics, observations, chain filters, and Debug Bundle summaries. Unknown operands remain unknown; input labels and independent cache metrics are unchanged. Raw storage, exported events, protocol usage, pricing, and scheduling inputs retain their existing contracts.
+- Responses item-completion events now follow final output order and preserve authoritative native payloads, so clients that save history in completion order can reconnect to the same conversation chain. Ordinary content deltas and reasoning-summary part boundaries remain immediate; strict history matching is unchanged.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

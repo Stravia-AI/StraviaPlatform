@@ -467,7 +467,7 @@ impl BundleProjection {
         let unknown = ConfirmedUsage::default();
         Self {
             status: status.into(),
-            usage: ConfirmedUsage::aggregate(
+            usage: ConfirmedUsage::aggregate_management(
                 attempts
                     .values()
                     .map(|usage| usage.as_ref().unwrap_or(&unknown)),

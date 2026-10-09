@@ -11,7 +11,7 @@ pub type ObservationStream = Pin<Box<dyn Stream<Item = ObservationUpdate> + Send
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmedUsage {
-    /// 上游报告的总输入 Token；缓存字段未知不影响已知输入。
+    /// 原始事件为上游总输入；管理读取边界投影为逐 attempt 的净输入，不能再次扣缓存。
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
@@ -25,7 +25,7 @@ pub struct ConfirmedUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
 pub struct UsageCoverage {
     pub attempt_count: i64,
-    /// 仅计入未报告总输入的 attempt，与缓存覆盖无关。
+    /// 管理投影中，总输入或 cache-read 任一未知的 attempt 均计为净输入缺失。
     pub missing_input_tokens: i64,
     pub missing_output_tokens: i64,
     pub missing_cache_read_tokens: i64,
@@ -34,14 +34,15 @@ pub struct UsageCoverage {
 }
 
 impl ConfirmedUsage {
-    pub(super) fn aggregate<'a>(attempts: impl Iterator<Item = &'a Self>) -> Self {
+    /// 只接收原始 attempt 快照；先逐 attempt 净化，再累计已知部分。
+    pub(super) fn aggregate_management<'a>(attempts: impl Iterator<Item = &'a Self>) -> Self {
         let mut sums = [None::<i128>; 5];
         let mut missing = [0; 5];
         let mut attempt_count = 0;
         for attempt in attempts {
             attempt_count += 1;
             for (index, incoming) in [
-                attempt.input_tokens,
+                management_input_tokens(attempt.input_tokens, attempt.cache_read_tokens),
                 attempt.output_tokens,
                 attempt.cache_read_tokens,
                 attempt.cache_write_tokens,
@@ -74,6 +75,12 @@ impl ConfirmedUsage {
             }),
         }
     }
+}
+
+pub(super) fn management_input_tokens(input: Option<i64>, cache_read: Option<i64>) -> Option<i64> {
+    input
+        .zip(cache_read)
+        .map(|(input, cache_read)| input.saturating_sub(cache_read).max(0))
 }
 
 #[derive(Debug, Clone)]
@@ -778,7 +785,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn confirmed_usage_aggregates_each_known_field_independently() {
+    fn management_usage_aggregates_each_known_field_independently() {
         let attempts = [
             ConfirmedUsage {
                 input_tokens: Some(12528),
@@ -796,8 +803,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let usage = ConfirmedUsage::aggregate(attempts.iter());
-        assert_eq!(usage.input_tokens, Some(12528));
+        let usage = ConfirmedUsage::aggregate_management(attempts.iter());
+        assert_eq!(attempts[0].input_tokens, Some(12528));
+        assert_eq!(usage.input_tokens, Some(0));
         assert_eq!(usage.output_tokens, Some(896));
         assert_eq!(usage.cache_read_tokens, Some(5));
         assert_eq!(usage.cache_write_tokens, Some(0));
@@ -806,12 +814,50 @@ mod tests {
             usage.coverage,
             Some(UsageCoverage {
                 attempt_count: 3,
-                missing_input_tokens: 1,
+                missing_input_tokens: 2,
                 missing_output_tokens: 2,
                 missing_cache_read_tokens: 1,
                 missing_cache_write_tokens: 2,
                 missing_reasoning_tokens: 3,
             })
+        );
+    }
+
+    #[test]
+    fn management_usage_clamps_each_attempt_and_preserves_unknown_and_known_zero() {
+        let attempts = [
+            ConfirmedUsage {
+                input_tokens: Some(12),
+                cache_read_tokens: Some(5),
+                cache_write_tokens: Some(100),
+                ..Default::default()
+            },
+            ConfirmedUsage {
+                input_tokens: Some(3),
+                cache_read_tokens: Some(9),
+                ..Default::default()
+            },
+            ConfirmedUsage {
+                input_tokens: Some(8),
+                ..Default::default()
+            },
+        ];
+        let usage = ConfirmedUsage::aggregate_management(attempts.iter());
+        assert_eq!(usage.input_tokens, Some(7));
+        assert_eq!(usage.coverage.unwrap().missing_input_tokens, 1);
+        assert_eq!(
+            ConfirmedUsage::aggregate_management(attempts[1..2].iter()).input_tokens,
+            Some(0)
+        );
+        assert_eq!(
+            ConfirmedUsage::aggregate_management(attempts[2..].iter()).input_tokens,
+            None
+        );
+        assert_eq!(management_input_tokens(None, Some(0)), None);
+        assert_eq!(management_input_tokens(Some(0), Some(0)), Some(0));
+        assert_eq!(
+            ConfirmedUsage::aggregate_management(std::iter::empty()).input_tokens,
+            None
         );
     }
 }

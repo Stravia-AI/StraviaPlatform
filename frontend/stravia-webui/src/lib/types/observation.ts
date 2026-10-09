@@ -43,6 +43,7 @@ export interface FailedRequestDetail {
 }
 
 export interface ConfirmedUsage {
+  /** 管理输入已按 attempt 扣除缓存读取；原始上游事件不使用此展示契约。 */
   input_tokens: number | null
   output_tokens: number | null
   cache_read_tokens: number | null

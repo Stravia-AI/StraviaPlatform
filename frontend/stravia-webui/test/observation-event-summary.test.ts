@@ -69,7 +69,7 @@ describe('observation usage on attempt finish', () => {
         status: 'completed',
         duration_ms: 1_000,
         usage: {
-          input_tokens: 920,
+          input_tokens: 600,
           output_tokens: 86,
           cache_read_tokens: 320,
           cache_write_tokens: 12,
@@ -78,7 +78,7 @@ describe('observation usage on attempt finish', () => {
       }),
     )
 
-    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_input(), value: '920' })
+    expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_input(), value: '600' })
     expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_output(), value: '86' })
     expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_cache_read(), value: '320' })
     expect(summary.facts).toContainEqual({ label: m.observation_event_tokens_cache_write(), value: '12' })

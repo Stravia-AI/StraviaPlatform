@@ -300,7 +300,9 @@ mod tests {
         assert_eq!(pro.display_name, "Gemini 3.1 Pro");
         assert_eq!(pro.selector.as_deref(), Some("gemini-pro-agent"));
         assert_eq!(
-            selector::resolve(&pro.metadata[selector::EXTENSION_KEY], None).unwrap(),
+            selector::resolve(&pro.metadata[selector::EXTENSION_KEY], None)
+                .unwrap()
+                .id,
             "gemini-pro-agent"
         );
     }

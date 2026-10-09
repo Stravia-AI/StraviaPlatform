@@ -254,13 +254,13 @@ gpt-oss-120b-medium
 
 家族记录用现有 `DiscoveredModel.family`、`selector`、`metadata.reasoning_efforts` 表达。`metadata.antigravity` 保存默认请求 ID 与 `variants`，每档保留实际 ID、显示 slug、effort 和规格。家族上下文采用所有已知档位的最小值，任一档未知则不登记；输入模态取交集。Thinking 保留在名称中，不伪造 Effort。没有新增公共 API、数据库 schema、前端供应商分支或依赖。
 
-推理根据 Target 的 Effort 从选择表取真实 ID；缺省使用该家族的默认 selector，未登记 Effort 在 HTTP 前返回明确错误，不生成假想 ID 或静默改档。已消费的 Effort 不再同时编码为 Gemini thinking budget。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity-cli-接入)。
+推理根据 Target 的 Effort 从选择表取真实 ID 和该 variant metadata 的 `thinkingBudget`；缺省使用该家族的默认 selector 与已知预算，显式 Target 非 Effort 控制或合法原始强度字段优先于目录缺省预算。未登记 Effort 或对应预算缺失/无效在 HTTP 前返回明确错误，不生成假想 ID、硬编码预算或静默改档。已消费的 Effort 不再重复编码为 `thinkingLevel`。CLI 1.3.2 已核对 Gemini 3.8 Flash Medium 的目录预算为 `4000`，High 为 `-1`；请求应同时保留档位 ID 和真实预算，摘要开关独立。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity-cli-接入)。
 
 实际验证：
 
 - `cargo test --locked --jobs 4 -p stravia-vendor-antigravity --lib`：15 passed。覆盖 Agent 引用筛选、其他用途排除、默认档位、重复引用、同名身份分离、真实重定向与循环拒绝、规格交集及未登记 Effort 拒绝。
 - `task build:vendors:all`：增量重建 Antigravity，生成八个自包含组件。
-- `cargo test --locked --jobs 4 -p stravia-vendor-antigravity --test contract oauth_and_inference_enforce_native_wire_at_real_http_boundary -- --exact --ignored --nocapture`：1 passed。实际 Wasm 与 loopback HTTP 验证默认/Low/Medium/High 的 envelope ID、无双重 thinking 控制，以及未登记 Effort 不发送 HTTP；原有 OAuth、签名、SSE 和错误边界仍通过。
+- `cargo test --locked --jobs 4 -p stravia-vendor-antigravity --test contract oauth_and_inference_enforce_native_wire_at_real_http_boundary -- --exact --ignored --nocapture`：历史验证 1 passed。当时实际 Wasm 与 loopback HTTP 验证默认/Low/Medium/High 的 envelope ID，以及未登记 Effort 不发送 HTTP；原有 OAuth、签名、SSE 和错误边界通过。后续 CLI 1.3.2 对齐已将回归断言改为同时保护 ID、variant 预算、独立摘要和显式控制优先级；此处不把历史结果视为新断言的执行结果。
 - `cargo clippy --locked --jobs 4 -p stravia-vendor-antigravity --all-targets -- -D warnings`：通过。
 - 在全新临时 SQLite 实例导入实际构建的插件，重放第 6 节响应中已去除账号信息的模型字段。OAuth 测试状态直接在隔离存储中预置假 token 与假 project；没有重新登录或读取真实账号凭据。真实同步返回 `added=7`，模型 API 输出七个家族。浏览器实际点击添加 Pro 家族，保存的 Route 仅支持 `low`、`high`；Flash 家族支持 `low`、`medium`、`high`。
 - 经真实 Server 的 `/v1/chat/completions` 向 loopback 上游发送请求：Pro 缺省与 High 为 `gemini-pro-agent`，Low 为 `gemini-3.1-pro-low`，Flash Medium 为 `gemini-3.8-flash-medium`；校验上游捕获的 envelope 与客户端响应一致。

@@ -86,10 +86,15 @@ _避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run�
 Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，但不遮蔽其他已确认用量，累计值与各项用量的报告覆盖程度分别表达，不能把未知记为零或用本地估算冒充精确值。
 _避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
 
+## Net Input Tokens
+
+Net Input Tokens 是每次上游尝试的总输入扣除缓存读取后的非负值，也是 Stravia 管理面「输入」指标的统一含义。总输入或缓存读取未知时，该次净输入保持未知；缓存写入不参与扣减。
+_避免使用_：总输入 Token（当指管理面输入）、Estimated Input Tokens
+
 ## Total Input Tokens
 
-Total Input Tokens 是上游明确报告的总输入 Token 数，也是 Stravia 管理面输入指标的统一含义。缓存读取与写入是独立分项，不从总输入扣除，也不重复加入输入与输出的总量；缓存分项未知不使已知总输入变成未知。
-_避免使用_：Net Input Tokens、净输入 Token、Estimated Input Tokens
+Total Input Tokens 是上游明确报告、包含缓存输入的原始输入 Token 数，用于原始用量记录、协议响应与计价，不是管理面的输入指标。净输入展示不改变该原始事实。
+_避免使用_：净输入 Token（当指原始上游输入）
 
 ## Connect Client Apply
 

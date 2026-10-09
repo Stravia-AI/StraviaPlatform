@@ -87,7 +87,7 @@ impl UsageStatsStore for PostgresUsageStatsStore {
              SELECT
                  (SELECT COUNT(*)::BIGINT FROM requests WHERE expires_at > $2
                     AND ($1::BIGINT IS NULL OR started_at >= $1)) AS total_requests,
-                 (SELECT SUM(input_tokens)::BIGINT FROM attempts) AS total_input_tokens,
+                 (SELECT SUM(CASE WHEN input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL THEN CASE WHEN input_tokens>cache_read_tokens THEN input_tokens-cache_read_tokens ELSE 0 END END)::BIGINT FROM attempts) AS total_input_tokens,
                  (SELECT SUM(output_tokens)::BIGINT FROM attempts) AS total_output_tokens,
                  (SELECT SUM(cache_read_tokens)::BIGINT FROM attempts) AS total_cache_read_tokens,
                  (SELECT SUM(cache_write_tokens)::BIGINT FROM attempts) AS total_cache_write_tokens,
@@ -134,7 +134,7 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY bucket_start
              ), attempt_stats AS (
                  SELECT t.bucket_start,
-                        SUM(a.input_tokens)::BIGINT AS total_input_tokens,
+                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END)::BIGINT AS total_input_tokens,
                         SUM(a.output_tokens)::BIGINT AS total_output_tokens,
                         SUM(a.cache_read_tokens)::BIGINT AS total_cache_read_tokens,
                         SUM(a.cache_write_tokens)::BIGINT AS total_cache_write_tokens,
@@ -178,7 +178,7 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        SUM(a.input_tokens)::BIGINT AS total_input_tokens,
+                        SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END)::BIGINT AS total_input_tokens,
                         SUM(a.output_tokens)::BIGINT AS total_output_tokens,
                         SUM(a.reasoning_tokens)::BIGINT AS total_reasoning_tokens
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.model
@@ -239,7 +239,7 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id)::BIGINT AS request_count,
-                    SUM(a.input_tokens)::BIGINT AS total_input_tokens,
+                    SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END)::BIGINT AS total_input_tokens,
                     SUM(a.output_tokens)::BIGINT AS total_output_tokens,
                     SUM(a.cache_read_tokens)::BIGINT AS cache_read_tokens,
                     SUM(a.cache_write_tokens)::BIGINT AS cache_write_tokens,
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_management_stats_preserve_total_input_and_full_attempt_tps()
+    async fn postgres_management_stats_project_net_input_and_preserve_full_attempt_tps()
     -> anyhow::Result<()> {
         let Ok(url) = std::env::var("DB_URL") else {
             eprintln!("skip PostgreSQL usage stats verification: DB_URL is not set");
@@ -573,41 +573,44 @@ mod tests {
                 insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
                 sqlx::query("UPDATE target_attempt_observations SET duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 3000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 2990 END WHERE model_turn_id='recent'")
                     .execute(&pool).await?;
+                let store = PostgresUsageStatsStore {
+                    pool: pool.clone(),
+                    last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                };
+                let scheduling = store.route_scheduling_snapshot().await;
+                assert!(!scheduling.stale);
+                assert_eq!(scheduling.targets.len(), 1);
                 // 管理统计仍只统计已完成 attempt；失败 attempt 不计入。
                 insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
                 insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
                 insert_attempt(&pool, "old-a", "old", old, 12528, None).await?;
 
-                let store = PostgresUsageStatsStore {
-                    pool: pool.clone(),
-                    last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
-                };
                 let overview = store.stats_overview(Some(1)).await?;
-                assert_eq!(overview.total_input_tokens, Some(15));
+                assert_eq!(overview.total_input_tokens, Some(7));
                 assert_eq!(overview.total_output_tokens, Some(6));
                 assert_eq!(overview.total_reasoning_tokens, Some(2));
                 // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
                 let all_time = store.stats_overview(None).await?;
-                assert_eq!(all_time.total_input_tokens, Some(12543));
+                assert_eq!(all_time.total_input_tokens, Some(7));
                 assert_eq!(all_time.total_output_tokens, Some(9));
                 assert_eq!(all_time.total_cache_write_tokens, None);
 
                 let series = store.stats_series(1, 3_600_000, 0).await?;
                 assert_eq!(series.len(), 1);
-                assert_eq!(series[0].total_input_tokens, Some(15));
+                assert_eq!(series[0].total_input_tokens, Some(7));
                 assert_eq!(series[0].total_output_tokens, Some(6));
                 assert_eq!(series[0].total_reasoning_tokens, Some(2));
                 assert_eq!(series[0].bucket_start % 3_600_000, 0);
 
                 let models = store.stats_by_model(Some(1)).await?;
                 assert_eq!(models.len(), 1);
-                assert_eq!(models[0].total_input_tokens, Some(15));
+                assert_eq!(models[0].total_input_tokens, Some(7));
                 assert_eq!(models[0].total_output_tokens, Some(6));
                 assert_eq!(models[0].total_reasoning_tokens, Some(2));
 
                 let api_keys = store.stats_by_api_key(Some(1)).await?;
                 assert_eq!(api_keys.len(), 1);
-                assert_eq!(api_keys[0].total_input_tokens, Some(15));
+                assert_eq!(api_keys[0].total_input_tokens, Some(7));
                 assert_eq!(api_keys[0].total_output_tokens, Some(6));
                 assert_eq!(api_keys[0].reasoning_tokens, Some(2));
 
@@ -616,7 +619,7 @@ mod tests {
                 assert_eq!(providers[0].avg_output_tps, Some(1.5));
                 let old_model = store.stats_by_model(None).await?.into_iter()
                     .find(|model| model.model == "unknown-cache").unwrap();
-                assert_eq!(old_model.total_input_tokens, Some(12528));
+                assert_eq!(old_model.total_input_tokens, None);
                 for (column, value, expected) in [
                     ("output_tokens", "NULL", None),
                     ("output_tokens", "0", Some(0.0)),
@@ -634,6 +637,24 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
                 assert_eq!(raw_input, Some(15));
+                for (assignment, expected) in [
+                    ("cache_write_tokens=100", Some(7)),
+                    ("cache_read_tokens=CASE id WHEN 'recent-a' THEN 5 END", Some(7)),
+                    ("cache_read_tokens=NULL", None),
+                    ("cache_read_tokens=100", Some(0)),
+                    ("input_tokens=NULL,cache_read_tokens=0", None),
+                    ("input_tokens=0,cache_read_tokens=0", Some(0)),
+                ] {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "UPDATE target_attempt_observations SET {assignment} WHERE model_turn_id='recent'"
+                    )))
+                    .execute(&pool)
+                    .await?;
+                    assert_eq!(store.stats_overview(Some(1)).await?.total_input_tokens, expected);
+                    assert_eq!(store.stats_series(1, 3_600_000, 0).await?[0].total_input_tokens, expected);
+                    assert_eq!(store.stats_by_model(Some(1)).await?[0].total_input_tokens, expected);
+                    assert_eq!(store.stats_by_api_key(Some(1)).await?[0].total_input_tokens, expected);
+                }
                 sqlx::query("DELETE FROM interaction_observations WHERE id IN ('recent','old')")
                     .execute(&pool)
                     .await?;

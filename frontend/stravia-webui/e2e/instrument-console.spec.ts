@@ -66,7 +66,7 @@ test('Overview with traffic shows request and second-based latency charts', asyn
   const errorRate = page.locator('.route-metric-strip__item').filter({ hasText: 'Error rate' })
   await expect(errorRate).toContainText('0%')
   await expect(errorRate.locator('.text-destructive')).toHaveCount(0)
-  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Input Tokens' })).toContainText('920')
+  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Input Tokens' })).toContainText('600')
   await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Output Tokens' })).toContainText('86')
   await expect(page.getByText('Total Tokens', { exact: true })).toHaveCount(0)
 
@@ -81,11 +81,11 @@ test('Overview with traffic shows request and second-based latency charts', asyn
     'Output Tokens',
     'Latency',
   ])
-  await expect(modelTable).toContainText('920')
+  await expect(modelTable).toContainText('600')
   await expect(modelTable).toContainText('86')
 
   await page.setViewportSize({ width: 390, height: 800 })
-  await expect(modelSection.locator('.route-mobile-list')).toContainText('Input 920 · Output 86 · 120 ms')
+  await expect(modelSection.locator('.route-mobile-list')).toContainText('Input 600 · Output 86 · 120 ms')
 })
 
 for (const routePath of ['/', '/stats']) {
@@ -140,7 +140,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
   await page.goto('/stats')
 
   for (const [label, value] of [
-    ['Input Tokens', '920'],
+    ['Input Tokens', '600'],
     ['Output Tokens', '86'],
     ['Cache read tokens', '320'],
     ['Cache write tokens', '12'],
@@ -155,7 +155,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'API Key usage', exact: true }) })
   const apiKeyTable = apiKeyUsage.getByRole('table', { name: 'API Key usage' })
-  await expect(apiKeyTable).toContainText('920')
+  await expect(apiKeyTable).toContainText('600')
   await expect(apiKeyTable).toContainText('86')
   await expect(apiKeyTable).toContainText('320')
   await expect(apiKeyTable).toContainText('12')
@@ -163,7 +163,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
 
   await page.setViewportSize({ width: 390, height: 800 })
   const mobileApiKeyUsage = apiKeyUsage.locator('.route-mobile-list')
-  await expect(mobileApiKeyUsage).toContainText('Input 920 · Output 86 · Cache read 320 · Cache write 12')
+  await expect(mobileApiKeyUsage).toContainText('Input 600 · Output 86 · Cache read 320 · Cache write 12')
   await expect(mobileApiKeyUsage).not.toContainText('RSN')
 
   const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
@@ -473,7 +473,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
       json: {
         data: {
           total_requests: counts.requests,
-          total_input_tokens: 920,
+          total_input_tokens: 600,
           total_output_tokens: 86,
           total_cache_read_tokens: 320,
           total_cache_write_tokens: 12,
@@ -493,7 +493,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             bucket_start: Date.UTC(2026, 7, 26),
             request_count: counts.requests,
             error_count: counts.errors,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             total_cache_read_tokens: 320,
             total_cache_write_tokens: 12,
@@ -512,7 +512,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
           {
             model: 'gpt-5',
             request_count: counts.requests,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             total_reasoning_tokens: 44,
             avg_duration_ms: 120,
@@ -529,7 +529,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             api_key_id: 'key-1',
             api_key_name: 'Desktop client',
             request_count: counts.requests,
-            total_input_tokens: 920,
+            total_input_tokens: 600,
             total_output_tokens: 86,
             cache_read_tokens: 320,
             cache_write_tokens: 12,

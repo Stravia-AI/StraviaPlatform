@@ -73,6 +73,9 @@ pub struct ResponsesStreamFormatter {
     usage: Usage,
     started: bool,
     completed: bool,
+    completion_frontier: usize,
+    pending_completions: BTreeMap<usize, Vec<SseEvent>>,
+    completed_messages: BTreeMap<usize, serde_json::Value>,
     next_output_index: usize,
     next_sequence_number: u64,
     reasoning_item_id: Option<String>,
@@ -115,6 +118,9 @@ impl ResponsesStreamFormatter {
             usage: Usage::default(),
             started: false,
             completed: false,
+            completion_frontier: 0,
+            pending_completions: BTreeMap::new(),
+            completed_messages: BTreeMap::new(),
             next_output_index: 0,
             next_sequence_number: 0,
             reasoning_item_id: None,
@@ -196,21 +202,6 @@ impl ResponsesStreamFormatter {
                     item.entry(field.clone()).or_insert_with(|| value.clone());
                 }
             }
-            if let Some(output) = object
-                .get_mut("response")
-                .and_then(|response| response.get_mut("output"))
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                for (index, item) in output.iter_mut().enumerate() {
-                    if let Some(fields) = self.completed_item_fields.get(&index)
-                        && let Some(item) = item.as_object_mut()
-                    {
-                        for (field, value) in fields {
-                            item.entry(field.clone()).or_insert_with(|| value.clone());
-                        }
-                    }
-                }
-            }
             object.insert(
                 "sequence_number".into(),
                 serde_json::Value::from(self.next_sequence_number),
@@ -218,6 +209,173 @@ impl ResponsesStreamFormatter {
             self.next_sequence_number += 1;
             event.event = Some(event_type);
             event.data = body.to_string();
+        }
+    }
+
+    /// Only complete contiguous indices before terminal: an unseen lower index
+    /// can still arrive on native streams. Deltas and added events never wait.
+    /// Summary part closure is an intra-item boundary, not item completion:
+    /// it must reach the client before the next summary part starts.
+    fn order_completions(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
+        if !events.iter().any(|event| {
+            event.event.as_deref().is_some_and(|kind| {
+                kind.ends_with(".done")
+                    || matches!(
+                        kind,
+                        "response.completed" | "response.incomplete" | "response.failed"
+                    )
+            })
+        }) {
+            return events;
+        }
+        #[derive(serde::Deserialize)]
+        struct CompletionIndex {
+            output_index: usize,
+        }
+        let mut ordered = Vec::with_capacity(events.len());
+        for event in events {
+            let kind = event.event.as_deref();
+            if kind.is_some_and(|kind| {
+                kind.ends_with(".done")
+                    && !matches!(
+                        kind,
+                        "response.reasoning_summary_text.done"
+                            | "response.reasoning_summary_part.done"
+                    )
+            }) && let Ok(CompletionIndex {
+                output_index: index,
+            }) = serde_json::from_str::<CompletionIndex>(&event.data)
+            {
+                if index < self.completion_frontier {
+                    continue;
+                }
+                let pending = self.pending_completions.entry(index).or_default();
+                if !pending
+                    .iter()
+                    .any(|event| event.event.as_deref() == Some("response.output_item.done"))
+                {
+                    pending.push(event);
+                }
+                self.drain_completions(&mut ordered, false);
+            } else {
+                if matches!(
+                    kind,
+                    Some("response.completed" | "response.incomplete" | "response.failed")
+                ) {
+                    self.drain_completions(&mut ordered, true);
+                }
+                ordered.push(event);
+            }
+        }
+        ordered
+    }
+
+    fn drain_completions(&mut self, events: &mut Vec<SseEvent>, terminal: bool) {
+        loop {
+            let index = if terminal {
+                self.pending_completions
+                    .first_key_value()
+                    .map(|(index, _)| *index)
+            } else {
+                Some(self.completion_frontier)
+            };
+            let Some(index) = index else { break };
+            let Some(pending) = self.pending_completions.get(&index) else {
+                break;
+            };
+            if !pending
+                .iter()
+                .any(|event| event.event.as_deref() == Some("response.output_item.done"))
+            {
+                break;
+            }
+            events.extend(
+                self.pending_completions
+                    .remove(&index)
+                    .expect("completion exists"),
+            );
+            self.completion_frontier = index + 1;
+        }
+    }
+
+    fn finish_message(
+        &mut self,
+        events: &mut Vec<SseEvent>,
+        output_index: usize,
+        default_status: &str,
+    ) {
+        if self.completed_messages.contains_key(&output_index) {
+            return;
+        }
+        let Some(message) = self.indexed_messages.get(&output_index) else {
+            return;
+        };
+        let mut parts = BTreeMap::new();
+        for (content_index, text) in &message.content {
+            let part = self.terminal_content_part(
+                output_index,
+                *content_index,
+                serde_json::json!({
+                    "type": "output_text", "text": text, "annotations": [], "logprobs": []
+                }),
+            );
+            events.push(SseEvent::new(
+                Some("response.output_text.done"),
+                serde_json::json!({
+                    "type": "response.output_text.done", "item_id": message.item_id,
+                    "output_index": output_index, "content_index": content_index, "text": text
+                })
+                .to_string(),
+            ));
+            parts.insert(*content_index, part);
+        }
+        for (content_index, refusal) in &message.refusals {
+            let part = self.terminal_content_part(
+                output_index,
+                *content_index,
+                serde_json::json!({
+                    "type": "refusal", "refusal": refusal
+                }),
+            );
+            events.push(SseEvent::new(
+                Some("response.refusal.done"),
+                serde_json::json!({
+                    "type": "response.refusal.done", "item_id": message.item_id,
+                    "output_index": output_index, "content_index": content_index, "refusal": refusal
+                })
+                .to_string(),
+            ));
+            parts.insert(*content_index, part);
+        }
+        for (content_index, part) in &parts {
+            events.push(SseEvent::new(
+                Some("response.content_part.done"),
+                serde_json::json!({
+                    "type": "response.content_part.done", "item_id": message.item_id,
+                    "output_index": output_index, "content_index": content_index, "part": part
+                })
+                .to_string(),
+            ));
+        }
+        let item = serde_json::json!({
+            "type": "message", "id": message.item_id, "role": "assistant",
+            "status": message.status.map(AiItemStatus::as_str).unwrap_or(default_status),
+            "content": parts.into_values().collect::<Vec<_>>()
+        });
+        events.push(SseEvent::new(
+            Some("response.output_item.done"),
+            serde_json::json!({
+                "type": "response.output_item.done", "output_index": output_index, "item": item
+            })
+            .to_string(),
+        ));
+        self.completed_messages.insert(output_index, item);
+    }
+
+    fn finish_unindexed_message(&mut self, events: &mut Vec<SseEvent>) {
+        if let Some(index) = self.close_message(None) {
+            self.flush_pending_annotations(events, index);
+            self.finish_message(events, index, "completed");
         }
     }
 
@@ -357,7 +515,7 @@ impl ResponsesStreamFormatter {
     }
 
     fn ensure_reasoning_started(&mut self, events: &mut Vec<SseEvent>) {
-        self.close_message(None);
+        self.finish_unindexed_message(events);
         self.ensure_started(events);
         if self.reasoning_item_id.is_some() {
             return;
@@ -408,8 +566,7 @@ impl ResponsesStreamFormatter {
 
     /// Close the open unindexed reasoning item. The IR has no explicit
     /// thinking-finished delta, so a reasoning run ends when the stream moves on
-    /// to another item. Sealing early keeps `output_item.done` arrival order
-    /// aligned with `output_index` order; thinking that resumes afterwards opens
+    /// to another item. Thinking that resumes afterwards opens
     /// a fresh reasoning item, matching how the IR itemizes non-adjacent
     /// thinking blocks.
     fn seal_reasoning_item(&mut self, events: &mut Vec<SseEvent>) {
@@ -646,7 +803,7 @@ impl ResponsesStreamFormatter {
         output_index: usize,
         preferred_item_id: Option<&str>,
     ) {
-        self.close_message(None);
+        self.finish_unindexed_message(events);
         self.ensure_started(events);
         self.next_output_index = self.next_output_index.max(output_index + 1);
         if self.indexed_reasoning.contains_key(&output_index) {
@@ -1158,98 +1315,27 @@ impl ResponsesStreamFormatter {
         }
 
         let mut indexed_output = Vec::new();
-        for (output_index, message) in &self.indexed_messages {
-            let mut content_by_index = BTreeMap::new();
-            for (content_index, text) in &message.content {
-                events.push(SseEvent::new(
-                    Some("response.output_text.done"),
-                    serde_json::json!({
-                        "type": "response.output_text.done",
-                        "item_id": message.item_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
-                        "text": text
-                    })
-                    .to_string(),
-                ));
-                let part = self.terminal_content_part(
-                    *output_index,
-                    *content_index,
-                    serde_json::json!({
-                        "type": "output_text",
-                        "text": text,
-                        "annotations": [],
-                        "logprobs": []
-                    }),
-                );
-                events.push(SseEvent::new(
-                    Some("response.content_part.done"),
-                    serde_json::json!({
-                        "type": "response.content_part.done",
-                        "item_id": message.item_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
-                        "part": part
-                    })
-                    .to_string(),
-                ));
-                content_by_index.insert(*content_index, part);
-            }
-            for (content_index, refusal) in &message.refusals {
-                events.push(SseEvent::new(
-                    Some("response.refusal.done"),
-                    serde_json::json!({
-                        "type": "response.refusal.done",
-                        "item_id": message.item_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
-                        "refusal": refusal
-                    })
-                    .to_string(),
-                ));
-                let part = self.terminal_content_part(
-                    *output_index,
-                    *content_index,
-                    serde_json::json!({
-                        "type": "refusal",
-                        "refusal": refusal
-                    }),
-                );
-                events.push(SseEvent::new(
-                    Some("response.content_part.done"),
-                    serde_json::json!({
-                        "type": "response.content_part.done",
-                        "item_id": message.item_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
-                        "part": part
-                    })
-                    .to_string(),
-                ));
-                content_by_index.insert(*content_index, part);
-            }
-            let content = content_by_index.into_values().collect::<Vec<_>>();
-            let item_status = message
-                .status
-                .map(AiItemStatus::as_str)
-                .unwrap_or(if failed { default_item_status } else { status });
-            let item = serde_json::json!({
-                "type": "message",
-                "id": message.item_id,
-                "status": item_status,
-                "role": "assistant",
-                "content": content
-            });
-            events.push(SseEvent::new(
-                Some("response.output_item.done"),
-                serde_json::json!({
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": item
-                })
-                .to_string(),
-            ));
-            indexed_output.push((*output_index, item));
+        let mut next_message = self
+            .indexed_messages
+            .first_key_value()
+            .map(|(index, _)| *index);
+        while let Some(output_index) = next_message {
+            self.finish_message(
+                &mut events,
+                output_index,
+                if failed { default_item_status } else { status },
+            );
+            next_message = self
+                .indexed_messages
+                .range((
+                    std::ops::Bound::Excluded(output_index),
+                    std::ops::Bound::Unbounded,
+                ))
+                .next()
+                .map(|(index, _)| *index);
+        }
+        for (output_index, item) in &self.completed_messages {
+            indexed_output.push((*output_index, item.clone()));
         }
 
         let mut indexed_message_content = Vec::new();
@@ -1384,7 +1470,16 @@ impl ResponsesStreamFormatter {
 
         let output = indexed_output
             .into_iter()
-            .map(|(_, item)| item)
+            .map(|(index, mut item)| {
+                if let Some(fields) = self.completed_item_fields.get(&index)
+                    && let Some(object) = item.as_object_mut()
+                {
+                    for (field, value) in fields {
+                        object.entry(field.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+                item
+            })
             .collect::<Vec<_>>();
 
         let usage = if !self.usage.required_components_known {
@@ -1550,7 +1645,7 @@ impl ResponsesStreamFormatter {
                     text,
                 ),
                 AiStreamDelta::ToolCallStart { index, id, name } => {
-                    self.close_message(None);
+                    self.finish_unindexed_message(&mut events);
                     self.ensure_started(&mut events);
                     self.seal_reasoning_item(&mut events);
                     if let Some(pos) = self.tool_index_map.get(index).copied()
@@ -1690,7 +1785,7 @@ impl ResponsesStreamFormatter {
                     if let Some("stravia:agent_result") =
                         item.get("type").and_then(|value| value.as_str())
                     {
-                        self.close_message(None);
+                        self.finish_unindexed_message(&mut events);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         let output_index = self.next_output_index;
@@ -1708,7 +1803,7 @@ impl ResponsesStreamFormatter {
                         self.standalone_items.push(PendingOutputItem {
                             output_index,
                             item: item.clone(),
-                            done: false,
+                            done: true,
                         });
                         let mut pending = item;
                         pending["status"] = serde_json::Value::String("in_progress".into());
@@ -1718,6 +1813,15 @@ impl ResponsesStreamFormatter {
                                 "type": "response.output_item.added",
                                 "output_index": output_index,
                                 "item": pending
+                            })
+                            .to_string(),
+                        ));
+                        events.push(SseEvent::new(
+                            Some("response.output_item.done"),
+                            serde_json::json!({
+                                "type": "response.output_item.done",
+                                "output_index": output_index,
+                                "item": self.standalone_items.last().expect("item inserted").item
                             })
                             .to_string(),
                         ));
@@ -1739,7 +1843,7 @@ impl ResponsesStreamFormatter {
                         self.completed_item_fields.insert(*index, fields.clone());
                     }
                     if let Some(native) = super::native_compaction_item(item) {
-                        self.close_message(None);
+                        self.finish_unindexed_message(&mut events);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
@@ -1780,7 +1884,7 @@ impl ResponsesStreamFormatter {
                         );
                     }
                     if let Some((call_id, content)) = item.function_call_output_ref() {
-                        self.close_message(None);
+                        self.finish_unindexed_message(&mut events);
                         self.ensure_started(&mut events);
                         self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
@@ -1814,6 +1918,14 @@ impl ResponsesStreamFormatter {
                                     .unwrap_or("completed")
                             }),
                         );
+                        events.push(SseEvent::new(
+                            Some("response.output_item.done"),
+                            serde_json::json!({
+                                "type": "response.output_item.done", "output_index": index,
+                                "item": self.indexed_function_outputs[index]
+                            })
+                            .to_string(),
+                        ));
                     }
                     let is_message = item.role
                         == stravia_runtime_contract::protocol::ir::Role::Assistant
@@ -1825,9 +1937,11 @@ impl ResponsesStreamFormatter {
                                 | stravia_runtime_contract::protocol::ir::ContentBlock::Refusal { .. })),
                         };
                     if is_message {
+                        let mut message_index = *index;
                         if !self.indexed_messages.contains_key(index)
                             && let Some(output_index) = self.close_message(item.status())
                         {
+                            message_index = output_index;
                             if output_index != *index {
                                 if let Some(content) = self.completed_message_content.remove(index)
                                 {
@@ -1844,6 +1958,7 @@ impl ResponsesStreamFormatter {
                                 .expect("indexed message was inserted")
                                 .status = item.status();
                         }
+                        self.finish_message(&mut events, message_index, "completed");
                     }
                     if let Some((_, _, encrypted_content)) = item.reasoning_ref() {
                         if let Some(sealed) = self.sealed_reasoning_items.get_mut(index) {
@@ -1962,6 +2077,7 @@ impl ResponsesStreamFormatter {
                 _ => {}
             }
         }
+        let mut events = self.order_completions(events);
         self.finalize_events(&mut events);
 
         events
@@ -1977,6 +2093,7 @@ impl ResponsesStreamFormatter {
                 serde_json::Value::Null,
             ));
         }
+        let mut events = self.order_completions(events);
         self.finalize_events(&mut events);
         events.push(SseEvent::new(None, "[DONE]"));
         events

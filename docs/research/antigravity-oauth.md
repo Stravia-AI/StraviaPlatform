@@ -146,9 +146,11 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 
 Schema 依据实际 `openapi.proto` 投影 type/format/title/description/nullable/default、数组与对象约束、enum、properties/propertyOrdering/required、数值与字符串约束、example、oneOf/anyOf/allOf/not、additionalProperties/additionalPropertiesSchema、ref/defs。properties/defs 的业务属性名保留，其 schema 值递归投影；type 规范化为 proto enum 名称，类型数组转换为原生组合约束，不把数组发送到 enum 字段。标准 JSON Schema 的 `$ref`/`$defs` 转换为 `ref`/`defs`，本地引用前缀转换为 `#/defs/`；int64 长度/数量约束按 protojson 转为字符串。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。具体允许字段以 `wire.rs` 为实现来源。
 
-CLI master 的 `thinkingLevel` 是 int32，公开 Gemini 的 `"HIGH"` 等符号值不直接转发，也不猜测其私有数字映射。
+CLI 1.3.2（1.2.16 亦已核对）master 的 `thinkingLevel` 是 enum，不是 int32：`UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`。投影接受这些符号或对应数字，非法显式值返回错误，不静默删除或猜测映射。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
 
-family selector 消费 `thinkingLevel` / `thinkingBudget` 后，只移除这些强度字段；`includeThoughts` 是独立的摘要意图，仍进入内层 `generationConfig.thinkingConfig`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。
+family selector 用 Target Effort 选择实际请求 ID，同时使用该 variant metadata 的 `thinkingBudget`，不再把 Effort 重复编码为 `thinkingLevel`。CLI 1.3.2 已核对的 Gemini 3.8 Flash 主请求：Medium 为对应 ID 加目录预算 `4000`，High 为对应 ID 加目录预算 `-1`。预算来自目录而非按模型硬编码；显式 Effort 对应预算缺失或无效时，在 HTTP 前明确要求重新同步。显式 Target Budget/Enabled/Disabled 仍优先于目录预算；无 Target 控制时，合法原始 level/budget 优先于缺省目录预算。
+
+`includeThoughts` 是独立的摘要意图，仍由现有 codec 编码进入内层 `generationConfig.thinkingConfig`，显式关闭摘要得到 `false`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。private descriptor 另有 `includeRawThoughts`、`enableThinking`，此次不新增控制 API、不默认打开，也不扩展现有投影范围。
 
 `args`、工具 `response`、schema `default`/`example` 是业务 JSON，不把其中名为 seed、metadata 或其他任意业务键当成协议参数删除。真实 thoughtSignature 原样保留，绝不生成伪造签名。
 
