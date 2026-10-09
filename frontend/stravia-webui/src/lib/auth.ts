@@ -206,6 +206,9 @@ export async function completeSetup(
 }
 
 export function authenticationRequired(): never {
-  window.location.assign('/login')
+  // 管理登录失效只切换页面；以独立 API Key 发出的推理流仍由根布局持有。
+  void import('$app/navigation')
+    .then(({ goto }) => goto('/login'))
+    .catch((error: unknown) => console.warn('Unable to open management login', error))
   throw new Error(m.frontend_error_authentication_required())
 }

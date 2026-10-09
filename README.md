@@ -137,6 +137,7 @@ All model Vendors run as self-contained Wasm Components. Stravia embeds the base
 
 ### Keys, usage, and request history
 
+- Built-in console chat: choose an API Key and model in the management UI, stream multi-turn replies, and revisit local conversation history. See [Console Chat](docs/design/console-chat.md) for storage and tool-injection limits.
 - API keys with custom secrets, model bindings, expiry, and per-key limits for concurrency, MCP access, and automatic tool injection.
 - Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
 - See the token usage and provider quotas that services actually report.

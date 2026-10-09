@@ -7,7 +7,8 @@ let {
   active = false,
   textStart = 0,
   snapshotKey = 0,
-}: { text: string; active?: boolean; textStart?: number; snapshotKey?: number } = $props()
+  minimumHeadingLevel = 1,
+}: { text: string; active?: boolean; textStart?: number; snapshotKey?: number; minimumHeadingLevel?: 1 | 2 } = $props()
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 // 与后端发布 100ms、工作区合并 100ms 共用 500ms 主动等待预算。
@@ -159,4 +160,4 @@ $effect(() => {
 
 <svelte:document onvisibilitychange={() => flush()} />
 
-<MarkdownContent text={displayed} />
+<MarkdownContent text={displayed} {minimumHeadingLevel} />

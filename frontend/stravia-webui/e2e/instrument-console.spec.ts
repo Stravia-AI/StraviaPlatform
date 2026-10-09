@@ -7,31 +7,25 @@ test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
 })
 
-test('empty Overview offers one service setup action and one no-traffic state', async ({ page }) => {
+test('empty Chat offers service setup instead of a composer', async ({ page }) => {
   await page.goto('/')
 
   const main = page.getByRole('main')
-  await expect(main.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
-  await expect(main.getByRole('navigation', { name: 'Request path' })).toBeVisible()
-  const nextAction = main.getByRole('region', { name: 'Connect a model service' })
-  await expect(nextAction.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
-  await expect(nextAction.getByRole('link')).toHaveCount(1)
-  await expect(main.getByRole('heading', { name: 'Most-used models' })).toHaveCount(0)
-  await expect(main.getByRole('heading', { name: 'Model service performance' })).toHaveCount(0)
+  await expect(main.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible()
+  await expect(main.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
+  await expect(main.getByRole('textbox', { name: 'Message' })).toHaveCount(0)
 })
 
-test('configured Overview stays available before the first request and keeps the client shortcut', async ({ page }) => {
+test('configured Chat offers a composer before the first request', async ({ page }) => {
   await stubConnectableConfiguration(page)
   await page.goto('/')
 
   const main = page.getByRole('main')
-  await expect(main.getByRole('link', { name: 'Connect clients' })).toBeVisible()
-  await expect(main.getByRole('region', { name: 'Connect a model service' })).toHaveCount(0)
-  await expect(main.getByRole('heading', { name: 'Most-used models' })).toHaveCount(0)
-  await expect(main.getByRole('heading', { name: 'Model service performance' })).toHaveCount(0)
+  await expect(main.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
+  await expect(main.getByRole('button', { name: 'API Key', exact: true })).toContainText('Client key')
 })
 
-test('Overview does not treat a failed configuration fetch as an empty instance', async ({ page }) => {
+test('Chat does not treat a failed configuration fetch as an empty instance', async ({ page }) => {
   let providerFetchFails = true
   await page.route('**/api/v1/providers', async (route) => {
     if (providerFetchFails) {
@@ -43,52 +37,15 @@ test('Overview does not treat a failed configuration fetch as an empty instance'
   await page.goto('/')
 
   const main = page.getByRole('main')
-  await expect(main.getByRole('heading', { name: 'Configuration unavailable' })).toBeVisible()
-  await expect(main.getByRole('region', { name: 'Connect a model service' })).toHaveCount(0)
+  await expect(main.getByRole('alert')).toContainText('Configuration fetch failed')
+  await expect(main.getByRole('link', { name: 'Connect a model service' })).toHaveCount(0)
 
   providerFetchFails = false
   await main.getByRole('button', { name: 'Retry' }).click()
-  await expect(main.getByRole('region', { name: 'Connect a model service' })).toBeVisible()
+  await expect(main.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
 })
 
-test('Overview with traffic shows request and second-based latency charts', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
-  await page.goto('/')
-
-  await expect(page.getByLabel('Request volume chart')).toBeVisible()
-  const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
-  await expect(latency.getByText('First token', { exact: true })).toBeVisible()
-  await expect(latency.getByText('0.04 s', { exact: true })).toBeVisible()
-  await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
-  await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
-  await expect(latency.getByLabel('Latency chart')).toBeVisible()
-  await expect(latency.locator('.lc-path')).toHaveCount(2)
-  const errorRate = page.locator('.route-metric-strip__item').filter({ hasText: 'Error rate' })
-  await expect(errorRate).toContainText('0%')
-  await expect(errorRate.locator('.text-destructive')).toHaveCount(0)
-  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Input Tokens' })).toContainText('920')
-  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Output Tokens' })).toContainText('86')
-  await expect(page.getByText('Total Tokens', { exact: true })).toHaveCount(0)
-
-  const modelSection = page
-    .locator('section')
-    .filter({ has: page.getByRole('heading', { name: 'Most-used models', exact: true }) })
-  const modelTable = modelSection.getByRole('table', { name: 'Most-used models' })
-  await expect(modelTable.getByRole('columnheader')).toHaveText([
-    'Model',
-    'Requests',
-    'Input Tokens',
-    'Output Tokens',
-    'Latency',
-  ])
-  await expect(modelTable).toContainText('920')
-  await expect(modelTable).toContainText('86')
-
-  await page.setViewportSize({ width: 390, height: 800 })
-  await expect(modelSection.locator('.route-mobile-list')).toContainText('Input 920 · Output 86 · 120 ms')
-})
-
-for (const routePath of ['/', '/stats']) {
+for (const routePath of ['/stats']) {
   test(`${routePath} latency stays chronological across repeated clock labels`, async ({ page }) => {
     await stubTraffic(page, { requests: 22, errors: 0 })
     const start = new Date(2026, 8, 26, 19).getTime()

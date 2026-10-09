@@ -1,4 +1,6 @@
 <script lang="ts">
+import { goto } from '$app/navigation'
+import { resolve } from '$app/paths'
 import * as m from '$lib/paraglide/messages.js'
 import SecretInput from '$lib/components/secret-input.svelte'
 
@@ -33,7 +35,7 @@ async function submit(): Promise<void> {
   errorKind = undefined
   try {
     await login(submittedUsername, password)
-    window.location.replace('/')
+    await goto(resolve('/'), { replaceState: true })
   } catch (cause) {
     const status = (cause as { status?: number }).status
     errorKind = status === 400 || status === 401 ? 'invalid' : 'unavailable'

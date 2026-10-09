@@ -1,494 +1,190 @@
 <script lang="ts">
-import * as m from '$lib/paraglide/messages.js'
-import RequestFailure from '$lib/components/request-failure.svelte'
-import { createQuery } from '@tanstack/svelte-query'
-import { BarChart, LineChart } from 'layerchart'
-
-import { admin, isTauri } from '$lib/admin-client'
+import { goto } from '$app/navigation'
+import { resolve } from '$app/paths'
+import { page } from '$app/state'
+import { onMount, tick, untrack } from 'svelte'
+import { toast } from 'svelte-sonner'
+import { isTauri } from '$lib/admin-client'
+import { getConsoleChat } from '$lib/console-chat.svelte'
+import { consoleAssistantContent, consoleVisibleText } from '$lib/console-chat'
+import type { ConsoleChatSnapshot, ConsoleConversation, ConsoleThinkingSelection, ConsoleTokenUsage } from '$lib/console-chat-types'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { eligibleConnectKeys } from '$lib/connect'
-import { getDataTableLabels } from '$lib/data-table-labels'
-import {
-  formatCompactCount,
-  formatDuration,
-  formatDurationSeconds,
-  formatNumber,
-  formatPercent,
-  formatTime,
-} from '$lib/format'
-import { buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
-import type { ModelStats, ProviderStats } from '$lib/types'
+import { effectiveModelDisplayName } from '$lib/logical-model'
+import { formatLogTime, formatNumber } from '$lib/format'
+import * as m from '$lib/paraglide/messages.js'
+import ConsoleChatActions from '$lib/components/console-chat-actions.svelte'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
-import MetricStrip from '$lib/components/metric-strip.svelte'
-import PageHeader from '$lib/components/page-header.svelte'
-import RouteSpine from '$lib/components/route-spine.svelte'
-import StatusIndicator from '$lib/components/status-indicator.svelte'
+import MarkdownContent from '$lib/components/markdown-content.svelte'
+import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import { Button } from '$lib/components/ui/button'
-import * as Card from '$lib/components/ui/card'
-import { DataTable, createDataTableColumnHelper } from '$lib/components/ui/data-table'
-import * as Empty from '$lib/components/ui/empty'
 import { Skeleton } from '$lib/components/ui/skeleton'
-
-const overviewQuery = createQuery(() => ({
-  queryKey: ['stats-overview'],
-  queryFn: () => admin.stats.overview(),
-  refetchInterval: 10_000,
+import { Textarea } from '$lib/components/ui/textarea'
+import * as Alert from '$lib/components/ui/alert'
+import * as Empty from '$lib/components/ui/empty'
+import * as Field from '$lib/components/ui/field'
+import * as Select from '$lib/components/ui/select'
+const chat = getConsoleChat()
+const snapshot: ConsoleChatSnapshot = $derived(chat.snapshot)
+const conversation: ConsoleConversation | null = $derived(snapshot.currentConversation)
+const generation = $derived(conversation ? snapshot.generations[conversation.id] : undefined)
+const lastMessage = $derived(conversation?.messages.at(-1))
+const title = $derived(conversation?.title ?? m.console_chat_new())
+const keyOptions = $derived(snapshot.keyCandidates.map((key) => ({ value: key.id, label: key.name })))
+const modelOptions = $derived(snapshot.modelCandidates.map((model) => {
+  const name = effectiveModelDisplayName(model)
+  return { value: model.id, label: name === model.model_id ? name : `${name} (${model.model_id})` }
 }))
-const seriesQuery = createQuery(() => ({
-  queryKey: ['stats-series', 24, 3_600],
-  queryFn: () => admin.stats.series(24, 3_600, localTzOffsetMs() / 1000),
-  refetchInterval: 30_000,
-}))
-const modelStatsQuery = createQuery(() => ({
-  queryKey: ['stats-models'],
-  queryFn: () => admin.stats.models(),
-  refetchInterval: 30_000,
-}))
-const providerStatsQuery = createQuery(() => ({
-  queryKey: ['stats-providers'],
-  queryFn: () => admin.stats.providers(),
-  refetchInterval: 30_000,
-}))
-const statusQuery = createQuery(() => ({ queryKey: ['gateway-status'], queryFn: admin.settings.status }))
-const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
-const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
-const apiKeysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
-
-const overview = $derived(overviewQuery.data)
-const modelStats = $derived(modelStatsQuery.data ?? [])
-const providerStats = $derived(providerStatsQuery.data ?? [])
-const tableLabels = $derived(getDataTableLabels())
-const modelStatsColumnHelper = createDataTableColumnHelper<ModelStats>()
-const modelStatsColumns = modelStatsColumnHelper.columns([
-  modelStatsColumnHelper.accessor('model', {
-    header: () => m.common_model(),
-    meta: { label: () => m.common_model(), cellClass: 'font-technical font-medium' },
-  }),
-  modelStatsColumnHelper.accessor('request_count', {
-    header: () => m.common_request_count_label(),
-    cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-  modelStatsColumnHelper.accessor('total_input_tokens', {
-    header: () => m.stats_input_tokens(),
-    cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.stats_input_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-  modelStatsColumnHelper.accessor('total_output_tokens', {
-    header: () => m.stats_output_tokens(),
-    cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.stats_output_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-  modelStatsColumnHelper.accessor('avg_duration_ms', {
-    header: () => m.common_latency(),
-    cell: (context) => formatDuration(context.getValue()),
-    meta: { label: () => m.common_latency(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
+const effortOptions = $derived([
+  { value: 'default', label: m.console_chat_default() },
+  ...snapshot.thinkingLevels.map((level) => ({ value: level, label: level })),
 ])
-const providerStatsColumnHelper = createDataTableColumnHelper<ProviderStats>()
-const providerStatsColumns = providerStatsColumnHelper.columns([
-  providerStatsColumnHelper.accessor('provider', {
-    header: () => m.common_model_service(),
-    meta: { label: () => m.common_model_service(), cellClass: 'font-medium' },
-  }),
-  providerStatsColumnHelper.accessor('request_count', {
-    header: () => m.common_request_count_label(),
-    cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-  providerStatsColumnHelper.accessor('error_count', {
-    header: () => m.common_error_count_label(),
-    meta: {
-      label: () => m.common_error_count_label(),
-      align: 'end',
-      cellClass: 'font-technical text-destructive tabular-nums',
-    },
-  }),
-  providerStatsColumnHelper.accessor('avg_duration_ms', {
-    header: () => m.common_latency(),
-    cell: (context) => formatDuration(context.getValue()),
-    meta: { label: () => m.common_latency(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-])
-const enabledProviders = $derived(providersQuery.data?.filter((provider) => provider.is_enabled))
-const enabledProviderIds = $derived(new Set(enabledProviders?.map((provider) => provider.id)))
-const connectableModels = $derived(
-  modelsQuery.data?.filter(
-    (model) =>
-      model.is_enabled && model.targets.some((target) => target.enabled && enabledProviderIds.has(target.provider_id)),
-  ),
-)
-const enabledModelCount = $derived(modelsQuery.data?.filter((model) => model.is_enabled).length)
-const eligibleKeys = $derived(
-  apiKeysQuery.data && connectableModels ? eligibleConnectKeys(apiKeysQuery.data, connectableModels) : undefined,
-)
-const configurationLoaded = $derived(
-  providersQuery.data !== undefined && modelsQuery.data !== undefined && apiKeysQuery.data !== undefined,
-)
-const configurationError = $derived(providersQuery.error ?? modelsQuery.error ?? apiKeysQuery.error)
-const setupAction = $derived.by(() => {
-  const providers = providersQuery.data
-  const models = modelsQuery.data
-  const apiKeys = apiKeysQuery.data
-  if (!providers || !models || !apiKeys || !enabledProviders || !connectableModels || !eligibleKeys) return undefined
-  if (providers.length === 0) {
-    return {
-      title: m.overview_connect_service_title(),
-      description: m.overview_connect_service_description(),
-      label: m.common_connect_model_service(),
-      href: '/providers' as const,
-    }
+let text = $state('')
+let composer = $state<HTMLTextAreaElement | null>(null)
+let surface = $state<HTMLElement | null>(null)
+let follow = $state(true)
+let scroller: HTMLElement | null = null
+let previousConversation: string | null = null
+const guide = $derived.by(() => {
+  switch (snapshot.blocker) {
+    case 'no-services': return { title: m.console_chat_connect_service_title(), description: m.console_chat_connect_service_description(), label: m.common_connect_model_service(), href: '/providers' as const }
+    case 'disabled-services': return { title: m.console_chat_enable_service_title(), description: m.console_chat_enable_service_description(), label: m.console_chat_review_model_services(), href: '/providers' as const }
+    case 'no-models': return { title: m.console_chat_add_model_title(), description: m.console_chat_add_model_description(), label: m.common_add_model(), href: '/models' as const }
+    case 'disabled-models': return { title: m.console_chat_review_models_title(), description: m.console_chat_review_models_description(), label: m.console_chat_review_models(), href: '/models' as const }
+    case 'no-keys': return { title: m.console_chat_create_api_key_title(), description: m.console_chat_create_api_key_description(), label: m.common_create_api_key(), href: '/api-keys' as const }
+    case 'unavailable-keys': return { title: m.console_chat_review_api_keys_title(), description: m.console_chat_review_api_keys_description(), label: m.console_chat_review_api_keys(), href: '/api-keys' as const }
+    default: return null
   }
-  if (enabledProviders.length === 0) {
-    return {
-      title: m.overview_enable_service_title(),
-      description: m.overview_enable_service_description(),
-      label: m.overview_review_model_services(),
-      href: '/providers' as const,
-    }
-  }
-  if (models.length === 0) {
-    return {
-      title: m.overview_add_model_title(),
-      description: m.overview_add_model_description(),
-      label: m.common_add_model(),
-      href: '/models' as const,
-    }
-  }
-  if (connectableModels.length === 0) {
-    return {
-      title: m.overview_review_models_title(),
-      description: m.overview_review_models_description(),
-      label: m.overview_review_models(),
-      href: '/models' as const,
-    }
-  }
-  if (apiKeys.length === 0) {
-    return {
-      title: m.overview_create_api_key_title(),
-      description: m.overview_create_api_key_description(),
-      label: m.common_create_api_key(),
-      href: '/api-keys' as const,
-    }
-  }
-  if (eligibleKeys.length === 0) {
-    return {
-      title: m.overview_review_api_keys_title(),
-      description: m.overview_review_api_keys_description(),
-      label: m.overview_review_api_keys(),
-      href: '/api-keys' as const,
-    }
-  }
-  return undefined
 })
-const hasTraffic = $derived((overview?.total_requests ?? 0) > 0)
-const requestChart = $derived(
-  (seriesQuery.data ?? []).map((item) => ({
-    hour: formatTime(item.bucket_start),
-    requests: item.request_count,
-    errors: item.error_count,
-  })),
-)
-const latencyChart = $derived(buildLatencyChart(seriesQuery.data ?? [], 3_600_000))
-const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
-const dash = '–'
-const metrics = $derived([
-  { label: m.common_total_requests(), value: hasTraffic ? formatCompactCount(overview?.total_requests ?? 0) : dash },
-  { label: m.stats_input_tokens(), value: hasTraffic ? formatCompactCount(overview?.total_input_tokens) : dash },
-  { label: m.stats_output_tokens(), value: hasTraffic ? formatCompactCount(overview?.total_output_tokens) : dash },
-  { label: m.common_avg_latency(), value: hasTraffic ? formatDuration(overview?.avg_duration_ms) : dash },
-  {
-    label: m.common_error_rate(),
-    value: hasTraffic ? formatPercent(errorRate / 100) : dash,
-    tone: hasTraffic && (overview?.error_count ?? 0) > 0 ? ('error' as const) : undefined,
-  },
-  {
-    label: m.common_model_services(),
-    value: providersQuery.data === undefined ? dash : formatNumber(providersQuery.data.length),
-  },
-  { label: m.common_models(), value: modelsQuery.data === undefined ? dash : formatNumber(modelsQuery.data.length) },
-])
-
-function getModelStatsRowId(model: ModelStats): string {
-  return model.model
+const readOnlyText = $derived(snapshot.readOnlyReason === 'deleted' ? m.console_chat_key_deleted() : snapshot.readOnlyReason === 'disabled' ? m.console_chat_key_disabled() : m.console_chat_key_expired())
+$effect(() => {
+  const id = page.url.searchParams.get('conversation')
+  untrack(() => chat.openConversation(id))
+})
+$effect(() => {
+  const id = snapshot.currentConversationId
+  if (id !== previousConversation) { previousConversation = id; follow = true; text = '' }
+  const messages = conversation?.messages
+  const liveText = generation?.text
+  const thinking = generation?.summary || generation?.reasoning
+  void messages; void liveText; void thinking
+  if (untrack(() => follow)) void tick().then(() => { if (scroller && follow) scroller.scrollTop = scroller.scrollHeight })
+})
+onMount(() => {
+  scroller = surface?.closest('main') ?? null
+  const onScroll = () => { if (scroller) follow = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 80 }
+  scroller?.addEventListener('scroll', onScroll, { passive: true })
+  const resize = new ResizeObserver(() => { if (scroller && follow) scroller.scrollTop = scroller.scrollHeight })
+  if (surface) resize.observe(surface)
+  return () => { scroller?.removeEventListener('scroll', onScroll); resize.disconnect() }
+})
+async function command(action: () => Promise<void>) {
+  try { await action() } catch (cause) { toast.error(localizeBackendErrorMessage(cause)) }
 }
-
-function getProviderStatsRowId(provider: ProviderStats): string {
-  return provider.provider
+async function send() {
+  if (!text.trim() || generation || !snapshot.selectedKeyId || !snapshot.selectedModelId) return
+  const draft = text
+  follow = true
+  const pending = command(() => chat.send(draft))
+  const id = chat.snapshot.currentConversationId
+  if (id && page.url.searchParams.get('conversation') !== id) await goto(resolve(`/?conversation=${encodeURIComponent(id)}`), { noScroll: true, keepFocus: true })
+  if (chat.snapshot.currentConversation?.messages.some((message) => message.role === 'user' && message.text === draft)) text = ''
+  await pending
+  composer?.focus()
 }
-
-function retryConfiguration(): void {
-  void Promise.all([providersQuery.refetch(), modelsQuery.refetch(), apiKeysQuery.refetch()])
-}
+async function newConversation() { chat.newConversation(); await goto(resolve('/')); composer?.focus() }
+async function copy(value: string) { await command(async () => { await navigator.clipboard.writeText(consoleVisibleText(value)); toast.success(m.common_copied_clipboard()) }) }
 </script>
-
-<svelte:head><title>{m.overview_overview()} · Stravia</title></svelte:head>
-
-{#snippet liveMeta()}
-  <StatusIndicator
-    compact
-    label={overviewQuery.isError ? m.overview_status_unavailable() : m.overview_gateway_live()}
-    tone={overviewQuery.isError ? 'error' : 'healthy'} />
-{/snippet}
-
-{#snippet modelStatsEmpty()}
-  <Empty.Root class="border-y py-6"
-    ><Empty.Header><Empty.Description>{m.overview_no_model_traffic_yet()}</Empty.Description></Empty.Header
-    ></Empty.Root>
-{/snippet}
-
-{#snippet providerStatsEmpty()}
-  <Empty.Root class="border-y py-6"
-    ><Empty.Header><Empty.Description>{m.overview_no_model_service_traffic_yet()}</Empty.Description></Empty.Header
-    ></Empty.Root>
-{/snippet}
-
-{#snippet connectAction()}
-  <Button href="/connect">{m.connect_connect_apps()}</Button>
-{/snippet}
-
-<div class="route-page">
-  <PageHeader
-    eyebrow={m.overview_workspace()}
-    title={m.overview_overview()}
-    description={m.overview_see_whether_stravia_ready_how_much_used_which()}
-    meta={liveMeta}
-    actions={configurationLoaded && !setupAction ? connectAction : undefined} />
-
+<svelte:head><title>{title} · Stravia</title></svelte:head>
+<section bind:this={surface} class="flex min-w-0 flex-col gap-6">
   {#if isTauri}<DesktopPortNotice />{/if}
-
-  {#if configurationError}
-    <RequestFailure
-      title={m.overview_configuration_unavailable()}
-      message={localizeBackendErrorMessage(configurationError)}
-      retry={retryConfiguration}
-      retrying={providersQuery.isFetching || modelsQuery.isFetching || apiKeysQuery.isFetching} />
-  {:else if !configurationLoaded}
-    <Card.Root aria-label={m.overview_loading_configuration()}>
-      <Card.Header>
-        <Skeleton class="h-5 w-36" />
-        <Skeleton class="h-4 w-full max-w-xl" />
-      </Card.Header>
-    </Card.Root>
-  {/if}
-
-  {#if configurationLoaded && setupAction}
-    <Card.Root role="region" aria-labelledby="overview-next-action-title">
-      <Card.Header>
-        <Card.Title id="overview-next-action-title">{setupAction.title}</Card.Title>
-        <Card.Description>{setupAction.description}</Card.Description>
-        <Card.Action><Button href={setupAction.href}>{setupAction.label}</Button></Card.Action>
-      </Card.Header>
-    </Card.Root>
-  {/if}
-
-  <RouteSpine
-    apiKeyCount={apiKeysQuery.data?.length}
-    modelCount={modelsQuery.data?.length}
-    {enabledModelCount}
-    providerCount={providersQuery.data?.length}
-    enabledProviderCount={enabledProviders?.length}
-    currentPath="/" />
-
-  {#if overviewQuery.isPending && overview === undefined}
-    <MetricStrip loading loadingLabel={m.overview_loading_overview_metrics()} placeholderCount={7} />
-    <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <Skeleton class="h-80 min-[1280px]:col-span-7" />
-      <Skeleton class="h-80 min-[1280px]:col-span-5" />
+  <header class="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
+    <div class="min-w-0 flex-1"><h1 class="font-structural text-[26px] font-semibold break-words sm:text-[30px]">{snapshot.missingConversation ? m.console_chat_missing() : title}</h1>
+      {#if conversation}<p class="mt-2 text-sm text-muted-foreground">{m.console_chat_key()}: <span class="text-foreground">{conversation.apiKeyName}</span> <span class="text-xs">{m.console_chat_key_locked()}</span></p>{/if}
     </div>
-  {:else if overviewQuery.isError && overview === undefined}
-    <RequestFailure
-      title={m.overview_overview_unavailable()}
-      message={localizeBackendErrorMessage(overviewQuery.error)}
-      retry={() => overviewQuery.refetch()}
-      retrying={overviewQuery.isFetching} />
-  {:else}
-    {#if overviewQuery.isError}
-      <RequestFailure
-        title={m.overview_refresh_failed()}
-        message={localizeBackendErrorMessage(overviewQuery.error)}
-        retry={() => overviewQuery.refetch()}
-        retrying={overviewQuery.isFetching} />
-    {/if}
-    <MetricStrip {metrics} label={m.common_usage_summary()} />
-
-    {#if hasTraffic}
-      <div class="grid gap-6 min-[1280px]:grid-cols-12">
-        <section class="route-section min-[1280px]:col-span-7" aria-labelledby="request-volume-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="request-volume-title" class="route-section-title">{m.overview_request_volume()}</h2>
-              <p class="route-section-description">
-                {m.overview_requests_errors_during_last_24_hours()}
-              </p>
-            </div>
-            <span class="font-technical text-xs text-muted-foreground tabular-nums">24h</span>
-          </div>
-          {#if requestChart.length > 0}
-            <div class="h-72 min-w-0" aria-label={m.overview_request_volume_chart()}>
-              <BarChart
-                data={requestChart}
-                x={(item: (typeof requestChart)[number]) => item.hour}
-                series={[
-                  { key: 'requests', label: m.common_requests_label(), color: 'var(--chart-1)' },
-                  { key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' },
-                ]}
-                seriesLayout="group"
-                props={{ xAxis: { ticks: 4 } }} />
-            </div>
-          {:else}
-            <Empty.Root class="h-72 border-y"
-              ><Empty.Header
-                ><Empty.Description>{m.overview_no_request_traffic_has_recorded()}</Empty.Description></Empty.Header
-              ></Empty.Root>
-          {/if}
-        </section>
-
-        <section class="route-section min-[1280px]:col-span-5" aria-labelledby="latency-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="latency-title" class="route-section-title">{m.common_latency()}</h2>
-              <p class="route-section-description">
-                {m.overview_average_first_token_end_end_latency_over_same_period()}
-              </p>
-            </div>
-            <div class="flex shrink-0 flex-col items-end gap-2">
-              <StatusIndicator
-                compact
-                label={statusQuery.data?.status === 'running'
-                  ? m.common_stravia_running()
-                  : m.overview_status_unavailable()}
-                tone={statusQuery.data?.status === 'running' ? 'healthy' : 'neutral'} />
-              <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
-                <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
-                <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
-                <span class="text-muted-foreground">{m.logs_duration_short()}</span>
-                <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
-              </div>
-            </div>
-          </div>
-          {#if latencyChart.length > 0}
-            <div class="h-72 min-w-0" aria-label={m.overview_latency_chart()}>
-              <LineChart
-                data={latencyChart}
-                x={(item: (typeof latencyChart)[number]) => item.bucket}
-                series={[
-                  { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
-                  { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
-                ]}
-                props={{
-                  xAxis: { ticks: 4, format: (value: Date) => formatTime(value) },
-                  tooltip: { header: { format: (value: Date) => formatTime(value) } },
-                }} />
-            </div>
-          {:else}
-            <Empty.Root class="h-72 border-y"
-              ><Empty.Header
-                ><Empty.Description>{m.overview_latency_appears_first_request()}</Empty.Description></Empty.Header
-              ></Empty.Root>
-          {/if}
-        </section>
-      </div>
-    {:else}
-      <Empty.Root class="border-y py-8">
-        <Empty.Header>
-          <Empty.Title>{m.overview_no_traffic_title()}</Empty.Title>
-          <Empty.Description>{m.overview_send_first_request()}</Empty.Description>
-        </Empty.Header>
-      </Empty.Root>
-    {/if}
-
-    {#if hasTraffic}
-      <div class="grid gap-6 min-[1280px]:grid-cols-12">
-        <section class="route-section min-[1280px]:col-span-7" aria-labelledby="model-ranking-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="model-ranking-title" class="route-section-title">
-                {m.overview_most_used_models()}
-              </h2>
-              <p class="route-section-description">
-                {m.overview_client_model_names_most_requests()}
-              </p>
-            </div>
-          </div>
-          <div class="route-desktop-table">
-            <DataTable
-              data={modelStats.slice(0, 6)}
-              columns={modelStatsColumns}
-              labels={tableLabels}
-              getRowId={getModelStatsRowId}
-              ariaLabel={m.overview_most_used_models()}
-              empty={modelStatsEmpty}
-              stripedRows />
-          </div>
-          <div class="route-mobile-list">
-            {#if modelStats.length === 0}
-              <Empty.Root class="border-y py-6"
-                ><Empty.Header><Empty.Description>{m.overview_no_model_traffic_yet()}</Empty.Description></Empty.Header
-                ></Empty.Root>
-            {:else}
-              {#each modelStats.slice(0, 6) as model (model.model)}
-                <div class="route-mobile-row">
-                  <div class="min-w-0">
-                    <p class="font-technical truncate font-medium">{model.model}</p>
-                    <p class="mt-1 text-xs text-muted-foreground">
-                      {m.observation_usage_input()}
-                      {formatCompactCount(model.total_input_tokens)} · {m.observation_usage_output()}
-                      {formatCompactCount(model.total_output_tokens)} ·
-                      {formatDuration(model.avg_duration_ms)}
-                    </p>
-                  </div>
-                  <p class="font-technical tabular-nums">{formatCompactCount(model.request_count)}</p>
-                </div>
-              {/each}
-            {/if}
-          </div>
-        </section>
-
-        <section class="route-section min-[1280px]:col-span-5" aria-labelledby="provider-ranking-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="provider-ranking-title" class="route-section-title">
-                {m.overview_model_service_performance()}
-              </h2>
-              <p class="route-section-description">
-                {m.overview_provider_metrics_summary()}
-              </p>
-            </div>
-          </div>
-          <div class="route-desktop-table">
-            <DataTable
-              data={providerStats.slice(0, 6)}
-              columns={providerStatsColumns}
-              labels={tableLabels}
-              getRowId={getProviderStatsRowId}
-              ariaLabel={m.overview_model_service_performance()}
-              empty={providerStatsEmpty}
-              stripedRows />
-          </div>
-          <div class="route-mobile-list">
-            {#if providerStats.length === 0}
-              <Empty.Root class="border-y py-6"
-                ><Empty.Header
-                  ><Empty.Description>{m.overview_no_model_service_traffic_yet()}</Empty.Description></Empty.Header
-                ></Empty.Root>
-            {:else}
-              {#each providerStats.slice(0, 6) as provider (provider.provider)}
-                <div class="route-mobile-row">
-                  <div class="min-w-0">
-                    <p class="truncate font-medium">{provider.provider}</p>
-                    <p class="mt-1 text-xs text-muted-foreground">
-                      {formatDuration(provider.avg_duration_ms)} ·
-                      <span class="text-destructive">{provider.error_count} {m.common_errors()}</span>
-                    </p>
-                  </div>
-                  <p class="font-technical tabular-nums">{formatCompactCount(provider.request_count)}</p>
-                </div>
-              {/each}
-            {/if}
-          </div>
-        </section>
-      </div>
-    {/if}
+    <div class="flex flex-wrap gap-1"><Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_new()}</Button><ConsoleChatActions {conversation} /></div>
+  </header>
+  {#if snapshot.storageError}<p role="alert" class="text-destructive">{m.console_chat_storage_error()} {localizeBackendErrorMessage(snapshot.storageError)}</p>{/if}
+  {#if snapshot.loadError || snapshot.catalogError}
+    <div role="alert" class="flex flex-col items-start gap-3"><p class="text-destructive">{localizeBackendErrorMessage(snapshot.loadError ?? snapshot.catalogError)}</p><Button variant="outline" onclick={() => void command(() => snapshot.loadError ? chat.start() : chat.refreshCatalog())}>{m.console_chat_retry()}</Button></div>
   {/if}
-</div>
+  {#if snapshot.loading}<div role="status" aria-label={m.console_chat_loading()} class="flex flex-col gap-4"><Skeleton class="h-8 w-48" /><Skeleton class="h-32 w-full" /></div>
+  {:else if snapshot.missingConversation}
+    <Empty.Root><Empty.Header><Empty.Description>{m.console_chat_missing_description()}</Empty.Description></Empty.Header><Empty.Content><Button onclick={() => void newConversation()}>{m.console_chat_start_new()}</Button></Empty.Content></Empty.Root>
+  {:else}
+    {#if conversation?.messages.length}
+      <div class="mx-auto flex w-full max-w-4xl flex-col gap-6">
+        {#each conversation.messages as message (message.id)}
+          {#if message.role === 'user'}
+            <article aria-label={m.console_chat_user_message()} class="ms-auto max-w-full rounded-lg border bg-muted px-4 py-3 whitespace-pre-wrap break-words">{consoleVisibleText(message.text)}</article>
+          {:else}
+            {@const content = consoleAssistantContent(message)}
+            {@const usage = message.usage as ConsoleTokenUsage | undefined}
+            {@const live = generation && message === lastMessage}
+            {@const thinking = consoleVisibleText(live ? generation.summary || generation.reasoning : content.thinking)}
+            <article aria-label={m.console_chat_assistant_response()} class="flex min-w-0 flex-col gap-3">
+              {#if thinking}<details class="rounded-lg border px-3 py-2"><summary class="min-h-10 cursor-pointer py-2 text-sm text-muted-foreground">{m.console_chat_reasoning()}</summary><StreamingMarkdown text={thinking} active={Boolean(live)} minimumHeadingLevel={2} /></details>{/if}
+              {#if live}<StreamingMarkdown text={consoleVisibleText(generation.text)} active minimumHeadingLevel={2} />
+              {:else}<MarkdownContent text={consoleVisibleText(content.text)} minimumHeadingLevel={2} />{/if}
+              {#if message.status === 'failed' && !live}<div role="alert" class="text-destructive">{localizeBackendErrorMessage(message.error ?? m.console_chat_request_failed())}{#if message === lastMessage && !snapshot.retryModelAvailable}<p class="mt-1 text-sm">{m.console_chat_model_recovery()}</p>{/if}</div>{/if}
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span class="font-technical break-all">{message.routeId}</span><span>{m.console_chat_effort()}: {message.thinkingLevel === 'default' ? m.console_chat_default() : message.thinkingLevel}</span><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
+                {#if usage?.inputTokens !== undefined}<span>{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span>{/if}
+                {#if usage?.outputTokens !== undefined}<span>{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span>{/if}
+                {#if live}<span role="status">{m.console_chat_generating()}</span>{:else if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span>{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span>{:else if message.status === 'completed'}<span role="status">{m.console_chat_completed()}</span>{/if}
+              </div>
+              <div class="flex flex-wrap gap-1"><Button variant="ghost" onclick={() => void copy(live ? generation.text : content.text)}>{m.console_chat_copy()}</Button>
+                {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
+                  {#if message.status === 'failed'}<Button variant="outline" disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)} onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button>{/if}
+                  <Button variant="ghost" disabled={!snapshot.selectedModelId || Boolean(guide) || Boolean(snapshot.catalogError)} onclick={() => void command(() => chat.regenerate())}>{m.console_chat_regenerate()}</Button>
+                {/if}
+              </div>
+            </article>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+    {#if snapshot.readOnlyReason}
+      <Alert.Root role="status" class="mx-auto max-w-4xl"><Alert.Title>{m.console_chat_read_only()}</Alert.Title><Alert.Description><p>{readOnlyText}</p><Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_other_key()}</Button></Alert.Description></Alert.Root>
+    {:else if guide}
+      <Empty.Root class="mx-auto w-full max-w-xl border" aria-labelledby="chat-setup-title"><Empty.Header><Empty.Title><h2 id="chat-setup-title">{guide.title}</h2></Empty.Title><Empty.Description>{guide.description}</Empty.Description></Empty.Header><Empty.Content><Button href={resolve(guide.href)}>{guide.label}</Button><Button variant="ghost" onclick={() => void command(() => chat.refreshCatalog())}>{m.console_chat_refresh()}</Button></Empty.Content></Empty.Root>
+    {:else if !snapshot.loadError && !snapshot.catalogError}
+      <form class={['mx-auto flex w-full max-w-4xl flex-col gap-3 rounded-xl border bg-card p-4', !conversation ? 'my-8 sm:my-16' : 'sticky bottom-0']} onsubmit={(event) => { event.preventDefault(); void send() }}>
+        <Field.FieldGroup>
+        <div class={['grid min-w-0 gap-3', conversation ? 'sm:grid-cols-2' : 'sm:grid-cols-3']}>
+          {#if !conversation}
+            <Field.Field orientation="vertical">
+              <Field.FieldLabel for="chat-key">{m.console_chat_key()}</Field.FieldLabel>
+              <Select.Root type="single" value={snapshot.selectedKeyId ?? ''} onValueChange={(value: string) => chat.selectKey(value || null)}>
+                <Select.Trigger id="chat-key" class="w-full">{keyOptions.find((option) => option.value === snapshot.selectedKeyId)?.label ?? m.console_chat_choose_key()}</Select.Trigger>
+                <Select.Content><Select.Group>{#each keyOptions as option (option.value)}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Group></Select.Content>
+              </Select.Root>
+            </Field.Field>
+          {/if}
+          <Field.Field orientation="vertical">
+            <Field.FieldLabel for="chat-model">{m.console_chat_model()}</Field.FieldLabel>
+            <Select.Root type="single" value={snapshot.selectedModelId ?? ''} onValueChange={(value: string) => chat.selectModel(value || null)}>
+              <Select.Trigger id="chat-model" class="w-full">{modelOptions.find((option) => option.value === snapshot.selectedModelId)?.label ?? m.console_chat_choose_model()}</Select.Trigger>
+              <Select.Content><Select.Group>{#each modelOptions as option (option.value)}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Group></Select.Content>
+            </Select.Root>
+          </Field.Field>
+          <Field.Field orientation="vertical">
+            <Field.FieldLabel for="chat-thinking">{m.console_chat_effort()}</Field.FieldLabel>
+            <Select.Root type="single" value={snapshot.thinkingSelection} onValueChange={(value: string) => chat.selectThinking(value as ConsoleThinkingSelection)}>
+              <Select.Trigger id="chat-thinking" class="w-full">{effortOptions.find((option) => option.value === snapshot.thinkingSelection)?.label}</Select.Trigger>
+              <Select.Content><Select.Group>{#each effortOptions as option (option.value)}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Group></Select.Content>
+            </Select.Root>
+          </Field.Field>
+        </div>
+        {#if !snapshot.selectedKeyId || !snapshot.selectedModelId}<p class="text-sm text-muted-foreground">{snapshot.selectedKeyId ? m.console_chat_choose_model() : m.console_chat_choose_key()}</p>{/if}
+        <Field.Field orientation="vertical" data-disabled={Boolean(generation)}>
+          <Field.FieldLabel for="chat-message">{m.console_chat_message()}</Field.FieldLabel>
+          <Textarea bind:ref={composer} id="chat-message" bind:value={text} rows={3} class="resize-y" disabled={Boolean(generation)} placeholder={m.console_chat_message_placeholder()} onkeydown={(event: KeyboardEvent) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); void send() } }} />
+        </Field.Field>
+        </Field.FieldGroup>
+        <div class="flex flex-wrap items-center justify-between gap-3"><p class="text-xs text-muted-foreground">{m.console_chat_send_notice()}</p>{#if generation}<Button type="button" variant="outline" onclick={() => void command(() => chat.stop())}>{m.console_chat_stop()}</Button>{:else}<Button type="submit" disabled={!text.trim() || !snapshot.selectedKeyId || !snapshot.selectedModelId}>{m.console_chat_send()}</Button>{/if}</div>
+      </form>
+    {/if}
+    {#if generation && (guide || snapshot.catalogError || snapshot.readOnlyReason)}<Button variant="outline" onclick={() => void command(() => chat.stop())}>{m.console_chat_stop()}</Button>{/if}
+    {#if !follow && conversation}<Button class="sticky bottom-4 mx-auto" variant="outline" onclick={() => { follow = true; if (scroller) scroller.scrollTop = scroller.scrollHeight }}>{m.console_chat_latest()}</Button>{/if}
+  {/if}
+</section>

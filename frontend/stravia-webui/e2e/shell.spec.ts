@@ -105,7 +105,7 @@ test('mobile navigation closes on Escape and selection and restores its trigger'
   await trigger.click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('link', { name: 'Overview', exact: true })).toBeFocused()
+  await expect(dialog.getByRole('link', { name: 'Chat', exact: true })).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   await expect(trigger).toBeFocused()

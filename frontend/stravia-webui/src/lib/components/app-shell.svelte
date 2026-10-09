@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { resolve } from '$app/paths'
+import { goto } from '$app/navigation'
 import { page } from '$app/state'
 import { createQuery } from '@tanstack/svelte-query'
 import ChartNoAxesCombinedIcon from '@lucide/svelte/icons/chart-no-axes-combined'
@@ -9,7 +10,7 @@ import GaugeIcon from '@lucide/svelte/icons/gauge'
 import KeyRoundIcon from '@lucide/svelte/icons/key-round'
 import ImagesIcon from '@lucide/svelte/icons/images'
 import ImagePlusIcon from '@lucide/svelte/icons/image-plus'
-import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard'
+import MessageSquareIcon from '@lucide/svelte/icons/message-square'
 import ListTreeIcon from '@lucide/svelte/icons/list-tree'
 import PanelLeftIcon from '@lucide/svelte/icons/panel-left'
 import PackageOpenIcon from '@lucide/svelte/icons/package-open'
@@ -25,6 +26,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin, isTauri } from '$lib/admin-client'
 import { logout } from '$lib/auth'
+import { getConsoleChat } from '$lib/console-chat.svelte'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { createWindowChrome } from '$lib/window-chrome'
 import BrandMark from '$lib/components/brand-mark.svelte'
@@ -37,6 +39,7 @@ import * as Sidebar from '$lib/components/ui/sidebar'
 import * as Breadcrumb from '$lib/components/ui/breadcrumb'
 
 let { children }: { children: Snippet } = $props()
+const chat = getConsoleChat()
 
 const shellMode = $derived(
   page.url.pathname === '/login' ||
@@ -89,7 +92,6 @@ const navigationGroups = [
   {
     label: m.app_shell_nav_setup,
     items: [
-      { href: '/', label: m.app_shell_nav_overview, icon: LayoutDashboardIcon },
       { href: '/providers', label: m.app_shell_nav_model_services, icon: PlugZapIcon },
       { href: '/models', label: m.app_shell_nav_models, icon: ListTreeIcon },
       { href: '/api-keys', label: m.app_shell_nav_api_keys, icon: KeyRoundIcon },
@@ -123,7 +125,7 @@ const navigationGroups = [
 ] as const
 
 type NavigationItem = (typeof navigationGroups)[number]['items'][number]
-type BreadcrumbItem = { label: string; href?: NavigationItem['href'] }
+type BreadcrumbItem = { label: string; href?: NavigationItem['href'] | '/' }
 
 const breadcrumbProvidersQuery = createQuery(() => ({
   queryKey: ['providers'],
@@ -131,6 +133,8 @@ const breadcrumbProvidersQuery = createQuery(() => ({
   enabled: Boolean(breadcrumbProviderId),
 }))
 const breadcrumbItems = $derived.by((): BreadcrumbItem[] => {
+  if (currentPath === '/') return [{ label: m.console_chat_chat() }]
+  if (currentPath === '/conversations') return [{ label: m.console_chat_chat(), href: '/' }, { label: m.console_chat_all() }]
   const navigationItem = findNavigationItem(currentPath)
   if (!navigationItem) return []
 
@@ -158,7 +162,7 @@ const breadcrumbItems = $derived.by((): BreadcrumbItem[] => {
 function findNavigationItem(pathname: string): NavigationItem | undefined {
   for (const group of navigationGroups) {
     for (const item of group.items) {
-      if (item.href === '/' ? pathname === '/' : pathname === item.href || pathname.startsWith(`${item.href}/`)) {
+      if (pathname === item.href || pathname.startsWith(`${item.href}/`)) {
         return item
       }
     }
@@ -178,7 +182,7 @@ function isCurrent(href: string): boolean {
 async function signOut(): Promise<void> {
   try {
     await logout()
-    window.location.assign(resolve('/login'))
+    await goto(resolve('/login'))
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   }
@@ -269,6 +273,39 @@ onMount(() => {
   <Sidebar.Content
     class={sidebarCollapsed && isDesktopNavigation ? 'navigation-scrollbar-compact' : 'navigation-scrollbar'}>
     <nav aria-label={m.app_shell_primary_navigation()}>
+      <Sidebar.Group>
+        <Sidebar.GroupContent>
+          <Sidebar.Menu>
+            <Sidebar.MenuItem>
+              <Sidebar.MenuButton isActive={currentPath === '/' || currentPath === '/conversations'} tooltipContent={m.console_chat_chat()}>
+                {#snippet child({ props })}
+                  <a {...props} href={resolve('/')} aria-label={m.console_chat_chat()} aria-current={currentPath === '/' && !page.url.searchParams.has('conversation') ? 'page' : undefined} onclick={() => navigationOpen = false}>
+                    <MessageSquareIcon /><span>{m.console_chat_chat()}</span>
+                  </a>
+                {/snippet}
+              </Sidebar.MenuButton>
+            </Sidebar.MenuItem>
+          </Sidebar.Menu>
+          {#if !sidebarCollapsed || !isDesktopNavigation}
+            <ul class="mt-1 flex flex-col gap-1 ps-3">
+              {#each chat.snapshot.conversations.slice(0, 5) as conversation (conversation.id)}
+                <li>
+                  <a class={['flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-sm hover:bg-sidebar-accent', currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '']}
+                    href={resolve(`/?conversation=${encodeURIComponent(conversation.id)}`)}
+                    aria-current={currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id ? 'page' : undefined}
+                    onclick={() => navigationOpen = false}>
+                    <span class="min-w-0 flex-1 truncate">{conversation.title}</span>
+                    {#if chat.snapshot.generations[conversation.id]}<span role="status" class="text-xs" aria-label={m.console_chat_generating()}>●</span>{/if}
+                  </a>
+                </li>
+              {/each}
+              {#if chat.snapshot.conversations.length > 5}
+                <li><a href={resolve('/conversations')} class="flex min-h-10 items-center rounded-md px-3 text-sm hover:bg-sidebar-accent" onclick={() => navigationOpen = false}>{m.console_chat_all()}</a></li>
+              {/if}
+            </ul>
+          {/if}
+        </Sidebar.GroupContent>
+      </Sidebar.Group>
       {#each navigationGroups as group (group.label)}
         <Sidebar.Group>
           <Sidebar.GroupLabel>{group.label()}</Sidebar.GroupLabel>

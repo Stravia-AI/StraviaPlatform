@@ -2,11 +2,14 @@
 import DOMPurify from 'dompurify'
 import { MARKDOWN_SANITIZE, markdownBlocks } from '$lib/markdown'
 
-let { text }: { text: string } = $props()
+let { text, minimumHeadingLevel = 1 }: { text: string; minimumHeadingLevel?: 1 | 2 } = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
 const blocks = $derived.by(() =>
-  markdownBlocks(text).map((block) => ({ ...block, html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE) })),
+  markdownBlocks(text, minimumHeadingLevel).map((block) => ({
+    ...block,
+    html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE),
+  })),
 )
 </script>
 

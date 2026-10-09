@@ -35,7 +35,7 @@ for (const clientLocale of ['zh-CN', 'zh-SG', 'zh-Hans']) {
     await prepareLocalePage(page, [clientLocale, 'en-US'])
     await page.goto('/')
 
-    await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '新对话', exact: true })).toBeVisible()
     await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-locale'))).toBe('zh-CN')
   })
@@ -46,7 +46,7 @@ for (const clientLocale of ['zh-TW', 'zh-HK', 'zh-Hant']) {
     await prepareLocalePage(page, [clientLocale])
     await page.goto('/')
 
-    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible()
     await expect(page.locator('html')).toHaveAttribute('lang', 'en-US')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-locale'))).toBe('en-US')
   })
@@ -56,7 +56,7 @@ test('saved language takes precedence over the client locale', async ({ page }) 
   await prepareLocalePage(page, ['zh-CN'], 'en-US')
   await page.goto('/')
 
-  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible()
   await expect(page.locator('html')).toHaveAttribute('lang', 'en-US')
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-locale'))).toBe('en-US')
 })
@@ -181,7 +181,7 @@ test('localized Request Records keep one local timestamp across canvas and detai
 test('known backend errors localize while unknown diagnostics remain visible', async ({ page }) => {
   await prepareLocalePage(page, ['zh-CN'], 'zh-CN')
   let error = JSON.stringify({ code: 'AUTH_SESSION_REPLACED', message: 'internal replacement diagnostic' })
-  await page.route('**/api/v1/stats/overview**', async (route) => {
+  await page.route('**/api/v1/providers', async (route) => {
     await route.fulfill({ status: 400, json: { error } })
   })
   await page.goto('/')

@@ -409,7 +409,7 @@ function retryAll(): void {
           {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
         {:else if hasTraffic && latencyChart.length > 0}<div
             class="h-40 min-w-0"
-            aria-label={m.overview_latency_chart()}>
+            aria-label={m.stats_latency_chart()}>
             <LineChart
               data={latencyChart}
               x={(item: (typeof latencyChart)[number]) => item.bucket}

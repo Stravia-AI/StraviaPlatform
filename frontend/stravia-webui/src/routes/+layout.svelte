@@ -20,6 +20,8 @@ import { Button } from '$lib/components/ui/button'
 import { Toaster } from '$lib/components/ui/sonner'
 import * as Tooltip from '$lib/components/ui/tooltip'
 import { setConnectSetup } from '$lib/connect-setup'
+import { createConsoleChat, setConsoleChat } from '$lib/console-chat.svelte'
+import { apiKeyExpiryTime } from '$lib/connect'
 import type { ConnectSetup } from '$lib/connect-setup'
 import { connectDesktopStartup, desktopFrontendFailure, initialDesktopStartupState } from '$lib/desktop-startup'
 import type { DesktopStartupState } from '$lib/desktop-startup'
@@ -36,15 +38,37 @@ import {
 let { children }: { children: Snippet } = $props()
 const connectSetup = $state<ConnectSetup>({ draft: undefined, createKey: false })
 setConnectSetup(connectSetup)
+const chat = createConsoleChat()
+setConsoleChat(chat)
 const isSetupResource = $derived(/^\/(providers|models|api-keys)(\/|$)/.test(page.url.pathname))
-afterNavigate(() => {
+afterNavigate(({ from }) => {
   if (!isSetupResource && page.url.pathname !== resolve('/connect')) {
     connectSetup.draft = undefined
     connectSetup.createKey = false
   }
+  if (
+    authReady &&
+    page.url.pathname !== '/login' &&
+    page.url.pathname !== '/setup' &&
+    from &&
+    /^\/(login|providers|models|api-keys)(\/|$)/.test(from.url.pathname)
+  ) {
+    void chat.start().then(() => chat.refreshCatalog())
+  }
 })
 
 let authReady = $state(false)
+$effect(() => {
+  if (authReady && page.url.pathname !== '/login' && page.url.pathname !== '/setup') void chat.start()
+})
+$effect(() => {
+  if (!browser || !authReady) return
+  const expiry = Math.min(...chat.snapshot.keyCandidates.map((key) => apiKeyExpiryTime(key.expires_at)))
+  if (!Number.isFinite(expiry)) return
+  // 在已知有效期边界重新派生，不轮询目录；远期 Key 遵守浏览器定时器上限。
+  const timer = window.setTimeout(() => chat.refreshEligibility(), Math.min(Math.max(0, expiry - Date.now()), 2_147_483_647))
+  return () => window.clearTimeout(timer)
+})
 let desktopStartup = $state.raw<DesktopStartupState>(initialDesktopStartupState)
 let serverStartup = $state.raw<ServerStartupState>(initialServerStartupState)
 let serverConnectionError = $state(false)
@@ -136,6 +160,7 @@ onMount(() => {
     if (desktop && desktopStartup.status !== 'ready') return
     authReady = true
 
+    if (window.location.pathname === '/login' || window.location.pathname === '/setup') return
     try {
       if (import.meta.env.MODE === 'desktop-e2e') await updates.load()
       else await updates.automaticCheck()
@@ -198,6 +223,7 @@ onMount(() => {
 })
 </script>
 
+<svelte:window onpagehide={() => void chat.stopAll()} onbeforeunload={() => void chat.stopAll()} />
 <ModeWatcher defaultMode="system" modeStorageKey="stravia-theme" />
 {#if isTauri && (!authReady || desktopStartup.status !== 'ready')}
   <DesktopStartup state={desktopSurfaceState} />
