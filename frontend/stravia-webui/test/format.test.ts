@@ -6,7 +6,6 @@ import {
   formatCompactCount,
   formatDate,
   formatDuration,
-  formatDurationSeconds,
   formatNumber,
   formatPercent,
   formatPixels,
@@ -61,8 +60,6 @@ describe('stable engineering values', () => {
   test('formats durations, throughput, bytes, and pixels with standard units', () => {
     expect(formatDuration(999, EN)).toBe('999 ms')
     expect(formatDuration(1_500, ZH)).toBe('1.5 s')
-    expect(formatDurationSeconds(436, ZH)).toBe('0.44 s')
-    expect(formatDurationSeconds(13_030, EN)).toBe('13.03 s')
     expect(formatTps(42.25, EN)).toBe('42.3 tok/s')
     expect(formatBytes(1_536, ZH)).toBe('1.5 KiB')
     expect(formatBytes(1_572_864, EN)).toBe('1.5 MiB')

@@ -2,23 +2,18 @@
 import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
-import { BarChart, LineChart } from 'layerchart'
+import { BarChart } from 'layerchart'
 
 import { admin, isTauri } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { eligibleConnectKeys } from '$lib/connect'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import {
-  formatCompactCount,
-  formatDuration,
-  formatDurationSeconds,
-  formatNumber,
-  formatPercent,
-  formatTime,
-} from '$lib/format'
+import { formatCompactCount, formatDuration, formatNumber, formatPercent, formatTime } from '$lib/format'
 import { buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
 import type { ModelStats, ProviderStats } from '$lib/types'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
+import LatencySpeedChart from '$lib/components/latency-speed-chart.svelte'
+import LatencySpeedSummary from '$lib/components/latency-speed-summary.svelte'
 import MetricStrip from '$lib/components/metric-strip.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import RouteSpine from '$lib/components/route-spine.svelte'
@@ -33,6 +28,12 @@ const overviewQuery = createQuery(() => ({
   queryKey: ['stats-overview'],
   queryFn: () => admin.stats.overview(),
   refetchInterval: 10_000,
+}))
+// 图表汇总与 24h 曲线共用窗口；其余概览指标保留原有全时段口径。
+const chartOverviewQuery = createQuery(() => ({
+  queryKey: ['stats-overview', 24],
+  queryFn: () => admin.stats.overview(24),
+  refetchInterval: 30_000,
 }))
 const seriesQuery = createQuery(() => ({
   queryKey: ['stats-series', 24, 3_600],
@@ -190,6 +191,7 @@ const requestChart = $derived(
   })),
 )
 const latencyChart = $derived(buildLatencyChart(seriesQuery.data ?? [], 3_600_000))
+const hasLatencyMetrics = $derived(latencyChart.some((point) => point.firstToken != null || point.outputTps != null))
 const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
 const dash = '–'
 const metrics = $derived([
@@ -347,9 +349,9 @@ function retryConfiguration(): void {
         <section class="route-section min-[1280px]:col-span-5" aria-labelledby="latency-title">
           <div class="route-section-header">
             <div>
-              <h2 id="latency-title" class="route-section-title">{m.common_latency()}</h2>
+              <h2 id="latency-title" class="route-section-title">{m.stats_latency_speed()}</h2>
               <p class="route-section-description">
-                {m.overview_average_first_token_end_end_latency_over_same_period()}
+                {m.stats_latency_speed_description()}
               </p>
             </div>
             <div class="flex shrink-0 flex-col items-end gap-2">
@@ -359,32 +361,32 @@ function retryConfiguration(): void {
                   ? m.common_stravia_running()
                   : m.overview_status_unavailable()}
                 tone={statusQuery.data?.status === 'running' ? 'healthy' : 'neutral'} />
-              <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
-                <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
-                <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
-                <span class="text-muted-foreground">{m.logs_duration_short()}</span>
-                <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
-              </div>
+              <LatencySpeedSummary overview={chartOverviewQuery.data} />
             </div>
           </div>
-          {#if latencyChart.length > 0}
-            <div class="h-72 min-w-0" aria-label={m.overview_latency_chart()}>
-              <LineChart
-                data={latencyChart}
-                x={(item: (typeof latencyChart)[number]) => item.bucket}
-                series={[
-                  { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
-                  { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
-                ]}
-                props={{
-                  xAxis: { ticks: 4, format: (value: Date) => formatTime(value) },
-                  tooltip: { header: { format: (value: Date) => formatTime(value) } },
-                }} />
+          {#if chartOverviewQuery.error}
+            <RequestFailure
+              title={m.overview_refresh_failed()}
+              message={localizeBackendErrorMessage(chartOverviewQuery.error)}
+              retry={() => chartOverviewQuery.refetch()}
+              retrying={chartOverviewQuery.isFetching} />
+          {/if}
+          {#if seriesQuery.error}
+            <RequestFailure
+              title={m.overview_refresh_failed()}
+              message={localizeBackendErrorMessage(seriesQuery.error)}
+              retry={() => seriesQuery.refetch()}
+              retrying={seriesQuery.isFetching} />
+          {/if}
+          {#if seriesQuery.isPending}
+            <Skeleton class="h-72" />
+          {:else if hasLatencyMetrics}
+            <div class="h-72 min-w-0">
+              <LatencySpeedChart data={latencyChart} />
             </div>
-          {:else}
+          {:else if !seriesQuery.error}
             <Empty.Root class="h-72 border-y"
-              ><Empty.Header
-                ><Empty.Description>{m.overview_latency_appears_first_request()}</Empty.Description></Empty.Header
+              ><Empty.Header><Empty.Description>{m.stats_no_latency_speed_data()}</Empty.Description></Empty.Header
               ></Empty.Root>
           {/if}
         </section>

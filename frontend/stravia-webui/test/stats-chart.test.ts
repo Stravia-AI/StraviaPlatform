@@ -10,18 +10,18 @@ describe('latency chart', () => {
     const start = Date.UTC(2026, 8, 2, 18)
     const points = buildLatencyChart(
       [
-        { bucket_start: start, avg_first_token_ms: 1_000, avg_duration_ms: 5_000 },
-        { bucket_start: start + 2 * HOUR_MS, avg_first_token_ms: 2_000, avg_duration_ms: 6_000 },
-        { bucket_start: start + 3 * HOUR_MS, avg_first_token_ms: null, avg_duration_ms: 7_000 },
+        { bucket_start: start, avg_first_token_ms: 1_000, avg_output_tps: 50 },
+        { bucket_start: start + 2 * HOUR_MS, avg_first_token_ms: 2_000, avg_output_tps: null },
+        { bucket_start: start + 3 * HOUR_MS, avg_first_token_ms: null, avg_output_tps: 0 },
       ],
       HOUR_MS,
     )
 
     expect(points).toEqual([
-      { bucket: new Date(start), firstToken: 1, duration: 5 },
-      { bucket: new Date(start + HOUR_MS), firstToken: null, duration: null },
-      { bucket: new Date(start + 2 * HOUR_MS), firstToken: 2, duration: 6 },
-      { bucket: new Date(start + 3 * HOUR_MS), firstToken: null, duration: 7 },
+      { bucket: new Date(start), firstToken: 1, outputTps: 50 },
+      { bucket: new Date(start + HOUR_MS), firstToken: null, outputTps: null },
+      { bucket: new Date(start + 2 * HOUR_MS), firstToken: 2, outputTps: null },
+      { bucket: new Date(start + 3 * HOUR_MS), firstToken: null, outputTps: 0 },
     ])
   })
 
@@ -33,7 +33,7 @@ describe('latency chart', () => {
       Array.from({ length: 25 }, (_, i) => ({
         bucket_start: start + i * HOUR_MS,
         avg_first_token_ms: 1_000,
-        avg_duration_ms: 2_000,
+        avg_output_tps: 20,
       })),
       HOUR_MS,
     )

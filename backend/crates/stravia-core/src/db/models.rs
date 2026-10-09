@@ -837,6 +837,9 @@ pub struct StatsOverview {
     pub total_reasoning_tokens: Option<i64>,
     pub avg_duration_ms: Option<f64>,
     pub avg_first_token_ms: Option<f64>,
+    /// 成功 attempt 的 Σ输出 Token / Σ完整耗时（tok/s），包含首字等待。
+    /// 无成功样本、任一输出或耗时未知、或总耗时不为正时为 null。
+    pub avg_output_tps: Option<f64>,
     /// 与「失败的请求」相同的最终失败请求数，不包含恢复成功、取消或中断。
     pub error_count: i64,
 }
@@ -858,6 +861,8 @@ pub struct StatsSeries {
     pub total_reasoning_tokens: Option<i64>,
     pub avg_duration_ms: Option<f64>,
     pub avg_first_token_ms: Option<f64>,
+    /// 本桶成功 attempt 的加权输出速率（tok/s）；完整性规则与 overview 相同。
+    pub avg_output_tps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

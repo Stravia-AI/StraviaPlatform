@@ -1,6 +1,6 @@
 import type { StatsSeries } from '$lib/types'
 
-type LatencyStats = Pick<StatsSeries, 'bucket_start' | 'avg_first_token_ms' | 'avg_duration_ms'>
+type LatencyStats = Pick<StatsSeries, 'bucket_start' | 'avg_first_token_ms' | 'avg_output_tps'>
 type TokenStats = Pick<
   StatsSeries,
   'bucket_start' | 'total_input_tokens' | 'total_output_tokens' | 'total_cache_read_tokens' | 'total_cache_write_tokens'
@@ -18,7 +18,7 @@ export interface LatencyChartPoint {
   /** Bucket 起点的真实时刻，作为时间轴坐标；显示文案由轴刻度与 tooltip 按需本地化格式化。 */
   bucket: Date
   firstToken: number | null
-  duration: number | null
+  outputTps: number | null
 }
 
 export function buildLatencyChart(rows: readonly LatencyStats[], bucketMs: number): LatencyChartPoint[] {
@@ -29,13 +29,13 @@ export function buildLatencyChart(rows: readonly LatencyStats[], bucketMs: numbe
     const start = row.bucket_start
     if (previousStart != null && Number.isFinite(start)) {
       for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
-        points.push({ bucket: new Date(missing), firstToken: null, duration: null })
+        points.push({ bucket: new Date(missing), firstToken: null, outputTps: null })
       }
     }
     points.push({
       bucket: new Date(start),
       firstToken: row.avg_first_token_ms == null ? null : row.avg_first_token_ms / 1000,
-      duration: row.avg_duration_ms == null ? null : row.avg_duration_ms / 1000,
+      outputTps: row.avg_output_tps,
     })
     previousStart = Number.isFinite(start) ? start : undefined
   }

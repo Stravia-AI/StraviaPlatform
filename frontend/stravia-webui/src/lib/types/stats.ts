@@ -12,6 +12,8 @@ export interface StatsOverview {
   total_reasoning_tokens: number | null
   avg_duration_ms: number | null
   avg_first_token_ms: number | null
+  /** 成功 Target attempts 的总输出 / 总完整耗时（tok/s）；任一样本缺输出或耗时为 null。 */
+  avg_output_tps: number | null
   error_count: number
 }
 
@@ -27,6 +29,8 @@ export interface StatsSeries {
   total_reasoning_tokens: number | null
   avg_duration_ms: number | null
   avg_first_token_ms: number | null
+  /** 与 overview 相同的完整覆盖口径，仅统计该时间桶的成功 Target attempts。 */
+  avg_output_tps: number | null
 }
 
 export interface ModelStats {
