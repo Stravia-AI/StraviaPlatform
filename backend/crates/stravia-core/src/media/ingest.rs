@@ -1,6 +1,7 @@
 //! Structured attachment admission and per-attempt transfer representations.
 use base64::Engine;
 use bytes::Bytes;
+use std::sync::Arc;
 use std::time::Duration;
 use stravia_runtime_contract::artifact::{
     ArtifactError, ArtifactId, ArtifactSettings, ArtifactStore,
@@ -60,6 +61,47 @@ pub(crate) async fn normalize_request(
     request: &mut AiRequest,
     cancellation: &CancellationToken,
 ) -> Result<(), ArtifactError> {
+    scrub_request(request)?;
+    append_upload_instructions(gateway, request).await?;
+    let retention = retention(gateway).await?;
+    normalize_request_blocks(gateway, principal, request, cancellation, retention).await
+}
+
+/// Shared requests stay borrowed until scrubbing, instructions, or attachments
+/// require mutation. SQL settings and attachment validation still run per call.
+pub(crate) async fn normalize_shared_request(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    request: &mut Arc<AiRequest>,
+    cancellation: &CancellationToken,
+) -> Result<(), ArtifactError> {
+    if request_contains_upload_grant(request)? {
+        scrub_request(Arc::make_mut(request))?;
+    }
+    if let Some(instructions) = crate::agent::upload_grant::upload_instructions(gateway).await?
+        && needs_upload_instructions(request, &instructions)
+    {
+        append_instructions(Arc::make_mut(request), &instructions);
+    }
+    let retention = retention(gateway).await?;
+    if request
+        .items
+        .iter()
+        .any(|item| matches!(&item.content, MessageContent::Blocks(blocks) if has_media(blocks)))
+    {
+        normalize_request_blocks(
+            gateway,
+            principal,
+            Arc::make_mut(request),
+            cancellation,
+            retention,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn scrub_request(request: &mut AiRequest) -> Result<(), ArtifactError> {
     fn scrub(text: &mut String) {
         if let std::borrow::Cow::Owned(clean) =
             crate::agent::upload_grant::scrub_upload_grants(text)
@@ -102,7 +144,7 @@ pub(crate) async fn normalize_request(
             MessageContent::Text(text) => scrub(text),
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
-                    if contains_upload_grant(block)? {
+                    if block_contains_upload_grant(block)? {
                         let mut value = serde_json::to_value(&*block)
                             .map_err(|e| ArtifactError::Invalid(e.to_string()))?;
                         crate::agent::upload_grant::scrub_upload_grant_value(&mut value);
@@ -130,22 +172,137 @@ pub(crate) async fn normalize_request(
             scrub_serialized(meta)?;
         }
     }
-    if let Some(instructions) = crate::agent::upload_grant::upload_instructions(gateway).await? {
-        let current = request.instructions.get_or_insert_default();
-        if !current.contains(&instructions) {
-            if !current.is_empty() {
-                current.push_str("\n\n");
-            }
-            current.push_str(&instructions);
-        }
+    Ok(())
+}
+
+fn needs_upload_instructions(request: &AiRequest, instructions: &str) -> bool {
+    request
+        .instructions
+        .as_ref()
+        .is_none_or(|current| !current.contains(instructions))
+}
+
+fn append_instructions(request: &mut AiRequest, instructions: &str) {
+    let current = request.instructions.get_or_insert_default();
+    if !current.is_empty() {
+        current.push_str("\n\n");
     }
-    let retention = retention(gateway).await?;
+    current.push_str(instructions);
+}
+
+async fn append_upload_instructions(
+    gateway: &crate::Gateway,
+    request: &mut AiRequest,
+) -> Result<(), ArtifactError> {
+    if let Some(instructions) = crate::agent::upload_grant::upload_instructions(gateway).await?
+        && needs_upload_instructions(request, &instructions)
+    {
+        append_instructions(request, &instructions);
+    }
+    Ok(())
+}
+
+async fn normalize_request_blocks(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    request: &mut AiRequest,
+    cancellation: &CancellationToken,
+    retention: Duration,
+) -> Result<(), ArtifactError> {
     for item in &mut request.items {
         if let MessageContent::Blocks(blocks) = &mut item.content {
             normalize_blocks(gateway, principal, blocks, cancellation, retention).await?;
         }
     }
     Ok(())
+}
+
+fn text_contains_upload_grant(text: &str) -> bool {
+    text.contains("stravia_upload_")
+}
+
+fn block_contains_upload_grant(block: &ContentBlock) -> Result<bool, ArtifactError> {
+    match block {
+        ContentBlock::Text { text, .. } => Ok(text_contains_upload_grant(text)),
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => Ok(text_contains_upload_grant(thinking)
+            || signature.as_deref().is_some_and(text_contains_upload_grant)),
+        ContentBlock::Reasoning {
+            summary,
+            content,
+            encrypted_content,
+        } => Ok(summary
+            .iter()
+            .chain(content)
+            .any(|text| text_contains_upload_grant(text))
+            || encrypted_content
+                .as_deref()
+                .is_some_and(text_contains_upload_grant)),
+        _ => contains_upload_grant(block),
+    }
+}
+
+fn request_contains_upload_grant(request: &AiRequest) -> Result<bool, ArtifactError> {
+    if text_contains_upload_grant(&request.model)
+        || request
+            .instructions
+            .as_deref()
+            .is_some_and(text_contains_upload_grant)
+        || contains_upload_grant(&request.generation)?
+        || contains_upload_grant(&request.embedding)?
+        || contains_upload_grant(&request.stream)?
+        || contains_upload_grant(&request.tools)?
+        || contains_upload_grant(&request.tool_choice)?
+        || contains_upload_grant(&request.reasoning)?
+        || contains_upload_grant(&request.response_format)?
+        || contains_upload_grant(&request.safety_settings)?
+        || contains_upload_grant(&request.ext)?
+        || contains_upload_grant(&request.meta.vendor)?
+    {
+        return Ok(true);
+    }
+    if let Some(raw) = &request.meta.raw
+        && (text_contains_upload_grant(&raw.method)
+            || text_contains_upload_grant(&raw.path)
+            || contains_upload_grant(&raw.headers)?
+            || contains_upload_grant(&raw.body)?)
+    {
+        return Ok(true);
+    }
+    for item in &request.items {
+        match &item.content {
+            MessageContent::Text(text) if text_contains_upload_grant(text) => return Ok(true),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if block_contains_upload_grant(block)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(calls) = &item.tool_calls {
+            for call in calls {
+                if text_contains_upload_grant(call.id.as_str())
+                    || text_contains_upload_grant(&call.name)
+                    || text_contains_upload_grant(&call.arguments)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        if item
+            .tool_call_id
+            .as_ref()
+            .is_some_and(|id| text_contains_upload_grant(id.as_str()))
+            || contains_upload_grant(&item.meta)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn normalize_response(

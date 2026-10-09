@@ -34,7 +34,7 @@ impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
                 target_id: target.into(),
                 egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
             },
-            input.request,
+            Arc::unwrap_or_clone(input.request),
             [Ok(
                 stravia_runtime_contract::model_turn::CanonicalEvent::Completed(Box::new(response)),
             )],

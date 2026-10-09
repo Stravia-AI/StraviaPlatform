@@ -333,7 +333,7 @@ tasks:
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.
     requires:
-      vars: [DB_URL]
+      vars: [DB_URL, STRAVIA_TEST_REDIS_URL]
     deps: [build:test:services, build:vendor-fixtures]
     env:
       STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-server{{if eq OS "windows"}}.exe{{end}}'
@@ -354,7 +354,7 @@ tasks:
   test:e2e:
     desc: Run proxy, Admin service, SQLite, and PostgreSQL E2E tests.
     requires:
-      vars: [DB_URL]
+      vars: [DB_URL, STRAVIA_TEST_REDIS_URL]
     cmds:
       - task: test:e2e:proxy
       - task: test:e2e:admin

@@ -76,7 +76,7 @@ Alternatively, download a platform archive from Releases (verify against `SHA256
 
 **First run (both):**
 
-1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator.
+1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator. PostgreSQL requires Redis configured before setup; see [cache and Server configuration](docs/design/architecture.md#统一派生缓存与-server-配置).
 2. **Add a provider** — API key or OAuth channel (Codex, Claude subscription, Grok device flow, Devin). Stravia syncs the available model inventory.
 3. **Add a model** — select upstream model IDs; the Model ID is the route clients call.
 4. **Create an API key**, then open **Connect clients** — Stravia generates a ready-to-apply provider patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode; the desktop app can write the config for you.
@@ -155,7 +155,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 
 ### Storage and deployment
 
-- SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3.
+- SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3. Existing PostgreSQL installations must also configure Redis before upgrading; see [cache and Server configuration](docs/design/architecture.md#统一派生缓存与-server-配置).
 - Instance data lives in one directory for easier management. Back up its database and local files—including installed plugin Components—together; a remote PostgreSQL backup alone is incomplete. Before migrating or upgrading, review the [deployment and storage documentation](docs/design/architecture.md) for backup and version compatibility requirements.
 - One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
 
@@ -187,7 +187,7 @@ Project JavaScript development, build, and test commands use Bun. Rust and Pytho
 | `task dev:desktop`       | Start the Tauri desktop app in development mode             |
 | `task check`             | Run WebUI checks, ESLint, Rust formatting, and Cargo checks |
 | `task test`              | Run WebUI and supported Rust unit tests                     |
-| `DB_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |
+| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |
 
 ## License
 

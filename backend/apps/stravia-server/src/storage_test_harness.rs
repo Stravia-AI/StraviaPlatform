@@ -198,6 +198,10 @@ async fn main() -> anyhow::Result<()> {
         }
         "postgres" => {
             let pg_url = env::var("STRAVIA_STORAGE_PG_URL").context("STRAVIA_STORAGE_PG_URL")?;
+            config.cache.redis_url = Some(
+                env::var("STRAVIA_TEST_REDIS_URL")
+                    .context("PostgreSQL storage harness requires STRAVIA_TEST_REDIS_URL")?,
+            );
             let schema =
                 env::var("STRAVIA_STORAGE_PG_SCHEMA").context("STRAVIA_STORAGE_PG_SCHEMA")?;
             ensure!(

@@ -102,6 +102,15 @@ struct Args {
         global = true
     )]
     config_poll_interval: u64,
+
+    // 性能与 HTTP 测试必须走真实目录装配，但不能访问生产目录。
+    #[cfg(feature = "test-harness")]
+    #[arg(long, hide = true)]
+    test_catalog_base_url: Option<String>,
+
+    #[cfg(feature = "test-harness")]
+    #[arg(long, env = "STRAVIA_TEST_REDIS_URL", hide = true)]
+    test_redis_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -164,7 +173,7 @@ async fn run_server(
         args.proxy_cors_origins.clone()
     };
 
-    let startup = StartupHttpApp::new(ServerStartupConfig {
+    let mut startup = StartupHttpApp::new(ServerStartupConfig {
         config_path,
         gateway,
         admin_entry,
@@ -175,32 +184,50 @@ async fn run_server(
         start_http_server(listener_address(&args.host, args.port), startup.router()).await?;
     let address = server.local_addr();
     tracing::info!(%address, "Stravia startup listener opened");
-    let prepared = startup.prepare().await;
-    let setup_token = match prepared {
-        Ok(token) => token,
+    let result = async {
+        let setup_token = startup.prepare().await?;
+        if let Some(token) = setup_token.as_deref() {
+            println!("Stravia setup token: {token}");
+            std::io::stdout().flush()?;
+        }
+
+        tracing::info!(%address, "Stravia Server listening");
+        shutdown_signal().await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    // 包括准备或令牌输出失败：先停止接收并排空请求，再关闭 Gateway。
+    let stopped = server.shutdown().await;
+    startup.shutdown().await;
+    match result {
+        Ok(()) => stopped,
         Err(error) => {
-            if let Err(shutdown_error) = server.shutdown().await {
+            if let Err(shutdown_error) = stopped {
                 tracing::warn!(%shutdown_error, "failed to stop the startup listener");
             }
-            return Err(error);
+            Err(error)
         }
-    };
-    if let Some(token) = setup_token.as_deref() {
-        println!("Stravia setup token: {token}");
-        std::io::stdout().flush()?;
     }
-
-    tracing::info!(%address, "Stravia Server listening");
-    shutdown_signal().await;
-    server.shutdown().await
 }
 
 fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
+    #[cfg(feature = "test-harness")]
+    let catalog_base_url = args.test_catalog_base_url.clone();
+    #[cfg(not(feature = "test-harness"))]
+    let catalog_base_url = Some(stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned());
+    #[cfg(feature = "test-harness")]
+    let cache = stravia_core::config::GatewayCacheConfig {
+        redis_url: args.test_redis_url.clone(),
+        ..Default::default()
+    };
+    #[cfg(not(feature = "test-harness"))]
+    let cache = stravia_core::config::GatewayCacheConfig::default();
     GatewayConfig {
         data_dir,
+        cache,
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
-        catalog_base_url: Some(stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned()),
-        catalog_background_refresh: true,
+        catalog_background_refresh: catalog_base_url.is_some(),
+        catalog_base_url,
         ..Default::default()
     }
 }

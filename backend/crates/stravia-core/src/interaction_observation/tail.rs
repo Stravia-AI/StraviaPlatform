@@ -33,6 +33,48 @@ struct Unit {
     bytes: usize,
 }
 
+/// Hash the exact JSON bytes without retaining a second serialized copy.
+/// `None` means the caller's existing capture budget was exceeded.
+pub(super) fn hash_json(
+    value: &Value,
+    max_bytes: usize,
+) -> serde_json::Result<Option<([u8; 32], usize)>> {
+    struct HashWriter {
+        digest: Sha256,
+        bytes: usize,
+        remaining: usize,
+        overflow: bool,
+    }
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.remaining {
+                self.overflow = true;
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.digest.update(bytes);
+            self.bytes += bytes.len();
+            self.remaining -= bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter {
+        digest: Sha256::new(),
+        bytes: 0,
+        remaining: max_bytes,
+        overflow: false,
+    };
+    let result = serde_json::to_writer(&mut writer, value);
+    if writer.overflow {
+        return Ok(None);
+    }
+    result?;
+    Ok(Some((writer.digest.finalize().into(), writer.bytes)))
+}
+
 impl Window {
     pub(super) fn capture(items: &[AiItem]) -> Option<Self> {
         let start = items
@@ -55,34 +97,24 @@ impl Window {
             let Value::Array(values) = canonical::item_value(item) else {
                 return None;
             };
-            let mut projected = Vec::with_capacity(values.len());
-            for mut value in values {
+            for mut value in values.into_iter().rev() {
+                if units.len() == MAX_UNITS {
+                    return Self::overflow_window(units, bytes);
+                }
                 if private_control(&value) && !public_thinking_projection(&value) {
                     // A nonmatching boundary preserves continuity without retaining private state.
                     value = serde_json::json!({"diagnostic_boundary": stravia_runtime_contract::identifier::new_id()});
                 }
-                let encoded = serde_json::to_vec(&value).ok()?;
-                projected.push(Unit {
-                    hash: Sha256::digest(&encoded).into(),
-                    bytes: encoded.len(),
+                let Some((hash, unit_bytes)) = hash_json(&value, MAX_WINDOW_BYTES - bytes).ok()?
+                else {
+                    return Self::overflow_window(units, bytes);
+                };
+                bytes += unit_bytes;
+                units.push(Unit {
+                    hash,
+                    bytes: unit_bytes,
                     value,
                 });
-            }
-            for unit in projected.into_iter().rev() {
-                if units.len() == MAX_UNITS || bytes + unit.bytes > MAX_WINDOW_BYTES {
-                    if units.is_empty() {
-                        return None;
-                    }
-                    units.reverse();
-                    return Some(Self {
-                        units,
-                        bytes,
-                        complete: false,
-                        received_items: None,
-                    });
-                }
-                bytes += unit.bytes;
-                units.push(unit);
             }
         }
         units.reverse();
@@ -93,6 +125,20 @@ impl Window {
             received_items: None,
         })
     }
+
+    fn overflow_window(mut units: Vec<Unit>, bytes: usize) -> Option<Self> {
+        if units.is_empty() {
+            return None;
+        }
+        units.reverse();
+        Some(Self {
+            units,
+            bytes,
+            complete: false,
+            received_items: None,
+        })
+    }
+
     pub(super) fn capture_received_input(items: &[AiItem]) -> Option<Self> {
         let mut window = Self::capture(items)?;
         // Delivered outputs and ordinary retained tails never compute this.
@@ -110,11 +156,8 @@ impl Window {
         for item in items {
             let mut value = canonical::item_value(item);
             value.sort_all_objects();
-            let encoded = serde_json::to_vec(&value).ok()?;
-            bytes = bytes.checked_add(encoded.len())?;
-            if bytes > MAX_WINDOW_BYTES {
-                return None;
-            }
+            let (hash, unit_bytes) = hash_json(&value, MAX_WINDOW_BYTES - bytes).ok()??;
+            bytes += unit_bytes;
             let user_only = item.role == stravia_runtime_contract::protocol::ir::Role::User
                 && value.as_array().is_some_and(|units| {
                     units.iter().all(|unit| {
@@ -133,11 +176,7 @@ impl Window {
                         )
                     })
             });
-            received.push((
-                Sha256::digest(&encoded).into(),
-                user_only,
-                continuation_only,
-            ));
+            received.push((hash, user_only, continuation_only));
         }
         Some(received)
     }

@@ -28,6 +28,7 @@ pub mod proxy;
 pub(crate) mod reversible_redaction;
 pub mod router;
 pub mod rpm;
+mod runtime_cache;
 pub mod startup_progress;
 pub mod storage;
 pub(crate) mod storage_codec;

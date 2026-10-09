@@ -9,6 +9,138 @@ use base64::Engine;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn shared_text_normalization_scrubs_extension_keys_and_keeps_sql_errors() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let owner = Principal::new("shared-input-owner");
+    let cancellation = stravia_runtime_contract::CancellationToken::new();
+    let grant = "stravia_upload_header.payload.signature";
+    let mut item = AiItem::output_text("ordinary text");
+    item.role = stravia_runtime_contract::protocol::ir::Role::User;
+    let mut input = AiRequest::new("model", vec![item]);
+    input.instructions = Some("existing instructions".into());
+    input.ext = Some(
+        serde_json::from_value(serde_json::json!({
+            "OpenAiChat": {"prediction": {"unknown": {(grant): grant}}}
+        }))
+        .unwrap(),
+    );
+    let mut input = Arc::new(input);
+    ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+        .await
+        .unwrap();
+    let extension = serde_json::to_value(&input.ext).unwrap();
+    assert_eq!(
+        extension["OpenAiChat"]["prediction"]["unknown"]["<stravia-upload-key>"],
+        "<stravia-upload-key>"
+    );
+    assert_eq!(input.instructions.as_deref(), Some("existing instructions"));
+    assert!(matches!(
+        &input.items[0].content,
+        stravia_runtime_contract::protocol::ir::MessageContent::Text(text) if text == "ordinary text"
+    ));
+
+    gateway
+        .storage
+        .settings()
+        .set(
+            "artifact_settings",
+            r#"{"upload_prompt_injection":true,"client_base_url":"https://upload.example"}"#,
+        )
+        .await
+        .unwrap();
+    ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+        .await
+        .unwrap();
+    let instructions = input.instructions.clone().unwrap();
+    assert!(instructions.starts_with("existing instructions\n\n"));
+    assert!(instructions.contains("https://upload.example"));
+    ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+        .await
+        .unwrap();
+    assert_eq!(input.instructions.as_deref(), Some(instructions.as_str()));
+
+    gateway
+        .storage
+        .settings()
+        .set("log_retention_days", "invalid")
+        .await
+        .unwrap();
+    let error = ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Invalid retention"));
+    gateway
+        .storage
+        .settings()
+        .set("log_retention_days", "7")
+        .await
+        .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("artifact_settings", "{")
+        .await
+        .unwrap();
+    assert!(
+        ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+            .await
+            .is_err()
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn shared_normalization_validates_nested_tool_result_content() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, ContentBlock, MessageContent};
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let item = AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::Tool,
+        content: MessageContent::Blocks(vec![ContentBlock::SearchResult {
+            source: "source".into(),
+            title: "title".into(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call".into(),
+                content: serde_json::json!({"not": "content blocks"}),
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks,
+                ),
+                is_error: None,
+                cache_control: None,
+            }],
+            cache_control: None,
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let mut request = Arc::new(AiRequest::new("model", vec![item]));
+    assert!(
+        ingest::normalize_shared_request(
+            &gateway,
+            &Principal::new("owner"),
+            &mut request,
+            &stravia_runtime_contract::CancellationToken::new(),
+        )
+        .await
+        .is_err()
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn public_model_input_snapshots_media_without_scanning_text() {
     let received = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
     let captures = received.clone();

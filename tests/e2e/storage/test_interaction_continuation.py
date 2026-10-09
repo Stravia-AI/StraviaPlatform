@@ -274,7 +274,8 @@ def test_actual_wire_history_preserves_ancestry_and_confirmed_usage(
     try:
         process, logs = start_stravia_server(
             stravia_binary=stravia_binary,
-            args=["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)],
+            args=["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+            + storage_runtime["server_args"](backend),
         )
         wait_until_ready(f"{base}/api/v1/auth/state")
         session = initialize_server(base, wait_for_setup_token(logs, process), database)

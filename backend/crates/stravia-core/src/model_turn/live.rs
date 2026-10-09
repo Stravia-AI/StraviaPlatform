@@ -80,7 +80,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 biased;
                 _ = input.cancellation.cancelled() => return Err(interruption_error(&input.deadline)),
                 () = input.deadline.wait() => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
-                result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
+                result = crate::media::ingest::normalize_shared_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
             }
         }
         let estimated_input_tokens =
@@ -158,7 +158,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
                         .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
                     let mappings = self.gateway.redaction
-                        .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
+                        .protect(&input.principal, Arc::make_mut(&mut input.request), observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                         observer.publish_input_preview();
@@ -1202,7 +1202,7 @@ async fn prepare_attempt(
     }
 
     // 每次尝试都从原请求解析，避免前一个 Target 的钳制结果污染 failover。
-    let mut provider_request = input.request.clone();
+    let mut provider_request = input.request.as_ref().clone();
     // Preserve the client's original off intent across the existing upward mapping.
     // This only suppresses automatic summaries; it does not change intensity resolution.
     if provider_request.reasoning.level == Some(ThinkingLevel::Off)
@@ -1382,14 +1382,12 @@ async fn prepare_attempt(
     } else {
         provider_request.reasoning.target_control = None;
     }
-    let mut full_provider_request = provider_request.clone();
-    crate::router::clear_previous_response_id(&mut full_provider_request);
     // 准备期间保留逻辑模型；仅在交给 guest 的请求副本上改写派发模型。
     input
         .request
         .meta
         .redaction
-        .observe_provider_request(&full_provider_request)
+        .observe_provider_request(&provider_request)
         .map_err(|_| {
             AttemptFailure::terminal(
                 "reversible_redaction_failed",
@@ -1397,9 +1395,9 @@ async fn prepare_attempt(
             )
         })?;
     let require_affinity = request_requires_affinity(&provider_request);
-    let continued_id = if compact || thinking_replayed {
+    let mut continuation_fallback = None;
+    if compact || thinking_replayed {
         crate::router::clear_previous_response_id(&mut provider_request);
-        None
     } else {
         executor
             .continuation
@@ -1414,9 +1412,10 @@ async fn prepare_attempt(
                         && require_affinity,
                 },
                 &mut provider_request,
+                &mut continuation_fallback,
             )
-            .await
-    };
+            .await;
+    }
 
     let session_affinity = crate::generation_chain::generation_session_fingerprint(&input.request);
     let websocket_affinity = namespace_fingerprint(&(
@@ -1476,7 +1475,7 @@ async fn prepare_attempt(
         preserve_upstream_error: compact || native_compaction_requested,
         observer: input.observer.clone(),
         request: provider_request,
-        continuation_fallback: continued_id.map(|_| full_provider_request),
+        continuation_fallback,
         dispatch_model: route.model_id.to_string(),
         actual_model,
         namespace: target_namespace,
@@ -1775,6 +1774,8 @@ async fn begin_attempt(
     let driver_route_id = route.id.to_string();
     let driver_target = target.clone();
     let principal = input.principal.clone();
+    // Affinity uses the immutable canonical input, not Target controls or the
+    // independently materialized vendor wire request.
     let canonical_request = input.request.clone();
     let parent_cancellation = input.cancellation.clone();
     let deadline = input.deadline.clone();
@@ -1879,7 +1880,7 @@ async fn drive_vendor_attempt(
     route_id: String,
     target: SelectedTarget,
     principal: stravia_runtime_contract::Principal,
-    canonical_request: AiRequest,
+    canonical_request: Arc<AiRequest>,
     parent_cancellation: stravia_runtime_contract::CancellationToken,
     operation_cancellation: stravia_runtime_contract::CancellationToken,
     deadline: Deadline,
@@ -1902,7 +1903,6 @@ async fn drive_vendor_attempt(
         ready,
     );
     let mut continuation_fallback = prepared.continuation_fallback.take();
-    let mut request = prepared.request.clone();
     let mut auth_recovered = false;
     // 分级见 `strip_rejected_protected_reasoning`。
     let mut protected_reasoning_recovery = 0u8;
@@ -1923,7 +1923,7 @@ async fn drive_vendor_attempt(
         );
         let mut first_token_ms = None;
         let outcome = lifecycle
-            .run(&mut prepared, &request, &attempt, &mut first_token_ms)
+            .run(&mut prepared, &attempt, &mut first_token_ms)
             .instrument(attempt.span())
             .await;
         let outcome = if let Some(error) = prepared.send_failure.lock().take() {
@@ -2007,13 +2007,16 @@ async fn drive_vendor_attempt(
                     )
                     .await;
                 if let Some(first_token_ms) = published {
-                    gateway.cache_affinity.record_success(
-                        &principal,
-                        &route_id,
-                        &canonical_request,
-                        &prepared.route.target_id,
-                        &usage,
-                    );
+                    gateway
+                        .cache_affinity
+                        .record_success(
+                            &principal,
+                            &route_id,
+                            &canonical_request,
+                            &prepared.route.target_id,
+                            &usage,
+                        )
+                        .await;
                     policy.record_success(&target);
                     lifecycle.complete();
                     attempt.finish("completed", None, None, Some(first_token_ms), None);
@@ -2043,13 +2046,14 @@ async fn drive_vendor_attempt(
             {
                 // 上游因载荷拒绝说明 Target 本身健康：不计入连续失败，也不受 Target
                 // 重试预算约束；只受两级剥离上限约束，且每级必须实际移除载荷。
-                let mut replay = continuation_fallback
-                    .take()
-                    .unwrap_or_else(|| request.clone());
-                crate::router::clear_previous_response_id(&mut replay);
-                let before = crate::history_marker::protected_payload_digests(&replay.items);
+                if let Some(fallback) = continuation_fallback.take() {
+                    prepared.request = fallback;
+                }
+                crate::router::clear_previous_response_id(&mut prepared.request);
+                let before =
+                    crate::history_marker::protected_payload_digests(&prepared.request.items);
                 if strip_rejected_protected_reasoning(
-                    &mut replay,
+                    &mut prepared.request,
                     &mut protected_reasoning_recovery,
                     &prepared.thinking_source,
                     &gateway.reasoning_rejections,
@@ -2061,10 +2065,10 @@ async fn drive_vendor_attempt(
                         None,
                         Some(&failure.diagnostic),
                     );
-                    let after = crate::history_marker::protected_payload_digests(&replay.items);
+                    let after =
+                        crate::history_marker::protected_payload_digests(&prepared.request.items);
                     stripped_protected_reasoning =
                         Some(before.difference(&after).copied().collect());
-                    request = replay;
                     continue;
                 }
                 finish_vendor_failure(
@@ -2166,7 +2170,7 @@ async fn drive_vendor_attempt(
                     None,
                     Some(&failure.diagnostic),
                 );
-                request = continuation_fallback.take().expect("checked fallback");
+                prepared.request = continuation_fallback.take().expect("checked fallback");
             }
             Err(failure)
                 if !lifecycle.committed()
@@ -2185,7 +2189,7 @@ async fn drive_vendor_attempt(
                     None,
                     Some(&failure.diagnostic),
                 );
-                request = continuation_fallback.take().expect("checked fallback");
+                prepared.request = continuation_fallback.take().expect("checked fallback");
             }
             Err(failure) => {
                 finish_vendor_failure(

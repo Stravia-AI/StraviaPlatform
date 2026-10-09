@@ -114,7 +114,7 @@ impl ModelTurnExecutor for SchemaRepairModel {
                 target_id: "in-memory".into(),
                 egress: Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24),
             },
-            input.request,
+            std::sync::Arc::unwrap_or_clone(input.request),
             [Ok(CanonicalEvent::Completed(Box::new(response)))],
         ))
     }

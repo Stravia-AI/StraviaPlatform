@@ -55,12 +55,7 @@ pub async fn handler(
                 .map(|vs| (k.as_str().to_lowercase(), vs.to_string()))
         })
         .collect();
-    let envelope = RawEnvelope::new(
-        Some(body.clone()),
-        flat_headers,
-        "POST",
-        "/v1/chat/completions",
-    );
+    let envelope = RawEnvelope::new(None, flat_headers, "POST", "/v1/chat/completions");
     let pair = ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,

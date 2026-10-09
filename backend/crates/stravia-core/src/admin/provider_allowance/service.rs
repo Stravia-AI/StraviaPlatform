@@ -1,16 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future::{BoxFuture, FutureExt, Shared};
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::admin::AdminService;
 use crate::db::models::Provider;
 use crate::plugin::{VendorCallContext, VendorRequest};
+use crate::runtime_cache::RuntimeCache;
 
 use super::samples::{AllowanceSample, AllowanceSampleStore, SAMPLE_RETENTION_MILLIS};
 use super::{
@@ -21,6 +23,8 @@ use super::{
 };
 
 const SUCCESS_TTL: Duration = Duration::from_secs(180);
+const SNAPSHOT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const CACHE_DOMAIN: &str = "provider_allowance";
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_FORECAST_SPAN_MILLIS: i64 = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,12 +35,103 @@ const NO_RESET_SENTINEL_MILLIS: i64 = 253_402_214_400_000;
 type SharedFetch =
     Shared<BoxFuture<'static, Result<Option<ProviderAllowanceSnapshot>, Arc<anyhow::Error>>>>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ProviderAllowanceState {
     inner: Arc<ProviderAllowanceStateInner>,
 }
 
 impl ProviderAllowanceState {
+    pub(crate) fn new(runtime_cache: RuntimeCache) -> Self {
+        Self {
+            inner: Arc::new(ProviderAllowanceStateInner {
+                changed: tokio::sync::Notify::new(),
+                cache: runtime_cache,
+                started_at: Instant::now(),
+                inflight: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    async fn cached(&self, identity: &str) -> Option<Arc<CacheEntry>> {
+        let entry: Arc<CacheEntry> = self.inner.cache.get(CACHE_DOMAIN, identity).await?;
+        if entry
+            .last_good_expires_at_millis
+            .is_some_and(|expires_at| self.elapsed_millis() >= expires_at)
+        {
+            return None;
+        }
+        Some(entry)
+    }
+
+    fn elapsed_millis(&self) -> u64 {
+        u64::try_from(self.inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn is_fresh(&self, entry: &CacheEntry) -> bool {
+        entry.successful_at_millis.is_some_and(|successful_at| {
+            self.elapsed_millis()
+                .checked_sub(successful_at)
+                .is_some_and(|elapsed| elapsed < SUCCESS_TTL.as_millis() as u64)
+        })
+    }
+
+    async fn cache_snapshot(
+        &self,
+        identity: &str,
+        mut snapshot: ProviderAllowanceSnapshot,
+    ) -> ProviderAllowanceSnapshot {
+        let now = self.elapsed_millis();
+        let successful_at_millis =
+            (snapshot.status == ProviderAllowanceStatus::Fresh).then_some(now);
+        let last_good_expires_at_millis = if successful_at_millis.is_some() {
+            Some(now.saturating_add(SNAPSHOT_RETENTION.as_millis() as u64))
+        } else if snapshot.status == ProviderAllowanceStatus::Stale {
+            // Read the raw entry, not `cached`: a refresh may have held the
+            // previous snapshot while its absolute retention deadline elapsed.
+            let previous: Option<Arc<CacheEntry>> =
+                self.inner.cache.get(CACHE_DOMAIN, identity).await;
+            let expires_at = previous
+                .as_ref()
+                .and_then(|entry| entry.last_good_expires_at_millis);
+            if !expires_at.is_some_and(|expires_at| self.elapsed_millis() < expires_at) {
+                // A missing/evicted entry cannot establish a new last-good
+                // lifetime from the stale snapshot's old values.
+                self.inner.cache.remove(CACHE_DOMAIN, identity).await;
+                snapshot.status = ProviderAllowanceStatus::Error;
+                snapshot.plan_label = None;
+                snapshot.fetched_at = None;
+                snapshot.allowances.clear();
+                snapshot.models.clear();
+                return snapshot;
+            }
+            expires_at
+        } else {
+            None
+        };
+        let ttl = last_good_expires_at_millis
+            .map(|expires_at| {
+                Duration::from_millis(expires_at.saturating_sub(self.elapsed_millis()))
+            })
+            .unwrap_or(SNAPSHOT_RETENTION);
+        let entry = CacheEntry {
+            snapshot: snapshot.clone(),
+            successful_at_millis,
+            last_good_expires_at_millis,
+        };
+        let estimated_bytes = entry.estimated_bytes();
+        self.inner
+            .cache
+            .put(
+                CACHE_DOMAIN,
+                identity,
+                Arc::new(entry),
+                estimated_bytes,
+                ttl,
+            )
+            .await;
+        snapshot
+    }
+
     pub(crate) async fn changed(&self) {
         self.inner.changed.notified().await;
     }
@@ -45,18 +140,63 @@ impl ProviderAllowanceState {
     }
 }
 
-#[derive(Default)]
 struct ProviderAllowanceStateInner {
     changed: tokio::sync::Notify,
-    cache: RwLock<HashMap<String, CacheEntry>>,
+    cache: RuntimeCache,
+    started_at: Instant,
     inflight: Mutex<HashMap<String, SharedFetch>>,
 }
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
 struct CacheEntry {
-    identity: String,
     snapshot: ProviderAllowanceSnapshot,
-    successful_at: Option<Instant>,
+    // Process-local monotonic offset; RuntimeCache namespaces never cross restarts.
+    successful_at_millis: Option<u64>,
+    // Unlike freshness, failed refreshes retain this absolute last-good deadline.
+    last_good_expires_at_millis: Option<u64>,
+}
+
+impl CacheEntry {
+    fn estimated_bytes(&self) -> usize {
+        fn allowance_bytes(item: &Allowance) -> usize {
+            std::mem::size_of::<Allowance>()
+                + item.key.len()
+                + item.label.len()
+                + [&item.used, &item.remaining, &item.limit]
+                    .into_iter()
+                    .flatten()
+                    .map(|amount| {
+                        amount.unit.len() + amount.currency.as_ref().map_or(0, String::len)
+                    })
+                    .sum::<usize>()
+        }
+        let snapshot = &self.snapshot;
+        std::mem::size_of::<Self>()
+            + snapshot.provider_id.len()
+            + snapshot.provider_name.len()
+            + snapshot.catalog_provider_id.len()
+            + snapshot.channel.len()
+            + snapshot.plan_label.as_ref().map_or(0, String::len)
+            + snapshot.fetched_at.as_ref().map_or(0, String::len)
+            + snapshot
+                .error
+                .as_ref()
+                .map_or(0, |error| error.message.len())
+            + snapshot
+                .allowances
+                .iter()
+                .map(allowance_bytes)
+                .sum::<usize>()
+            + snapshot
+                .models
+                .iter()
+                .map(|model| {
+                    std::mem::size_of::<ModelAllowance>()
+                        + model.model.len()
+                        + model.allowances.iter().map(allowance_bytes).sum::<usize>()
+                })
+                .sum::<usize>()
+    }
 }
 
 impl AdminService {
@@ -95,10 +235,8 @@ impl AdminService {
             .provider_allowance_state
             .inner
             .cache
-            .read()
+            .get::<CacheEntry>(CACHE_DOMAIN, &identity)
             .await
-            .get(provider_id)
-            .filter(|entry| entry.identity == identity)
             .map(|entry| entry.snapshot.clone());
         if previous.as_ref().is_some_and(|snapshot| {
             keys.iter().any(|key| {
@@ -159,19 +297,10 @@ impl AdminService {
                 targets.push(allowance_target(self, &provider, Some(snapshot), false).await?);
                 continue;
             }
-            let previous = {
-                let cache = self.gw.provider_allowance_state.inner.cache.read().await;
-                cache
-                    .get(&provider.id)
-                    .filter(|entry| entry.identity == identity)
-                    .cloned()
-            };
-            let fresh = previous.as_ref().is_some_and(|entry| {
-                entry
-                    .successful_at
-                    .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
-            });
-            let mut snapshot = previous.map(|entry| entry.snapshot);
+            let state = &self.gw.provider_allowance_state;
+            let previous = state.cached(&identity).await;
+            let fresh = previous.as_ref().is_some_and(|entry| state.is_fresh(entry));
+            let mut snapshot = previous.map(|entry| entry.snapshot.clone());
             if let Some(snapshot) = snapshot.as_mut() {
                 super::suspension::decorate(self, snapshot).await?;
             }
@@ -213,14 +342,6 @@ async fn provider_allowance(
         return Ok(None);
     };
     if !eligible_allowance_provider(admin, &provider) {
-        admin
-            .gw
-            .provider_allowance_state
-            .inner
-            .cache
-            .write()
-            .await
-            .remove(provider_id);
         return Ok(None);
     }
     fetch_provider_allowance(admin, provider, force).await
@@ -236,18 +357,6 @@ async fn eligible_allowance_providers(admin: &AdminService) -> anyhow::Result<Ve
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    let eligible_ids = providers
-        .iter()
-        .map(|provider| provider.id.clone())
-        .collect::<HashSet<_>>();
-    admin
-        .gw
-        .provider_allowance_state
-        .inner
-        .cache
-        .write()
-        .await
-        .retain(|provider_id, _| eligible_ids.contains(provider_id));
     Ok(providers)
 }
 
@@ -366,12 +475,8 @@ async fn fetch_provider_allowance(
         let mut snapshot = admin
             .gw
             .provider_allowance_state
-            .inner
-            .cache
-            .read()
+            .cached(&identity)
             .await
-            .get(&provider.id)
-            .filter(|entry| entry.identity == identity)
             .map(|entry| {
                 let mut snapshot = entry.snapshot.clone();
                 snapshot.status = ProviderAllowanceStatus::Stale;
@@ -394,18 +499,11 @@ async fn fetch_provider_allowance(
             invalid_credential_snapshot(admin, &provider, &identity).await,
         ));
     }
-    let previous = {
-        let cache = admin.gw.provider_allowance_state.inner.cache.read().await;
-        cache
-            .get(&provider.id)
-            .filter(|entry| entry.identity == identity)
-            .cloned()
-    };
+    let state = &admin.gw.provider_allowance_state;
+    let previous = state.cached(&identity).await;
     if !force
         && let Some(entry) = previous.as_ref()
-        && entry
-            .successful_at
-            .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
+        && state.is_fresh(entry)
     {
         let mut snapshot = entry.snapshot.clone();
         super::suspension::decorate(admin, &mut snapshot).await?;
@@ -617,16 +715,7 @@ async fn fetch_provider_allowance(
                         }
                     }
 
-                    let successful_at =
-                        (snapshot.status == ProviderAllowanceStatus::Fresh).then(Instant::now);
-                    state.inner.cache.write().await.insert(
-                        provider_id,
-                        CacheEntry {
-                            identity: identity_for_future,
-                            snapshot: snapshot.clone(),
-                            successful_at,
-                        },
-                    );
+                    snapshot = state.cache_snapshot(&identity_for_future, snapshot).await;
                     Ok(Some(snapshot))
                 }
                 .await;
@@ -671,13 +760,11 @@ async fn invalid_credential_snapshot(
     provider: &Provider,
     identity: &str,
 ) -> ProviderAllowanceSnapshot {
-    let mut cache = admin.gw.provider_allowance_state.inner.cache.write().await;
-    let previous = cache
-        .get(&provider.id)
-        .filter(|entry| entry.identity == identity);
+    let state = &admin.gw.provider_allowance_state;
+    let previous = state.cached(identity).await;
     let mut snapshot = stale_or_error_snapshot(
         provider,
-        previous.map(|entry| &entry.snapshot),
+        previous.as_ref().map(|entry| &entry.snapshot),
         ProviderAllowanceError {
             category: ProviderAllowanceErrorCategory::Authentication,
             message:
@@ -685,15 +772,7 @@ async fn invalid_credential_snapshot(
                     .into(),
         },
     );
-    cache.insert(
-        provider.id.clone(),
-        CacheEntry {
-            identity: identity.to_owned(),
-            snapshot: snapshot.clone(),
-            successful_at: None,
-        },
-    );
-    drop(cache);
+    snapshot = state.cache_snapshot(identity, snapshot).await;
     if let Err(error) = super::suspension::decorate(admin, &mut snapshot).await {
         tracing::warn!(provider_id = %provider.id, error = ?error, "provider allowance suspension decoration failed");
     }
@@ -1203,6 +1282,129 @@ fn stale_or_error_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cached_snapshot(status: ProviderAllowanceStatus) -> ProviderAllowanceSnapshot {
+        ProviderAllowanceSnapshot {
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            catalog_provider_id: "catalog".into(),
+            channel: "default".into(),
+            plan_label: None,
+            status,
+            allowances: vec![map_allowance(sdk_item("USD")).expect("allowance")],
+            models: Vec::new(),
+            fetched_at: Some("2026-10-09T00:00:00Z".into()),
+            error: None,
+            guard_supported: true,
+            missing_guarded_keys: Vec::new(),
+            suspension: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_snapshots_are_shared_and_isolated_by_provider_identity() {
+        let state = ProviderAllowanceState::new(RuntimeCache::tinyufo(1024 * 1024));
+        let clone = state.clone();
+        let snapshot = cached_snapshot(ProviderAllowanceStatus::Fresh);
+        state
+            .cache_snapshot("old-identity-hash", snapshot.clone())
+            .await;
+
+        let cached = clone
+            .cached("old-identity-hash")
+            .await
+            .expect("shared snapshot");
+        assert_eq!(cached.snapshot, snapshot);
+        assert!(clone.is_fresh(&cached));
+        assert!(clone.cached("new-credential-identity-hash").await.is_none());
+        assert!(clone.cached("new-channel-identity-hash").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_does_not_extend_last_good_retention() {
+        let mut state = ProviderAllowanceState::new(RuntimeCache::tinyufo(1024 * 1024));
+        let mut stale = cached_snapshot(ProviderAllowanceStatus::Fresh);
+        state.cache_snapshot("identity-hash", stale.clone()).await;
+        Arc::get_mut(&mut state.inner)
+            .expect("sole state owner")
+            .started_at = Instant::now() - SNAPSHOT_RETENTION - Duration::from_secs(1);
+        stale.status = ProviderAllowanceStatus::Stale;
+        stale.error = Some(safe_error(
+            ProviderAllowanceErrorCategory::UpstreamUnavailable,
+        ));
+        state.cache_snapshot("identity-hash", stale).await;
+
+        assert!(state.cached("identity-hash").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_retain_values_only_until_original_success_expires() {
+        let mut state = ProviderAllowanceState::new(RuntimeCache::tinyufo(1024 * 1024));
+        let fresh = cached_snapshot(ProviderAllowanceStatus::Fresh);
+        state.cache_snapshot("identity-hash", fresh.clone()).await;
+        Arc::get_mut(&mut state.inner)
+            .expect("sole state owner")
+            .started_at = Instant::now() - SNAPSHOT_RETENTION / 2;
+        let mut stale = fresh.clone();
+        stale.status = ProviderAllowanceStatus::Stale;
+        stale.error = Some(safe_error(
+            ProviderAllowanceErrorCategory::UpstreamUnavailable,
+        ));
+        let first_failure = state.cache_snapshot("identity-hash", stale).await;
+        assert_eq!(first_failure.allowances, fresh.allowances);
+        assert_eq!(first_failure.fetched_at, fresh.fetched_at);
+        assert!(state.cached("identity-hash").await.is_some());
+
+        Arc::get_mut(&mut state.inner)
+            .expect("sole state owner")
+            .started_at = Instant::now() - SNAPSHOT_RETENTION - Duration::from_secs(1);
+        assert!(state.cached("identity-hash").await.is_none());
+        let expired = state
+            .cache_snapshot("identity-hash", first_failure.clone())
+            .await;
+        assert_eq!(expired.status, ProviderAllowanceStatus::Error);
+        assert!(expired.allowances.is_empty());
+        assert!(expired.models.is_empty());
+        assert!(expired.fetched_at.is_none());
+        assert!(state.cached("identity-hash").await.is_none());
+
+        // The previous read already expired, and the cache entry is now gone.
+        // An in-flight failure holding that snapshot must not resurrect it.
+        let later_failure = state.cache_snapshot("identity-hash", first_failure).await;
+        assert_eq!(later_failure, expired);
+        assert!(state.cached("identity-hash").await.is_none());
+
+        state.cache_snapshot("identity-hash", fresh.clone()).await;
+        let recovered = state.cached("identity-hash").await.expect("new success");
+        assert_eq!(recovered.snapshot, fresh);
+        assert!(state.is_fresh(&recovered));
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_keeps_last_good_values_but_is_not_fresh() {
+        let state = ProviderAllowanceState::new(RuntimeCache::tinyufo(1024 * 1024));
+        let fresh = cached_snapshot(ProviderAllowanceStatus::Fresh);
+        state.cache_snapshot("identity-hash", fresh.clone()).await;
+        let mut stale = fresh.clone();
+        stale.status = ProviderAllowanceStatus::Stale;
+        stale.error = Some(safe_error(
+            ProviderAllowanceErrorCategory::UpstreamUnavailable,
+        ));
+        state.cache_snapshot("identity-hash", stale.clone()).await;
+
+        let cached = state
+            .cached("identity-hash")
+            .await
+            .expect("stale snapshot retained");
+        assert_eq!(cached.snapshot, stale);
+        assert_eq!(cached.snapshot.allowances, fresh.allowances);
+        assert_eq!(cached.snapshot.fetched_at, fresh.fetched_at);
+        assert!(!state.is_fresh(&cached));
+        let encoded = serde_json::to_vec(cached.as_ref()).expect("cache wire value");
+        let decoded: CacheEntry = serde_json::from_slice(&encoded).expect("cache wire round trip");
+        assert_eq!(decoded.snapshot, stale);
+        assert!(!state.is_fresh(&decoded));
+    }
 
     fn sdk_amount(value: &str, currency: Option<&str>) -> stravia_vendor_sdk::AllowanceAmount {
         stravia_vendor_sdk::AllowanceAmount {

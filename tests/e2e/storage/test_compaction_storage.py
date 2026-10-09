@@ -36,6 +36,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
     port = find_free_port()
     base = f"http://127.0.0.1:{port}"
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    args += storage_runtime["server_args"](backend)
     try:
         process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
         wait_until_ready(f"{base}/api/v1/auth/state")

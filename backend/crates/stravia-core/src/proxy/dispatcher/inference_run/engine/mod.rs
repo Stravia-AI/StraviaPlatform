@@ -212,7 +212,7 @@ fn thinking_carrier_facts(
 pub(super) struct GenerationChainRun {
     principal: stravia_runtime_contract::Principal,
     write: Option<crate::generation_chain::GenerationChainWrite>,
-    client_request: AiRequest,
+    client_request: Arc<AiRequest>,
     previous_response_id: Option<String>,
     compaction_source_generation_id: Option<String>,
     vendor_publications: Vec<crate::plugin::VendorPublicationFence>,
@@ -222,7 +222,7 @@ struct DispatchContext<'a> {
     gw: Gateway,
     executor: Arc<dyn ModelTurnExecutor>,
     headers: HeaderMap,
-    request: &'a mut AiRequest,
+    request: &'a mut Arc<AiRequest>,
     ingress: ProtocolId,
     ctx: &'a mut RequestContext,
     inference_run: &'a mut Option<crate::hook::InferenceRun>,
@@ -235,7 +235,7 @@ struct DispatchContext<'a> {
 struct SharedModelTurnInput<'a> {
     executor: Arc<dyn ModelTurnExecutor>,
     gateway: &'a Gateway,
-    request: &'a mut AiRequest,
+    request: &'a mut Arc<AiRequest>,
     ingress: ProtocolId,
     request_context: &'a RequestContext,
     inference_run: &'a mut Option<crate::hook::InferenceRun>,
@@ -261,7 +261,9 @@ fn stabilize_media_generation_chain(
     let client_delta = generation
         .write
         .as_ref()
-        .map_or(&generation.client_request, |write| write.request_delta());
+        .map_or(generation.client_request.as_ref(), |write| {
+            write.request_delta()
+        });
     let image_count = client_delta
         .items
         .iter()
@@ -346,7 +348,6 @@ pub(super) async fn orchestrate(
     if let Some(session_id) = client_session_id(&headers, &request) {
         crate::generation_chain::set_generation_session_id(&mut request, session_id);
     }
-    let mut client_request = request.clone();
     let ingress_capabilities = stravia_protocol_codec::registry::ProtocolRegistry::global()
         .capabilities(&ingress)
         .expect("registered ingress protocol");
@@ -409,7 +410,8 @@ pub(super) async fn orchestrate(
             attachment_ingest_error_response(error),
         );
     }
-    client_request.clone_from(&request);
+    let mut request = Arc::new(request);
+    let client_request = Arc::clone(&request);
     ctx.auth_subject = Some(crate::proxy::context::AuthSubject {
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
@@ -460,7 +462,7 @@ pub(super) async fn orchestrate(
                         root_id,
                     );
                 }
-                request = write.request().clone();
+                request = write.request_shared();
                 Some(write)
             }
             Err(error) => {
@@ -560,31 +562,37 @@ pub(super) async fn orchestrate(
         None
     };
     let execution_window = ctx.deadline.remaining();
-    match crate::history_marker::resolve_request_markers(
-        gw.history_markers.as_ref(),
+    if crate::history_marker::request_needs_marker_resolution(&request) {
+        match crate::history_marker::resolve_request_markers(
+            gw.history_markers.as_ref(),
+            &principal,
+            Arc::make_mut(&mut request),
+        )
+        .await
+        {
+            Ok(_) => (),
+            Err(error) => {
+                let response = coded_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "history_marker_unavailable",
+                    &error.to_string(),
+                );
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "restoration",
+                    "history_marker_unavailable",
+                    response,
+                );
+            }
+        }
+    }
+    if let Err(error) = crate::media::ingest::normalize_shared_request(
+        &gw,
         &principal,
         &mut request,
+        &ctx.cancellation,
     )
     .await
-    {
-        Ok(_) => (),
-        Err(error) => {
-            let response = coded_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "history_marker_unavailable",
-                &error.to_string(),
-            );
-            return reject_before_admission(
-                &mut Some(ingress_observer),
-                "restoration",
-                "history_marker_unavailable",
-                response,
-            );
-        }
-    };
-    if let Err(error) =
-        crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
-            .await
     {
         return reject_before_admission(
             &mut Some(ingress_observer),
@@ -662,7 +670,7 @@ pub(super) async fn orchestrate(
             ingress_protocol: ingress.to_string(),
         },
         AdmissionFacts {
-            client_request: client_request.clone(),
+            client_request: Arc::clone(&client_request),
             has_new_user,
             has_matching_pending_tool_result: has_new_user
                 && (compact_pending_tool_result
@@ -682,7 +690,7 @@ pub(super) async fn orchestrate(
         });
     observer.capture_client_tool_results(submitted_items);
     if has_new_user {
-        observer.capture_input_preview(&client_request.items);
+        observer.capture_input_preview(Arc::clone(&client_request));
     }
     if let Some(root_id) = generation_root_id.clone() {
         observer.record(RunEvent::GenerationAssociated {
@@ -732,7 +740,7 @@ pub(super) async fn orchestrate(
         super::RunTerminalContext::new(
             generation_node_id,
             generation_root_id.clone(),
-            client_request.items.clone(),
+            Arc::clone(&client_request),
             gw.compaction.clone(),
             principal.clone(),
             compaction_records.clone(),
@@ -930,7 +938,7 @@ async fn dispatch_round(
         let request_hook_result = inference_run
             .as_mut()
             .expect("buffered Inference Run")
-            .on_request(request)
+            .on_request(Arc::make_mut(request))
             .await;
         match request_hook_result {
             Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
@@ -1028,14 +1036,14 @@ async fn dispatch_round(
     // Pin the entry media plan: hidden Model Legs re-apply it inside the
     // leg loop rather than letting per-leg stripping leak back.
     if let Some(plan) = &fixed_media_plan {
-        request.meta.media_routing = Some(plan.clone());
+        Arc::make_mut(request).meta.media_routing = Some(plan.clone());
     }
     if request
         .meta
         .media_routing
         .as_ref()
         .is_some_and(|plan| plan.mode == MediaRoutingMode::Bridge)
-        && !stabilize_media_generation_chain(generation_chain, request)
+        && !stabilize_media_generation_chain(generation_chain, Arc::make_mut(request))
     {
         return coded_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1068,12 +1076,12 @@ async fn dispatch_round(
 async fn acquire_turn(
     executor: &dyn ModelTurnExecutor,
     headers: &HeaderMap,
-    request: &AiRequest,
+    request: &Arc<AiRequest>,
     request_context: &RequestContext,
     ledger: &RunLedger,
     generation: &mut GenerationChainRun,
-) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
-    let make_input = |effective_request: AiRequest| {
+) -> Result<ModelTurn, RoundOutcome> {
+    let make_input = |effective_request: Arc<AiRequest>| {
         let mut input = TurnInput::new(generation.principal.clone(), effective_request)
             .with_execution(
                 request_context.cancellation.clone(),
@@ -1099,11 +1107,11 @@ async fn acquire_turn(
         input
     };
 
-    let effective_request = request.clone();
+    let effective_request = Arc::clone(request);
     use tracing::Instrument as _;
     let span = tracing::info_span!(target: "stravia::perf", "proxy.model_turn.acquire", status = tracing::field::Empty);
     let first_attempt = executor
-        .execute(make_input(effective_request.clone()))
+        .execute(make_input(Arc::clone(&effective_request)))
         .instrument(span.clone())
         .await;
     span.record(
@@ -1117,9 +1125,9 @@ async fn acquire_turn(
     drop(span);
     let turn = first_attempt.map_err(model_turn_execute_failure)?;
     if let Some(write) = generation.write.as_mut() {
-        write.observe_effective(effective_request.clone());
+        write.observe_effective(effective_request);
     }
-    Ok((turn, effective_request))
+    Ok(turn)
 }
 
 async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutcome {
@@ -1136,7 +1144,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         projection,
         ledger,
     } = input;
-    let (turn, effective_request) = match acquire_turn(
+    let turn = match acquire_turn(
         executor.as_ref(),
         headers,
         request,
@@ -1149,7 +1157,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         Ok(turn) => turn,
         Err(outcome) => return outcome,
     };
-    *request = effective_request;
     inference_run
         .as_mut()
         .expect("Inference Run before Model Turn output")

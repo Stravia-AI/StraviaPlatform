@@ -36,10 +36,11 @@ async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_proje
                     ingress_protocol: "responses".into(),
                 },
                 AdmissionFacts {
-                    client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    client_request: (stravia_runtime_contract::protocol::ir::AiRequest::new(
                         "model",
                         Vec::new(),
-                    ),
+                    ))
+                    .into(),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,
@@ -49,7 +50,7 @@ async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_proje
         let terminal = RunTerminalContext::new(
             None,
             None,
-            Vec::new(),
+            std::sync::Arc::new(AiRequest::new("model", Vec::new())),
             Compaction::sqlite(pool.clone()),
             stravia_runtime_contract::Principal::new("owner"),
             crate::model_turn::CompactionPublications::default(),
@@ -125,10 +126,11 @@ async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
                 ingress_protocol: "open-responses/responses/2026-04-24".into(),
             },
             AdmissionFacts {
-                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                client_request: (stravia_runtime_contract::protocol::ir::AiRequest::new(
                     "model",
                     Vec::new(),
-                ),
+                ))
+                .into(),
                 has_new_user: true,
                 has_matching_pending_tool_result: false,
                 generation_root_id: None,
@@ -138,7 +140,7 @@ async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
     let terminal = RunTerminalContext::new(
         None,
         None,
-        Vec::new(),
+        std::sync::Arc::new(AiRequest::new("model", Vec::new())),
         Compaction::sqlite(pool.clone()),
         stravia_runtime_contract::Principal::new("owner"),
         crate::model_turn::CompactionPublications::default(),
@@ -221,10 +223,11 @@ async fn websocket_sent_partial_excludes_unsent_staged_output_and_preserves_item
                 ingress_protocol: "open-responses/responses/2026-04-24".into(),
             },
             AdmissionFacts {
-                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                client_request: (stravia_runtime_contract::protocol::ir::AiRequest::new(
                     "model",
                     Vec::new(),
-                ),
+                ))
+                .into(),
                 has_new_user: true,
                 has_matching_pending_tool_result: false,
                 generation_root_id: None,
@@ -234,7 +237,7 @@ async fn websocket_sent_partial_excludes_unsent_staged_output_and_preserves_item
     let terminal = RunTerminalContext::new(
         None,
         None,
-        Vec::new(),
+        std::sync::Arc::new(AiRequest::new("model", Vec::new())),
         Compaction::sqlite(pool.clone()),
         stravia_runtime_contract::Principal::new("owner"),
         crate::model_turn::CompactionPublications::default(),
@@ -337,10 +340,11 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
                 ingress_protocol: "open-responses/responses/2026-04-24".into(),
             },
             AdmissionFacts {
-                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                client_request: (stravia_runtime_contract::protocol::ir::AiRequest::new(
                     "model",
                     Vec::new(),
-                ),
+                ))
+                .into(),
                 has_new_user: true,
                 has_matching_pending_tool_result: false,
                 generation_root_id: None,
@@ -392,7 +396,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
     let terminal = RunTerminalContext::new(
         None,
         None,
-        Vec::new(),
+        std::sync::Arc::new(AiRequest::new("model", Vec::new())),
         compaction.clone(),
         principal.clone(),
         publications,

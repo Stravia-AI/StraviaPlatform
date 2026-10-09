@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 
 use crate::db::identity::{ProviderId, TargetDestination, UpstreamModelId};
 use crate::db::models::{RouteSelectionStrategy, TargetConfig};
+use crate::runtime_cache::RuntimeCache;
 use stravia_runtime_contract::protocol::ir::AiErrorKind;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::ProtocolExt;
@@ -157,6 +158,8 @@ pub struct TargetRuntimeStatus {
 pub struct RoutePolicyState {
     origin: Instant,
     inner: Arc<Mutex<RoutePolicyStateInner>>,
+    runtime_cache: RuntimeCache,
+    pricing_namespace: Arc<str>,
 }
 
 /// Failure and cooldown bookkeeping for one target. Entries are never removed, so the
@@ -191,18 +194,14 @@ struct RoutePolicyStateInner {
     next_epoch: u64,
     in_flight_input: HashMap<String, u64>,
     conversation_targets: HashMap<ConversationAffinityKey, String>,
-    /// Scheduling prices resolved from Provider Model records, keyed
-    /// `provider_id → requested model`. `None` entries are negative hits
-    /// (model not found or carries no cost) sharing the same invalidation.
     /// `pricing_generation` bumps on every clear so a load that raced an
     /// invalidation can never reinsert stale data.
-    pricing: HashMap<String, HashMap<String, Option<TargetPricing>>>,
     pricing_generation: u64,
 }
 
 /// Pricing fields `scheduling_snapshot` needs from one Provider Model record.
 /// Router-private: only ever produced and consumed inside `crate::router`.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct TargetPricing {
     pub(super) cost_input: Option<f64>,
     pub(super) cost_output: Option<f64>,
@@ -286,16 +285,23 @@ impl RoutePolicyStateInner {
     }
 }
 
+#[cfg(test)]
 impl Default for RoutePolicyState {
     fn default() -> Self {
-        Self {
-            origin: Instant::now(),
-            inner: Arc::new(Mutex::new(RoutePolicyStateInner::default())),
-        }
+        Self::new(RuntimeCache::tinyufo(1024 * 1024))
     }
 }
 
 impl RoutePolicyState {
+    pub(crate) fn new(runtime_cache: RuntimeCache) -> Self {
+        Self {
+            origin: Instant::now(),
+            inner: Arc::new(Mutex::new(RoutePolicyStateInner::default())),
+            runtime_cache,
+            pricing_namespace: uuid::Uuid::new_v4().to_string().into(),
+        }
+    }
+
     pub fn now_ms(&self) -> u64 {
         self.origin.elapsed().as_millis().min(u64::MAX as u128) as u64
     }
@@ -466,43 +472,56 @@ impl RoutePolicyState {
     /// Probe the shared pricing cache for `(provider_id, requested model)`.
     /// On `Miss` the caller loads outside the lock and stores the result under
     /// the carried generation; `Hit` covers both priced and negative entries.
-    pub(super) fn pricing(&self, provider_id: &str, model: &str) -> PricingProbe {
-        let inner = self.inner.lock();
-        match inner
-            .pricing
-            .get(provider_id)
-            .and_then(|models| models.get(model))
-        {
+    pub(super) async fn pricing(&self, provider_id: &str, model: &str) -> PricingProbe {
+        let generation = self.inner.lock().pricing_generation;
+        let key = self.pricing_key(generation, provider_id, model);
+        let cached = self
+            .runtime_cache
+            .get::<Option<TargetPricing>>("pricing", &key)
+            .await;
+        let current_generation = self.inner.lock().pricing_generation;
+        if current_generation != generation {
+            return PricingProbe::Miss(current_generation);
+        }
+        match cached {
             Some(pricing) => PricingProbe::Hit(*pricing),
-            None => PricingProbe::Miss(inner.pricing_generation),
+            None => PricingProbe::Miss(generation),
         }
     }
 
     /// Store a freshly loaded pricing result under the generation it was
     /// loaded against. A generation mismatch means an invalidation landed
     /// while the load was in flight, so the possibly-stale value is dropped.
-    pub(super) fn store_pricing(
+    pub(super) async fn store_pricing(
         &self,
         generation: u64,
         provider_id: &str,
         model: &str,
         pricing: Option<TargetPricing>,
     ) {
-        let mut inner = self.inner.lock();
-        if inner.pricing_generation == generation {
-            if let Some(models) = inner.pricing.get_mut(provider_id) {
-                if let Some(cached) = models.get_mut(model) {
-                    *cached = pricing;
-                } else {
-                    models.insert(model.to_owned(), pricing);
-                }
-            } else {
-                inner.pricing.insert(
-                    provider_id.to_owned(),
-                    HashMap::from([(model.to_owned(), pricing)]),
-                );
-            }
+        if self.inner.lock().pricing_generation != generation {
+            return;
         }
+        // A concurrent clear may land during the put. Its new generation has
+        // a different key, so the late write can never become a current hit.
+        let key = self.pricing_key(generation, provider_id, model);
+        self.runtime_cache
+            .put(
+                "pricing",
+                &key,
+                Arc::new(pricing),
+                std::mem::size_of::<Option<TargetPricing>>(),
+                Duration::from_secs(86_400),
+            )
+            .await;
+    }
+
+    fn pricing_key(&self, generation: u64, provider_id: &str, model: &str) -> String {
+        format!(
+            "{}:{generation}:{}:{provider_id}{model}",
+            self.pricing_namespace,
+            provider_id.len()
+        )
     }
 
     /// Drop every cached price: a local admin write committed or a config
@@ -510,7 +529,6 @@ impl RoutePolicyState {
     /// before this call from reinserting stale entries.
     pub(crate) fn clear_pricing(&self) {
         let mut inner = self.inner.lock();
-        inner.pricing.clear();
         inner.pricing_generation = inner.pricing_generation.wrapping_add(1);
     }
 }
@@ -2246,8 +2264,8 @@ mod tests {
         assert_eq!(next_provider(&mut rival), None);
     }
 
-    #[test]
-    fn stale_pricing_load_cannot_repopulate_after_invalidation() {
+    #[tokio::test]
+    async fn stale_pricing_load_cannot_repopulate_after_invalidation() {
         let state = RoutePolicyState::default();
         let stale = TargetPricing {
             cost_input: Some(1.0),
@@ -2259,39 +2277,41 @@ mod tests {
         };
 
         // A load that probed before invalidation must not reinsert afterwards.
-        let PricingProbe::Miss(stale_generation) = state.pricing("p", "m") else {
+        let PricingProbe::Miss(stale_generation) = state.pricing("p", "m").await else {
             panic!("empty cache must miss")
         };
         state.clear_pricing();
-        state.store_pricing(stale_generation, "p", "m", Some(stale));
+        state
+            .store_pricing(stale_generation, "p", "m", Some(stale))
+            .await;
         assert!(
-            matches!(state.pricing("p", "m"), PricingProbe::Miss(_)),
+            matches!(state.pricing("p", "m").await, PricingProbe::Miss(_)),
             "pre-invalidation load must not repopulate the cache"
         );
 
         // Negative results cache identically to priced ones until the next
         // invalidation.
-        let PricingProbe::Miss(generation) = state.pricing("p", "missing") else {
+        let PricingProbe::Miss(generation) = state.pricing("p", "missing").await else {
             panic!("missing model must miss")
         };
-        state.store_pricing(generation, "p", "missing", None);
+        state.store_pricing(generation, "p", "missing", None).await;
         assert!(matches!(
-            state.pricing("p", "missing"),
+            state.pricing("p", "missing").await,
             PricingProbe::Hit(None)
         ));
 
-        let PricingProbe::Miss(generation) = state.pricing("p", "m") else {
+        let PricingProbe::Miss(generation) = state.pricing("p", "m").await else {
             panic!("post-clear cache must miss")
         };
-        state.store_pricing(generation, "p", "m", Some(fresh));
-        match state.pricing("p", "m") {
+        state.store_pricing(generation, "p", "m", Some(fresh)).await;
+        match state.pricing("p", "m").await {
             PricingProbe::Hit(Some(pricing)) => assert_eq!(pricing.cost_input, Some(9.0)),
             _ => panic!("stored price must hit"),
         }
         state.clear_pricing();
         assert!(
-            matches!(state.pricing("p", "m"), PricingProbe::Miss(_))
-                && matches!(state.pricing("p", "missing"), PricingProbe::Miss(_)),
+            matches!(state.pricing("p", "m").await, PricingProbe::Miss(_))
+                && matches!(state.pricing("p", "missing").await, PricingProbe::Miss(_)),
             "clear must drop positive and negative entries"
         );
     }

@@ -4,8 +4,12 @@ use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 #[tokio::test]
 async fn completed_inline_window_is_the_parent_after_cold_restore() {
     let durable = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
+    let chain = GenerationChain::from_turn_chain(
+        durable.clone(),
+        DEFAULT_GENERATION_CHAIN_TTL,
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("inline-owner");
     let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({
@@ -68,8 +72,12 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     ordinary_response.items = vec![AiItem::output_text("ordinary answer")];
     assert!(below_threshold.stage(&mut ordinary_response, &generation_source(), None));
     below_threshold.persist().await.unwrap();
-    let cold_chain =
-        GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
+    let cold_chain = GenerationChain::from_turn_chain(
+        durable.clone(),
+        DEFAULT_GENERATION_CHAIN_TTL,
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let mut continuation = responses_request(vec![user_message("after ordinary answer")]);
     crate::router::stamp_previous_response_id(&mut continuation, below_threshold.id());
     let continued = cold_chain.begin(owner.clone(), continuation).await.unwrap();
@@ -111,7 +119,9 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
         history_context_fingerprint(&with_new_input.request_delta().items),
         history_context_fingerprint(&[trigger, user_message("new after source")])
     );
-    write.parent.fresh_inline_states.push(state.clone());
+    Arc::make_mut(&mut write.parent)
+        .fresh_inline_states
+        .push(state.clone());
     let mut response = AiResponse::new("inline-response", "model");
     response.items = vec![state.clone(), AiItem::output_text("inline answer")];
     response.items[1].set_graph_metadata(
@@ -131,7 +141,12 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     let inline_id = write.id().to_owned();
     for cold in [false, true] {
         let chain = if cold {
-            GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None)
+            GenerationChain::from_turn_chain(
+                durable.clone(),
+                DEFAULT_GENERATION_CHAIN_TTL,
+                None,
+                crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            )
         } else {
             chain.clone()
         };
@@ -216,6 +231,7 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
         )),
         DEFAULT_GENERATION_CHAIN_TTL,
         Some(artifacts),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let original = user_message("source question");
     let mut source = chain
@@ -279,6 +295,7 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         )),
         DEFAULT_GENERATION_CHAIN_TTL,
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     )
     .with_compaction(compaction.clone());
     let owner = principal("recompaction-owner");
@@ -540,9 +557,13 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .expect("publish thinking marker");
 
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None)
-            .with_history_markers(Arc::clone(&marker_store));
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    )
+    .with_history_markers(Arc::clone(&marker_store));
     let unknown_reference = "bcdefghijklmnopqrstuvwxyzabc";
     let projected = format!(
         "R1{}{}R2",
@@ -689,6 +710,7 @@ async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     )
     .with_history_markers(marker_store);
     let owner = principal("owner");
@@ -805,7 +827,12 @@ async fn write_materializes_an_explicit_parent_before_observation() {
 #[tokio::test]
 async fn persist_requires_a_staged_response() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let mut write = chain
         .begin(
@@ -831,7 +858,12 @@ async fn persist_requires_a_staged_response() {
 #[tokio::test]
 async fn dropping_a_staged_write_does_not_persist_a_node() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let mut write = chain
         .begin(
@@ -889,8 +921,12 @@ async fn a_later_stage_replaces_the_unpersisted_response() {
 #[tokio::test]
 async fn observe_effective_persists_rewritten_history() {
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let mut write = chain
         .begin(
@@ -909,7 +945,12 @@ async fn observe_effective_persists_rewritten_history() {
     write.stage(&mut response, &generation_source(), None);
     write.persist().await.expect("persist response");
     drop(chain);
-    let chain = GenerationChain::from_turn_chain(backend, Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend,
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
 
     let mut continuation = responses_request(vec![user_message("follow-up")]);
     let Some(ProtocolExt::OpenResponses(extension)) = continuation.ext.as_mut() else {
@@ -934,7 +975,12 @@ async fn observe_effective_persists_rewritten_history() {
 #[tokio::test]
 async fn automatic_parent_discovery_writes_only_a_nonempty_branch_delta() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let question = user_message("question");
     let mut root = chain
@@ -970,7 +1016,12 @@ async fn automatic_parent_discovery_writes_only_a_nonempty_branch_delta() {
 #[tokio::test]
 async fn an_identical_full_request_creates_a_new_root() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let question = user_message("question");
     let mut first = chain

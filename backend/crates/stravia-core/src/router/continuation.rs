@@ -22,11 +22,14 @@ pub trait ContinuationLookup: Send + Sync {
         None
     }
 
+    /// Retain full replay only after eligibility succeeds, before rewriting the
+    /// provider request. A miss leaves `full_fallback` empty.
     async fn prepare(
         &self,
         principal: &Principal,
         target: ContinuationTarget<'_>,
         request: &mut AiRequest,
+        full_fallback: &mut Option<AiRequest>,
     ) -> Option<String>;
 }
 
@@ -62,9 +65,14 @@ impl ContinuationLookup for ScriptedContinuation {
         _principal: &Principal,
         _target: ContinuationTarget<'_>,
         request: &mut AiRequest,
+        full_fallback: &mut Option<AiRequest>,
     ) -> Option<String> {
+        *full_fallback = None;
         match &self.previous_response_id {
             Some(previous_response_id) => {
+                let mut fallback = request.clone();
+                clear_previous_response_id(&mut fallback);
+                *full_fallback = Some(fallback);
                 stamp_previous_response_id(request, previous_response_id);
                 Some(previous_response_id.clone())
             }

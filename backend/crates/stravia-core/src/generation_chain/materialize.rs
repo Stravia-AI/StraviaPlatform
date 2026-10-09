@@ -193,24 +193,6 @@ pub(super) fn serialized_size_bytes(value: &impl serde::Serialize) -> usize {
     }
 }
 
-pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) -> usize {
-    let items = serialized_size_bytes(&materialized.effective_items);
-    let client_items = serialized_size_bytes(&materialized.client_items);
-    let profile = serialized_size_bytes(&materialized.effective_request);
-    items
-        .saturating_add(client_items)
-        .saturating_add(profile)
-        .saturating_add(materialized.root_id.len())
-        .saturating_add(
-            materialized
-                .compaction_record_ids
-                .iter()
-                .map(|id| id.len().saturating_add(std::mem::size_of::<String>()))
-                .fold(0usize, usize::saturating_add),
-        )
-        .saturating_add(std::mem::size_of::<MaterializedGeneration>())
-}
-
 pub(super) fn visit_client_items_from_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     mut visit: impl FnMut(&str, &[AiItem], usize),

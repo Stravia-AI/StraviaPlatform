@@ -349,6 +349,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7.4
+        ports:
+          - 26379:6379
+        # Redis defaults to maxmemory=0 and maxmemory-policy=noeviction.
+        # Keep this disposable service dedicated to this PostgreSQL test job.
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -405,6 +416,7 @@ jobs:
         run: task test:e2e:storage:postgres
         env:
           DB_URL: postgresql://stravia:stravia@localhost:5432/stravia_test
+          STRAVIA_TEST_REDIS_URL: redis://127.0.0.1:26379/0
 
   webui-e2e:
     if: ${{ (github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none') }}

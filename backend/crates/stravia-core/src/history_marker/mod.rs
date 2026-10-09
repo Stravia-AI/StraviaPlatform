@@ -21,7 +21,8 @@ pub use syntax::{
 };
 pub(crate) use syntax::{
     new_reference, render_history_marker_reference, render_preview_projection_end,
-    render_preview_projection_span, render_preview_projection_start, valid_reference,
+    render_preview_projection_span, render_preview_projection_start,
+    request_needs_marker_resolution, valid_reference,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

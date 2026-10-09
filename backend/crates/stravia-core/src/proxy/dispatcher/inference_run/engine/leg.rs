@@ -174,7 +174,7 @@ pub(super) enum LegAdvance {
 
 /// Run state the leg borrows for completion and follow-up acquisition.
 pub(super) struct LegParts<'a> {
-    pub request: &'a mut AiRequest,
+    pub request: &'a mut Arc<AiRequest>,
     pub run: &'a mut InferenceRun,
     pub phase: &'a mut PhaseTracker,
     pub projection: &'a mut ClientProjectionSession,
@@ -718,7 +718,7 @@ impl ModelLegConsume {
         let completion = complete_canonical_response(
             &self.completion,
             CompletionInput {
-                request: &mut *request,
+                request: Arc::make_mut(request),
                 run: &mut *run,
                 phase: &mut *phase,
                 response: self.response.take().expect("sealed Model Leg response"),
@@ -770,7 +770,7 @@ impl ModelLegConsume {
             LegFlow::Failed(failure) => return LegAdvance::Failed(failure),
         }
         if let Err(failure) = continuation
-            .finish(&self.completion, ledger, request, run, phase)
+            .finish(&self.completion, ledger, Arc::make_mut(request), run, phase)
             .await
         {
             return LegAdvance::Failed(LegFailure::Completion(failure));
@@ -1068,7 +1068,7 @@ mod tests {
                     ingress_protocol: INGRESS.to_string(),
                 },
                 crate::interaction_observation::AdmissionFacts {
-                    client_request: AiRequest::new("model", Vec::new()),
+                    client_request: Arc::new(AiRequest::new("model", Vec::new())),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,
@@ -1105,7 +1105,7 @@ mod tests {
             crate::proxy::dispatcher::inference_run::RunTerminalContext::new(
                 None,
                 None,
-                Vec::new(),
+                Arc::new(AiRequest::new("model", Vec::new())),
                 gateway.compaction.clone(),
                 principal.clone(),
                 crate::model_turn::CompactionPublications::default(),
@@ -1115,7 +1115,7 @@ mod tests {
         let generation = GenerationChainRun {
             principal,
             write: None,
-            client_request: request,
+            client_request: Arc::new(request),
             previous_response_id: None,
             compaction_source_generation_id: None,
             vendor_publications: Vec::new(),

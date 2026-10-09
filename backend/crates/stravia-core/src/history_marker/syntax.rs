@@ -479,8 +479,40 @@ fn contains_private_syntax(text: &str) -> bool {
     text.contains(HISTORY_MARKER_PREFIX) || text.contains(PROJECTION_DELIMITER_PREFIX)
 }
 
+fn block_needs_parsing(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::Text { text, .. } => contains_private_syntax(text),
+        ContentBlock::Thinking {
+            thinking,
+            signature: None,
+        } => contains_private_syntax(thinking),
+        ContentBlock::Reasoning {
+            summary,
+            content,
+            encrypted_content: None,
+        } => summary
+            .iter()
+            .chain(content)
+            .any(|text| contains_private_syntax(text)),
+        _ => false,
+    }
+}
+
+fn item_needs_parsing(item: &AiItem) -> bool {
+    item.role == Role::Assistant
+        && match &item.content {
+            MessageContent::Text(text) => contains_private_syntax(text),
+            MessageContent::Blocks(blocks) => blocks.iter().any(block_needs_parsing),
+        }
+}
+
+/// Detect private carriers without detaching a shared request or copying content.
+pub(crate) fn request_needs_marker_resolution(request: &AiRequest) -> bool {
+    request.items.iter().any(item_needs_parsing)
+}
+
 fn parse_item(item: AiItem) -> ParsedItem {
-    if item.role != Role::Assistant {
+    if !item_needs_parsing(&item) {
         return ParsedItem::Unchanged(item);
     }
     let mut atoms = Vec::new();
@@ -494,18 +526,22 @@ fn parse_item(item: AiItem) -> ParsedItem {
         }
         MessageContent::Blocks(blocks) => {
             for block in blocks {
+                if !block_needs_parsing(block) {
+                    atoms.push(CarrierAtom::Visible(block.clone()));
+                    continue;
+                }
                 match block {
                     ContentBlock::Text {
                         text,
                         cache_control,
-                    } if contains_private_syntax(text) => {
+                    } => {
                         changed = true;
                         atoms.extend(parse_scalar(text, ScalarKind::Text(cache_control.clone())));
                     }
                     ContentBlock::Thinking {
                         thinking,
                         signature: None,
-                    } if contains_private_syntax(thinking) => {
+                    } => {
                         changed = true;
                         atoms.extend(parse_scalar(thinking, ScalarKind::Thinking));
                     }
@@ -513,11 +549,7 @@ fn parse_item(item: AiItem) -> ParsedItem {
                         summary,
                         content,
                         encrypted_content: None,
-                    } if summary
-                        .iter()
-                        .chain(content)
-                        .any(|text| contains_private_syntax(text)) =>
-                    {
+                    } => {
                         changed = true;
                         for text in summary {
                             atoms.extend(parse_scalar(text, ScalarKind::ReasoningSummary));
@@ -526,7 +558,7 @@ fn parse_item(item: AiItem) -> ParsedItem {
                             atoms.extend(parse_scalar(text, ScalarKind::ReasoningContent));
                         }
                     }
-                    _ => atoms.push(CarrierAtom::Visible(block.clone())),
+                    _ => unreachable!("Only unsigned textual carriers need parsing"),
                 }
             }
         }

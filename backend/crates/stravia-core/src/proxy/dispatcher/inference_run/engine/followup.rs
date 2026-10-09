@@ -26,7 +26,7 @@ pub(super) enum HookRespondError {
 
 /// Run state borrowed while preparing a Hook-produced response.
 pub(super) struct HookRespondParts<'a> {
-    pub request: &'a AiRequest,
+    pub request: &'a std::sync::Arc<AiRequest>,
     pub ingress: ProtocolId,
     pub inference_run: &'a mut crate::hook::InferenceRun,
     pub projection: &'a mut ClientProjectionSession,
@@ -79,7 +79,7 @@ pub(super) async fn prepare_hook_response(
         .await
         .map_err(|error| HookRespondError::Failure(error.to_string()))?;
     let pending_generation_chain = generation.write.take().and_then(|mut write| {
-        write.observe_effective(request.clone());
+        write.observe_effective(std::sync::Arc::clone(request));
         let mut staged_response = response.clone();
         ledger.apply_hidden_rounds(&mut staged_response);
         response.usage = staged_response.usage.clone();
@@ -109,7 +109,7 @@ pub(super) async fn prepare_hook_response(
 pub(super) struct FollowupLeg<'a> {
     pub executor: &'a dyn ModelTurnExecutor,
     pub headers: &'a HeaderMap,
-    pub request: &'a mut AiRequest,
+    pub request: &'a mut std::sync::Arc<AiRequest>,
     pub ingress: ProtocolId,
     pub request_context: &'a RequestContext,
     pub ledger: &'a RunLedger,
@@ -168,7 +168,10 @@ pub(super) async fn acquire_followup_model_turn(
     if request_context.cancellation.is_cancelled() {
         return Err(buffered_response(error_response(499, "request cancelled")));
     }
-    match inference_run.on_request(request).await {
+    match inference_run
+        .on_request(std::sync::Arc::make_mut(request))
+        .await
+    {
         Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
         Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
             let plan = prepare_hook_response(
@@ -208,9 +211,9 @@ pub(super) async fn acquire_followup_model_turn(
         }
     }
     if let Some(plan) = fixed_media_plan {
-        request.meta.media_routing = Some(plan.clone());
+        std::sync::Arc::make_mut(request).meta.media_routing = Some(plan.clone());
     }
-    if !stabilize_media_generation_chain(generation, request) {
+    if !stabilize_media_generation_chain(generation, std::sync::Arc::make_mut(request)) {
         return Ok(FollowupModelTurn::StreamError(
             stravia_runtime_contract::protocol::ir::AiError::new(
                 stravia_runtime_contract::protocol::ir::AiErrorKind::Unknown,
@@ -219,7 +222,7 @@ pub(super) async fn acquire_followup_model_turn(
         ));
     }
     enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
-    let (turn, effective_request) = acquire_turn(
+    let turn = acquire_turn(
         executor,
         headers,
         request,
@@ -228,7 +231,6 @@ pub(super) async fn acquire_followup_model_turn(
         generation,
     )
     .await?;
-    *request = effective_request;
     inference_run.set_route(turn.route.clone());
     enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
     Ok(FollowupModelTurn::Turn(Box::new(turn)))

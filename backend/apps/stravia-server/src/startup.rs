@@ -16,7 +16,7 @@ use stravia_core::startup_progress::{StartupProgress, observe_startup};
 use tokio::sync::{RwLock, watch};
 use tower::ServiceExt;
 
-use crate::{ServerStartupConfig, prepare_server_app};
+use crate::{PreparedServerApp, ServerStartupConfig, prepare_server_app};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,7 +48,8 @@ struct BootState {
 pub struct StartupHttpApp {
     runtime: Arc<Runtime>,
     progress_routes: Router,
-    config: ServerStartupConfig,
+    config: Option<ServerStartupConfig>,
+    prepared: Option<PreparedServerApp>,
 }
 
 impl StartupHttpApp {
@@ -80,7 +81,8 @@ impl StartupHttpApp {
         Self {
             runtime,
             progress_routes,
-            config,
+            config: Some(config),
+            prepared: None,
         }
     }
 
@@ -94,7 +96,11 @@ impl StartupHttpApp {
 
     /// 在调用方任务内执行初始化，保证 migration 与启动阶段共用观察范围。
     /// 返回首次设置令牌（如有）；错误原样交给宿主，网页只接收失败状态。
-    pub async fn prepare(self) -> anyhow::Result<Option<String>> {
+    pub async fn prepare(&mut self) -> anyhow::Result<Option<String>> {
+        let config = self
+            .config
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup preparation already attempted"))?;
         let runtime = Arc::clone(&self.runtime);
         let result = observe_startup(
             move |progress| {
@@ -103,17 +109,19 @@ impl StartupHttpApp {
                     progress: Some(progress),
                 });
             },
-            prepare_server_app(self.config),
+            prepare_server_app(config),
         )
         .await;
         match result {
-            Ok(prepared) => {
-                *self.runtime.current.write().await = prepared.app;
+            Ok(mut prepared) => {
+                *self.runtime.current.write().await = prepared.app.clone();
+                let setup_token = prepared.setup_token.take();
+                self.prepared = Some(prepared);
                 self.runtime.snapshot.send_replace(StartupSnapshot {
                     status: StartupStatus::Ready,
                     progress: None,
                 });
-                Ok(prepared.setup_token)
+                Ok(setup_token)
             }
             Err(error) => {
                 let progress = self.runtime.snapshot.borrow().progress;
@@ -123,6 +131,13 @@ impl StartupHttpApp {
                 });
                 Err(error)
             }
+        }
+    }
+
+    /// HTTP 监听器排空后由宿主显式等待关闭；准备失败时无需业务清理。
+    pub async fn shutdown(self) {
+        if let Some(prepared) = self.prepared {
+            prepared.shutdown().await;
         }
     }
 }
@@ -238,7 +253,7 @@ mod tests {
             "[database]\nbackend = \"sqlite\"\n",
         )?;
         let policy = AdminEntryPolicy::new(&["http://allowed.test".to_owned()], &[])?;
-        let startup = StartupHttpApp::new(configured_sqlite(root.path(), policy));
+        let mut startup = StartupHttpApp::new(configured_sqlite(root.path(), policy));
         let server = crate::start_http_server(("127.0.0.1", 0), startup.router()).await?;
         let base = format!("http://{}", server.local_addr());
         let client = reqwest::Client::new();
@@ -344,6 +359,7 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         server.shutdown().await?;
+        startup.shutdown().await;
         Ok(())
     }
 
@@ -363,7 +379,7 @@ mod tests {
             "[database]\nbackend = \"sqlite\"\n",
         )?;
         let policy = AdminEntryPolicy::default();
-        let startup = StartupHttpApp::new(configured_sqlite(root.path(), policy));
+        let mut startup = StartupHttpApp::new(configured_sqlite(root.path(), policy));
         let server = crate::start_http_server(("127.0.0.1", 0), startup.router()).await?;
         let base = format!("http://{}", server.local_addr());
         let events = reqwest::get(format!("{base}/api/v1/startup/events")).await?;
@@ -388,6 +404,7 @@ mod tests {
             b"preserve-invalid-database: sensitive fixture"
         );
         server.shutdown().await?;
+        startup.shutdown().await;
         Ok(())
     }
 }

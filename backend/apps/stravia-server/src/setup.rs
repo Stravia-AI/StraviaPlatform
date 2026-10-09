@@ -16,7 +16,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError};
 use stravia_core::config::{
-    GatewayConfig, GatewayStorageConfig, SqlStorageConfig, StorageBackendKind,
+    GatewayCacheConfig, GatewayConfig, GatewayStorageConfig, SqlStorageConfig, StorageBackendKind,
 };
 use stravia_core::data_paths::DataPaths;
 use tokio::sync::{Mutex, RwLock};
@@ -44,9 +44,34 @@ pub enum DatabaseConfig {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct ServerFileConfig {
-    database: DatabaseConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database: Option<DatabaseConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache: Option<ServerCacheConfig>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerCacheConfig {
+    #[serde(default = "default_cache_capacity_mb")]
+    capacity_mb: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redis_url: Option<String>,
+}
+
+impl ServerCacheConfig {
+    fn gateway_cache(&self) -> anyhow::Result<GatewayCacheConfig> {
+        let capacity_bytes = usize::try_from(self.capacity_mb)
+            .ok()
+            .and_then(|capacity| capacity.checked_mul(1024 * 1024))
+            .context("cache.capacity_mb exceeds this platform's supported capacity")?;
+        Ok(GatewayCacheConfig {
+            capacity_bytes,
+            redis_url: self.redis_url.clone(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -61,10 +86,21 @@ pub struct ServerStartupConfig {
 pub struct PreparedServerApp {
     pub app: Router,
     pub setup_token: Option<String>,
+    shutdown: Arc<Mutex<Option<Gateway>>>,
+}
+
+impl PreparedServerApp {
+    /// 宿主先排空 HTTP 请求，再等待业务任务、观测写入和缓存命名空间清理。
+    pub async fn shutdown(self) {
+        if let Some(gateway) = self.shutdown.lock().await.take() {
+            gateway.shutdown().await;
+        }
+    }
 }
 
 struct SetupRuntime {
     current: Arc<RwLock<Router>>,
+    shutdown: Arc<Mutex<Option<Gateway>>>,
     startup: ServerStartupConfig,
     setup_token: Mutex<Option<String>>,
     setup_session: Mutex<Option<String>>,
@@ -97,8 +133,14 @@ struct SetupStateResponse {
     username: Option<String>,
 }
 
-pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<PreparedServerApp> {
-    if let Some(database) = read_database_config(&startup.config_path)? {
+pub async fn prepare_server_app(
+    mut startup: ServerStartupConfig,
+) -> anyhow::Result<PreparedServerApp> {
+    let file = read_server_config(&startup.config_path)?;
+    if let Some(cache) = file.as_ref().and_then(|config| config.cache.as_ref()) {
+        startup.gateway.cache = cache.gateway_cache()?;
+    }
+    if let Some(database) = file.and_then(|config| config.database) {
         let gateway_config = gateway_config(&startup.gateway, &database)?;
         let storage = Gateway::open_storage(&gateway_config)
             .await
@@ -117,18 +159,21 @@ pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<
                 ))
             })?;
             let auth = AdminAuth::new(gateway.storage.clone());
-            let app = normal_app(gateway, auth, &startup);
+            let app = normal_app(gateway.clone(), auth, &startup);
             return Ok(PreparedServerApp {
                 app,
                 setup_token: None,
+                shutdown: Arc::new(Mutex::new(Some(gateway))),
             });
         }
     }
 
     let setup_token = Uuid::new_v4().simple().to_string();
     let current = Arc::new(RwLock::new(Router::new()));
+    let shutdown = Arc::new(Mutex::new(None));
     let runtime = Arc::new(SetupRuntime {
         current: current.clone(),
+        shutdown: Arc::clone(&shutdown),
         startup,
         setup_token: Mutex::new(Some(setup_token.clone())),
         setup_session: Mutex::new(None),
@@ -140,13 +185,18 @@ pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<
     Ok(PreparedServerApp {
         app,
         setup_token: Some(setup_token),
+        shutdown,
     })
 }
 
-/// Read the database configuration, returning `None` when the file is absent.
+/// Read the database configuration, returning `None` before a database is selected.
 /// SQLite always uses the data root; legacy path overrides require explicit migration.
 /// Unreadable or invalid configurations return an error.
 pub fn read_database_config(path: &Path) -> anyhow::Result<Option<DatabaseConfig>> {
+    Ok(read_server_config(path)?.and_then(|config| config.database))
+}
+
+fn read_server_config(path: &Path) -> anyhow::Result<Option<ServerFileConfig>> {
     let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -157,8 +207,13 @@ pub fn read_database_config(path: &Path) -> anyhow::Result<Option<DatabaseConfig
             "server configuration is invalid; legacy SQLite path configurations require stravia-tools migrate-data"
         )
     })?;
-    validate_database_config(&config.database)?;
-    Ok(Some(config.database))
+    if let Some(database) = config.database.as_ref() {
+        validate_database_config(database)?;
+    }
+    if let Some(cache) = config.cache.as_ref() {
+        cache.gateway_cache()?;
+    }
+    Ok(Some(config))
 }
 
 pub fn gateway_config(
@@ -342,6 +397,13 @@ async fn test_database(
         return *response;
     }
     let database = input.database;
+    let config = match gateway_config(&runtime.startup.gateway, &database) {
+        Ok(config) => config,
+        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "invalid_database_config"),
+    };
+    if Gateway::check_runtime_cache(&config).await.is_err() {
+        return auth_error(StatusCode::BAD_REQUEST, "cache_unavailable");
+    }
     match preflight_database(&runtime.startup.gateway.data_dir, &database).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
@@ -377,6 +439,15 @@ async fn complete_setup(
             .into_response();
     }
     let database = input.database;
+    let gateway_config = match gateway_config(&runtime.startup.gateway, &database) {
+        Ok(config) => config,
+        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "invalid_database_config"),
+    };
+    // 缓存连接失败不能发生在创建管理员、撤销 setup 授权之后。
+    if let Err(error) = Gateway::check_runtime_cache(&gateway_config).await {
+        tracing::warn!(error = %error, "runtime cache preflight failed");
+        return auth_error(StatusCode::BAD_REQUEST, "cache_unavailable");
+    }
     if let Err(error) = preflight_database(&runtime.startup.gateway.data_dir, &database).await {
         tracing::warn!(error = %redacted_database_error(&error), "database preflight failed");
         return auth_error(StatusCode::BAD_REQUEST, "database_unavailable");
@@ -386,10 +457,6 @@ async fn complete_setup(
         return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed");
     }
 
-    let gateway_config = match gateway_config(&runtime.startup.gateway, &database) {
-        Ok(config) => config,
-        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "invalid_database_config"),
-    };
     let storage = match Gateway::open_storage(&gateway_config).await {
         Ok(storage) => storage,
         Err(error) => {
@@ -446,7 +513,9 @@ async fn complete_setup(
         }
     };
     let auth = AdminAuth::new(gateway.storage.clone());
-    let normal = normal_app(gateway, auth, &runtime.startup);
+    let normal = normal_app(gateway.clone(), auth, &runtime.startup);
+    // 保留首次设置创建的 Gateway；路由状态切换不能丢失宿主的关闭入口。
+    *runtime.shutdown.lock().await = Some(gateway);
     *runtime.current.write().await = normal;
     clear_setup_cookie(
         &origin,
@@ -529,9 +598,10 @@ fn save_database_config(path: &Path, database: &DatabaseConfig) -> anyhow::Resul
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).context("create configuration directory")?;
-    let source = toml::to_string_pretty(&ServerFileConfig {
-        database: database.clone(),
-    })?;
+    // 初始配置可以只有 cache；选择数据库时不能丢掉 Redis 地址和共享预算。
+    let mut config = read_server_config(path)?.unwrap_or_default();
+    config.database = Some(database.clone());
+    let source = toml::to_string_pretty(&config)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .context("configuration directory is not writable")?;
     #[cfg(unix)]
@@ -625,6 +695,292 @@ fn default_min_connections() -> u32 {
     1
 }
 
+fn default_cache_capacity_mb() -> u32 {
+    16
+}
+
 async fn setup_not_found() -> StatusCode {
     StatusCode::NOT_FOUND
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use serde_json::{Value, json};
+
+    fn startup(directory: &Path) -> ServerStartupConfig {
+        ServerStartupConfig {
+            config_path: directory.join("server.toml"),
+            gateway: GatewayConfig {
+                data_dir: directory.join("data"),
+                ..Default::default()
+            },
+            admin_entry: crate::AdminEntryPolicy::default(),
+            proxy_cors_origins: Vec::new(),
+            serve_embedded_webui: false,
+        }
+    }
+
+    fn post(path: &str, input: Value, session: &str) -> anyhow::Result<Request> {
+        Ok(Request::post(path)
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-stravia-csrf", "1")
+            .header(header::COOKIE, session)
+            .body(Body::from(serde_json::to_vec(&input)?))?)
+    }
+
+    async fn response_json(response: Response) -> anyhow::Result<Value> {
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    async fn claim(prepared: &PreparedServerApp) -> anyhow::Result<String> {
+        let response = prepared
+            .app
+            .clone()
+            .oneshot(post(
+                "/api/v1/setup/claim",
+                json!({ "token": prepared.setup_token.as_ref().expect("setup token") }),
+                "",
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(response.headers()[header::SET_COOKIE]
+            .to_str()?
+            .split(';')
+            .next()
+            .expect("setup cookie")
+            .to_string())
+    }
+
+    fn completion(database: Value) -> Value {
+        json!({
+            "database": database,
+            "username": "setup-admin",
+            "password": "setup-regression-password",
+            "client_base_url": "http://localhost:8080"
+        })
+    }
+
+    async fn state(app: &Router, session: &str) -> anyhow::Result<Value> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/auth/state")
+                    .header(header::HOST, "localhost")
+                    .header(header::COOKIE, session)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    #[tokio::test]
+    async fn graceful_cleanup_stops_observation_after_setup_and_configured_restart()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config = startup(directory.path());
+        let prepared = prepare_server_app(config.clone()).await?;
+        let session = claim(&prepared).await?;
+        let response = prepared
+            .app
+            .clone()
+            .oneshot(post(
+                "/api/v1/setup/complete",
+                completion(json!({ "backend": "sqlite" })),
+                &session,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 保持真实 Gateway 的观察句柄存活，确保关闭来自宿主而非最后一个引用 Drop。
+        let gateway = prepared
+            .shutdown
+            .lock()
+            .await
+            .as_ref()
+            .context("setup must retain its Gateway for shutdown")?
+            .clone();
+        gateway.admin().observation_flush().await?;
+        gateway
+            .storage
+            .settings()
+            .set("shutdown_regression", "setup-persisted")
+            .await?;
+        let server = crate::start_http_server(("127.0.0.1", 0), prepared.app.clone()).await?;
+        server.shutdown().await?;
+        prepared.shutdown().await;
+        assert!(
+            gateway.admin().observation_flush().await.is_err(),
+            "awaited cleanup must stop the observation writer even with live handles"
+        );
+        drop(gateway);
+
+        let prepared = prepare_server_app(config).await?;
+        assert!(prepared.setup_token.is_none());
+        let gateway = prepared
+            .shutdown
+            .lock()
+            .await
+            .as_ref()
+            .context("configured startup must retain its Gateway for shutdown")?
+            .clone();
+        assert_eq!(
+            gateway
+                .storage
+                .settings()
+                .get("shutdown_regression")
+                .await?,
+            Some("setup-persisted".to_owned())
+        );
+        gateway.admin().observation_flush().await?;
+        let server = crate::start_http_server(("127.0.0.1", 0), prepared.app.clone()).await?;
+        server.shutdown().await?;
+        prepared.shutdown().await;
+        assert!(
+            gateway.admin().observation_flush().await.is_err(),
+            "configured startup must await the same real writer cleanup"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_only_config_enters_setup_and_completion_preserves_cache() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let startup = startup(directory.path());
+        let config_path = startup.config_path.clone();
+        let redis_url = "redis://cache-user:cache-secret@cache.invalid:6379/5";
+        std::fs::write(
+            &config_path,
+            format!("[cache]\ncapacity_mb = 7\nredis_url = \"{redis_url}\"\n"),
+        )?;
+        assert!(read_database_config(&config_path)?.is_none());
+
+        let prepared = prepare_server_app(startup).await?;
+        assert_eq!(
+            state(&prepared.app, "").await?,
+            json!({
+                "mode": "setup", "authenticated": false,
+                "setup_authorized": false, "username": null
+            })
+        );
+        let session = claim(&prepared).await?;
+        let response = prepared
+            .app
+            .clone()
+            .oneshot(post(
+                "/api/v1/setup/complete",
+                completion(json!({ "backend": "sqlite" })),
+                &session,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()?
+                .contains("Max-Age=0")
+        );
+        assert_eq!(response_json(response).await?, json!({ "mode": "server" }));
+
+        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+        assert_eq!(saved["database"]["backend"].as_str(), Some("sqlite"));
+        assert_eq!(saved["cache"]["capacity_mb"].as_integer(), Some(7));
+        assert_eq!(saved["cache"]["redis_url"].as_str(), Some(redis_url));
+        assert!(matches!(
+            read_database_config(&config_path)?,
+            Some(DatabaseConfig::Sqlite {})
+        ));
+        assert_eq!(
+            state(&prepared.app, &session).await?,
+            json!({
+                "mode": "server", "authenticated": false,
+                "setup_authorized": false, "username": null
+            })
+        );
+        prepared.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_without_redis_rejects_preflight_and_keeps_setup_reusable()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let startup = startup(directory.path());
+        let config_path = startup.config_path.clone();
+        let data_dir = startup.gateway.data_dir.clone();
+        let cache_only = "[cache]\ncapacity_mb = 9\n";
+        std::fs::write(&config_path, cache_only)?;
+        let prepared = prepare_server_app(startup).await?;
+        let session = claim(&prepared).await?;
+        let postgres = json!({
+            "backend": "postgres",
+            "url": "postgres://database-user:database-secret@database.invalid:5432/setup",
+            "max_connections": 1,
+            "min_connections": 0
+        });
+
+        for (path, input) in [
+            (
+                "/api/v1/setup/test",
+                json!({ "database": postgres.clone() }),
+            ),
+            ("/api/v1/setup/complete", completion(postgres)),
+        ] {
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                prepared.app.clone().oneshot(post(path, input, &session)?),
+            )
+            .await??;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert_eq!(
+                response_json(response).await?,
+                json!({ "error": "cache_unavailable", "code": "cache_unavailable" })
+            );
+            assert_eq!(std::fs::read_to_string(&config_path)?, cache_only);
+            assert!(
+                !data_dir.exists(),
+                "preflight must not open storage or create an admin"
+            );
+            assert_eq!(
+                state(&prepared.app, &session).await?,
+                json!({
+                    "mode": "setup", "authenticated": false,
+                    "setup_authorized": true, "username": null
+                })
+            );
+        }
+
+        let response = prepared
+            .app
+            .clone()
+            .oneshot(post(
+                "/api/v1/setup/complete",
+                completion(json!({ "backend": "sqlite" })),
+                &session,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await?, json!({ "mode": "server" }));
+        let response = prepared
+            .app
+            .clone()
+            .oneshot(post(
+                "/api/v1/auth/login",
+                json!({
+                    "username": "setup-admin",
+                    "password": "setup-regression-password"
+                }),
+                "",
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await?["username"], "setup-admin");
+        prepared.shutdown().await;
+        Ok(())
+    }
 }

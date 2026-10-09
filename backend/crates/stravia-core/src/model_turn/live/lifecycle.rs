@@ -16,7 +16,7 @@ use crate::plugin::{
 };
 use crate::router::{RouteAttemptReservation, SelectedTarget, selected_target_key};
 use stravia_runtime_contract::Deadline;
-use stravia_runtime_contract::protocol::ir::{AiRequest, AiStreamDelta, request::MediaRoutingMode};
+use stravia_runtime_contract::protocol::ir::{AiStreamDelta, request::MediaRoutingMode};
 use stravia_vendor_runtime::RuntimeEvent;
 use stravia_vendor_sdk::OperationOutput;
 
@@ -88,7 +88,6 @@ impl<'a> OutputLifecycle<'a> {
     pub(super) async fn run(
         &mut self,
         prepared: &mut PreparedAttempt,
-        request: &AiRequest,
         attempt: &AttemptObservation,
         first_token_ms: &mut Option<i64>,
     ) -> Result<VendorTerminal, AttemptFailure> {
@@ -100,7 +99,7 @@ impl<'a> OutputLifecycle<'a> {
             emitted_delta: false,
             pending_failure: None,
         }
-        .run(prepared, request)
+        .run(prepared)
         .await
     }
 
@@ -201,7 +200,6 @@ impl Operation<'_, '_> {
     async fn run(
         &mut self,
         prepared: &mut PreparedAttempt,
-        request: &AiRequest,
     ) -> Result<VendorTerminal, AttemptFailure> {
         let gateway = self.lifecycle.gateway;
         let principal = self.lifecycle.principal;
@@ -244,8 +242,9 @@ impl Operation<'_, '_> {
                 } else {
                     stravia_vendor_sdk::Capability::Infer
                 },
-                requires_video: request_contains_video(request),
-                requires_image: request
+                requires_video: request_contains_video(&prepared.request),
+                requires_image: prepared
+                    .request
                     .meta
                     .media_routing
                     .as_ref()
@@ -294,7 +293,7 @@ impl Operation<'_, '_> {
                         }
                     })?;
                 gateway
-                    .select_vendor_protocol(&mut execution, request, &context)
+                    .select_vendor_protocol(&mut execution, &prepared.request, &context)
                     .await
                     .map_err(classify_vendor_error)?;
                 execution
@@ -325,7 +324,9 @@ impl Operation<'_, '_> {
             });
         }
 
-        let mut request = request.clone();
+        // Each actual call owns its materialized wire request. Recovery retains
+        // only the Target-specific logical request, not another driver snapshot.
+        let mut request = prepared.request.clone();
         request.model.clone_from(&prepared.dispatch_model);
         crate::media::ingest::materialize_request(
             gateway,

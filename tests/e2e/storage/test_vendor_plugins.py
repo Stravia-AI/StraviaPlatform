@@ -267,11 +267,12 @@ def _start_initialized_server(
     data_dir: Path,
     port: int,
     database: dict[str, Any],
+    cache_args: list[str],
 ) -> tuple[Any, list[str], WebSession]:
     base_url = f"http://127.0.0.1:{port}"
     process, logs = start_stravia_server(
         stravia_binary=stravia_binary,
-        args=["--data-dir", str(data_dir), "--host", "127.0.0.1", "--port", str(port)],
+        args=["--data-dir", str(data_dir), "--host", "127.0.0.1", "--port", str(port)] + cache_args,
     )
     try:
         wait_until_ready(f"{base_url}/api/v1/auth/state")
@@ -283,12 +284,12 @@ def _start_initialized_server(
 
 
 def _restart_server(
-    stravia_binary: Path, data_dir: Path, port: int
+    stravia_binary: Path, data_dir: Path, port: int, cache_args: list[str]
 ) -> tuple[Any, list[str], WebSession]:
     base_url = f"http://127.0.0.1:{port}"
     process, logs = start_stravia_server(
         stravia_binary=stravia_binary,
-        args=["--data-dir", str(data_dir), "--host", "127.0.0.1", "--port", str(port)],
+        args=["--data-dir", str(data_dir), "--host", "127.0.0.1", "--port", str(port)] + cache_args,
     )
     try:
         wait_until_ready(f"{base_url}/api/v1/auth/state")
@@ -319,6 +320,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
     pg_url = storage_runtime["pg_url"]
     schema: str | None = None
     database: dict[str, Any] = {"backend": "sqlite"}
+    cache_args = storage_runtime["server_args"](backend)
 
     fixtures = repo_root / "target" / "vendor-test-fixtures"
     data_dir = tmp_path / backend
@@ -349,7 +351,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
             }
 
         process, logs, session = _start_initialized_server(
-            stravia_binary, data_dir, port, database
+            stravia_binary, data_dir, port, database, cache_args
         )
         initial_plugins = _plugins(session)
         assert {
@@ -361,7 +363,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         assert not list((data_dir / "plugins").rglob("*.wasm"))
         stop_stravia_server(process, logs)
         process = None
-        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        process, logs, session = _restart_server(stravia_binary, data_dir, port, cache_args)
         assert _plugins(session)["base"]["status"] == "ready"
         assert not list((data_dir / "plugins").rglob("*.wasm"))
         installed = _install_plugin(session, fixtures, "lifecycle-v1.wasm")
@@ -460,7 +462,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         assert _wait_for_api_key_usage(session, api_key["id"], 4)["request_count"] == 4
         stop_stravia_server(process, logs)
         process = None
-        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        process, logs, session = _restart_server(stravia_binary, data_dir, port, cache_args)
         plugins = _plugins(session)
         assert (plugins[LIFECYCLE_VENDOR]["version"], plugins[LIFECYCLE_VENDOR]["source"]) == (
             "1.0.0",
@@ -629,7 +631,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
 
         stop_stravia_server(process, logs)
         process = None
-        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        process, logs, session = _restart_server(stravia_binary, data_dir, port, cache_args)
         plugins = _plugins(session)
         assert (plugins[LIFECYCLE_VENDOR]["version"], plugins[LIFECYCLE_VENDOR]["source"]) == (
             "3.0.0",
@@ -682,7 +684,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         process = None
         digest = hashlib.sha256((fixtures / "lifecycle-v3.wasm").read_bytes()).hexdigest()
         (artifact_dir / f"{digest}.wasm").unlink()
-        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        process, logs, session = _restart_server(stravia_binary, data_dir, port, cache_args)
         assert _plugins(session)[LIFECYCLE_VENDOR]["status"] == "unavailable"
         # configured_credential_fields 依赖已加载描述符；组件不可用时它为空，不代表凭据被删除。
         unavailable_provider_facts = {
@@ -724,7 +726,7 @@ def test_real_vendor_plugin_lifecycle_is_equivalent_across_storage_backends(
         )
         stop_stravia_server(process, logs)
         process = None
-        process, logs, session = _restart_server(stravia_binary, data_dir, port)
+        process, logs, session = _restart_server(stravia_binary, data_dir, port, cache_args)
         assert LIFECYCLE_VENDOR not in _plugins(session)
         assert _provider_fact(session, first["provider_id"]) == unavailable_provider_facts[first["provider_id"]]
         assert _route_fact(session, first["model_id"]) == route_facts[first["model_id"]]

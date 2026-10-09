@@ -432,6 +432,10 @@ fn apply_provider_effective_request(
     else {
         return;
     };
+    apply_decoded_provider_effective_request(request, effective);
+}
+
+fn apply_decoded_provider_effective_request(request: &mut AiRequest, effective: AiRequest) {
     request.generation = effective.generation;
     request.tools = effective.tools;
     request.tool_choice = effective.tool_choice;
@@ -457,7 +461,7 @@ fn apply_provider_effective_request(
 
 pub(super) fn attach_persisted_profile(
     response: &mut AiResponse,
-    request: &mut AiRequest,
+    request: &mut Arc<AiRequest>,
     previous_response_id: Option<&str>,
 ) {
     let mut profile =
@@ -465,7 +469,26 @@ pub(super) fn attach_persisted_profile(
             request,
         );
     if let Some(profile) = profile.as_object_mut() {
-        if let Some(provider_effective) = apply_provider_effective_response(request, response) {
+        let provider_effective = response
+            .vendor
+            .egress
+            .get("__open_responses_provider_effective")
+            .or_else(|| {
+                response
+                    .vendor
+                    .ingress
+                    .get("__open_responses_response_profile")
+            })
+            .and_then(serde_json::Value::as_object);
+        if let Some(provider_effective) = provider_effective {
+            if let Ok(effective) =
+                stravia_protocol_codec::codec::open_responses::decoder::decode_effective_response_profile(
+                    &request.model,
+                    provider_effective,
+                )
+            {
+                apply_decoded_provider_effective_request(Arc::make_mut(request), effective);
+            }
             profile.extend(provider_effective.clone());
         }
         profile.insert(

@@ -64,7 +64,7 @@ pub async fn handler(
                 .map(|vs| (k.as_str().to_lowercase(), vs.to_string()))
         })
         .collect();
-    let envelope = RawEnvelope::new(Some(body.clone()), flat_headers, "POST", &path);
+    let envelope = RawEnvelope::new(None, flat_headers, "POST", &path);
     let mut auth_headers = headers.clone();
     inject_query_key_for_auth(&mut auth_headers, &query);
     let request = match GoogleDecoder.decode_with_model(body, &model, is_stream) {

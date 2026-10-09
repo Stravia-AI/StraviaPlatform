@@ -76,14 +76,14 @@ Platform Tools 在 Stravia 内部执行，可将结果交给后续模型轮次�
 | 完整本地测试矩阵（含增量构建与清理，限时五分钟） | `task test:all` |
 | 代理 / 管理 E2E | `task test:e2e:proxy` / `task test:e2e:admin` |
 | SQLite 存储 E2E | `task test:e2e:storage:sqlite` |
-| PostgreSQL 存储 E2E | 设置 `DB_URL`，再运行 `task test:e2e:storage:postgres` |
-| 完整后端 E2E 矩阵 | 设置 `DB_URL`，再运行 `task test:e2e` |
+| PostgreSQL 存储 E2E | 设置 `DB_URL` 与 `STRAVIA_TEST_REDIS_URL`，再运行 `task test:e2e:storage:postgres` |
+| 完整后端 E2E 矩阵 | 设置 `DB_URL` 与 `STRAVIA_TEST_REDIS_URL`，再运行 `task test:e2e` |
 | Chromium WebUI E2E | `task test:e2e:web` |
 | Windows 桌面冒烟测试 | `task test:e2e:desktop` |
 
-`DB_URL` 必须指向隔离的测试数据库，不得使用生产数据库。
+`DB_URL` 与 `STRAVIA_TEST_REDIS_URL` 必须分别指向隔离的测试数据库与 Redis，不得使用生产服务。
 
-`task test:all` 在 Windows 上运行全部本地测试面，包括桌面 Rust 单元测试、真实 Chromium 与 Tauri 冒烟测试、SQLite/PostgreSQL 存储、开发服务器和本地可运行的 opt-in 测试。它要求已安装锁定依赖、浏览器、Docker，以及本地 `postgres:16` 镜像；自动创建并清理仅监听 loopback 的独立 PostgreSQL 容器，不使用调用者的数据库连接。存储测试的每个并行 worker 使用独立数据库，避免随机 schema 仍争用同一数据库级迁移锁；真实迁移、重连检查和产品锁保持不变。需要生产凭据或外部服务的 live-upstream、S3 与显式忽略的文档示例仍须单独满足前置条件后运行。
+`task test:all` 在 Windows 上运行全部本地测试面，包括桌面 Rust 单元测试、真实 Chromium 与 Tauri 冒烟测试、SQLite/PostgreSQL 存储、开发服务器和本地可运行的 opt-in 测试。它要求已安装锁定依赖、浏览器、Docker，以及本地 `postgres:16` 与 `redis:8-alpine` 镜像；自动创建并清理仅监听 loopback 的独立 PostgreSQL 与 Redis 容器，不使用调用者的数据库或 Redis 连接。存储测试的每个并行 worker 使用独立数据库，避免随机 schema 仍争用同一数据库级迁移锁；真实迁移、重连检查和产品锁保持不变。需要生产凭据或外部服务的 live-upstream、S3 与显式忽略的文档示例仍须单独满足前置条件后运行。
 
 五分钟从统一命令启动计到测试与清理完成，包括源码/工具链检查和必要的增量构建；超时或任一测试失败均返回非零。首次冷构建不承诺五分钟。`target/test-artifacts/` 只缓存按源码、编译环境和实际文件校验的独立编译产物，不缓存测试结果；不得以跳过测试、缩短产品 TTL、丢弃大输入边界或重试掩盖失败来满足时限。逐项日志与计时保存在 `target/test-results/all/`。
 

@@ -178,9 +178,7 @@ fn normalize_messages_for_openai(
         .map(|d| d.name.clone())
         .unwrap_or_else(|| "tool".to_string());
 
-    for msg in &preprocessed {
-        let mut msg = msg.clone();
-
+    for mut msg in preprocessed {
         if msg.role == Role::Assistant {
             promote_reasoning_meta(&mut msg);
             if let Some(tool_calls) = &mut msg.tool_calls {

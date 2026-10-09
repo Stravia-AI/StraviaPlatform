@@ -318,7 +318,7 @@ _避免使用_：GenerationChainTurn、GenerationChainDraft、Session
 ## Generation Materialization Cache
 
 
-Generation Materialization Cache 是 Gateway 进程内、按字节上限淘汰的 LRU 缓存，保存从 immutable Generation Chain delta 精确物化的 execution context。它不是历史事实源；重启或淘汰后，Stravia 必须从 Generation Chain 按父节点顺序重建，不能重跑 Hook。
+Generation Materialization Cache 是可丢弃的派生缓存，保存从 immutable Generation Chain delta 精确物化的 execution context。它不是历史事实源，也不承诺跨 Gateway 或重启复用；未命中、失效或淘汰后，Stravia 必须从 Generation Chain 按父节点顺序重建，不能重跑 Hook。
 
 ## Automatic Parent Discovery
 

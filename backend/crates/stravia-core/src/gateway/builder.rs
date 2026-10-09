@@ -74,6 +74,7 @@ impl GatewayBuilder {
             Arc::clone(&gateway.turn_chains),
             generation_chain_ttl,
             gateway.artifact_store.clone(),
+            gateway.runtime_cache.clone(),
         )
         .with_history_markers(Arc::clone(&gateway.history_markers))
         .with_redaction_mappings(Arc::clone(&gateway.redaction.mappings));

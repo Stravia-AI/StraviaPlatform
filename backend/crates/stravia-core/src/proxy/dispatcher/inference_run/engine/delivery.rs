@@ -626,7 +626,7 @@ mod tests {
                     ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
                 },
                 AdmissionFacts {
-                    client_request: AiRequest::new("model", Vec::new()),
+                    client_request: (AiRequest::new("model", Vec::new())).into(),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,
@@ -636,7 +636,7 @@ mod tests {
         let terminal = super::super::super::RunTerminalContext::new(
             None,
             None,
-            Vec::new(),
+            std::sync::Arc::new(AiRequest::new("model", Vec::new())),
             gateway.compaction.clone(),
             stravia_runtime_contract::Principal::new("owner"),
             Default::default(),
@@ -695,7 +695,7 @@ mod tests {
                     ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
                 },
                 AdmissionFacts {
-                    client_request: AiRequest::new(
+                    client_request: (AiRequest::new(
                         "model",
                         vec![
                             AiItem::function_call(call),
@@ -704,7 +704,8 @@ mod tests {
                                 serde_json::json!("result"),
                             ),
                         ],
-                    ),
+                    ))
+                    .into(),
                     has_new_user: false,
                     has_matching_pending_tool_result: true,
                     generation_root_id: None,

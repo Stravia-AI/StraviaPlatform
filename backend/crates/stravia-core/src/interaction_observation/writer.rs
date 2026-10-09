@@ -17,11 +17,11 @@ use super::{
     types::*,
 };
 
-/// Admission payload carried through the writer channel; boxed because the
-/// full request facts dwarf the other `WriterCommand` variants.
+/// Admission carries only the bounded received window and a full-request hash,
+/// never an unbounded request snapshot behind a slow SQL writer.
 pub(super) struct AdmitPayload {
     pub start: RunStart,
-    pub facts: super::AdmissionFacts,
+    pub facts: super::attribution::PreparedAdmission,
     pub received_at: i64,
     pub metadata: super::RequestMetadata,
     pub debug_enabled: bool,
@@ -406,7 +406,7 @@ pub(super) fn spawn(
                 Some(WriterCommand::Admit(payload)) => {
                     let AdmitPayload {
                         start,
-                        facts,
+                        mut facts,
                         received_at,
                         metadata,
                         debug_enabled,
@@ -416,7 +416,9 @@ pub(super) fn spawn(
                     let now = now();
                     // Run Attribution owns the placement decision end to end; the
                     // writer only persists the outcome and publishes it.
-                    let mut decision = attribution.admit(&start, &facts, received_at, now).await;
+                    let mut decision = attribution
+                        .admit(&start, &mut facts, received_at, now)
+                        .await;
                     if decision.fingerprint_gap
                         && let Some(trace) = &trace
                     {

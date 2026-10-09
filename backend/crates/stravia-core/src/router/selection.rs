@@ -107,7 +107,8 @@ impl RouteSelector {
             conversation_affinity_target,
             cache_affinity_target: self
                 .cache_affinity
-                .preferred_target(principal, &route.id, request),
+                .preferred_target(principal, &route.id, request)
+                .await,
             estimated_uncached_input_tokens: estimated_input_tokens,
             now_ms: self.policy_state.now_ms(),
         };
@@ -265,7 +266,7 @@ impl RouteSelector {
                 });
             let model = target.model().as_str();
             let provider_id = target.provider_id().as_str();
-            let pricing = match self.policy_state.pricing(provider_id, model) {
+            let pricing = match self.policy_state.pricing(provider_id, model).await {
                 PricingProbe::Hit(pricing) => pricing,
                 PricingProbe::Miss(generation) => {
                     let loaded = self
@@ -287,7 +288,8 @@ impl RouteSelector {
                                 .and_then(|value| value.to_f64()),
                         });
                     self.policy_state
-                        .store_pricing(generation, provider_id, model, loaded);
+                        .store_pricing(generation, provider_id, model, loaded)
+                        .await;
                     loaded
                 }
             };
@@ -433,6 +435,7 @@ mod tests {
             _principal: &Principal,
             _target: ContinuationTarget<'_>,
             _request: &mut AiRequest,
+            _full_fallback: &mut Option<AiRequest>,
         ) -> Option<String> {
             None
         }
@@ -457,6 +460,7 @@ mod tests {
             _principal: &Principal,
             _target: ContinuationTarget<'_>,
             _request: &mut AiRequest,
+            _full_fallback: &mut Option<AiRequest>,
         ) -> Option<String> {
             None
         }
@@ -469,8 +473,9 @@ mod tests {
     }
 
     fn fixture(storage: DynStorage, continuation: Arc<dyn ContinuationLookup>) -> Fixture {
-        let cache_affinity = CacheAffinity::default();
-        let policy_state = RoutePolicyState::default();
+        let runtime_cache = crate::runtime_cache::RuntimeCache::tinyufo(1024 * 1024);
+        let cache_affinity = CacheAffinity::new(runtime_cache.clone());
+        let policy_state = RoutePolicyState::new(runtime_cache);
         Fixture {
             selector: RouteSelector::new(
                 storage,
@@ -871,13 +876,16 @@ mod tests {
     async fn cache_affinity_applies_only_without_conversation_identity() {
         let fixture = fixture(memory(), no_continuation());
         let seeded = request();
-        fixture.cache_affinity.record_success(
-            &principal(),
-            "route-id",
-            &seeded,
-            "affinity:model",
-            &large_usage(),
-        );
+        fixture
+            .cache_affinity
+            .record_success(
+                &principal(),
+                "route-id",
+                &seeded,
+                "affinity:model",
+                &large_usage(),
+            )
+            .await;
         let route = route(vec![target("primary", 10), target("affinity", 0)]);
 
         let mut policy = fixture

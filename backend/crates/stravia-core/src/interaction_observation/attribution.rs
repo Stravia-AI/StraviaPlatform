@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use stravia_runtime_contract::Principal;
@@ -42,11 +43,44 @@ pub(crate) struct AdmissionFacts {
     /// The received canonical client request; never restored or effective
     /// history. Tail evidence reads `client_request.items`; the retry
     /// fingerprint covers the whole request per the documented contract.
-    pub client_request: AiRequest,
+    pub client_request: Arc<AiRequest>,
     pub has_new_user: bool,
     pub has_matching_pending_tool_result: bool,
     pub generation_root_id: Option<String>,
     pub generation_parent_id: Option<String>,
+}
+
+/// Bounded, locally derived admission evidence. The writer never retains the
+/// full request while waiting for SQL; attribution still owns both projections.
+pub(super) struct PreparedAdmission {
+    pub(super) has_new_user: bool,
+    pub(super) has_matching_pending_tool_result: bool,
+    pub(super) generation_root_id: Option<String>,
+    pub(super) generation_parent_id: Option<String>,
+    received_input: Option<Window>,
+    input_overflow: bool,
+    canonical_fingerprint: String,
+    fingerprint_gap: bool,
+}
+
+impl AdmissionFacts {
+    pub(super) fn prepare(self, run_id: &str) -> PreparedAdmission {
+        let items = &self.client_request.items;
+        let received_input = Window::capture_received_input(items);
+        let input_overflow = received_input.is_none() && !items.is_empty();
+        let (canonical_fingerprint, fingerprint_gap) =
+            request_fingerprint(&self.client_request, run_id);
+        PreparedAdmission {
+            has_new_user: self.has_new_user,
+            has_matching_pending_tool_result: self.has_matching_pending_tool_result,
+            generation_root_id: self.generation_root_id,
+            generation_parent_id: self.generation_parent_id,
+            received_input,
+            input_overflow,
+            canonical_fingerprint,
+            fingerprint_gap,
+        }
+    }
 }
 
 /// One admission's resolved placement plus the diagnostic event to persist.
@@ -337,17 +371,14 @@ impl<E: AttributionEvidence> RunAttribution<E> {
     pub(super) async fn admit(
         &mut self,
         start: &RunStart,
-        facts: &AdmissionFacts,
+        facts: &mut PreparedAdmission,
         ingress_received_at: i64,
         now: i64,
     ) -> Attribution {
-        let items = &facts.client_request.items;
-        let (input, input_overflow) = match Window::capture_received_input(items) {
-            Some(window) => (Some(window), false),
-            None => (None, !items.is_empty()),
-        };
-        let (canonical_fingerprint, fingerprint_gap) =
-            request_fingerprint(&facts.client_request, &start.id);
+        let input = facts.received_input.take();
+        let input_overflow = facts.input_overflow;
+        let canonical_fingerprint = &facts.canonical_fingerprint;
+        let fingerprint_gap = facts.fingerprint_gap;
         let mut parent_evidence_error = None;
         let replayed_client_tool_results = match input.as_ref() {
             Some(input) => {
@@ -407,7 +438,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             AssignInput {
                 run_id: &start.id,
                 principal: &start.principal,
-                canonical_fingerprint: &canonical_fingerprint,
+                canonical_fingerprint,
                 has_new_user: facts.has_new_user,
                 has_matching_pending_tool_result: facts.has_matching_pending_tool_result
                     && !replayed_client_tool_results,
@@ -783,10 +814,10 @@ impl<E: AttributionEvidence> RunAttribution<E> {
 fn request_fingerprint(request: &AiRequest, run_id: &str) -> (String, bool) {
     match serde_json::to_value(request).and_then(|mut canonical| {
         canonical.sort_all_objects();
-        serde_json::to_vec(&canonical)
+        super::tail::hash_json(&canonical, usize::MAX)
     }) {
-        Ok(bytes) => (canonical::hash_hex(&canonical::hash_bytes(&bytes)), false),
-        Err(_) => (format!("unavailable:{run_id}"), true),
+        Ok(Some((hash, _))) => (canonical::hash_hex(&hash), false),
+        Ok(None) | Err(_) => (format!("unavailable:{run_id}"), true),
     }
 }
 
@@ -1019,7 +1050,7 @@ mod tests {
 
     fn facts(items: Vec<AiItem>) -> AdmissionFacts {
         AdmissionFacts {
-            client_request: AiRequest::new("model", items),
+            client_request: Arc::new(AiRequest::new("model", items)),
             has_new_user: false,
             has_matching_pending_tool_result: false,
             generation_root_id: None,
@@ -1057,7 +1088,12 @@ mod tests {
     async fn no_evidence_admits_a_new_root_and_stamps_receipt() {
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let assigned = attribution
-            .admit(&start("run"), &facts(vec![user("hi")]), 1_000, 1_000)
+            .admit(
+                &start("run"),
+                &mut facts(vec![user("hi")]).prepare("run"),
+                1_000,
+                1_000,
+            )
             .await;
         assert_eq!(assigned.grouping_reason, "new_root");
         assert_eq!(assigned.parent_run_id, None);
@@ -1082,7 +1118,14 @@ mod tests {
         let mut attribution = RunAttribution::new(evidence);
         let mut facts = facts(vec![user("follow up")]);
         facts.generation_parent_id = Some("node".into());
-        let assigned = attribution.admit(&start("run"), &facts, 5_000, 5_000).await;
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut facts.clone().prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
         assert_eq!(assigned.interaction_id, "interaction");
         assert_eq!(assigned.parent_run_id.as_deref(), Some("parent-run"));
         assert_eq!(assigned.grouping_reason, "exact_continuation");
@@ -1105,7 +1148,12 @@ mod tests {
         facts.has_new_user = true;
         facts.has_matching_pending_tool_result = true;
         let assigned = attribution
-            .admit(&start("run"), &facts, 100_000, 100_000)
+            .admit(
+                &start("run"),
+                &mut facts.clone().prepare("run"),
+                100_000,
+                100_000,
+            )
             .await;
         assert_eq!(assigned.interaction_id, "interaction");
         assert_eq!(assigned.grouping_reason, "pending_tool_result");
@@ -1129,7 +1177,12 @@ mod tests {
             facts.has_new_user = true;
             let received_at = 10_000 + delay;
             let assigned = attribution
-                .admit(&start("run"), &facts, received_at, received_at)
+                .admit(
+                    &start("run"),
+                    &mut facts.clone().prepare("run"),
+                    received_at,
+                    received_at,
+                )
                 .await;
             assert_eq!(
                 assigned.grouping_reason, "rapid_exact_continuation",
@@ -1156,7 +1209,12 @@ mod tests {
             facts.has_new_user = true;
             let received_at = 10_000 + delay;
             let assigned = attribution
-                .admit(&start("run"), &facts, received_at, received_at)
+                .admit(
+                    &start("run"),
+                    &mut facts.clone().prepare("run"),
+                    received_at,
+                    received_at,
+                )
                 .await;
             assert_eq!(
                 assigned.grouping_reason, "new_user",
@@ -1176,7 +1234,9 @@ mod tests {
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let mut facts = facts(vec![user("hi")]);
         facts.generation_parent_id = Some("unobserved".into());
-        let assigned = attribution.admit(&start("run"), &facts, 1, 1).await;
+        let assigned = attribution
+            .admit(&start("run"), &mut facts.clone().prepare("run"), 1, 1)
+            .await;
         assert_eq!(assigned.grouping_reason, "unmatched_parent");
         assert_eq!(assigned.parent_run_id, None);
         assert_eq!(assigned.parent_interaction_id, None);
@@ -1191,7 +1251,9 @@ mod tests {
         let mut attribution = RunAttribution::new(evidence);
         let mut facts = facts(vec![user("hi")]);
         facts.generation_parent_id = Some("node".into());
-        let assigned = attribution.admit(&start("run"), &facts, 1, 1).await;
+        let assigned = attribution
+            .admit(&start("run"), &mut facts.clone().prepare("run"), 1, 1)
+            .await;
         assert_eq!(assigned.grouping_reason, "unmatched_parent");
         assert!(assigned.parent_evidence_error.is_some());
     }
@@ -1204,8 +1266,12 @@ mod tests {
         use stravia_runtime_contract::protocol::ir::{AiResponse, OpenResponsesExt, ProtocolExt};
 
         let backend = Arc::new(crate::turn_chain::test_store().await);
-        let chain =
-            GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+        let chain = GenerationChain::from_turn_chain(
+            backend.clone(),
+            Duration::from_secs(60),
+            None,
+            crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        );
         let principal = Principal::new("owner");
         let request = |items| {
             let mut request = AiRequest::new("model", items);
@@ -1238,7 +1304,12 @@ mod tests {
         drop(root);
         drop(chain);
 
-        let restarted = GenerationChain::from_turn_chain(backend, Duration::from_secs(60), None);
+        let restarted = GenerationChain::from_turn_chain(
+            backend,
+            Duration::from_secs(60),
+            None,
+            crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        );
         let mut replay = incoming.clone();
         replay.push(user("reminder"));
         let current = Window::capture_received_input(&replay).unwrap();
@@ -1331,7 +1402,12 @@ mod tests {
             request.has_new_user = true;
             request.has_matching_pending_tool_result = true;
             let assigned = attribution
-                .admit(&start("reminder-run"), &request, 5_000, 5_000)
+                .admit(
+                    &start("reminder-run"),
+                    &mut request.clone().prepare("reminder-run"),
+                    5_000,
+                    5_000,
+                )
                 .await;
             assert!(assigned.replayed_client_tool_results);
             assert!(assigned.received_input.is_some());
@@ -1384,7 +1460,12 @@ mod tests {
         let mut incoming = received;
         incoming.push(next_result);
         let assigned = attribution
-            .admit(&start("next-result-run"), &facts(incoming), 10, 10)
+            .admit(
+                &start("next-result-run"),
+                &mut facts(incoming).prepare("next-result-run"),
+                10,
+                10,
+            )
             .await;
         assert!(!assigned.replayed_client_tool_results);
         assert_eq!(assigned.grouping_reason, "current_tool_continuation");
@@ -1435,7 +1516,12 @@ mod tests {
                 &received[..2],
             );
             let assigned = attribution
-                .admit(&start("branch"), &facts(items), 10, 10)
+                .admit(
+                    &start("branch"),
+                    &mut facts(items).prepare("branch"),
+                    10,
+                    10,
+                )
                 .await;
             assert!(!assigned.replayed_client_tool_results);
             assert_eq!(assigned.grouping_reason, "current_tool_continuation");
@@ -1464,7 +1550,12 @@ mod tests {
         let mut replay = received;
         replay.push(user("reminder"));
         let assigned = attribution
-            .admit(&start("branch"), &facts(replay), 10, 10)
+            .admit(
+                &start("branch"),
+                &mut facts(replay).prepare("branch"),
+                10,
+                10,
+            )
             .await;
         assert!(!assigned.replayed_client_tool_results);
         assert_eq!(assigned.grouping_reason, "current_tool_continuation");
@@ -1501,7 +1592,12 @@ mod tests {
             let mut replay = received.clone();
             replay.push(user("reminder"));
             let assigned = attribution
-                .admit(&start("branch"), &facts(replay), 10, 10)
+                .admit(
+                    &start("branch"),
+                    &mut facts(replay).prepare("branch"),
+                    10,
+                    10,
+                )
                 .await;
             assert!(!assigned.replayed_client_tool_results);
             assert_eq!(assigned.grouping_reason, "current_tool_continuation");
@@ -1523,7 +1619,7 @@ mod tests {
         let assigned = attribution
             .admit(
                 &start("run"),
-                &facts(vec![long_user("task"), tool_result("call-1")]),
+                &mut facts(vec![long_user("task"), tool_result("call-1")]).prepare("run"),
                 5_000,
                 5_000,
             )
@@ -1560,7 +1656,12 @@ mod tests {
         let mut request = facts(vec![long_user("task"), tool_result("call-1")]);
         request.generation_parent_id = Some("unobserved-node".into());
         let assigned = attribution
-            .admit(&start("run"), &request, 5_000, 5_000)
+            .admit(
+                &start("run"),
+                &mut request.clone().prepare("run"),
+                5_000,
+                5_000,
+            )
             .await;
         assert_eq!(assigned.interaction_id, "source-interaction");
         assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
@@ -1615,7 +1716,12 @@ mod tests {
             let run_id = format!("continued-run-{step}");
             let received_at = delivered_at + 400_000;
             let assigned = attribution
-                .admit(&start(&run_id), &request, received_at, received_at)
+                .admit(
+                    &start(&run_id),
+                    &mut request.clone().prepare(&run_id),
+                    received_at,
+                    received_at,
+                )
                 .await;
 
             assert_eq!(assigned.interaction_id, "task-interaction");
@@ -1660,7 +1766,12 @@ mod tests {
         request.generation_parent_id = Some("node".into());
         request.has_new_user = true;
         let assigned = attribution
-            .admit(&start("new-run"), &request, 10_000, 10_000)
+            .admit(
+                &start("new-run"),
+                &mut request.clone().prepare("new-run"),
+                10_000,
+                10_000,
+            )
             .await;
         assert_ne!(assigned.interaction_id, "interaction");
         assert_eq!(
@@ -1695,11 +1806,12 @@ mod tests {
         let assigned = attribution
             .admit(
                 &start("run"),
-                &facts(vec![
+                &mut facts(vec![
                     long_user("kept"),
                     long_answer("kept"),
                     tool_result("call-1"),
-                ]),
+                ])
+                .prepare("run"),
                 5_000,
                 5_000,
             )
@@ -1735,7 +1847,12 @@ mod tests {
         request.generation_parent_id = Some("node".into());
         request.has_new_user = true;
         let assigned = attribution
-            .admit(&start("run"), &request, 5_000, 5_000)
+            .admit(
+                &start("run"),
+                &mut request.clone().prepare("run"),
+                5_000,
+                5_000,
+            )
             .await;
         assert_eq!(assigned.grouping_reason, "new_user");
         assert_eq!(
@@ -1762,7 +1879,12 @@ mod tests {
             &[long_user("task"), tool_call("call-1")],
         );
         let assigned = attribution
-            .admit(&start("run"), &request, 5_000, 5_000)
+            .admit(
+                &start("run"),
+                &mut request.clone().prepare("run"),
+                5_000,
+                5_000,
+            )
             .await;
         assert_ne!(assigned.interaction_id, "source-interaction");
         assert_eq!(assigned.grouping_reason, "new_user");
@@ -1794,7 +1916,7 @@ mod tests {
             let assigned = attribution
                 .admit(
                     &start("run"),
-                    &facts(source_items.clone()),
+                    &mut facts(source_items.clone()).prepare("run"),
                     received_at,
                     received_at,
                 )
@@ -1828,7 +1950,12 @@ mod tests {
         );
         let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert_eq!(assigned.interaction_id, "source-interaction");
         assert_eq!(assigned.grouping_reason, "retained_tail_continuation");
@@ -1865,7 +1992,12 @@ mod tests {
         let mut admitted = facts(head);
         admitted.generation_parent_id = Some("head-run".into());
         let assigned = attribution
-            .admit(&start("run"), &admitted, 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut admitted.clone().prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert_eq!(assigned.interaction_id, "confirmed-interaction");
         assert!(matches!(
@@ -1894,7 +2026,12 @@ mod tests {
         }
         let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert_eq!(assigned.grouping_reason, "new_root");
         assert!(matches!(
@@ -1928,7 +2065,12 @@ mod tests {
         ]);
         facts.has_new_user = true;
         let assigned = attribution
-            .admit(&start("run"), &facts, 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts.clone().prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert_eq!(assigned.grouping_reason, "retained_tail_linked");
         assert_ne!(assigned.interaction_id, "source-interaction");
@@ -1966,7 +2108,12 @@ mod tests {
         let mut facts = facts(source_items);
         facts.generation_parent_id = Some("node".into());
         let assigned = attribution
-            .admit(&start("run"), &facts, 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts.clone().prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         // The confirmed parent decides; the association is persisted as a
         // diagnostic event only, never as a grouping input.
@@ -2004,7 +2151,9 @@ mod tests {
             if parented {
                 facts.generation_parent_id = Some("node".into());
             }
-            let assigned = attribution.admit(&start("run"), &facts, 1, 1).await;
+            let assigned = attribution
+                .admit(&start("run"), &mut facts.clone().prepare("run"), 1, 1)
+                .await;
             if parented {
                 assert!(assigned.diagnostic_event.is_none());
                 assert_eq!(assigned.interaction_id, "interaction");
@@ -2032,7 +2181,12 @@ mod tests {
         );
         let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert!(matches!(
             assigned.diagnostic_event,
@@ -2055,7 +2209,12 @@ mod tests {
         );
         let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert!(matches!(
             &assigned.diagnostic_event,
@@ -2081,7 +2240,12 @@ mod tests {
         }
         let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert!(matches!(
             assigned.diagnostic_event,
@@ -2096,7 +2260,12 @@ mod tests {
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let oversized = user(&"a".repeat(600 * 1024));
         let assigned = attribution
-            .admit(&start("run"), &facts(vec![oversized]), 1, 1)
+            .admit(
+                &start("run"),
+                &mut facts(vec![oversized]).prepare("run"),
+                1,
+                1,
+            )
             .await;
         assert!(matches!(
             assigned.diagnostic_event,
@@ -2126,7 +2295,12 @@ mod tests {
             &source_items,
         );
         let assigned = attribution
-            .admit(&start("run"), &facts(source_items), 20_000, 20_000)
+            .admit(
+                &start("run"),
+                &mut facts(source_items).prepare("run"),
+                20_000,
+                20_000,
+            )
             .await;
         assert_eq!(assigned.grouping_reason, "new_root");
         assert!(matches!(
@@ -2140,11 +2314,21 @@ mod tests {
         let items = vec![user("same request")];
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let first = attribution
-            .admit(&start("first"), &facts(items.clone()), 1_000, 1_000)
+            .admit(
+                &start("first"),
+                &mut facts(items.clone()).prepare("first"),
+                1_000,
+                1_000,
+            )
             .await;
         attribution.finish("first", "failed", 2_000);
         let retry = attribution
-            .admit(&start("retry"), &facts(items), 3_000, 3_000)
+            .admit(
+                &start("retry"),
+                &mut facts(items).prepare("retry"),
+                3_000,
+                3_000,
+            )
             .await;
         assert_eq!(retry.interaction_id, first.interaction_id);
         assert_eq!(retry.grouping_reason, "inferred_retry");
@@ -2156,12 +2340,22 @@ mod tests {
         let items = vec![user("same request")];
         let mut attribution = RunAttribution::new(MemoryEvidence::default());
         let first = attribution
-            .admit(&start("first"), &facts(items.clone()), 1_000, 1_000)
+            .admit(
+                &start("first"),
+                &mut facts(items.clone()).prepare("first"),
+                1_000,
+                1_000,
+            )
             .await;
         attribution.output_committed("first");
         attribution.finish("first", "failed", 2_000);
         let retry = attribution
-            .admit(&start("retry"), &facts(items), 3_000, 3_000)
+            .admit(
+                &start("retry"),
+                &mut facts(items).prepare("retry"),
+                3_000,
+                3_000,
+            )
             .await;
         assert_ne!(retry.interaction_id, first.interaction_id);
         assert!(!retry.inferred_retry);

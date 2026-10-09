@@ -545,13 +545,6 @@ pub(crate) fn record_observation_queue_depth(depth: usize) {
     }
 }
 
-pub(crate) fn record_generation_cache_bytes(bytes: usize) {
-    let guard = sources().read();
-    if any_enabled(&guard) {
-        gauge!("stravia_generation_materialization_cache_bytes").set(bytes as f64);
-    }
-}
-
 pub(crate) fn record_generation_cache_access(hit: bool) {
     let guard = sources().read();
     if any_enabled(&guard) {

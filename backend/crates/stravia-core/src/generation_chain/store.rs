@@ -4,9 +4,10 @@ use super::*;
 pub(super) struct GenerationChainStore {
     pub(super) turn_chain: Arc<dyn TurnChainStore>,
     ttl: Duration,
-    materializations: Arc<Mutex<GenerationMaterializationCache>>,
+    runtime_cache: RuntimeCache,
 }
 
+#[derive(Serialize, Deserialize)]
 pub(super) struct MaterializedGeneration {
     pub(super) root_id: String,
     pub(super) compaction_record_ids: Vec<String>,
@@ -22,53 +23,58 @@ pub(super) struct MaterializedGeneration {
     /// 供候选匹配直接引用，避免每次命中前重复投影整段历史。
     pub(super) client_item_units: usize,
     pub(super) payload_version: u32,
+    #[serde(with = "cache_deadline")]
     pub(super) expires_at: std::time::Instant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct GenerationMaterializationCacheKey {
-    principal: String,
-    node_id: TurnNodeId,
-    payload_version: u32,
-}
-
-struct CachedMaterialization {
-    materialized: Arc<MaterializedGeneration>,
-    /// 引用目录按 ingress 惰性缓存：命中时可跳过整条 `load_generation_chain`
-    /// SQL 与节点 decode。Err 同样确定性，一并缓存。
-    catalogs: HashMap<Option<ProtocolId>, Result<Vec<AiItem>, String>>,
-    bytes: usize,
+#[derive(Serialize, Deserialize)]
+struct CachedCatalog {
+    catalog: Result<Vec<AiItem>, String>,
+    #[serde(with = "cache_deadline")]
     expires_at: std::time::Instant,
 }
 
-#[derive(Default)]
-struct GenerationMaterializationCache {
-    bytes: usize,
-    entries: HashMap<GenerationMaterializationCacheKey, CachedMaterialization>,
-    head_versions: HashMap<(String, TurnNodeId), u32>,
-    lru: VecDeque<GenerationMaterializationCacheKey>,
+#[derive(Serialize)]
+struct BorrowedCachedCatalog<'a> {
+    catalog: &'a Result<Vec<AiItem>, String>,
+    #[serde(with = "cache_deadline")]
+    expires_at: std::time::Instant,
 }
 
-/// 超预算时从 LRU 头部驱逐，直到回到容量内；被驱逐 key 的 head_versions
-/// 一并移除，避免悬空指向已删除版本。
-fn materialization_cache_evict(cache: &mut GenerationMaterializationCache) {
-    while cache.bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
-        let Some(evicted) = cache.lru.pop_front() else {
-            break;
-        };
-        if let Some(evicted_entry) = cache.entries.remove(&evicted) {
-            cache.bytes = cache.bytes.saturating_sub(evicted_entry.bytes);
-        }
-        cache
-            .head_versions
-            .remove(&(evicted.principal, evicted.node_id));
+// Cache namespaces are process-local. Preserve the exact monotonic deadline
+// through Redis instead of reconstructing it from a remaining TTL at read time.
+mod cache_deadline {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    fn origin() -> Instant {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        *ORIGIN.get_or_init(Instant::now)
     }
-}
 
-fn catalog_size_bytes(catalog: &Result<Vec<AiItem>, String>) -> usize {
-    match catalog {
-        Ok(items) => super::materialize::serialized_size_bytes(items),
-        Err(error) => error.len(),
+    pub fn serialize<S: Serializer>(deadline: &Instant, serializer: S) -> Result<S::Ok, S::Error> {
+        let origin = origin();
+        let before_origin = *deadline < origin;
+        let offset = if before_origin {
+            origin.duration_since(*deadline)
+        } else {
+            deadline.duration_since(origin)
+        };
+        let nanos = u64::try_from(offset.as_nanos()).map_err(serde::ser::Error::custom)?;
+        (before_origin, nanos).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Instant, D::Error> {
+        let (before_origin, nanos) = <(bool, u64)>::deserialize(deserializer)?;
+        let offset = Duration::from_nanos(nanos);
+        let origin = origin();
+        let deadline = if before_origin {
+            origin.checked_sub(offset)
+        } else {
+            origin.checked_add(offset)
+        };
+        deadline.ok_or_else(|| serde::de::Error::custom("generation cache deadline overflow"))
     }
 }
 
@@ -84,6 +90,18 @@ pub(super) struct GenerationChainCommit {
     pub(crate) effective_state: GenerationChainState,
 }
 
+pub(super) fn generation_cache_key(
+    principal: &str,
+    id: &TurnNodeId,
+    ingress: Option<ProtocolId>,
+) -> String {
+    // JSON tuples avoid delimiter collisions in Principal or node IDs.
+    let ingress =
+        ingress.map(|endpoint| (endpoint.protocol.as_str(), endpoint.name, endpoint.version));
+    serde_json::to_string(&(principal, id.as_str(), RESPONSE_PAYLOAD_VERSION, ingress))
+        .expect("generation cache key contains only JSON-serializable identifiers")
+}
+
 pub(crate) fn request_has_item_references(request: &AiRequest) -> bool {
     item_reference_ids(&request.items).next().is_some()
 }
@@ -91,6 +109,21 @@ pub(crate) fn request_has_item_references(request: &AiRequest) -> bool {
 pub(super) fn item_reference_ids(items: &[AiItem]) -> impl Iterator<Item = &str> {
     items.iter().filter_map(item_reference_id)
 }
+pub(super) fn request_has_response_artifact_references(request: &AiRequest) -> bool {
+    request.items.iter().any(|item| match &item.content {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Image {
+                    source: MediaSource::FileId { file_id, .. },
+                    ..
+                } if file_id.starts_with("stravia://artifacts/")
+            )
+        }),
+        _ => false,
+    })
+}
+
 pub(crate) async fn hydrate_response_artifact_references(
     principal: &Principal,
     request: &mut AiRequest,
@@ -170,11 +203,15 @@ struct PrefixVerifyContext<'a> {
 }
 
 impl GenerationChainStore {
-    pub fn from_turn_chain(turn_chain: Arc<dyn TurnChainStore>, ttl: Duration) -> Self {
+    pub fn from_turn_chain(
+        turn_chain: Arc<dyn TurnChainStore>,
+        ttl: Duration,
+        runtime_cache: RuntimeCache,
+    ) -> Self {
         Self {
             turn_chain,
             ttl,
-            materializations: Arc::new(Mutex::new(GenerationMaterializationCache::default())),
+            runtime_cache,
         }
     }
 
@@ -282,7 +319,7 @@ impl GenerationChainStore {
     pub async fn discover_parent(
         &self,
         principal: &Principal,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
     ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
         self.discover_prefix(principal, request, false).await
     }
@@ -296,7 +333,7 @@ impl GenerationChainStore {
     pub(super) async fn discover_prefix(
         &self,
         principal: &Principal,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
         allow_complete_window: bool,
     ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
         let client_request = canonical_client_history_request(request);
@@ -399,7 +436,7 @@ impl GenerationChainStore {
         principal: &Principal,
         context: &PrefixVerifyContext<'_>,
         candidates: Vec<stravia_runtime_contract::turn_chain::ReusablePrefixCandidate>,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
     ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
         for candidate in candidates {
             let matched_units = usize::try_from(candidate.item_count).unwrap_or(usize::MAX);
@@ -430,7 +467,7 @@ impl GenerationChainStore {
             if !history_matches {
                 continue;
             }
-            let mut delta = request.clone();
+            let mut delta = request.as_ref().clone();
             let matched_request_items = context.leading_control_items + matched_items;
             delta.items = request.items[matched_request_items..].to_vec();
             remap_client_tool_result_ids(
@@ -460,7 +497,7 @@ impl GenerationChainStore {
                     &mut delta,
                 )?
             };
-            *request = delta;
+            *request = Arc::new(delta);
             return Ok(Some(DiscoveredGenerationPrefix {
                 active,
                 matched_items: matched_request_items,
@@ -667,16 +704,20 @@ impl GenerationChainStore {
         not_found: &str,
     ) -> Result<(Arc<MaterializedGeneration>, Result<Vec<AiItem>, String>), String> {
         let principal_key = principal.continuation_key();
-        let cached = self.materialization_cache_get(&principal_key, id);
+        let cached = self.materialization_cache_get(&principal_key, id).await;
         crate::performance::record_generation_cache_access(cached.is_some());
         if let Some(materialized) = cached {
-            if let Some(catalog) = self.materialization_catalog_get(&principal_key, id, ingress) {
+            if let Some(catalog) = self
+                .materialization_catalog_get(&principal_key, id, ingress)
+                .await
+            {
                 return Ok((materialized, catalog));
             }
             let chain = self
                 .load_generation_chain(principal, id)
                 .await
                 .map_err(|_| not_found.to_string())?;
+            let expires_at = chain.expires_at.min(materialized.expires_at);
             let mut catalog = Ok(Vec::new());
             for node in chain.nodes {
                 let (_, node) = super::materialize::decode_response_node(node)
@@ -687,7 +728,8 @@ impl GenerationChainStore {
                     catalog = Err(error);
                 }
             }
-            self.materialization_catalog_insert(&principal_key, id, ingress, &catalog);
+            self.materialization_catalog_insert(&principal_key, id, ingress, &catalog, expires_at)
+                .await;
             return Ok((materialized, catalog));
         }
         let chain = self
@@ -702,8 +744,16 @@ impl GenerationChainStore {
             principal_key.clone(),
             id.clone(),
             Arc::clone(&materialized),
-        );
-        self.materialization_catalog_insert(&principal_key, id, ingress, &catalog);
+        )
+        .await;
+        self.materialization_catalog_insert(
+            &principal_key,
+            id,
+            ingress,
+            &catalog,
+            materialized.expires_at,
+        )
+        .await;
         Ok((materialized, catalog))
     }
 
@@ -713,152 +763,107 @@ impl GenerationChainStore {
         id: &TurnNodeId,
     ) -> Result<Arc<MaterializedGeneration>, String> {
         let principal_key = principal.continuation_key();
-        if let Some(materialized) = self.materialization_cache_get(&principal_key, id) {
+        if let Some(materialized) = self.materialization_cache_get(&principal_key, id).await {
             crate::performance::record_generation_cache_access(true);
             return Ok(materialized);
         }
         crate::performance::record_generation_cache_access(false);
         let chain = self.load_generation_chain(principal, id).await?;
         let materialized = Arc::new(materialize_generation_nodes(chain.nodes, chain.expires_at)?);
-        self.materialization_cache_insert(principal_key, id.clone(), Arc::clone(&materialized));
+        self.materialization_cache_insert(principal_key, id.clone(), Arc::clone(&materialized))
+            .await;
         Ok(materialized)
     }
 
-    fn materialization_cache_get(
+    async fn materialization_cache_get(
         &self,
         principal: &str,
         id: &TurnNodeId,
     ) -> Option<Arc<MaterializedGeneration>> {
-        let mut cache = self.materializations.lock();
-        let version = *cache
-            .head_versions
-            .get(&(principal.to_owned(), id.clone()))?;
-        let key = GenerationMaterializationCacheKey {
-            principal: principal.to_owned(),
-            node_id: id.clone(),
-            payload_version: version,
-        };
-        let expired = cache
-            .entries
-            .get(&key)
-            .is_none_or(|entry| entry.expires_at <= std::time::Instant::now());
-        if expired {
-            if let Some(entry) = cache.entries.remove(&key) {
-                cache.bytes = cache.bytes.saturating_sub(entry.bytes);
-                crate::performance::record_generation_cache_bytes(cache.bytes);
-            }
-            cache.lru.retain(|candidate| candidate != &key);
-            cache
-                .head_versions
-                .remove(&(principal.to_owned(), id.clone()));
+        let key = generation_cache_key(principal, id, None);
+        let materialized = self
+            .runtime_cache
+            .get::<MaterializedGeneration>("generation.materialized", &key)
+            .await?;
+        if materialized.expires_at <= std::time::Instant::now()
+            || materialized.payload_version != RESPONSE_PAYLOAD_VERSION
+        {
+            self.runtime_cache
+                .remove("generation.materialized", &key)
+                .await;
             return None;
         }
-        let materialized = Arc::clone(&cache.entries.get(&key)?.materialized);
-        cache.lru.retain(|candidate| candidate != &key);
-        cache.lru.push_back(key);
         Some(materialized)
     }
 
-    fn materialization_cache_insert(
+    async fn materialization_cache_insert(
         &self,
         principal: String,
         id: TurnNodeId,
         materialized: Arc<MaterializedGeneration>,
     ) {
-        let bytes = materialization_size_bytes(&materialized);
-        if bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
+        let ttl = materialized
+            .expires_at
+            .saturating_duration_since(std::time::Instant::now());
+        if ttl.is_zero() || materialized.payload_version != RESPONSE_PAYLOAD_VERSION {
             return;
         }
-        let key = GenerationMaterializationCacheKey {
-            principal: principal.clone(),
-            node_id: id.clone(),
-            payload_version: materialized.payload_version,
-        };
-        let mut cache = self.materializations.lock();
-        if let Some(previous_version) = cache
-            .head_versions
-            .insert((principal, id), materialized.payload_version)
-        {
-            let previous = GenerationMaterializationCacheKey {
-                principal: key.principal.clone(),
-                node_id: key.node_id.clone(),
-                payload_version: previous_version,
-            };
-            if let Some(previous) = cache.entries.remove(&previous) {
-                cache.bytes = cache.bytes.saturating_sub(previous.bytes);
-            }
-            cache.lru.retain(|candidate| candidate != &previous);
-        }
-        cache.bytes = cache.bytes.saturating_add(bytes);
-        cache.entries.insert(
-            key.clone(),
-            CachedMaterialization {
-                catalogs: HashMap::new(),
-                expires_at: materialized.expires_at,
-                materialized,
-                bytes,
-            },
-        );
-        cache.lru.push_back(key);
-        materialization_cache_evict(&mut cache);
-        crate::performance::record_generation_cache_bytes(cache.bytes);
+        let key = generation_cache_key(&principal, &id, None);
+        let bytes = serialized_size_bytes(materialized.as_ref());
+        self.runtime_cache
+            .put("generation.materialized", &key, materialized, bytes, ttl)
+            .await;
     }
 
-    fn materialization_catalog_get(
+    async fn materialization_catalog_get(
         &self,
         principal: &str,
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
     ) -> Option<Result<Vec<AiItem>, String>> {
-        let cache = self.materializations.lock();
-        let version = *cache
-            .head_versions
-            .get(&(principal.to_owned(), id.clone()))?;
-        let key = GenerationMaterializationCacheKey {
-            principal: principal.to_owned(),
-            node_id: id.clone(),
-            payload_version: version,
-        };
-        cache.entries.get(&key)?.catalogs.get(&ingress).cloned()
+        let key = generation_cache_key(principal, id, ingress);
+        let entry = self
+            .runtime_cache
+            .get::<CachedCatalog>("generation.catalog", &key)
+            .await?;
+        if entry.expires_at <= std::time::Instant::now() {
+            self.runtime_cache.remove("generation.catalog", &key).await;
+            return None;
+        }
+        Some(entry.catalog.clone())
     }
 
-    fn materialization_catalog_insert(
+    async fn materialization_catalog_insert(
         &self,
         principal: &str,
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
         catalog: &Result<Vec<AiItem>, String>,
+        expires_at: std::time::Instant,
     ) {
-        let bytes = catalog_size_bytes(catalog);
-        if bytes > GENERATION_MATERIALIZATION_CACHE_BYTES {
+        let ttl = expires_at.saturating_duration_since(std::time::Instant::now());
+        if ttl.is_zero() {
             return;
         }
-        let mut cache = self.materializations.lock();
-        let Some(version) = cache
-            .head_versions
-            .get(&(principal.to_owned(), id.clone()))
-            .copied()
-        else {
+        let key = generation_cache_key(principal, id, ingress);
+        // 只计数借用表示；超预算历史仍正常返回，不先深拷贝再丢弃。
+        let bytes = serialized_size_bytes(&BorrowedCachedCatalog {
+            catalog,
+            expires_at,
+        });
+        if !self
+            .runtime_cache
+            .can_admit::<CachedCatalog>("generation.catalog", &key, bytes)
+        {
             return;
-        };
-        let key = GenerationMaterializationCacheKey {
-            principal: principal.to_owned(),
-            node_id: id.clone(),
-            payload_version: version,
-        };
-        let removed = if let Some(entry) = cache.entries.get_mut(&key) {
-            let removed = entry
-                .catalogs
-                .insert(ingress, catalog.clone())
-                .map_or(0, |previous| catalog_size_bytes(&previous));
-            entry.bytes = entry.bytes.saturating_sub(removed).saturating_add(bytes);
-            removed
-        } else {
-            return;
-        };
-        cache.bytes = cache.bytes.saturating_sub(removed).saturating_add(bytes);
-        materialization_cache_evict(&mut cache);
-        crate::performance::record_generation_cache_bytes(cache.bytes);
+        }
+        let entry = Arc::new(CachedCatalog {
+            catalog: catalog.clone(),
+            expires_at,
+        });
+        self.runtime_cache
+            .put("generation.catalog", &key, entry, bytes, ttl)
+            .await;
     }
 
     #[cfg(test)]
@@ -876,7 +881,9 @@ impl GenerationChainStore {
         request: &mut AiRequest,
         candidate_state: &GenerationChainState,
         allow_ephemeral_response: bool,
+        full_fallback: &mut Option<AiRequest>,
     ) -> bool {
+        *full_fallback = None;
         let Ok(materialized) = self
             .materialize_generation(principal, &TurnNodeId::new(parent_id))
             .await
@@ -889,7 +896,13 @@ impl GenerationChainStore {
             parent_state: Some(materialized.effective_state.clone()),
             ..ActiveGenerationChain::default()
         };
-        self.prepare_upstream(&active, request, candidate_state, allow_ephemeral_response)
+        self.prepare_upstream(
+            &active,
+            request,
+            candidate_state,
+            allow_ephemeral_response,
+            full_fallback,
+        )
     }
 
     pub fn prepare_upstream(
@@ -898,7 +911,9 @@ impl GenerationChainStore {
         request: &mut AiRequest,
         candidate_state: &GenerationChainState,
         allow_ephemeral_response: bool,
+        full_fallback: &mut Option<AiRequest>,
     ) -> bool {
+        *full_fallback = None;
         if !(request_preserves_upstream_response(request) || allow_ephemeral_response)
             || !candidate_state.supports_open_responses_continuation()
         {
@@ -929,6 +944,11 @@ impl GenerationChainStore {
         {
             return false;
         }
+        // Snapshot only after every continuation gate succeeds, immediately before
+        // discarding history or replacing protocol controls.
+        let mut fallback = request.clone();
+        crate::router::clear_previous_response_id(&mut fallback);
+        *full_fallback = Some(fallback);
         request.items = request.items.split_off(parent_state.context_messages);
         match request.ext.as_mut() {
             Some(ProtocolExt::OpenResponses(extension)) => {

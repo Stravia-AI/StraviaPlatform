@@ -23,6 +23,66 @@ fn principal(id: &str) -> Principal {
     Principal::new(id)
 }
 
+#[tokio::test]
+async fn gated_resolution_cleans_private_carriers_and_preserves_protected_blocks() {
+    use stravia_runtime_contract::protocol::ir::Role;
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let malformed_marker = "before\n<!--sh:broken\npreserved";
+    let malformed_projection = "before\n<!--sp:broken\npreserved";
+    let mut user = AiItem::output_text(malformed_marker);
+    user.role = Role::User;
+    let mut request = AiRequest::new(
+        "model",
+        vec![
+            user,
+            AiItem::thinking(malformed_marker, Some("signature".into())),
+            AiItem::reasoning(
+                vec![malformed_projection.into()],
+                vec![],
+                Some("encrypted".into()),
+            ),
+        ],
+    );
+    if request_needs_marker_resolution(&request) {
+        resolve_request_markers(store.as_ref(), &owner, &mut request)
+            .await
+            .unwrap();
+    }
+    assert!(
+        matches!(&request.items[0].content, MessageContent::Text(text) if text == malformed_marker)
+    );
+    assert_eq!(
+        request.items[1].thinking_ref(),
+        Some((malformed_marker, Some("signature")))
+    );
+    assert!(matches!(
+        request.items[2].reasoning_ref(),
+        Some((summary, _, Some("encrypted"))) if summary == [malformed_projection]
+    ));
+
+    for item in [
+        AiItem::output_text(malformed_marker),
+        AiItem::thinking(malformed_projection, None),
+        AiItem::reasoning(
+            vec![malformed_marker.into()],
+            vec![malformed_projection.into()],
+            None,
+        ),
+    ] {
+        let mut request = AiRequest::new("model", vec![item]);
+        if request_needs_marker_resolution(&request) {
+            resolve_request_markers(store.as_ref(), &owner, &mut request)
+                .await
+                .unwrap();
+        }
+        let content = serde_json::to_value(&request.items).unwrap().to_string();
+        assert!(!content.contains(HISTORY_MARKER_PREFIX));
+        assert!(!content.contains(PROJECTION_DELIMITER_PREFIX));
+        assert!(content.contains("preserved"));
+    }
+}
+
 fn call(id: &str) -> ToolCall {
     ToolCall {
         id: id.into(),

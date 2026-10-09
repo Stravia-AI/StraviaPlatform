@@ -134,6 +134,27 @@ async fn run_provider_allowance_sampler<F, Fut>(
     }
 }
 
+async fn open_runtime_cache(
+    config: &GatewayConfig,
+    storage_kind: RuntimeStorageKind,
+) -> anyhow::Result<crate::runtime_cache::RuntimeCache> {
+    match storage_kind {
+        RuntimeStorageKind::Memory | RuntimeStorageKind::Sqlite => Ok(
+            crate::runtime_cache::RuntimeCache::tinyufo(config.cache.capacity_bytes),
+        ),
+        RuntimeStorageKind::Postgres => {
+            let url = config
+                .cache
+                .redis_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("PostgreSQL requires cache.redis_url"))?;
+            crate::runtime_cache::RuntimeCache::redis(url, config.cache.capacity_bytes).await
+        }
+    }
+}
+
 async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageRuntime> {
     crate::startup_progress::report("storage_connect", "Connecting to storage", 0, None);
     let root = crate::data_paths::resolve_data_dir(&config.data_dir)?;
@@ -177,6 +198,15 @@ async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageR
 }
 
 impl Gateway {
+    /// 检查配置所需的运行时缓存，不执行 SQL 迁移或启动后台任务。
+    /// SQLite 使用进程内缓存；PostgreSQL 的 Redis 地址或连接无效时返回脱敏错误。
+    pub async fn check_runtime_cache(config: &GatewayConfig) -> anyhow::Result<()> {
+        if config.storage.backend == StorageBackendKind::Postgres {
+            open_runtime_cache(config, RuntimeStorageKind::Postgres).await?;
+        }
+        Ok(())
+    }
+
     /// 打开配置指定的存储，执行迁移并检查连接，不启动 Gateway 后台任务。
     /// SQLite 会按需创建数据目录和数据库；连接、迁移或健康检查失败时返回错误。
     pub async fn open_storage(config: &GatewayConfig) -> anyhow::Result<DynStorage> {
@@ -191,6 +221,7 @@ impl Gateway {
     pub async fn shutdown(&self) {
         self.lifecycle.shutdown().await;
         self.observation.shutdown().await;
+        self.runtime_cache.shutdown().await;
     }
 
     pub async fn new(mut config: GatewayConfig) -> anyhow::Result<Self> {
@@ -214,6 +245,7 @@ impl Gateway {
     ) -> anyhow::Result<Self> {
         crate::startup_progress::report("gateway_initialize", "Initializing gateway", 0, None);
         config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
+        let runtime_cache = open_runtime_cache(&config, storage_kind).await?;
         let paths = crate::data_paths::DataPaths::new(&config.data_dir);
         paths.prepare()?;
         let history_sqlite_pool = if sqlite_pool.is_none() && postgres_pool.is_none() {
@@ -412,6 +444,7 @@ impl Gateway {
             Arc::clone(&turn_chains),
             Duration::from_secs(7 * 24 * 60 * 60),
             artifact_store.clone(),
+            runtime_cache.clone(),
         )
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_mappings(Arc::clone(&redaction.mappings))
@@ -463,6 +496,7 @@ impl Gateway {
             config,
             storage,
             storage_kind,
+            runtime_cache: runtime_cache.clone(),
             http_client,
             vendor_http_client: vendor_http_client.clone(),
             vendor_websocket_client: vendor_websocket_client.clone(),
@@ -476,12 +510,14 @@ impl Gateway {
                 vendor_http_client.clone(),
                 vendor_websocket_client.clone(),
             ),
-            provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::default(),
+            provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::new(
+                runtime_cache.clone(),
+            ),
             allowance_samples,
             vendor_client_cache: Arc::new(tokio::sync::RwLock::new([None, None])),
             model_cache,
-            cache_affinity: router::cache_affinity::CacheAffinity::default(),
-            route_policy_state: router::RoutePolicyState::default(),
+            cache_affinity: router::cache_affinity::CacheAffinity::new(runtime_cache.clone()),
+            route_policy_state: router::RoutePolicyState::new(runtime_cache),
             observation,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,

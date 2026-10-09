@@ -110,7 +110,8 @@ pub(crate) type CompactionPublications = Arc<parking_lot::Mutex<Vec<CompactionPu
 pub struct TurnInput {
     pub purpose: ModelTurnPurpose,
     pub principal: Principal,
-    pub request: AiRequest,
+    /// Canonical input shared across attempts; target preparation owns its edits.
+    pub request: Arc<AiRequest>,
     pub authorization: ModelTurnAuthorization,
     pub extra_headers: reqwest::header::HeaderMap,
     pub cancellation: CancellationToken,
@@ -129,11 +130,11 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    pub fn new(principal: Principal, request: AiRequest) -> Self {
+    pub fn new(principal: Principal, request: impl Into<Arc<AiRequest>>) -> Self {
         Self {
             purpose: ModelTurnPurpose::Generation,
             principal,
-            request,
+            request: request.into(),
             authorization: ModelTurnAuthorization::RouteBinding,
             extra_headers: reqwest::header::HeaderMap::new(),
             cancellation: CancellationToken::new(),
@@ -356,7 +357,7 @@ impl InMemoryModelTurnExecutor {
 #[async_trait]
 impl ModelTurnExecutor for InMemoryModelTurnExecutor {
     async fn execute(&self, input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
-        let request = input.request;
+        let request = input.request.as_ref().clone();
         self.requests.lock().push(request.clone());
         let response = self
             .responses

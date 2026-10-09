@@ -22,7 +22,12 @@ impl GenerationChainWrite {
     }
 
     pub(crate) fn request_mut(&mut self) -> &mut AiRequest {
-        &mut self.request
+        Arc::make_mut(&mut self.request)
+    }
+
+    /// Share the immutable execution snapshot; edits use `request_mut` COW.
+    pub(crate) fn request_shared(&self) -> Arc<AiRequest> {
+        Arc::clone(&self.request)
     }
 
     pub(crate) fn request_delta(&self) -> &AiRequest {
@@ -100,28 +105,35 @@ impl GenerationChainWrite {
         &mut self,
         publications: &[crate::model_turn::CompactionPublication],
     ) {
-        for publication in publications.iter().filter(|publication| {
-            matches!(
-                publication.mode,
-                crate::interaction_observation::CompactionMode::Inline
-            )
-        }) {
-            self.parent
-                .fresh_inline_states
-                .push(publication.state.clone());
-            self.parent
+        let mut publications = publications
+            .iter()
+            .filter(|publication| {
+                matches!(
+                    publication.mode,
+                    crate::interaction_observation::CompactionMode::Inline
+                )
+            })
+            .peekable();
+        if publications.peek().is_none() {
+            return;
+        }
+        let parent = Arc::make_mut(&mut self.parent);
+        for publication in publications {
+            parent.fresh_inline_states.push(publication.state.clone());
+            parent
                 .compaction_record_ids
                 .push(publication.record_id.clone());
         }
-        self.parent.compaction_record_ids.sort();
-        self.parent.compaction_record_ids.dedup();
+        parent.compaction_record_ids.sort();
+        parent.compaction_record_ids.dedup();
     }
 
     pub(crate) fn inherited_media_turns(&self) -> &[(usize, Vec<String>)] {
         &self.parent.media_turn_messages
     }
 
-    pub(crate) fn observe_effective(&mut self, request: AiRequest) {
+    pub(crate) fn observe_effective(&mut self, request: impl Into<Arc<AiRequest>>) {
+        let request = request.into();
         let marker_references = self
             .request
             .items
@@ -173,13 +185,16 @@ impl GenerationChainWrite {
             .collect::<Vec<_>>();
 
         self.request = request;
-        self.request
-            .items
-            .retain(|item| !history_marker_restored(item));
+        if !marker_insertions.is_empty() || self.request.items.iter().any(history_marker_restored) {
+            Arc::make_mut(&mut self.request)
+                .items
+                .retain(|item| !history_marker_restored(item));
+        }
         marker_insertions.sort_by_key(|(index, ordinal, _)| (*index, *ordinal));
         for (offset, (index, _, marker)) in marker_insertions.into_iter().enumerate() {
-            self.request.items.insert(
-                index.saturating_add(offset).min(self.request.items.len()),
+            let request = Arc::make_mut(&mut self.request);
+            request.items.insert(
+                index.saturating_add(offset).min(request.items.len()),
                 marker,
             );
         }
@@ -357,9 +372,9 @@ impl GenerationChainWrite {
             .save_with_effective(GenerationChainCommit {
                 principal: self.principal.clone(),
                 id: self.id.clone(),
-                parent: self.parent.clone(),
-                request_delta: self.request_delta.clone(),
-                effective_request: Some(self.request.clone()),
+                parent: self.parent.as_ref().clone(),
+                request_delta: self.request_delta.as_ref().clone(),
+                effective_request: Some(self.request.as_ref().clone()),
                 response: staged.response,
                 upstream_response_id: staged.upstream_response_id,
                 effective_state: staged.effective_state,
@@ -375,6 +390,59 @@ fn history_marker_restored(item: &AiItem) -> bool {
         .and_then(|meta| meta.get("__stravia_history_marker_restored"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
+}
+
+#[cfg(test)]
+mod snapshot_ownership_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cloned_writes_isolate_effective_edits_from_client_delta_and_other_legs() {
+        let chain = test_chain().await;
+        let mut request = AiRequest::new("model", vec![AiItem::output_text("client input")]);
+        request.generation.temperature = Some(0.75);
+        let original = chain
+            .begin(Principal::new("owner"), request)
+            .await
+            .expect("begin generation");
+        let mut edited = original.clone();
+        edited.request_mut().items = vec![AiItem::output_text("leg-specific input")];
+        edited.request_mut().generation.temperature = Some(0.25);
+
+        assert_eq!(
+            original.request().items[0].content.to_text(),
+            "client input"
+        );
+        assert_eq!(
+            edited.request_delta().items[0].content.to_text(),
+            "client input"
+        );
+        assert_ne!(
+            original.request().generation.temperature,
+            edited.request().generation.temperature
+        );
+
+        let effective = Arc::new(AiRequest::new(
+            "model",
+            vec![AiItem::output_text("effective input")],
+        ));
+        edited.observe_effective(Arc::clone(&effective));
+        edited.request_mut().items[0] = AiItem::output_text("later leg edit");
+
+        assert_eq!(effective.items[0].content.to_text(), "effective input");
+        assert_eq!(
+            original.request().items[0].content.to_text(),
+            "client input"
+        );
+        assert_eq!(
+            edited.request_delta().items[0].content.to_text(),
+            "client input"
+        );
+        assert_eq!(
+            edited.request().items[0].content.to_text(),
+            "later leg edit"
+        );
+    }
 }
 
 fn history_marker_anchor_indices(items: &[AiItem]) -> Vec<(usize, String)> {

@@ -37,7 +37,7 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) headers: HeaderMap,
     pub(super) ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
     pub(super) request_context: RequestContext,
-    pub(super) request: AiRequest,
+    pub(super) request: Arc<AiRequest>,
     pub(super) generation: super::GenerationChainRun,
     pub(super) inference_run: crate::hook::InferenceRun,
     pub(super) phase: PhaseTracker,

@@ -504,7 +504,7 @@ mod diagnostic_tests {
                         ingress_protocol: "responses".into(),
                     },
                     AdmissionFacts {
-                        client_request: AiRequest::new("model", Vec::new()),
+                        client_request: AiRequest::new("model", Vec::new()).into(),
                         has_new_user: true,
                         has_matching_pending_tool_result: false,
                         generation_root_id: None,

@@ -1,19 +1,15 @@
-//! Raw request envelope — a snapshot of the original bytes / headers.
-//!
-//! Preserved for:
-//! - Pass-through mode (body forwarded verbatim).
-//! - Audit logging (what did the client actually send?).
-//! - Debug round-trip verification.
+//! 原始请求的可选上下文；它不提供绕过 canonical pipeline 的透传路径。
+//! 普通 HTTP ingress 只保留 headers/method/path，原始正文由 codec 与 Wire
+//! capture 各自拥有，不在执行请求中再保存一份完整 JSON。
 
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// A snapshot of the original inbound request, captured before any codec
-/// transformation.
+/// 原始入口上下文。正文可缺省；审计原始 Wire 必须使用受控的 Debug capture。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RawEnvelope {
-    /// The original JSON body as received from the client.
+    /// 调用方显式保留的原始 JSON；普通代理入口不复制到此字段。
     pub body: Option<Value>,
     /// Flattened request headers (lowercase keys).
     pub headers: HashMap<String, String>,

@@ -52,10 +52,38 @@ impl Default for GatewayStorageConfig {
     }
 }
 
+#[derive(Clone)]
+pub struct GatewayCacheConfig {
+    /// 全部可丢弃派生值共享的逻辑字节预算，不是进程 RSS 上限。
+    pub capacity_bytes: usize,
+    /// PostgreSQL 必须配置 Redis；SQLite 不使用此连接。
+    pub redis_url: Option<String>,
+}
+
+impl std::fmt::Debug for GatewayCacheConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayCacheConfig")
+            .field("capacity_bytes", &self.capacity_bytes)
+            .field("redis_configured", &self.redis_url.is_some())
+            .finish()
+    }
+}
+
+impl Default for GatewayCacheConfig {
+    fn default() -> Self {
+        Self {
+            capacity_bytes: 16 * 1024 * 1024,
+            redis_url: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub data_dir: PathBuf,
     pub storage: GatewayStorageConfig,
+    pub cache: GatewayCacheConfig,
     /// Whether this process has a trusted Desktop updater bridge.
     pub product_update_download_supported: bool,
     /// How often to poll the shared DB for a config epoch change and reload
@@ -79,6 +107,7 @@ impl Default for GatewayConfig {
         Self {
             data_dir: default_data_dir(),
             storage: GatewayStorageConfig::default(),
+            cache: GatewayCacheConfig::default(),
             product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,
             catalog_base_url: None,

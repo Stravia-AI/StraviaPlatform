@@ -34,6 +34,7 @@ delete environment.DB_URL
 delete environment.DATABASE_URL
 delete environment.STRAVIA_TEST_POSTGRES_URL
 delete environment.STRAVIA_STORAGE_TEST_POSTGRES_URLS
+delete environment.STRAVIA_TEST_REDIS_URL
 delete environment.STRAVIA_STORAGE_HARNESS_BINARY
 delete environment.STRAVIA_DESKTOP_E2E_RUN_ROOT
 
@@ -151,6 +152,7 @@ const localIgnored: Record<string, true> = {
   http_non_success_json_keeps_status: true,
   http_compaction_remains_unary_and_preserves_error: true,
   real_base_executes_with_stable_wasi_patches_and_mixed_imports: true,
+  'runtime_cache::tests::redis_expiry_eviction_remove_budget_and_namespace': true,
 }
 
 async function runRustBinaries(binaries: RustBinary[], requireLocalIgnored: boolean): Promise<void> {
@@ -233,12 +235,24 @@ try {
             retries: 30,
           },
         },
+        redis: {
+          image: 'redis:8-alpine',
+          pull_policy: 'never',
+          command: ['redis-server', '--save', '', '--appendonly', 'no', '--maxmemory', '128mb', '--maxmemory-policy', 'noeviction'],
+          ports: ['127.0.0.1::6379'],
+          healthcheck: {
+            test: ['CMD', 'redis-cli', 'ping'],
+            interval: '1s',
+            timeout: '3s',
+            retries: 30,
+          },
+        },
       },
     }),
     { mode: 0o600 },
   )
   ownsPostgres = true
-  // Compose 自己等待真实数据库健康；镜像必须预先安装，不隐式下载或连接既有数据库。
+  // Compose 等待真实 PostgreSQL/Redis 健康；镜像预装，不连接既有服务。
   await run('postgres-start', [...compose, 'up', '--detach', '--wait', '--wait-timeout', '60'])
   const address = (await run('postgres-port', [...compose, 'port', 'postgres', '5432'], { capture: true })).trim()
   const port = /^127\.0\.0\.1:(\d+)$/.exec(address)?.[1]
@@ -246,6 +260,10 @@ try {
   const postgresUrl = `postgres://stravia:${password}@127.0.0.1:${port}/stravia_test`
   environment.DB_URL = postgresUrl
   environment.STRAVIA_TEST_POSTGRES_URL = postgresUrl
+  const redisAddress = (await run('redis-port', [...compose, 'port', 'redis', '6379'], { capture: true })).trim()
+  const redisPort = /^127\.0\.0\.1:(\d+)$/.exec(redisAddress)?.[1]
+  if (!redisPort) throw new Error('Isolated Redis did not expose exactly one localhost port')
+  environment.STRAVIA_TEST_REDIS_URL = `redis://127.0.0.1:${redisPort}/0`
   // SQLx 的 session advisory 迁移锁按数据库隔离，随机 schema 不能隔离并行 worker。
   const storagePostgresUrls: Record<string, string> = {}
   const storageDatabaseCommands: string[] = []

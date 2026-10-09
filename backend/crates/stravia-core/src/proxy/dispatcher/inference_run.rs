@@ -403,7 +403,8 @@ struct TerminalDelivery {
     visible_stream: stravia_protocol_codec::accumulator::StreamResponseAccumulator,
     canonical_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
     visible_committed: bool,
-    client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    // Keep the admitted snapshot shared until Gemini projection edits its prefix.
+    client_request: Option<std::sync::Arc<AiRequest>>,
     client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
     client_completion_published: bool,
     prepared_client_completion: Option<(RunObserver, VendorWriteGuards)>,
@@ -625,14 +626,14 @@ impl RunTerminalContext {
     pub(super) fn new(
         generation_node_id: Option<String>,
         generation_root_id: Option<String>,
-        client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+        client_request: std::sync::Arc<AiRequest>,
         compaction: crate::compaction::Compaction,
         principal: stravia_runtime_contract::Principal,
         compaction_records: crate::model_turn::CompactionPublications,
     ) -> Self {
         Self {
             shared: std::sync::Arc::new(parking_lot::Mutex::new(TerminalDelivery {
-                client_input,
+                client_request: Some(client_request),
                 ..TerminalDelivery::default()
             })),
             generation_node_id,
@@ -788,7 +789,14 @@ impl RunTerminalContext {
         let prefix = if ingress
             == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
         {
-            shared.client_input.as_mut_slice()
+            std::sync::Arc::make_mut(
+                shared
+                    .client_request
+                    .as_mut()
+                    .expect("terminal client request"),
+            )
+            .items
+            .as_mut_slice()
         } else {
             &mut []
         };
@@ -900,7 +908,11 @@ impl RunTerminalContext {
         shared.delivery_completed_at.get_or_insert(delivered_at);
         shared.client_completion_published = true;
         observer.observe_client_completion(
-            &shared.client_input,
+            &shared
+                .client_request
+                .as_ref()
+                .expect("terminal client request")
+                .items,
             shared.client_output.as_deref().unwrap_or_default(),
             delivered_at,
             shared.waiting_client,

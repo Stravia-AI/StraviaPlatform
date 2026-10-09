@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Added a [real HTTP 4×4 ingress/upstream protocol benchmark](docs/research/protocol-http-benchmark.md) with streaming and non-streaming delivery, open-loop and fixed-worker loads, large request bodies, per-process CPU and memory sampling, protocol completion checks, and baseline/optimized comparison reports. It exercises the actual Server and SQL storage paths with a local synthetic upstream; measurements are not a guarantee of a final memory target.
+
+### Changed
+
+- **Breaking:** Disposable derived caches now share one logical capacity budget: SQLite uses in-process TinyUFO, while PostgreSQL requires Redis configured before first setup or an existing installation's upgrade. Missing or unreachable Redis prevents PostgreSQL startup; SQL remains authoritative and there is no SQLite fallback. See [cache and Server configuration](docs/design/architecture.md#统一派生缓存与-server-配置) for deployment and upgrade requirements.
+- Large canonical request snapshots are now shared across request preparation, observation, and model-turn attempts instead of repeatedly deep-cloning their bodies. History restoration and attachment normalization detach shared requests only when mutation is needed, while retaining upload-grant scrubbing, settings validation, and real media processing. Observation Admission prepares bounded attribution evidence before entering the SQL writer queue, so queued admissions no longer retain full large requests; strict history matching, request delivery, and durable SQL history remain unchanged.
+- Vendor request encoding consumes owned OpenAI message preprocessing and releases canonical request/JSON intermediates after body serialization. Rebuild and re-import affected standalone plugins to receive the encoding memory reductions.
+- The complete local Windows test matrix now provisions isolated Redis alongside PostgreSQL. PostgreSQL E2E also requires `STRAVIA_TEST_REDIS_URL` pointing to a dedicated test instance.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

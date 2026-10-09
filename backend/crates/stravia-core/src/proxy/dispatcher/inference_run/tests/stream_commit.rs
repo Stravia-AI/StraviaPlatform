@@ -81,7 +81,7 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
             } else {
                 (7, 3)
             };
-        let request = input.request;
+        let request = Arc::unwrap_or_clone(input.request);
         let route = stravia_runtime_contract::hook::RouteContext {
             model_id: request.model.clone(),
             provider_id: "mid-stream-provider".into(),
@@ -135,7 +135,7 @@ impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
                 target_id: "completed-target".into(),
                 egress: Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
             },
-            input.request,
+            Arc::unwrap_or_clone(input.request),
             [
                 Ok(CanonicalEvent::Delta(
                     stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(

@@ -28,6 +28,7 @@ async fn generation_store() -> GenerationChainStore {
     GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
         DEFAULT_GENERATION_CHAIN_TTL,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     )
 }
 
@@ -36,6 +37,7 @@ async fn generation_chain() -> GenerationChain {
         Arc::new(crate::turn_chain::test_store().await),
         DEFAULT_GENERATION_CHAIN_TTL,
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     )
 }
 

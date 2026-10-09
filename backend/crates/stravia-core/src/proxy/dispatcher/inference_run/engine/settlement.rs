@@ -286,6 +286,8 @@ pub(super) async fn settle(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::history_marker::{HistoryMarker, HistoryMarkerKind};
     use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
@@ -349,7 +351,7 @@ mod tests {
                     ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
                 },
                 crate::interaction_observation::AdmissionFacts {
-                    client_request: AiRequest::new("model", Vec::new()),
+                    client_request: Arc::new(AiRequest::new("model", Vec::new())),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,
@@ -366,7 +368,7 @@ mod tests {
             RunTerminalContext::new(
                 None,
                 None,
-                Vec::new(),
+                Arc::new(AiRequest::new("model", Vec::new())),
                 gateway.compaction.clone(),
                 principal,
                 crate::model_turn::CompactionPublications::default(),

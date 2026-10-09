@@ -136,6 +136,12 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 ## 4. 模块与 seam
 
+### 普通准入队列与输入预览
+
+普通准入在入队前从收到的 canonical 请求生成 `PreparedAdmission`：只保留有界 received-input 证据、溢出或指纹缺口标志、Generation 已确认事实及完整请求的 canonical fingerprint，不让 writer 等待 SQL 时持有完整原文请求。fingerprint 覆盖完整请求语义，不把有界尾窗当成完整请求；证据超限、缺失或无法无损重建时按既有规则记录 gap，不凭截断内容确认归属。
+
+输入预览不作为上述准入证据，也不提前写入普通队列。活动请求先完成凭据保护并登记全部有效映射，成功后才生成和发布最多 4,096 Unicode 字符的受保护预览；保护失败或取消不能发布未经保护的正文。该内存优化不关闭普通 Observation、进程日志、Generation Chain 历史或 Debug 契约，不缩减 SQL 历史；Debug 原文捕获仍只在明确启用时遵循 §7 的独立边界。
+
 ### 原生压缩与保留尾部关联
 
 目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为对启用后准入的请求生效。
@@ -466,7 +472,7 @@ SQL 事件只计入最近的 span，不重复累加到祖先。父 span 的直�
 |`observation.writer.persist_events`、`persist_tail_source`、`filter_client_tool_results` 等|观察事件批次、工具尾迹与工具结果归属查询|
 |`observation.manifest.*` / `observation.maintenance.*`|Debug manifest 写入、计数与保留期维护；不在空闲的每个 writer tick 上建立 span|
 
-`stravia_generation_materialization_cache_access_total{result="hit"|"miss"}` 统计普通物化与含 Item Reference 的父节点恢复对 Generation Materialization Cache 的访问。普通父节点恢复命中缓存后不再读链；含 Item Reference 时，命中只表示可复用执行上下文，仍需读取祖先历史构造引用目录。直接调用底层 Turn Chain 物化不会经过该缓存，因此不能仅凭命中率推断底层读取次数。
+`stravia_generation_materialization_cache_access_total{result="hit"|"miss"}` 统计普通物化与含 Item Reference 的父节点恢复对 Generation Materialization Cache 的访问。物化对象和按 ingress 隔离的祖先引用目录现共用[统一派生缓存](architecture.md#统一派生缓存与-server-配置)：Memory / SQLite 使用 TinyUFO，PostgreSQL 使用 Redis。普通父节点恢复命中缓存后不再读链；含 Item Reference 时，若对应 ingress 的引用目录也命中则不再读链，否则仍需读取祖先历史构造目录。物化 hit 本身不证明目录 hit。直接调用底层 Turn Chain 物化不会经过该缓存，因此不能仅凭命中率推断底层读取次数。逻辑缓存记账不等于进程或 Redis 实际内存。
 
 调查时，在同一进程、同一段复现操作前后各导出一次 metrics，按 `operation` 比较 `_count` 和 `_sum` 差值，并在操作完成后立即导出 timeline。先按查询次数判断高频来源，再按耗时判断慢路径；用工作量字段区分大批次与过多小批次，用父子关系识别重复物化。指标是累计值，关闭或清除 Debug 数据不会归零；有界 timeline 与累计 metrics 也不覆盖相同时间窗口，不能直接相除推导每请求查询量。
 

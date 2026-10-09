@@ -910,10 +910,10 @@ impl IngressObserver {
             protected,
         });
         // 没有成功收据与最终清理的保留槽，就不创建可被后续 User 误判的运行投影。
-        if inner.completion.lock().is_none()
-            || inner.finalization.lock().is_none()
-            || self
-                .observation
+        let can_admit = inner.completion.lock().is_some() && inner.finalization.lock().is_some();
+        let admitted = if can_admit {
+            let facts = facts.prepare(&start.id);
+            self.observation
                 .inner
                 .writer
                 .try_send(WriterCommand::Admit(Box::new(writer::AdmitPayload {
@@ -925,8 +925,11 @@ impl IngressObserver {
                     trace: inner.trace.clone(),
                     discarded_trace,
                 })))
-                .is_err()
-        {
+                .is_ok()
+        } else {
+            false
+        };
+        if !admitted {
             inner.gap.store(true, Ordering::Release);
             self.observation
                 .inner
@@ -1013,7 +1016,7 @@ struct RunObserverInner {
     failure: Mutex<Option<FailureDiagnostic>>,
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
     // Canonical user text remains memory-only until Model Turn protection succeeds.
-    pending_input: Mutex<Option<String>>,
+    pending_input: Mutex<Option<Arc<stravia_runtime_contract::protocol::ir::AiRequest>>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
     thinking_redaction: Mutex<
         std::collections::BTreeMap<
@@ -1042,9 +1045,9 @@ impl RunObserver {
     /// Admission only: use the received canonical window, never effective model history.
     pub(crate) fn capture_input_preview(
         &self,
-        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+        input: Arc<stravia_runtime_contract::protocol::ir::AiRequest>,
     ) {
-        *self.inner.pending_input.lock() = redaction::user_input_text(input);
+        *self.inner.pending_input.lock() = Some(input);
     }
 
     /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
@@ -1090,7 +1093,10 @@ impl RunObserver {
     pub(crate) fn publish_input_preview(&self) {
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
         self.send_tool_results(tool_results);
-        let Some(text) = self.inner.pending_input.lock().take() else {
+        let Some(input) = self.inner.pending_input.lock().take() else {
+            return;
+        };
+        let Some(text) = redaction::user_input_text(&input.items) else {
             return;
         };
         let preview = redaction::input_preview(text, &self.inner.protected);
@@ -1839,7 +1845,9 @@ mod snapshot_tests {
     /// Every test admission crosses the same one-call boundary as production.
     fn facts(items: Vec<stravia_runtime_contract::protocol::ir::AiItem>) -> AdmissionFacts {
         AdmissionFacts {
-            client_request: stravia_runtime_contract::protocol::ir::AiRequest::new("model", items),
+            client_request: Arc::new(stravia_runtime_contract::protocol::ir::AiRequest::new(
+                "model", items,
+            )),
             has_new_user: true,
             has_matching_pending_tool_result: false,
             generation_root_id: None,
@@ -3154,7 +3162,9 @@ mod snapshot_tests {
         };
         let publish = |id: &str, input: &[AiItem]| {
             let run = test_run(&observation, id, facts(input.to_vec()));
-            run.capture_input_preview(input);
+            run.capture_input_preview(Arc::new(
+                stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.to_vec()),
+            ));
             run.capture_client_tool_results(input);
             run.protect_secrets(["preview-secret"]);
             run.publish_input_preview();
@@ -3231,7 +3241,9 @@ mod snapshot_tests {
         observation.shutdown().await;
         let observation = test_observation(&pool, directory.path(), false).await;
         let unknown = test_run(&observation, "preview-unavailable", facts(input.clone()));
-        unknown.capture_input_preview(&input);
+        unknown.capture_input_preview(Arc::new(
+            stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.clone()),
+        ));
         unknown.protect_secrets(["preview-secret"]);
         unknown.publish_input_preview();
         observation.flush().await?;
@@ -3316,7 +3328,9 @@ mod snapshot_tests {
             "preview-verified-parent",
             facts(vec![question.clone()]),
         );
-        parent.capture_input_preview(std::slice::from_ref(&question));
+        parent.capture_input_preview(Arc::new(
+            stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![question.clone()]),
+        ));
         parent.publish_input_preview();
         parent.finish(RunOutcome {
             client_output_committed: true,
@@ -3347,7 +3361,9 @@ mod snapshot_tests {
             let mut admission = facts(input.clone());
             admission.generation_parent_id = Some("preview-verified-node".into());
             let child = test_run(&observation, id, admission);
-            child.capture_input_preview(&input);
+            child.capture_input_preview(Arc::new(
+                stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.clone()),
+            ));
             child.publish_input_preview();
         }
         observation.flush().await?;

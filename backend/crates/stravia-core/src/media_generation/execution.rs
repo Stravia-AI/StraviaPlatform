@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Instant};
+use std::{io::Cursor, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
@@ -159,7 +159,7 @@ pub(crate) async fn generate(
                     ingress_protocol: "mcp".into(),
                 },
                 AdmissionFacts {
-                    client_request: observation_request.clone(),
+                    client_request: Arc::new(observation_request),
                     has_new_user: true,
                     has_matching_pending_tool_result: false,
                     generation_root_id: None,

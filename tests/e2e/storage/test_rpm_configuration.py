@@ -97,6 +97,7 @@ def test_destination_rpm_limits_and_restart(
     port = find_free_port()
     base = f"http://127.0.0.1:{port}"
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    args += storage_runtime["server_args"](backend)
     process = None
     logs = []
     try:

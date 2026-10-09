@@ -116,7 +116,11 @@ async fn optimization_plain_parent_reads_chain_once_cold_and_not_at_all_warm() {
         Duration::from_secs(60),
     )
     .await;
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     for (iteration, expected_reads) in [(0, 1), (1, 1)] {
         let mut request = continuation_to(
             "resp_optimization_child",
@@ -203,7 +207,11 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
         Duration::from_secs(60),
     )
     .await;
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     // 首次冷读后 materialized 与引用目录同键缓存，后续命中不再触发存储读。
     for (iteration, expected_reads) in [(0, 1), (1, 1)] {
         let mut request = continuation_to(
@@ -272,7 +280,11 @@ async fn optimization_reference_conflicts_across_ancestors_remain_ambiguous() {
         Duration::from_secs(60),
     )
     .await;
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let mut request = continuation_to(
         "resp_optimization_conflict_child",
         vec![reference_to("msg_conflicting")],
@@ -301,7 +313,12 @@ async fn blocked_generation_commit(
     let backend = Arc::new(CommitBarrierTurnChainStore::new(
         crate::turn_chain::test_store().await,
     ));
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("commit-fence-owner");
     let question = user_message("question");
     let first_answer = AiItem::output_text("first answer");
@@ -519,7 +536,12 @@ async fn cancelled_pending_commit_releases_waiter_without_publishing_a_node() {
 #[tokio::test]
 async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
-    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     let question = user_message("question");
     let mut a = chain
@@ -572,8 +594,12 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &rebuilt_prefix)
         .await
         .unwrap();
-    let restarted =
-        GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let restarted = GenerationChain::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let mut replay = history_a;
     replay.push(AiItem::reasoning(
         vec!["summary".into()],
@@ -682,6 +708,7 @@ async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -734,6 +761,7 @@ async fn edited_tool_history_does_not_merge_a_later_user_into_tool_continuation(
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -799,7 +827,11 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
         inner: crate::turn_chain::test_store().await,
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), Duration::from_secs(60));
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("owner");
     store
         .save(GenerationChainCommit {
@@ -816,10 +848,14 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
         .expect("save response");
 
     for _ in 0..2 {
-        store
+        let materialized = store
             .materialize_generation(&owner, &TurnNodeId::new("resp_immediately_expired"))
             .await
             .expect("materialize response");
+        let encoded = serde_json::to_vec(materialized.as_ref()).unwrap();
+        let decoded: MaterializedGeneration = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.expires_at, materialized.expires_at);
+        assert!(decoded.expires_at <= std::time::Instant::now());
     }
 
     assert_eq!(
@@ -832,10 +868,71 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
 }
 
 #[tokio::test]
+async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_miss() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cache = crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024);
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        cache.clone(),
+    );
+    let owner = principal("shared-cache-owner");
+    let id = TurnNodeId::new("resp_shared_cache");
+    let mut response = AiResponse::new("upstream", "model");
+    response.push_output_text("answer");
+    store
+        .save(GenerationChainCommit {
+            principal: owner.clone(),
+            id: id.to_string(),
+            parent: ActiveGenerationChain::default(),
+            request_delta: responses_request(vec![user_message("question")]),
+            effective_request: None,
+            response,
+            upstream_response_id: None,
+            effective_state: GenerationChainState::default(),
+        })
+        .await
+        .expect("save response");
+
+    let first = store.materialize_generation(&owner, &id).await.unwrap();
+    let warm = store.materialize_generation(&owner, &id).await.unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &warm),
+        "TinyUFO hits must not clone history"
+    );
+    assert_eq!(backend.reads(), 1);
+    let encoded = serde_json::to_vec(first.as_ref()).unwrap();
+    let decoded: MaterializedGeneration = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded.expires_at, first.expires_at);
+    assert_eq!(
+        serde_json::to_value(&decoded.effective_items).unwrap(),
+        serde_json::to_value(&first.effective_items).unwrap()
+    );
+
+    cache
+        .remove(
+            "generation.materialized",
+            &super::super::store::generation_cache_key(&owner.continuation_key(), &id, None),
+        )
+        .await;
+    let rebuilt = store.materialize_generation(&owner, &id).await.unwrap();
+    assert_eq!(backend.reads(), 2, "a shared-cache miss must re-read SQL");
+    assert!(!Arc::ptr_eq(&first, &rebuilt));
+    assert_eq!(
+        serde_json::to_value(&rebuilt.effective_items).unwrap(),
+        serde_json::to_value(&first.effective_items).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn materialization_cache_does_not_outlive_the_generation_ttl() {
     let store = GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(1),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let mut response = AiResponse::new("upstream", "model");
@@ -935,6 +1032,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         Some(artifact_store),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let first_write = chain
         .begin(owner.clone(), request_for(&first.id))
@@ -1026,6 +1124,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         Some(artifact_store),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
 
     let mut round_one = chain
@@ -1293,6 +1392,7 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -1361,6 +1461,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -1398,6 +1499,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
     let lookup = chain.continuation_lookup();
 
     let mut without_affinity = resumed.request().clone();
+    let mut miss_fallback = None;
     assert_eq!(
         lookup
             .prepare(
@@ -1409,10 +1511,32 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
                     allow_ephemeral_response: false,
                 },
                 &mut without_affinity,
+                &mut miss_fallback,
             )
             .await,
         None
     );
+    assert!(miss_fallback.is_none());
+
+    let mut root_request = responses_request(vec![user_message("new root")]);
+    assert_eq!(
+        lookup
+            .prepare(
+                &owner,
+                crate::router::ContinuationTarget {
+                    namespace: "provider:model",
+                    protocol: Some(OPEN_RESPONSES_2026_04_24),
+                    actual_model: "model",
+                    allow_ephemeral_response: true,
+                },
+                &mut root_request,
+                &mut miss_fallback,
+            )
+            .await,
+        None,
+    );
+    assert!(miss_fallback.is_none());
+    assert_eq!(root_request.items[0].content.to_text(), "new root");
 
     let mut with_affinity = resumed.request().clone();
     assert_eq!(
@@ -1426,6 +1550,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
                     allow_ephemeral_response: true,
                 },
                 &mut with_affinity,
+                &mut None,
             )
             .await
             .as_deref(),
@@ -1441,6 +1566,7 @@ async fn stable_session_does_not_link_semantically_changed_history() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
     let original_user = AiItem {
@@ -1506,6 +1632,7 @@ async fn controls_prefix_wins_when_same_session_candidate_does_not_match() {
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
         None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
 
@@ -1894,8 +2021,11 @@ async fn response_ids_are_isolated_by_principal() {
 async fn response_history_survives_adapter_reconstruction() {
     let turn_chain: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let owner = principal("owner");
-    let store =
-        GenerationChainStore::from_turn_chain(Arc::clone(&turn_chain), Duration::from_secs(60));
+    let store = GenerationChainStore::from_turn_chain(
+        Arc::clone(&turn_chain),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
     store
@@ -1912,7 +2042,11 @@ async fn response_history_survives_adapter_reconstruction() {
         .await
         .expect("save response");
 
-    let reconstructed = GenerationChainStore::from_turn_chain(turn_chain, Duration::from_secs(60));
+    let reconstructed = GenerationChainStore::from_turn_chain(
+        turn_chain,
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let mut continuation = responses_request(vec![user_message("follow-up")]);
     let Some(ProtocolExt::OpenResponses(extension)) = continuation.ext.as_mut() else {
         unreachable!();
@@ -1959,6 +2093,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
         Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     store
         .save(GenerationChainCommit {
@@ -1977,6 +2112,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let reconstructed = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
         Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let mut request = responses_request(Vec::new());
     let Some(ProtocolExt::OpenResponses(ext)) = request.ext.as_mut() else {
@@ -2104,7 +2240,34 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         .expect("materialize response");
     let state = GenerationChainState::from_request(&next, "provider-a", OPEN_RESPONSES_2026_04_24);
 
-    assert!(store.prepare_upstream(&active, &mut next, &state, false));
+    let full_items = next.items.clone();
+    let mut fallback = None;
+    assert!(store.prepare_upstream(&active, &mut next, &state, false, &mut fallback));
+    let fallback = fallback.expect("successful continuation retains full replay");
+    assert!(super::super::project::items_equal(
+        &fallback.items,
+        &full_items
+    ));
+    assert!(crate::router::parent_id_from_request(&fallback).is_none());
+    let mut incompatible = fallback;
+    let incompatible_state = GenerationChainState::from_request(
+        &incompatible,
+        "another-provider",
+        OPEN_RESPONSES_2026_04_24,
+    );
+    let mut miss_fallback = None;
+    assert!(!store.prepare_upstream(
+        &active,
+        &mut incompatible,
+        &incompatible_state,
+        false,
+        &mut miss_fallback,
+    ));
+    assert!(miss_fallback.is_none());
+    assert!(super::super::project::items_equal(
+        &incompatible.items,
+        &full_items
+    ));
     assert_eq!(next.items.len(), 1);
     let Some(ProtocolExt::OpenResponses(extension)) = next.ext else {
         unreachable!();
@@ -2145,6 +2308,7 @@ async fn automatic_prefix_selects_exact_completed_context_and_leaves_new_items()
     let mut next = responses_request(root.items.clone());
     next.items.extend(completed_items);
     next.items.push(user_message("m2"));
+    let mut next = Arc::new(next);
     let discovered = store
         .discover_parent(&owner, &mut next)
         .await
@@ -2160,7 +2324,7 @@ async fn automatic_prefix_selects_exact_completed_context_and_leaves_new_items()
             user_message("m2"),
         ]
     ));
-    let Some(ProtocolExt::OpenResponses(extension)) = next.ext else {
+    let Some(ProtocolExt::OpenResponses(extension)) = &next.ext else {
         unreachable!();
     };
     assert_eq!(extension.store, None);
@@ -2235,6 +2399,7 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
             serde_json::Value::String(format!("{id}-result")),
         ));
     }
+    let mut next = Arc::new(next);
     store
         .discover_parent(&owner, &mut next)
         .await
@@ -2248,7 +2413,9 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
             .collect::<Vec<_>>(),
         vec!["call_existing", "call_a", "call_b", "call_c", "call_d"]
     );
-    stravia_protocol_codec::codec::tool_correlation::normalize_request_tool_results(&mut next);
+    stravia_protocol_codec::codec::tool_correlation::normalize_request_tool_results(Arc::make_mut(
+        &mut next,
+    ));
 
     assert_eq!(
         next.items
@@ -2327,6 +2494,7 @@ async fn automatic_prefix_never_turns_an_identical_full_request_into_an_empty_de
 
     let mut identical = root;
     identical.items.extend(completed_items);
+    let mut identical = Arc::new(identical);
     assert!(
         store
             .discover_parent(&owner, &mut identical)
@@ -2500,7 +2668,9 @@ async fn native_upstream_reuse_requires_persisted_open_responses_target() {
             ..ActiveGenerationChain::default()
         };
 
-        assert!(!store.prepare_upstream(&active, &mut request, &state, false));
+        let mut fallback = None;
+        assert!(!store.prepare_upstream(&active, &mut request, &state, false, &mut fallback));
+        assert!(fallback.is_none());
         assert_eq!(request.items.len(), 1);
     }
 }
@@ -2602,8 +2772,12 @@ async fn commit_observation_node(
 #[tokio::test]
 async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history() {
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("observation-owner");
 
     commit_observation_node(
@@ -2702,8 +2876,12 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
 #[tokio::test]
 async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partial_evidence() {
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("unavailable-observation-owner");
 
     let mut visited = Vec::new();
@@ -2741,8 +2919,12 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
 #[tokio::test]
 async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root() {
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
-    let chain =
-        GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None);
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
     let owner = principal("invalid-observation-owner");
 
     commit_observation_node(

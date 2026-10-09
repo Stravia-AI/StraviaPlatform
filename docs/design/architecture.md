@@ -515,7 +515,7 @@ Request Patch 可改写 canonical model、system/instructions、ContextItems、g
 
 ### 4.5.1 Cache Affinity
 
-Request Hook 完成后、首次 Target 选择前，`CacheAffinity` 对每个 canonical `AiItem` 计算 Canonical Item Hash，并以 Principal、Route 与有序 Hash 前缀查询 Gateway-local 的有界索引。索引只在 Target 成功响应且已报告 `prompt_tokens >= 20,000` 时记录该 Target 与请求的每条 Item Hash；最长精确前缀命中且 Target 仍是当前 Route 的健康候选时，`RouteAttemptPolicy` 仅将该 Target 提到首选位置。没有命中、Target 已移除/不健康、或首选 Target 可重试失败时，现有 Route 选择与重试顺序完整生效。该索引不持久化、不记录 raw 内容或 Hash 日志，也不创建 request-wide fingerprint、客户端/连接/Session 绑定，重启或淘汰只降低 Prompt Cache 命中率。
+Request Hook 完成后、首次 Target 选择前，`CacheAffinity` 先按 Principal、Route 与请求控制语义查询统一派生缓存中的有界记录；未命中时不计算大正文的 Item Hash。已有记录时才对 canonical `AiItem` 计算 Canonical Item Hash，匹配有序 Hash 的最长精确前缀；Target 仍是当前 Route 的健康候选时，`RouteAttemptPolicy` 仅将该 Target 提到首选位置。记录只在 Target 成功响应且已报告 `prompt_tokens >= 20,000` 时发布，只包含每条 Item Hash 与成功 Target，不包含原文请求；保留期为 24 小时且可提前淘汰。同一实例的 clone 共用本地读改写协调门，等待协调门与缓存读写共享整段 100ms 发布 deadline，超时放弃这项可选偏好。没有命中、Target 已移除/不健康、或首选 Target 可重试失败时，现有 Route 选择与重试顺序完整生效。它不记录 raw 内容或 Hash 日志，也不创建 request-wide fingerprint、客户端/连接/Session 绑定，不承诺跨实例或重启复用；淘汰只降低 Prompt Cache 命中率。后端与预算见 §10.1。
 
 ### 4.6 Stateful streaming 限制
 
@@ -537,7 +537,7 @@ Responses 的跨协议 Thinking Preview 与其 History Marker 属于同一个合
 
 `stage` 在进程内登记待提交屏障，按 Principal、精确客户端历史前缀、显式父 ID 或 item reference 匹配后续请求。父发现与物化先等待相关写入结束，再读取 durable history，避免客户端已收到终止事件而 SQL 尚未提交时错连旧父。屏障不是历史事实源，不提前发布节点；失败和取消释放等待但不形成可续接历史。无关分支与其他 Principal 不等待，dispatcher 的既有取消和 deadline 覆盖真实的 begin/compaction 等待。该机制不提供跨进程的提交协调。
 
-Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Gateway 在进程内以按字节上限淘汰的 LRU Generation Materialization Cache 加速读取；它以共享不可变对象保存精确物化的 execution context，缓存命中只复制共享引用，不在锁内复制整段历史；构造可变请求时再复制所需字段。缓存大小通过流式序列化计数估算，不分配用于计量的完整 JSON 缓冲；条目仍受原有字节上限与 TTL 限制，缓存不是历史事实源。重启或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
+Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Generation Materialization Cache 通过统一派生缓存加速精确物化，物化对象与引用目录共享 §10.1 的预算。Memory / SQLite 的 TinyUFO 命中只复制不可变对象的 `Arc`，不序列化或复制整段历史；PostgreSQL 的 Redis 值需要编码与解码。构造可变请求时再复制所需字段。计量采用逻辑字节估计，不为计量分配完整 JSON 缓冲；条目受预算与历史有效期限制，超大条目不缓存但仍正常返回 SQL 结果。缓存不是历史事实源，重启、未命中或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
 
 父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。自动父发现胜出后，未过期且无引用的 delta 直接复用核验得到的不可变物化对象，不再二次查缓存；对象已过期时沿用原恢复与错误处理路径。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，若已有对应 ingress 的引用目录则不再读链，否则读取一次祖先历史构造目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录按 ingress 惰性缓存，并计入同一字节预算。
 
@@ -909,7 +909,7 @@ Provider discovery 只负责提供当前可见的模型 ID。动态端点响应�
 
 模型价格只登记 `input`、`output`、`cache_read` 与 `cache_write`，基础价格、`context_over_200k` 和 `tiers` 使用相同字段集合。推理、音频输入和音频输出不再分别登记单价；目录导入与管理写入不会保留这些退休价格。SQLite 与 PostgreSQL 的 `0013_remove_extra_model_prices` 增量迁移清理已保存快照中的三项价格及对应投影列，保留其他价格的十进制精度、快照身份、revision、推理强度和音频模态，不修改用量记录。升级前备份数据库；恢复这些已删除的价格需要升级前备份。
 
-调度所需的 input/output/cache-read/cache-write 基础价格投影由当前 Gateway 共享的 `RoutePolicyState` 复用，按 Provider 与 Target 请求的 upstream Model ID 缓存，同时缓存缺失或无价结果。用量与凭据失效信息仍在每次选择时向存储读取，沿用原有 stale 标记。创建、编辑、删除、同步、选择策略修改与 re-import 在本实例成功返回前清除相关定价缓存；本地 Route 缓存刷新也清除价格，覆盖 Provider 级联删除。启用配置 epoch 轮询时，其他实例据此异步失效：观测到新 epoch 即清除价格，即使后续 Route 重载失败也不保留旧值。禁用轮询不承诺跨实例刷新。缓存代次阻止失效前启动的旧读取回填，读取失败不进入缓存。
+调度所需的 input/output/cache-read/cache-write 基础价格投影由当前 Gateway 的 `RoutePolicyState` 通过统一派生缓存复用，按 Provider 与 Target 请求的 upstream Model ID 隔离，同时缓存缺失或无价结果，TTL 为 24 小时且可提前淘汰。用量与凭据失效信息仍在每次选择时向存储读取，沿用原有 stale 标记。本地 `RoutePolicyState` 保留配置失效代次与协调状态；创建、编辑、删除、同步、选择策略修改与 re-import 在本实例成功返回前推进定价失效代次，本地 Route 缓存刷新也失效价格，覆盖 Provider 级联删除。启用配置 epoch 轮询时，既有机制在观测到新 epoch 时失效价格，即使后续 Route 重载失败也不使用旧值；这不使 Redis 成为多实例配置发布机制，也不承诺跨实例同时刷新。禁用轮询不承诺跨实例刷新。缓存代次阻止失效前启动的旧读取回填，读取失败不进入缓存。
 
 SQLite 与 PostgreSQL 的 Provider Model 创建、规格编辑、选择策略修改、手工删除及实际对账写入都在原事务内更新 `config_epoch`。创建与编辑在提交前读回完整记录；读回失败时一并回滚规格、成本规则与 epoch，提交后不再执行可失败的读回。
 
@@ -954,6 +954,25 @@ WebUI 的 `frontend/stravia-webui/src/lib/provider-model-editing.ts` 是 Provide
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
+
+#### 统一派生缓存与 Server 配置
+
+`backend/crates/stravia-core/src/runtime_cache.rs` 的 `RuntimeCache` 为同一 Gateway 的可丢弃派生数据提供共享逻辑预算，默认 16 MiB：Memory / SQLite 使用 TinyUFO，PostgreSQL 必须使用 Redis。Generation 精确物化对象、按 ingress 隔离的祖先引用目录、pricing、Cache Affinity 和 Provider Allowance 快照共用预算，不各自另设一份 16 MiB。预算包含 identity 与索引的逻辑估计，不是 allocator、进程 RSS 或 Redis 实际内存上限；超大值不入缓存，正常 SQL 读取结果不因此失败。SQL 历史、配置、权限、RPM、锁、连接及活动执行状态不迁入可淘汰缓存；官方 Allowance Monitor 仍是 live 额度事实源，SQL Sample 仍只服务趋势。
+
+Server 的配置路径默认由 `DataPaths::server_config()` 指向所选数据根的 `server.toml`，CLI `--config` 可指定其他文件。在现有文件加入：
+
+```toml
+[cache]
+capacity_mb = 16
+redis_url = "redis://127.0.0.1:6379/0"
+```
+
+示例 URL 不含凭据；生产连接按实际隔离网络、ACL 与 TLS 配置，不在日志或文档暴露真实 URL 凭据。SQLite 不使用 `redis_url`。首次存储设置前允许仅有 `[cache]` 的文件，保存存储设置保留该段。**既有 PostgreSQL 安装须在升级启动前配置可达 Redis**；缺失、无效或初始连接失败时启动失败关闭，不回退 SQLite。Core 使用官方 Redis client，连接超时 5 秒、响应超时 1 秒；运行中 get 错误按 miss、put 错误丢弃，不自动重连或重试，不把缓存故障转成历史事实丢失。
+
+每个 Gateway 创建随机 Redis namespace；五个容器 key（values、weights、expiry、order、used）由 Lua 原子维护 TTL、逻辑预算与 FIFO 淘汰。正常 shutdown 只 `DEL` 自己的五个 key，异常退出由最长 7 天 TTL 回收；不复用跨进程或重启缓存，不支持 Redis Cluster，也不提供多实例适配。pricing 的 24 小时 TTL 与本地失效代次、affinity 的 24 小时 TTL 与本地发布协调、allowance 的 180 秒 fresh / 最多 7 天 last-good 保留，各自保留原语义；并发读取合并、定时刷新和其他运行协调仍是本实例状态。
+
+Redis 至少 6.2，部署使用 `noeviction`，`maxmemory` 须为实际容器与索引开销预留余量，不能把逻辑预算直接作为真实内存配额。缓存值可能包含请求上下文，与 SQL 历史同样敏感；应隔离网络并配置 ACL / TLS。Redis 不用于恢复历史，不替代 SQL、实例文件与外部数据库的备份。
+
 SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后续变化通过增量 migration 交付。Server 完成存储配置后、Desktop 打开本地库时，校验已应用历史是否为当前迁移列表的连续成功前缀，再保留数据升级；未知版本、缺口、失败记录、非换行等价的 checksum 不一致和无版本非空库都拒绝启动。checksum 差异只允许同一 SQL 的完整 LF/CRLF 表示，保留其他字节与末尾换行；确认匹配后，只调整本次 runner 的内存副本，不回写已有迁移记录。离线复制执行相同检查，真实 SQL 改动仍拒绝。违反新增约束的历史数据使迁移失败，不自动清空或修正。升级前备份完整数据根及外部数据库；决策见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。参考 SQL 仅供 DBA 审阅，不用于初始化部署。
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。

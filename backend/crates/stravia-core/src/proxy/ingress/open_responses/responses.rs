@@ -77,7 +77,7 @@ pub async fn handler(
                 .map(|vs| (k.as_str().to_lowercase(), vs.to_string()))
         })
         .collect();
-    let envelope = RawEnvelope::new(Some(body.clone()), flat_headers, "POST", "/v1/responses");
+    let envelope = RawEnvelope::new(None, flat_headers, "POST", "/v1/responses");
     let pair = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("registered ingress adapter");
@@ -142,7 +142,7 @@ pub async fn compact(
         OPEN_RESPONSES_2026_04_24,
     );
     let envelope = RawEnvelope::new(
-        Some(body.clone()),
+        None,
         std::collections::HashMap::new(),
         "POST",
         "/v1/responses/compact",

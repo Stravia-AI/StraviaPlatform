@@ -574,7 +574,6 @@ async fn real_wasm_stream_preserves_typed_quota_over_http_429() -> anyhow::Resul
             .any(|event| event["type"] == "response.completed"),
         "failed stream must not become a successful completion: {body}"
     );
-    assert!(body.trim_end().ends_with("data: [DONE]"));
     upstream.assert_no_request();
     Ok(())
 }

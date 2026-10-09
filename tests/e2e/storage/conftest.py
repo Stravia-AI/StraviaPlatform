@@ -61,6 +61,45 @@ def load_pg_url() -> str | None:
     return url
 
 
+def postgres_redis_url() -> str:
+    url = os.environ.get("STRAVIA_TEST_REDIS_URL")
+    if not url:
+        raise RuntimeError(
+            "PostgreSQL E2E requires STRAVIA_TEST_REDIS_URL pointing to an isolated "
+            "Redis 6.2+ service with maxmemory-policy=noeviction"
+        )
+    try:
+        parsed = urlsplit(url)
+        valid = (
+            parsed.scheme in {"redis", "rediss"}
+            and bool(parsed.hostname)
+            and (parsed.port is None or 0 < parsed.port <= 65535)
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError("STRAVIA_TEST_REDIS_URL must be a valid isolated Redis URL")
+    return url
+
+
+def storage_server_args(backend: str) -> list[str]:
+    return ["--test-redis-url", postgres_redis_url()] if backend == "postgres" else []
+
+
+@pytest.fixture(autouse=True)
+def postgres_prerequisites(request: pytest.FixtureRequest) -> None:
+    callspec = getattr(request.node, "callspec", None)
+    backend = callspec.params.get("backend") if callspec is not None else None
+    if backend != "postgres" and not request.node.name.startswith("test_postgres_"):
+        return
+    if not load_pg_url():
+        pytest.fail("PostgreSQL E2E requires an explicitly injected DB_URL", pytrace=False)
+    try:
+        postgres_redis_url()
+    except RuntimeError as error:
+        pytest.fail(str(error), pytrace=False)
+
+
 class _MockHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -207,6 +246,7 @@ def run_harness(
     if backend == "postgres":
         if not pg_url:
             raise RuntimeError("postgres backend requires DB_URL")
+        env["STRAVIA_TEST_REDIS_URL"] = postgres_redis_url()
         env["STRAVIA_STORAGE_PG_URL"] = pg_url
         env["STRAVIA_STORAGE_PG_SCHEMA"] = make_isolated_schema()
 
@@ -278,6 +318,7 @@ def storage_runtime() -> dict[str, object]:
                 "upstream_port": upstream_port,
                 "work_dir": tmpdir,
                 "pg_url": load_pg_url(),
+                "server_args": storage_server_args,
                 "make_isolated_schema": make_isolated_schema,
                 "run_harness": run_harness,
                 "postgres_dsn_for_schema": postgres_dsn_for_schema,

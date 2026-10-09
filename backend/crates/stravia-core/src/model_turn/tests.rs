@@ -50,7 +50,8 @@ fn credential_observer(
                 client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
                     "model",
                     Vec::new(),
-                ),
+                )
+                .into(),
                 has_new_user: true,
                 has_matching_pending_tool_result: false,
                 generation_root_id: None,

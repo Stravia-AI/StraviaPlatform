@@ -76,7 +76,7 @@ docker run --rm \
 
 **首次启动（两种形态相同）：**
 
-1. 打开 <http://127.0.0.1:23471/setup>，输入控制台打印的一次性设置令牌。选择 SQLite 或 PostgreSQL，创建管理员。
+1. 打开 <http://127.0.0.1:23471/setup>，输入控制台打印的一次性设置令牌。选择 SQLite 或 PostgreSQL，创建管理员。选择 PostgreSQL 必须在首次设置前配置 Redis，见[缓存与 Server 配置](docs/design/architecture.md#统一派生缓存与-server-配置)。
 2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Claude 订阅、Grok device flow、Devin）。Stravia 会同步可用模型清单。
 3. **添加模型** —— 选择上游模型 ID；Model ID 即客户端调用的路由。
 4. **创建 API Key**，然后打开**接入客户端** —— Stravia 为 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 生成可直接应用的 provider 补丁；桌面端可直接写入客户端配置。
@@ -155,7 +155,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 
 ### 存储与部署
 
-- 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。
+- 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。既有 PostgreSQL 安装也必须在升级前配置 Redis，见[缓存与 Server 配置](docs/design/architecture.md#统一派生缓存与-server-配置)。
 - 实例数据集中在一个目录，便于管理。数据库与本地文件（包括已安装的插件 Component）必须配套备份；仅备份远程 PostgreSQL 并不完整。迁移与升级前请阅读[部署与存储说明](docs/design/architecture.md)，确认备份和版本兼容要求。
 - 一个端口同时提供模型 API、MCP、Admin API、健康探针与内嵌 WebUI；反向代理下可用显式管理入口与受信代理。
 
@@ -187,7 +187,7 @@ Rust `1.98.1` · Bun `1.4.2` · Task `3.52.0` · Python E2E 需要 uv。
 | `task dev:desktop`       | 以开发模式启动 Tauri 桌面应用                        |
 | `task check`             | 运行 WebUI 检查、ESLint、Rust 格式和 Cargo 检查      |
 | `task test`              | 运行 WebUI 和受支持的 Rust 单元测试                  |
-| `DB_URL=… task test:e2e` | 运行完整 Proxy、Admin、SQLite 和 PostgreSQL E2E 套件 |
+| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | 运行完整 Proxy、Admin、SQLite 和 PostgreSQL E2E 套件 |
 
 ## 许可证
 

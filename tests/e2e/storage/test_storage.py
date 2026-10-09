@@ -69,6 +69,7 @@ def test_failed_request_projection_survives_restart_and_clear(
     port = find_free_port()
     base = f"http://127.0.0.1:{port}"
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    args += storage_runtime["server_args"](backend)
     process = None
     logs = []
     try:
@@ -197,7 +198,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
                     "127.0.0.1",
                     "--port",
                     str(server_port),
-                ],
+                ] + storage_runtime["server_args"]("postgres"),
             )
             admin_base = f"http://127.0.0.1:{server_port}"
             try:
@@ -342,7 +343,7 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
                     "127.0.0.1",
                     "--port",
                     str(reconnect_port),
-                ],
+                ] + storage_runtime["server_args"]("postgres"),
             )
             try:
                 wait_until_ready(f"{reconnect_base}/api/v1/auth/state", timeout=30.0)
@@ -431,6 +432,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
     port = find_free_port()
     base = f"http://127.0.0.1:{port}"
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    args += storage_runtime["server_args"](backend)
     try:
         with echo_provider() as (upstream, received):
             process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
@@ -539,6 +541,7 @@ def test_observation_tool_replay_and_trace_survive_restart(
     port = find_free_port()
     base = f"http://127.0.0.1:{port}"
     args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    args += storage_runtime["server_args"](backend)
     process = None
     logs: list[str] = []
     try:

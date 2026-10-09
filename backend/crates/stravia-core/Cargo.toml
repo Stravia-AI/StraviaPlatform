@@ -71,6 +71,8 @@ zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 zstd = { workspace = true }
 tempfile = { workspace = true }
 parking_lot = { workspace = true }
+tinyufo = { workspace = true }
+redis = { workspace = true }
 image = { workspace = true }
 
 [build-dependencies]
