@@ -475,6 +475,7 @@ test('pauses immediately when a snapshot reports persisted credential invalidati
 })
 
 test('renders the matrix, shared summary, timeline, forecast, model details, and refresh actions', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-02T12:00:00Z'))
   const posts = await mockAllowances(page, [errorSnapshot, staleSnapshot, freshSnapshot])
   await page.goto('/allowances')
 
@@ -516,6 +517,36 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
   await expect(forecastPanel).toContainText('exhausted at')
   await expect(forecastPanel).not.toContainText('may exhaust')
+
+  const timeline = page.getByRole('list', { name: 'Reset timeline' })
+  const alphaReset = timeline.getByRole('button', { name: /Locate Alpha account · Weekly window/ })
+  const betaReset = timeline.getByRole('button', { name: /Locate Beta account · Weekly window/ })
+  const alphaId = await alphaReset.getAttribute('aria-controls')
+  const betaId = await betaReset.getAttribute('aria-controls')
+  const alphaAllowance = matrix.locator(`[id=${JSON.stringify(alphaId)}]`)
+  const normalBackground = await alphaAllowance.evaluate((element) => getComputedStyle(element).backgroundColor)
+  await alphaReset.hover()
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveAttribute('id', alphaId!)
+  await expect
+    .poll(() => alphaAllowance.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .not.toBe(normalBackground)
+  await betaReset.hover()
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveAttribute('id', betaId!)
+  await page.mouse.move(0, 0)
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveCount(0)
+  await expect(alphaAllowance).toHaveCSS('background-color', normalBackground)
+  await alphaReset.focus()
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveAttribute('id', alphaId!)
+  await betaReset.focus()
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveAttribute('id', betaId!)
+  await page.getByLabel('Search model services').focus()
+  await expect(matrix.locator('[data-highlighted="true"]')).toHaveCount(0)
+  await alphaReset.click()
+  await expect(alphaAllowance).toBeFocused()
+  await expect(matrix.getByRole('button', { name: 'Alpha account allowance details' })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  )
 
   await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
   await matrix.getByLabel('Show model allowances for Alpha account').click()
@@ -686,6 +717,7 @@ test('does not treat an exhausted allowance without a reset date as exhausted', 
 })
 
 test('search and all filters drive the same visible collection', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-02T12:00:00Z'))
   await mockAllowances(page, [errorSnapshot, staleSnapshot, freshSnapshot])
   await page.goto('/allowances')
 

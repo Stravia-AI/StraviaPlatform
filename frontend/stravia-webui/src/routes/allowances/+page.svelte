@@ -74,6 +74,8 @@ type AllowanceValueMode = 'remaining' | 'used'
 
 // 仅是本机展示偏好，不进入管理面配置
 const VALUE_MODE_STORAGE_KEY = 'stravia:allowances:value-mode'
+const TIMELINE_PREVIEW_LIMIT = 10
+const TIMELINE_PREVIEW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 const reading = new ProviderAllowanceRead(useQueryClient(), { providers: admin.providers.list, ...admin.allowances })
 const readState = $derived(reading.snapshot)
@@ -83,6 +85,9 @@ let conditionFilter = $state<'all' | AllowanceCondition>('all')
 let freshnessFilter = $state<'all' | ProviderAllowanceStatus>('all')
 let valueMode = $state<AllowanceValueMode>('remaining')
 const expandedProviderIds = new SvelteSet<string>()
+let timelineExpanded = $state(false)
+let hoveredAllowanceId = $state<string | null>(null)
+let focusedAllowanceId = $state<string | null>(null)
 
 onMount(() => {
   if (localStorage.getItem(VALUE_MODE_STORAGE_KEY) === 'used') valueMode = 'used'
@@ -179,6 +184,27 @@ const timeline = $derived.by(() =>
         collator.compare(allowanceLabel(left.allowance), allowanceLabel(right.allowance)),
     ),
 )
+const timelineNow = $derived.by(() => {
+  // 时间窗口跟随读取快照更新，不因搜索、展开或悬停重算，也不增加独立计时器。
+  void readState
+  return Date.now()
+})
+// 展示范围与预报统计分开；过去的重置时间仍可能携带有效的耗尽证据。
+const futureTimeline = $derived(timeline.filter(({ allowance }) => allowance.reset_at > timelineNow))
+const timelinePreview = $derived(
+  futureTimeline
+    .filter(({ allowance }) => allowance.reset_at <= timelineNow + TIMELINE_PREVIEW_WINDOW_MS)
+    .slice(0, TIMELINE_PREVIEW_LIMIT),
+)
+const displayedTimeline = $derived(timelineExpanded ? futureTimeline : timelinePreview)
+const highlightedAllowanceId = $derived.by(() => {
+  const id = hoveredAllowanceId ?? focusedAllowanceId
+  return displayedTimeline.some(
+    ({ snapshot, allowance }) => allowanceElementId(snapshot.provider_id, allowance.key) === id,
+  )
+    ? id
+    : null
+})
 const nextResetAt = $derived(nextRelevantResetAt(visibleAllowances.map(({ allowance }) => allowance)))
 const emptyWindows = $derived.by(() =>
   visibleAllowances
@@ -204,6 +230,18 @@ const latestFetchedAt = $derived.by(() => {
     .sort()
   return timestamps.at(-1)
 })
+
+function allowanceElementId(providerId: string, key: string): string {
+  return `allowance-${encodeURIComponent(providerId)}:${encodeURIComponent(key)}`
+}
+
+function locateAllowance(id: string): void {
+  const target = document.getElementById(id)
+  if (!target) return
+  hoveredAllowanceId = null
+  target.focus({ preventScroll: true })
+  target.scrollIntoView({ block: 'center', behavior: 'instant' })
+}
 
 function catalogValue(target: Pick<ProviderAllowanceTarget, 'catalog_provider_id' | 'channel'>): string {
   return `${target.catalog_provider_id}::${target.channel}`
@@ -474,7 +512,17 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
     <!-- auto-fill 轨道宽度只取决于容器宽度，使不同服务的同序条目纵向对齐 -->
     <ul class="grid grid-cols-[repeat(auto-fill,minmax(6.5rem,1fr))] gap-x-4 gap-y-2">
       {#each provider.allowances as allowance (allowance.key)}
-        <li class="grid min-w-0 gap-0.5">
+        {@const id = allowanceElementId(providerId, allowance.key)}
+        <li
+          {id}
+          tabindex="-1"
+          onfocus={() => (focusedAllowanceId = id)}
+          onblur={() => (focusedAllowanceId = null)}
+          data-highlighted={highlightedAllowanceId === id ? 'true' : undefined}
+          class={cn(
+            'grid min-w-0 scroll-m-4 gap-0.5 rounded-sm',
+            highlightedAllowanceId === id && 'bg-accent ring-2 ring-primary ring-offset-2 ring-offset-background',
+          )}>
           <span class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
             <span class="truncate">{allowanceLabel(allowance)}</span>
             {#if provider.snapshot?.guard_supported && allowance.guarded}
@@ -645,6 +693,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
           'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-3 py-2.5 @3xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
           expandable && 'transition-colors duration-[140ms] hover:bg-muted/30',
           expanded && 'bg-muted/20',
+          highlightedAllowanceId?.startsWith(allowanceElementId(providerId, '')) && 'bg-accent/40',
         )}>
         <div class="flex min-w-0 items-start gap-2">
           {#if expandable}
@@ -930,28 +979,67 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               <h2 class="text-base font-semibold">{m.allowances_timeline_title()}</h2>
             </div>
           </Card.Header>
-          <Card.Content class="pt-3">
+          <Card.Content id="allowance-reset-timeline" class="pt-3">
             {#if !allResolved}
               <div class="flex items-center justify-center py-6">
                 <Spinner aria-label={m.allowances_loading()} />
               </div>
-            {:else if timeline.length === 0}
+            {:else if futureTimeline.length === 0}
               <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
+            {:else if displayedTimeline.length === 0}
+              <p class="text-sm text-muted-foreground">{m.allowances_timeline_preview_empty()}</p>
             {:else}
-              <ol class="relative ml-2 border-l">
-                {#each timeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                  <li class="relative pb-3 pl-5 last:pb-0">
-                    <span class="absolute -left-1.5 top-1 size-3 rounded-full border-2 border-background bg-primary"
-                    ></span>
-                    <p class="font-technical text-sm font-medium tabular-nums">
-                      {formatLogTime(item.allowance.reset_at, localeState.current)}
-                    </p>
-                    <p class="mt-1 text-sm text-muted-foreground">
-                      {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-                    </p>
+              <ol class="relative ml-2 border-l" aria-label={m.allowances_timeline_title()}>
+                {#each displayedTimeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                  {@const id = allowanceElementId(item.snapshot.provider_id, item.allowance.key)}
+                  <li class="relative pb-1 pl-3 last:pb-0">
+                    <span
+                      class="absolute -left-1.5 top-3 size-3 rounded-full border-2 border-background bg-primary"
+                      aria-hidden="true"></span>
+                    <Button
+                      variant="ghost"
+                      class="h-auto min-h-10 w-full justify-start px-2 py-2 text-start whitespace-normal"
+                      aria-controls={id}
+                      aria-label={m.allowances_timeline_locate({
+                        provider: item.snapshot.provider_name,
+                        item: allowanceLabel(item.allowance),
+                        time: formatLogTime(item.allowance.reset_at, localeState.current),
+                      })}
+                      onpointerenter={(event: PointerEvent) => {
+                        if (event.pointerType !== 'touch') hoveredAllowanceId = id
+                      }}
+                      onpointerleave={() => (hoveredAllowanceId = null)}
+                      onfocus={() => (focusedAllowanceId = id)}
+                      onblur={() => (focusedAllowanceId = null)}
+                      onclick={() => locateAllowance(id)}>
+                      <span class="grid min-w-0 gap-1">
+                        <span class="font-technical text-sm font-medium tabular-nums">
+                          {formatLogTime(item.allowance.reset_at, localeState.current)}
+                        </span>
+                        <span class="text-sm text-muted-foreground">
+                          {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                        </span>
+                      </span>
+                    </Button>
                   </li>
                 {/each}
               </ol>
+            {/if}
+            {#if allResolved && futureTimeline.length > timelinePreview.length}
+              <Button
+                variant="ghost"
+                class="mt-3 w-full"
+                aria-expanded={timelineExpanded}
+                aria-controls="allowance-reset-timeline"
+                onclick={() => (timelineExpanded = !timelineExpanded)}>
+                {#if timelineExpanded}
+                  <ChevronRightIcon data-icon="inline-start" class="-rotate-90" />
+                  {m.allowances_timeline_collapse()}
+                {:else}
+                  <ChevronDownIcon data-icon="inline-start" />
+                  {m.allowances_timeline_expand()}
+                {/if}
+              </Button>
             {/if}
           </Card.Content>
         </Card.Root>
