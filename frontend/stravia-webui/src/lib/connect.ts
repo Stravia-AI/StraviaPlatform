@@ -101,15 +101,27 @@ export function apiKeyAllowsModel(modelIds: readonly string[], modelId: string):
   return modelIds.length === 0 || modelIds.includes(modelId)
 }
 
+export function apiKeyExpiryTime(expiresAt: ApiKey['expires_at']): number {
+  if (!expiresAt) return Infinity
+  // PostgreSQL 的管理面时间可能不带时区；与网关一样按 UTC 解释。
+  const expiry = expiresAt.includes('T') ? expiresAt : `${expiresAt.replace(' ', 'T')}Z`
+  return Date.parse(expiry)
+}
+
+export function apiKeyReadOnlyReason(
+  key: Pick<ApiKey, 'is_enabled' | 'expires_at'> | undefined,
+  now = Date.now(),
+): 'deleted' | 'disabled' | 'expired' | null {
+  if (!key) return 'deleted'
+  if (!key.is_enabled) return 'disabled'
+  if (!(apiKeyExpiryTime(key.expires_at) > now)) return 'expired'
+  return null
+}
+
 export function eligibleConnectKeys(keys: readonly ApiKey[], models: readonly Route[]): ApiKey[] {
   const now = Date.now()
   return keys.filter((key) => {
-    if (!key.is_enabled) return false
-    if (key.expires_at) {
-      // PostgreSQL 的管理面时间可能不带时区；与网关一样按 UTC 解释。
-      const expiry = key.expires_at.includes('T') ? key.expires_at : `${key.expires_at.replace(' ', 'T')}Z`
-      if (!(Date.parse(expiry) > now)) return false
-    }
+    if (apiKeyReadOnlyReason(key, now)) return false
     return models.some((model) => model.is_enabled && apiKeyAllowsModel(key.model_ids, model.id))
   })
 }

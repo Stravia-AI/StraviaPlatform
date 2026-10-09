@@ -338,7 +338,7 @@ function retryAll(): void {
 <div class="route-page">
   <PageHeader
     eyebrow={m.common_monitor()}
-    title={m.stats_usage()}
+    title={m.stats_usage_statistics()}
     description={m.stats_page_summary()}
     meta={liveMeta}
     actions={rangeAction} />

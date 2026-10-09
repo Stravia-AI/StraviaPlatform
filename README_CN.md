@@ -137,6 +137,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 
 ### 密钥、用量与请求记录
 
+- 管理面内置控制台对话：选择 API Key 与模型，流式进行多轮对话并回看本地历史；存储与自动工具注入限制见[控制台对话文档](docs/design/console-chat.md)。
 - API Key 支持自定义密钥、模型绑定、有效期，以及按 Key 的并发、MCP 访问和自动工具注入限制。
 - 请求记录：在可缩放的画布上实时看到每次交互 —— 模型调用、重试、工具调用 —— 失败的请求单独成列，单次对话可逐条查看。
 - 查看服务商实际上报的 token 用量与配额。
