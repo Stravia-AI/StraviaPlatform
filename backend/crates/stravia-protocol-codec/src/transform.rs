@@ -752,23 +752,6 @@ fn request_loss_paths(
     {
         lost.push("tools".to_string());
     }
-    if let Some(tools) = &request.tools {
-        for (index, tool) in tools.iter().enumerate() {
-            if tool.strict == Some(true)
-                && matches!(
-                    pair.egress.protocol,
-                    Protocol::AnthropicMessages | Protocol::GoogleGemini
-                )
-            {
-                lost.push(format!("tools[{index}].strict"));
-            }
-            if pair.egress.protocol == Protocol::GoogleGemini
-                && gemini_drops_schema_constraint(&tool.parameters)
-            {
-                lost.push(format!("tools[{index}].parameters"));
-            }
-        }
-    }
     if let Some(tool_choice) = &request.tool_choice {
         let unsupported = match pair.egress.protocol {
             Protocol::AnthropicMessages => {
@@ -994,20 +977,6 @@ fn thinking_control_representable(
         // Devin 把思考档位编码进 selector 后缀(`family-high`),vendor 在编码前
         // 用 Effort 值改写模型名;wire 上没有独立的 effort 字段。
         Protocol::DevinConnect => matches!(control, TargetThinkingControl::Effort { .. }),
-        _ => false,
-    }
-}
-fn gemini_drops_schema_constraint(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.keys().any(|key| {
-                matches!(
-                    key.as_str(),
-                    "$schema" | "additionalProperties" | "$ref" | "ref" | "definitions" | "$defs"
-                )
-            }) || object.values().any(gemini_drops_schema_constraint)
-        }
-        Value::Array(values) => values.iter().any(gemini_drops_schema_constraint),
         _ => false,
     }
 }

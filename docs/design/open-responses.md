@@ -361,6 +361,8 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 标准 function tool 保留 `name`、description、JSON Schema parameters、strict、tool choice、parallel choice、call ID、arguments delta/done 和 output content。
 
+`strict` 省略在各协议中语义不同：Chat Completions 与 Anthropic Messages 表示非严格，Open Responses 上游省略时会自动严格化，把可选参数改成必填。非 Responses 入口发往 Responses 目标时，未声明 `strict` 的 function tool 显式写出 `strict: false`；Responses 入口保持原样，显式 `true`/`false` 始终保留。Chat Completions 目标同样保留显式 `strict`。
+
 跨协议工具结果按 producer 的 `ToolResultContentKind` 区分业务 JSON 与原生 content blocks。Anthropic `tool_result.content` 只发送合法的字符串或原生 block 数组：业务 JSON 序列化为字符串，包括业务 JSON 数组，不把数组元素误作原生 blocks。Gemini `functionResponse.response` 保留业务 JSON object，非 object 结果使用 `{"result": ...}` 承载原值。工具 call ID 与结果关联不变。
 
 客户端拥有的 function call，其 `arguments` 是不透明字符串：空串、非法 JSON、缺失闭合符号与原始空白均原样保留，不由响应 Hook 校验、补全或替换。此规则覆盖流式 delta/done、完整响应、Generation Chain 及客户端下一轮回显；工具参数解析错误由客户端处理，不单独升级为平台响应失败。Platform Tool 在实际执行前解析参数，解析失败作为 `is_error` 工具结果交回模型，不调用工具执行器。Hook 主动修改参数仍遵循既有 patch 契约。
@@ -412,7 +414,7 @@ Extension final item 仍使用标准 `response.output_item.added` / `response.ou
 - text/image/file/media content；
 - function output 和 call correlation；
 - response/item identity 与 reference；
-- required output format 或 strict schema；
+- required output format；
 - `tool_choice=required/none`、allowed tools；
 - output/tool call limits；
 - truncation 和其它安全、成本、上下文完整性硬约束。
@@ -429,6 +431,7 @@ Extension final item 仍使用标准 `response.output_item.added` / `response.ou
 - `frequency_penalty`
 - `reasoning.effort`
 - `service_tier`
+- function tool 的 `strict` 与目标无法表达的参数 schema 约束（如 Gemini 的 `additionalProperties`、`$ref`）：目标协议没有等价控制时降级，工具名与参数 schema 主体照常保留
 - `prompt_cache_key`
 - 图片 `detail` 提示（如 `auto`、`low`、`high`）：目标协议没有等价控制时允许省略，图片本体与工具结果关联仍必须保留；目标协议支持时继续传递该提示。省略仅发生在目标 wire 编码，不改写 canonical 历史，也不放宽入站字段值校验。
 - `client_metadata` 与其它 additive metadata
@@ -602,7 +605,7 @@ Vendored OpenAPI、hash、Rust schema tests、behavior tests 和 contract matrix
 5. **Durable branch**：两个请求从同一 stored parent 分支，互不共享 Inference Run mutable state。
 6. **Reference isolation**：本 Principal item 可解析；其它 Principal、过期和未知 item 返回相同错误。
 7. **Cross-protocol tool result**：function output 等价映射到 Anthropic/Google；目标不支持时 provider call 前拒绝。
-8. **Hard constraint**：目标无法表达 strict JSON Schema 或 required tool choice 时拒绝，不静默降级。
+8. **Hard constraint**：目标无法表达 required tool choice 或 required output format 时拒绝；function tool `strict` 与 schema 约束按 10.3 兼容降级。
 9. **Advisory hint**：跨协议仅允许第 10.3 节列出的字段静默省略。
 10. **Extension final-only**：Web Search 返回标准 assistant message；Image/Agent/Media 只返回 registered final item，无私有 progress event。
 11. **Protocol violation**：same-protocol upstream 返回未注册 event，Stravia fail closed；已 commit stream 发标准失败序列。

@@ -2231,7 +2231,7 @@ fn responses_replay_preserves_canonical_reasoning_item() {
 }
 
 #[test]
-fn strict_function_schema_is_rejected_when_target_cannot_preserve_it() {
+fn strict_function_tool_is_omitted_when_target_cannot_express_it() {
     let source = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("registered source pair");
@@ -2256,21 +2256,131 @@ fn strict_function_schema_is_rejected_when_target_cannot_preserve_it() {
         ANTHROPIC_MESSAGES_2023_06_01,
         GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
     ] {
-        let error = ProtocolTransform::global()
+        let encoded = ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, target)
             .expect("registered target pair")
             .encode_request(&request)
-            .expect_err("target must reject strict schema loss");
-        assert!(
-            matches!(
-                error,
-                TransformError::Unrepresentable { ref lost, .. }
-                    if lost.iter().any(|path| path == "tools[0].strict")
-            ),
-            "unexpected transform error: {error}"
-        );
+            .expect("function tool strict is an advisory hint");
+        let tool = &encoded.body["tools"][0];
+        assert!(!tool.to_string().contains("strict"), "{tool}");
+        assert!(tool.to_string().contains("lookup"), "{tool}");
     }
 }
+/// Chat 与 Anthropic 省略 `strict` 表示非严格，而 Responses 省略表示由上游自动严格化。
+/// 跨协议到 Responses 时必须显式写出非严格，否则可选参数会被上游改成必填。
+#[test]
+fn responses_target_keeps_non_strict_default_of_other_ingress_protocols() {
+    let tools = json!([{
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "note": {"type": "string"}},
+                "required": ["query"]
+            }
+        }
+    }]);
+    let chat = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .expect("registered chat pair");
+    let request = chat
+        .decode_request(json!({
+            "model": "logical-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": tools,
+        }))
+        .expect("valid chat request");
+    let encoded = chat.encode_request(&request).expect("encode Responses");
+    assert_eq!(encoded.body["tools"][0]["strict"], false);
+
+    let anthropic = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+        .expect("registered anthropic pair");
+    let request = anthropic
+        .decode_request(json!({
+            "model": "logical-model",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "name": "lookup",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}, "note": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }],
+        }))
+        .expect("valid anthropic request");
+    let encoded = anthropic.encode_request(&request).expect("encode Responses");
+    assert_eq!(encoded.body["tools"][0]["strict"], false);
+
+    let explicit = chat
+        .decode_request(json!({
+            "model": "logical-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "strict": true,
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+                }
+            }],
+        }))
+        .expect("valid strict chat request");
+    let encoded = chat.encode_request(&explicit).expect("encode Responses");
+    assert_eq!(encoded.body["tools"][0]["strict"], true);
+}
+
+#[test]
+fn chat_target_preserves_explicit_strict_and_omits_unset() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("registered chat pair");
+    let request = pair
+        .decode_request(json!({
+            "model": "logical-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {"type": "function", "function": {"name": "on", "strict": true, "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "off", "strict": false, "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "unset", "parameters": {"type": "object"}}}
+            ],
+        }))
+        .expect("valid chat request");
+    let encoded = pair.encode_request(&request).expect("encode chat");
+    assert_eq!(encoded.body["tools"][0]["function"]["strict"], true);
+    assert_eq!(encoded.body["tools"][1]["function"]["strict"], false);
+    assert!(encoded.body["tools"][2]["function"].get("strict").is_none());
+}
+
+#[test]
+fn responses_ingress_keeps_omitted_strict_for_responses_target() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .expect("registered Responses pair");
+    let request = pair
+        .decode_request(json!({
+            "model": "logical-model",
+            "input": "hello",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }))
+        .expect("valid Responses request");
+    let encoded = pair.encode_request(&request).expect("encode Responses");
+    assert!(encoded.body["tools"][0].get("strict").is_none());
+}
+
 #[test]
 fn refusal_semantics_fail_closed_for_protocols_without_refusal_items() {
     let pair = ProtocolTransform::global()

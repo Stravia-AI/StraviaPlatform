@@ -73,6 +73,9 @@ impl OpenAIEncoder {
                             .unwrap()
                             .insert("description".into(), desc.clone().into());
                     }
+                    if let Some(strict) = t.strict {
+                        f["strict"] = Value::Bool(strict);
+                    }
                     serde_json::json!({
                         "type": "function",
                         "function": f,

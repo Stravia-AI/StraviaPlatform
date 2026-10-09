@@ -13,6 +13,12 @@
 - Large canonical request snapshots are now shared across request preparation, observation, and model-turn attempts instead of repeatedly deep-cloning their bodies. History restoration and attachment normalization detach shared requests only when mutation is needed, while retaining upload-grant scrubbing, settings validation, and real media processing. Observation Admission prepares bounded attribution evidence before entering the SQL writer queue, so queued admissions no longer retain full large requests; strict history matching, request delivery, and durable SQL history remain unchanged.
 - Vendor request encoding consumes owned OpenAI message preprocessing and releases canonical request/JSON intermediates after body serialization. Rebuild and re-import affected standalone plugins to receive the encoding memory reductions.
 - The complete local Windows test matrix now provisions isolated Redis alongside PostgreSQL. PostgreSQL E2E also requires `STRAVIA_TEST_REDIS_URL` pointing to a dedicated test instance.
+- Protocol conversion is now compatibility-first for tool constraints: function tool `strict` and parameter schema keywords an Anthropic or Gemini target cannot express (such as `additionalProperties` or `$ref`) are silently degraded instead of rejecting the request. See ADR-0006. Rebuild and re-import affected standalone plugins to receive the change.
+- Connect Client Apply writes `compat.supportsStrictMode: true` on the OMP `stravia` provider, so OMP sends schema-adapted `strict: true` tools instead of omitting `strict`, which Responses upstreams auto-strictify with optional parameters made required. Re-apply the OMP configuration to receive it.
+
+### Fixed
+
+- Function tools from Chat Completions or Anthropic Messages clients that omit `strict` are now sent to Open Responses targets with explicit `strict: false`, so upstream no longer auto-strictifies them and turns optional parameters into required ones. Chat Completions targets now preserve explicit `strict`. Rebuild and re-import affected standalone plugins (for example `openai-codex`) to receive the fix.
 
 ## [0.4.0] - 2026-10-08
 

@@ -306,6 +306,9 @@ fn insert_request_control_fields(
         obj.insert("reasoning".into(), Value::Object(reasoning));
     }
     if let Some(tools) = &req.tools {
+        let foreign_ingress = req.meta.source_protocol.is_some_and(|protocol| {
+            protocol != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+        });
         let tools = tools
             .iter()
             .map(|tool| {
@@ -318,7 +321,9 @@ fn insert_request_control_fields(
                         "description": tool.description,
                         "parameters": tool.parameters,
                     });
-                    if let Some(strict) = tool.strict {
+                    // Chat、Anthropic 等协议省略 `strict` 即非严格；Responses 省略时上游会自动
+                    // 严格化并把可选参数改成必填，所以非 Responses 入口必须显式写出 false。
+                    if let Some(strict) = tool.strict.or(foreign_ingress.then_some(false)) {
                         encoded["strict"] = Value::Bool(strict);
                     }
                     encoded

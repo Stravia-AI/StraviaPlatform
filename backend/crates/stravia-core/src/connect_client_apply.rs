@@ -533,7 +533,12 @@ fn plan_omp(
             .join("models.yml")])
     })?;
     let mut document = parse_yaml(&path, existing_files.get(&path))?;
-    let provider = responses_provider(input, "baseUrl");
+    let mut provider = responses_provider(input, "baseUrl");
+    // OMP 对自定义 Responses 模型默认不发 `strict`，上游会把省略当作自动严格化并把
+    // 可选参数改成必填；显式声明后 OMP 才发送与自身 schema 适配后的 `strict: true`。
+    if let Some(object) = provider.as_object_mut() {
+        object.insert("compat".to_owned(), json!({ "supportsStrictMode": true }));
+    }
     upsert_json_path(
         &mut document,
         &["providers", "stravia"],
@@ -1597,6 +1602,41 @@ name = "Other"
         assert_eq!(model.context_window, 200_000);
         assert_eq!(model.max_tokens, None);
         assert!(!text.contains("$serde_json::private::Number"));
+    }
+
+    /// OMP 对自定义 Responses 模型默认不发 `strict`，而 Responses 上游省略时会自动严格化；
+    /// 配置必须显式声明支持，且只写在 OMP 自己的 provider 上。
+    #[test]
+    fn omp_declares_strict_tool_support_but_pi_does_not() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut environment = environment(temporary.path());
+        environment.insert(
+            "PI_CODING_AGENT_DIR".to_owned(),
+            temporary.path().join("pi").display().to_string(),
+        );
+
+        let omp = plan_connect_client_apply(
+            &standard_input(ConnectClientId::Omp),
+            &environment,
+            &BTreeMap::new(),
+        )
+        .expect("OMP plan");
+        let document = serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
+            .expect("OMP YAML");
+        assert_eq!(
+            document["providers"]["stravia"]["compat"]["supportsStrictMode"],
+            serde_json::json!(true)
+        );
+
+        let pi = plan_connect_client_apply(
+            &standard_input(ConnectClientId::Pi),
+            &environment,
+            &BTreeMap::new(),
+        )
+        .expect("Pi plan");
+        let document = serde_json::from_str::<serde_json::Value>(&planned_text(&pi, "models.json"))
+            .expect("Pi JSON");
+        assert!(document["providers"]["stravia"].get("compat").is_none());
     }
 
     #[test]
