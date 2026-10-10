@@ -134,7 +134,8 @@ const breadcrumbProvidersQuery = createQuery(() => ({
 }))
 const breadcrumbItems = $derived.by((): BreadcrumbItem[] => {
   if (currentPath === '/') return [{ label: m.console_chat_chat() }]
-  if (currentPath === '/conversations') return [{ label: m.console_chat_chat(), href: '/' }, { label: m.console_chat_all() }]
+  if (currentPath === '/conversations')
+    return [{ label: m.console_chat_chat(), href: '/' }, { label: m.console_chat_all() }]
   const navigationItem = findNavigationItem(currentPath)
   if (!navigationItem) return []
 
@@ -277,9 +278,18 @@ onMount(() => {
         <Sidebar.GroupContent>
           <Sidebar.Menu>
             <Sidebar.MenuItem>
-              <Sidebar.MenuButton isActive={currentPath === '/' || currentPath === '/conversations'} tooltipContent={m.console_chat_chat()}>
+              <Sidebar.MenuButton
+                isActive={currentPath === '/' || currentPath === '/conversations'}
+                tooltipContent={m.console_chat_chat()}>
                 {#snippet child({ props })}
-                  <a {...props} href={resolve('/')} aria-label={m.console_chat_chat()} aria-current={currentPath === '/' && !page.url.searchParams.has('conversation') ? 'page' : undefined} onclick={() => navigationOpen = false}>
+                  <a
+                    {...props}
+                    href={resolve('/')}
+                    aria-label={m.console_chat_chat()}
+                    aria-current={currentPath === '/' && !page.url.searchParams.has('conversation')
+                      ? 'page'
+                      : undefined}
+                    onclick={() => (navigationOpen = false)}>
                     <MessageSquareIcon /><span>{m.console_chat_chat()}</span>
                   </a>
                 {/snippet}
@@ -290,17 +300,34 @@ onMount(() => {
             <ul class="mt-1 flex flex-col gap-1 ps-3">
               {#each chat.snapshot.conversations.slice(0, 5) as conversation (conversation.id)}
                 <li>
-                  <a class={['flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-sm hover:bg-sidebar-accent', currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '']}
+                  <a
+                    class={[
+                      'flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-sm hover:bg-sidebar-accent',
+                      currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id
+                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                        : '',
+                    ]}
                     href={resolve(`/?conversation=${encodeURIComponent(conversation.id)}`)}
-                    aria-current={currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id ? 'page' : undefined}
-                    onclick={() => navigationOpen = false}>
+                    aria-current={currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id
+                      ? 'page'
+                      : undefined}
+                    onclick={() => (navigationOpen = false)}>
                     <span class="min-w-0 flex-1 truncate">{conversation.title}</span>
-                    {#if chat.snapshot.generations[conversation.id]}<span role="status" class="text-xs" aria-label={m.console_chat_generating()}>●</span>{/if}
+                    {#if chat.snapshot.generations[conversation.id]}<span
+                        role="status"
+                        class="text-xs"
+                        aria-label={m.console_chat_generating()}>●</span
+                      >{/if}
                   </a>
                 </li>
               {/each}
               {#if chat.snapshot.conversations.length > 5}
-                <li><a href={resolve('/conversations')} class="flex min-h-10 items-center rounded-md px-3 text-sm hover:bg-sidebar-accent" onclick={() => navigationOpen = false}>{m.console_chat_all()}</a></li>
+                <li>
+                  <a
+                    href={resolve('/conversations')}
+                    class="flex min-h-10 items-center rounded-md px-3 text-sm hover:bg-sidebar-accent"
+                    onclick={() => (navigationOpen = false)}>{m.console_chat_all()}</a>
+                </li>
               {/if}
             </ul>
           {/if}

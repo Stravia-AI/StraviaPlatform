@@ -1102,7 +1102,7 @@ mod tests {
                 .await
                 .unwrap();
             set_debug(&debug, true);
-            async {
+            let mut connection = async {
                 let mut connection = pool.acquire().await.unwrap();
                 let value: i64 = sqlx::query_scalar("SELECT 41 + 1")
                     .fetch_one(&mut *connection)
@@ -1118,17 +1118,19 @@ mod tests {
                             .unwrap();
                         assert_eq!(value, secret);
                     }
-                    // fetch_one 可先于 worker 的 QueryLogger 析构返回；ping 是
-                    // 同一连接的 FIFO 屏障，不产生额外 SQL，也不依赖时间等待。
-                    sqlx::Connection::ping(&mut *connection).await.unwrap();
                 }
                 .instrument(tracing::info_span!(
                     target: "stravia::perf", "test.sqlite.child", node_count = 2_u64
                 ))
                 .await;
+                connection
             }
             .instrument(tracing::info_span!(target: "stravia::perf", "test.sqlite.parent"))
             .await;
+            // 同一连接的 FIFO ping 排空先前 Execute 持有的 span；必须在被测
+            // span 外提交，因为 worker 会先回复 ping，再释放 ping 自己捕获的 span。
+            sqlx::Connection::ping(&mut *connection).await.unwrap();
+            drop(connection);
             set_debug(&debug, false);
             pool.close().await;
         });

@@ -157,10 +157,9 @@ fn infer(
     let mut body = encoded.body;
     if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
         && thinking.get("type").and_then(Value::as_str) != Some("disabled")
+        && let Some(display) = display
     {
-        if let Some(display) = display {
-            thinking.insert("display".into(), Value::String(display.into()));
-        }
+        thinking.insert("display".into(), Value::String(display.into()));
     }
     let codec_headers = encoded.headers;
     let egress_path = encoded.path;

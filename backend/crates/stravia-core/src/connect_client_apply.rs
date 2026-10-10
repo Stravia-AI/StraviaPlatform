@@ -1621,8 +1621,9 @@ name = "Other"
             &BTreeMap::new(),
         )
         .expect("OMP plan");
-        let document = serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
-            .expect("OMP YAML");
+        let document =
+            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
+                .expect("OMP YAML");
         assert_eq!(
             document["providers"]["stravia"]["compat"]["supportsStrictMode"],
             serde_json::json!(true)

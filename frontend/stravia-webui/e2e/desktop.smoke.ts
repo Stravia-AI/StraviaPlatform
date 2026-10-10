@@ -90,6 +90,23 @@ async function expectPortSwitch(previousTimeOrigin: number, port: number): Promi
   await expect($('header button[aria-expanded]')).toBeDisplayed()
 }
 
+async function refreshDesktop(): Promise<void> {
+  const previousTimeOrigin = await browser.execute(() => performance.timeOrigin)
+  // 嵌入式驱动只等待 location.reload() 的脚本回调；旧页面仍可暂时通过 URL/控件断言。
+  await browser.refresh()
+  await browser.waitUntil(
+    () =>
+      browser.execute(
+        (previous) =>
+          performance.timeOrigin !== previous &&
+          document.readyState === 'complete' &&
+          document.querySelector('a[href="/vendor-plugins"]') !== null,
+        previousTimeOrigin,
+      ),
+    { timeoutMsg: 'desktop refresh did not finish loading the new authenticated document' },
+  )
+}
+
 async function unusedPort(): Promise<number> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -111,7 +128,7 @@ describe('Stravia desktop smoke', () => {
 
   it('switches and closes real selected scopes and zero-output diagnostics through native authenticated HTTP', async () => {
     await browser.execute(() => localStorage.setItem('stravia-locale', 'en-US'))
-    await browser.refresh()
+    await refreshDesktop()
     await browser.tauri.switchWindow('main')
     const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
     const suffix = Date.now().toString(36)
@@ -236,47 +253,48 @@ describe('Stravia desktop smoke', () => {
         members.push({ id: id!, content })
       }
       // 页面外写入夹具后重新加载，避免复用启动时的空统计缓存。
-      await browser.refresh()
+      await refreshDesktop()
       await browser.tauri.switchWindow('main')
       await browser.maximizeWindow()
+      // 首页现在是控制台对话；真实统计与图表集中在用量分析，不再绑定旧 Overview。
+      await $('a[href="/"]').click()
+      await expect($('#chat-key')).toHaveText(expect.stringContaining(`Native observation ${suffix}`))
+      await expect($('#chat-model')).toHaveText(expect.stringContaining('Native observation'))
+      await expect($('#chat-message')).toBeEnabled()
       // 真实原生宿主使用刚完成的本地调用，不以浏览器桩响应代替 IPC 统计与绘图。
-      for (const path of ['/', '/stats']) {
-        await $(`a[href="${path}"]`).click()
-        const section = await $(
-          path === '/' ? '[aria-labelledby="latency-title"]' : '[aria-labelledby="latency-trend-title"]',
+      await $('a[href="/stats"]').click()
+      const section = await $('[aria-labelledby="latency-trend-title"]')
+      await section.waitForExist()
+      const chart = await section.$('[aria-label="Latency and speed chart"]')
+      await chart.waitForExist()
+      await chart.scrollIntoView({ block: 'center' })
+      await expect(chart).toBeDisplayed()
+      await expect(chart.$('[aria-label="Time to first token axis"]')).toBeDisplayed()
+      await expect(chart.$('[aria-label="TPS axis"]')).toBeDisplayed()
+      const styles = await browser.execute(() => {
+        const chart = document.querySelector('[aria-label="Latency and speed chart"]')!
+        const first = chart.querySelector('[aria-label="Time to first token"]')!
+        const tps = chart.querySelector('[aria-label="TPS"]')!
+        return { first: getComputedStyle(first).strokeDasharray, tps: getComputedStyle(tps).strokeDasharray }
+      })
+      expect(styles.first).toBe('none')
+      expect(styles.tps).not.toBe('none')
+      // 嵌入式驱动的指针移动依赖前台焦点；在真实 WebView 发送事件，不扩展窗口权限。
+      await browser.execute(() => {
+        const svg = document.querySelector('[aria-label="Latency and speed chart"] svg')!
+        const bounds = svg.getBoundingClientRect()
+        svg.dispatchEvent(
+          new PointerEvent('pointermove', {
+            bubbles: true,
+            pointerType: 'mouse',
+            clientX: bounds.x + bounds.width / 2,
+            clientY: bounds.y + bounds.height / 2,
+          }),
         )
-        await section.waitForExist()
-        const chart = await section.$('[aria-label="Latency and speed chart"]')
-        await chart.waitForExist()
-        await chart.scrollIntoView({ block: 'center' })
-        await expect(chart).toBeDisplayed()
-        await expect(chart.$('[aria-label="Time to first token axis"]')).toBeDisplayed()
-        await expect(chart.$('[aria-label="TPS axis"]')).toBeDisplayed()
-        const styles = await browser.execute(() => {
-          const chart = document.querySelector('[aria-label="Latency and speed chart"]')!
-          const first = chart.querySelector('[aria-label="Time to first token"]')!
-          const tps = chart.querySelector('[aria-label="TPS"]')!
-          return { first: getComputedStyle(first).strokeDasharray, tps: getComputedStyle(tps).strokeDasharray }
-        })
-        expect(styles.first).toBe('none')
-        expect(styles.tps).not.toBe('none')
-        // 嵌入式驱动的指针移动依赖前台焦点；在真实 WebView 发送事件，不扩展窗口权限。
-        await browser.execute(() => {
-          const svg = document.querySelector('[aria-label="Latency and speed chart"] svg')!
-          const bounds = svg.getBoundingClientRect()
-          svg.dispatchEvent(
-            new PointerEvent('pointermove', {
-              bubbles: true,
-              pointerType: 'mouse',
-              clientX: bounds.x + bounds.width / 2,
-              clientY: bounds.y + bounds.height / 2,
-            }),
-          )
-        })
-        await expect($('[role="tooltip"]')).toBeDisplayed()
-        await expect($('[role="tooltip"]')).toHaveText(expect.stringContaining('tok/s'))
-        await expect($('[role="tooltip"]')).toHaveText(expect.stringMatching(/\d(?:\.\d+)? s/))
-      }
+      })
+      await expect($('[role="tooltip"]')).toBeDisplayed()
+      await expect($('[role="tooltip"]')).toHaveText(expect.stringContaining('tok/s'))
+      await expect($('[role="tooltip"]')).toHaveText(expect.stringMatching(/\d(?:\.\d+)? s/))
       await $('a[href="/logs"]').click()
       await $('button[aria-label="Load and show all chains"]').waitForEnabled()
       await browser.execute(() => {
@@ -389,7 +407,7 @@ describe('Stravia desktop smoke', () => {
       localStorage.setItem('stravia-locale', 'en-US')
       localStorage.setItem('stravia-sidebar-state', 'expanded')
     })
-    await browser.refresh()
+    await refreshDesktop()
     await browser.tauri.switchWindow('main')
     await $('a[href="/web-search"]').click()
     const localRow = await $(
@@ -416,7 +434,7 @@ describe('Stravia desktop smoke', () => {
       localStorage.setItem('stravia-locale', 'en-US')
       localStorage.setItem('stravia-sidebar-state', 'expanded')
     })
-    await browser.refresh()
+    await refreshDesktop()
     await browser.tauri.switchWindow('main')
     await $('a[href="/vendor-plugins"]').click()
     const component = fileURLToPath(new URL('../../../target/vendor-test-fixtures/lifecycle-v1.wasm', import.meta.url))
@@ -475,7 +493,7 @@ describe('Stravia desktop smoke', () => {
     expect(configuration.client_base_url).toBe(`http://127.0.0.1:${port}`)
     expect((await fetch(`http://127.0.0.1:${port}/api/v1/settings/artifact_settings`)).status).toBe(401)
     try {
-      await browser.refresh()
+      await refreshDesktop()
       await browser.tauri.switchWindow('main')
       await $('a[href="/settings"]').click()
       const address = await $('#artifact-client-base-url')
@@ -483,7 +501,7 @@ describe('Stravia desktop smoke', () => {
       await address.setValue('https://desktop.example:9443/client/prefix')
       await $('button=Save file settings').click()
       await expect($('button=Save file settings')).not.toBeEnabled()
-      await browser.refresh()
+      await refreshDesktop()
       await expect($('#artifact-client-base-url')).toHaveValue('https://desktop.example:9443/client/prefix')
       const persisted = JSON.parse((await adminRequest(port, '/settings/artifact_settings')) as string)
       expect(persisted.client_base_url).toBe('https://desktop.example:9443/client/prefix')
@@ -505,7 +523,7 @@ describe('Stravia desktop smoke', () => {
       body: JSON.stringify({ value: 'false' }),
     })
     const before = await adminRequest(port, '/reversible-redaction/discoveries')
-    await browser.refresh()
+    await refreshDesktop()
     await browser.tauri.switchWindow('main')
     await $('a[href="/reversible-redaction"]').click()
     await expect($('//h1[normalize-space()="Credential Protection"]')).toBeDisplayed()
@@ -541,7 +559,7 @@ describe('Stravia desktop smoke', () => {
       localStorage.setItem('stravia-locale', 'en-US')
       localStorage.setItem('stravia-sidebar-state', 'expanded')
     })
-    await browser.refresh()
+    await refreshDesktop()
     await browser.tauri.switchWindow('main')
     const serverPort = await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))
     const portState = (await browser.tauri.execute(({ core }) =>
@@ -554,7 +572,7 @@ describe('Stravia desktop smoke', () => {
     )) as DesktopAdminSession
     expect(nativeSession).not.toHaveProperty('refresh_token')
     await expectProtectedStatus(portState.currentPort, nativeSession.access_token)
-    await browser.refresh()
+    await refreshDesktop()
     const restoredSession = (await browser.tauri.execute(({ core }) =>
       core.invoke('get_admin_session'),
     )) as DesktopAdminSession
@@ -719,7 +737,7 @@ describe('Stravia desktop smoke', () => {
       )
 
       // 管理 API 在页面外准备夹具，重新加载以免复用前一个 smoke 的配置查询缓存。
-      await browser.refresh()
+      await refreshDesktop()
       await browser.tauri.switchWindow('main')
       await $('a[href="/connect"]').click()
       await expect($('//h1[normalize-space()="Connect clients"]')).toBeDisplayed()
@@ -743,8 +761,13 @@ describe('Stravia desktop smoke', () => {
       await expect(incrementalPreview).not.toHaveText(expect.stringContaining('user-current-model'))
       await expect(incrementalPreview).not.toHaveText(expect.stringContaining('approval_policy'))
 
-      // 原生剪贴板拒绝未聚焦的文档；window.focus() 不能突破 Windows 前台锁，由驱动在宿主进程内激活窗口才可靠。
+      // 最大化和 WebDriver 切窗不保证 Windows 前台焦点；只请求现有文档焦点，并在复制前核验真实前提。
       await browser.maximizeWindow()
+      await browser.execute(() => window.focus())
+      await browser.waitUntil(() => browser.execute(() => document.hasFocus()), {
+        timeout: 10_000,
+        timeoutMsg: 'native clipboard requires the desktop WebView to have foreground focus',
+      })
       const renderedConfiguration = await browser.execute(() => {
         const preview = document.querySelector('pre.route-code-plane')
         if (!preview?.textContent) throw new Error('Connect configuration preview was empty')
@@ -901,7 +924,7 @@ describe('Stravia desktop smoke', () => {
       await $('a[href="/reversible-redaction"]').click()
       // 客户端路由完成后再刷新，避免刷新仍在离开的设置页。
       await expectSaved(changed)
-      await browser.refresh()
+      await refreshDesktop()
       await expectSaved(changed)
     } finally {
       await $('a[href="/reversible-redaction"]').click()

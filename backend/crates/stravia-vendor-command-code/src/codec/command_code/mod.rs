@@ -669,7 +669,7 @@ fn encode_image(source: MediaSource) -> anyhow::Result<Value> {
                 image
                     .as_object_mut()
                     .expect("image part is an object")
-                    .insert("mimeType".into(), Value::String(media_type.into()));
+                    .insert("mimeType".into(), Value::String(media_type));
             }
             Ok(image)
         }
@@ -733,8 +733,8 @@ fn encode_tool_call_value(call: &ToolCall) -> Value {
 }
 
 fn owned_tool_call_value(call: ToolCall) -> Value {
-    let input = serde_json::from_str::<Value>(&call.arguments)
-        .unwrap_or_else(|_| Value::String(call.arguments));
+    let input =
+        serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::String(call.arguments));
     object([
         ("type", Value::String("tool-call".into())),
         ("toolCallId", Value::String(call.id.into_string())),

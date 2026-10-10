@@ -237,42 +237,44 @@ def test_protocol_matrix(
                 run
                 and run["ingress_protocol"]
                 == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
-                # Tool handoff sets waiting_client before the request finishes.
-                # ADR-0077 also completes the trace before committing run_finished.
-                # finished_at is committed in the same transaction as that event.
+                # Delivery receipts can already set finished_at and terminal status.
+                # ADR-0077 completes the trace before committing run_finished too.
                 and run["finished_at"] is not None
                 and run["status"] != "running"
                 and (run.get("trace") or {}).get("status") == "complete"
             ):
-                observed = candidate
-                break
+                # Detail contains only the latest event page. Check readiness against
+                # the full lifecycle at this fixed watermark, including older pages
+                # when later activity has pushed run_finished out of the latest page.
+                cursor = candidate["older_events_cursor"]
+                while cursor is not None:
+                    page_status, page_body = http_request(
+                        "GET",
+                        f"{proxy_base}/api/v1/observations/interactions/{candidate['interaction']['id']}"
+                        f"/events?before_sequence={cursor}"
+                        f"&through_sequence={candidate['snapshot_sequence']}",
+                        headers=admin_headers,
+                    )
+                    assert page_status == 200, page_body
+                    page = page_body["data"]
+                    assert page["snapshot_sequence"] == candidate["snapshot_sequence"]
+                    for page_run in page["runs"]:
+                        if page_run["id"] == run["id"]:
+                            run["events"] = page_run["events"] + run["events"]
+                    next_cursor = page["next_cursor"]
+                    assert next_cursor is None or next_cursor < cursor
+                    cursor = next_cursor
+                if any(event["kind"] == "run_finished" for event in run["events"]):
+                    observed = candidate
+                    break
+                last_state += f" run_finished absent at snapshot={candidate['snapshot_sequence']}"
         time.sleep(0.1)
     assert observed is not None, (
         f"Observation not persisted for {ingress_protocol} <- {replay_model} ({last_state})"
     )
     run = observed["runs"][-1]
     assert run["ingress_protocol"] == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
-    # Detail contains only the latest event page, not the whole lifecycle.
-    # Read older pages at its fixed watermark so ordering/attempt coverage is
-    # independent of response size and concurrent observation activity.
-    cursor = observed["older_events_cursor"]
-    while cursor is not None:
-        page_status, page_body = http_request(
-            "GET",
-            f"{proxy_base}/api/v1/observations/interactions/{observed['interaction']['id']}"
-            f"/events?before_sequence={cursor}"
-            f"&through_sequence={observed['snapshot_sequence']}",
-            headers=admin_headers,
-        )
-        assert page_status == 200, page_body
-        page = page_body["data"]
-        assert page["snapshot_sequence"] == observed["snapshot_sequence"]
-        for page_run in page["runs"]:
-            if page_run["id"] == run["id"]:
-                run["events"] = page_run["events"] + run["events"]
-        next_cursor = page["next_cursor"]
-        assert next_cursor is None or next_cursor < cursor
-        cursor = next_cursor
+    # Readiness collected every event page at the selected detail's watermark.
     sequences = [event["sequence"] for event in run["events"]]
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))

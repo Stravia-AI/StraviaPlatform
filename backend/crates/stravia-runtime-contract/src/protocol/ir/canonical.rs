@@ -261,21 +261,21 @@ impl serde::Serialize for HistoryUnit<'_> {
 
 fn history_units(item: &AiItem) -> Vec<HistoryUnit<'_>> {
     // Complex content and native wrappers retain the canonical projection.
-    if let MessageContent::Text(text) = &item.content {
-        if history_native_item_fields(item).is_none() {
-            let mut units = Vec::new();
-            if item.role == super::Role::Assistant {
-                let mut tail = Vec::new();
-                assistant_history_tail(item, &mut tail, &[]);
-                if !text.is_empty() || tail.is_empty() {
-                    units.push(HistoryUnit::Text { item, text });
-                }
-                units.extend(tail.into_iter().map(HistoryUnit::Owned));
-            } else {
+    if let MessageContent::Text(text) = &item.content
+        && history_native_item_fields(item).is_none()
+    {
+        let mut units = Vec::new();
+        if item.role == super::Role::Assistant {
+            let mut tail = Vec::new();
+            assistant_history_tail(item, &mut tail, &[]);
+            if !text.is_empty() || tail.is_empty() {
                 units.push(HistoryUnit::Text { item, text });
             }
-            return units;
+            units.extend(tail.into_iter().map(HistoryUnit::Owned));
+        } else {
+            units.push(HistoryUnit::Text { item, text });
         }
+        return units;
     }
     history_item_values(item)
         .into_iter()
@@ -483,27 +483,26 @@ fn assistant_history_tail(
 }
 
 fn tool_output_history_values(item: &AiItem) -> Option<Vec<serde_json::Value>> {
-    if let MessageContent::Blocks(blocks) = &item.content {
-        if !blocks.is_empty()
-            && blocks
+    if let MessageContent::Blocks(blocks) = &item.content
+        && !blocks.is_empty()
+        && blocks
+            .iter()
+            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    {
+        return Some(
+            blocks
                 .iter()
-                .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
-        {
-            return Some(
-                blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                            ..
-                        } => Some(tool_output_value(tool_use_id, content.clone(), *is_error)),
-                        _ => None,
-                    })
-                    .collect(),
-            );
-        }
+                .filter_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } => Some(tool_output_value(tool_use_id, content.clone(), *is_error)),
+                    _ => None,
+                })
+                .collect(),
+        );
     }
     if item.role != super::Role::Tool {
         return None;
@@ -1143,8 +1142,14 @@ mod tests {
                     );
                     let mut changed = plain.clone();
                     changed.content = MessageContent::Text(format!("{text}!").into());
-                    assert!(!history_items_equal(&[plain.clone()], &[changed]));
-                    assert!(history_items_equal(&[plain.clone()], &[plain]));
+                    assert!(!history_items_equal(
+                        std::slice::from_ref(&plain),
+                        std::slice::from_ref(&changed)
+                    ));
+                    assert!(history_items_equal(
+                        std::slice::from_ref(&plain),
+                        std::slice::from_ref(&plain)
+                    ));
                 }
             }
         }
@@ -1189,7 +1194,7 @@ mod tests {
     #[test]
     fn borrowed_history_retains_complex_fallback_and_unit_order() {
         let mut assistant = item(ContentBlock::Thinking {
-            thinking: "thought🙂".to_owned().into(),
+            thinking: "thought🙂".to_owned(),
             signature: Some("signed".into()),
         });
         assistant.role = Role::Assistant;
@@ -1199,7 +1204,7 @@ mod tests {
                 cache_control: None,
             },
             ContentBlock::Thinking {
-                thinking: "thought🙂".to_owned().into(),
+                thinking: "thought🙂".to_owned(),
                 signature: Some("signed".into()),
             },
             ContentBlock::Text {

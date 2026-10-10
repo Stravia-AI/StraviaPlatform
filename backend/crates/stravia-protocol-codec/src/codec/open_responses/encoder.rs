@@ -253,6 +253,9 @@ fn insert_owned_request_control_fields(
     obj: &mut serde_json::Map<String, Value>,
     mut req: AiRequest,
 ) {
+    let foreign_ingress = req.meta.source_protocol.is_some_and(|protocol| {
+        protocol != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+    });
     let tools = req.tools.take();
     let format = req.response_format.take();
     let tool_choice = req.tool_choice.take();
@@ -286,7 +289,9 @@ fn insert_owned_request_control_fields(
                     encoded["description"] =
                         tool.description.map(Value::String).unwrap_or(Value::Null);
                     encoded["parameters"] = tool.parameters;
-                    if let Some(strict) = tool.strict {
+                    // Preserve foreign ingress's non-strict default: Responses
+                    // otherwise makes an omitted strict flag strict-by-default.
+                    if let Some(strict) = tool.strict.or(foreign_ingress.then_some(false)) {
                         encoded["strict"] = Value::Bool(strict);
                     }
                     encoded

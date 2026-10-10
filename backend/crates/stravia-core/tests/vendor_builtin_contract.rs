@@ -788,6 +788,7 @@ fn assert_openai_standard_request(body: &Value) {
 fn assert_responses_standard_request(body: &Value) {
     assert_eq!(body["reasoning"]["effort"], "high");
     assert_eq!(body["tools"][0]["name"], "lookup");
+    assert_eq!(body["tools"][0]["strict"], false);
 }
 
 fn assert_anthropic_standard_request(body: &Value) {
@@ -1946,13 +1947,29 @@ async fn standard_plugin_rejects_an_unrepresentable_hard_requirement_before_netw
     let (route, token) = provider_route_and_key(&gateway, "gemini-lossy", ProviderSourceInput::Custom { vendor: "custom".to_string(), channel: "default".to_string(), protocol: Some("google-gemini".to_string()), base_url, models_source: None, static_models: None }, "upstream-model", ProviderCredentialInput::ApiKey { value: "test-key".into() }, Default::default(), json!({"id": "upstream-model", "name": "upstream-model", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]}))
     .await?;
     let mut request = standard_client_request(&route);
-    request["tools"][0]["function"]["strict"] = json!(true);
+    // Tool-call arguments are opaque client-owned bytes. Gemini requires JSON
+    // objects, so this history must be rejected rather than repaired into {}.
+    // Unlike tool strictness, preserving those bytes is not an advisory control.
+    request["messages"] = json!([
+        {"role": "user", "content": "Use the lookup tool."},
+        {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call-lookup",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"key\":\"value\""}
+            }]
+        },
+        {"role": "tool", "tool_call_id": "call-lookup", "content": "lookup failed"},
+        {"role": "user", "content": "Continue."}
+    ]);
 
     let (status, body) = chat(gateway, &token, request).await?;
-    assert_ne!(
+    assert_eq!(
         status,
-        StatusCode::OK,
-        "strict tool schema was silently weakened: {body}"
+        StatusCode::BAD_REQUEST,
+        "unrepresentable tool-call arguments were not rejected: {body}"
     );
     assert_eq!(body["error"]["code"], "vendor_request_invalid");
     assert_eq!(

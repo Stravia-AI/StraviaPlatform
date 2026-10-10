@@ -66,7 +66,10 @@ $effect(() => {
   const expiry = Math.min(...chat.snapshot.keyCandidates.map((key) => apiKeyExpiryTime(key.expires_at)))
   if (!Number.isFinite(expiry)) return
   // 在已知有效期边界重新派生，不轮询目录；远期 Key 遵守浏览器定时器上限。
-  const timer = window.setTimeout(() => chat.refreshEligibility(), Math.min(Math.max(0, expiry - Date.now()), 2_147_483_647))
+  const timer = window.setTimeout(
+    () => chat.refreshEligibility(),
+    Math.min(Math.max(0, expiry - Date.now()), 2_147_483_647),
+  )
   return () => window.clearTimeout(timer)
 })
 let desktopStartup = $state.raw<DesktopStartupState>(initialDesktopStartupState)
