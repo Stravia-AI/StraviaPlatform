@@ -61,16 +61,21 @@ export function consoleAssistantContent(message: ConsoleAssistantMessage): { tex
   }
 }
 
+function hasVisibleThinkingText(activity: ThinkingActivity): boolean {
+  return activity.text.trim().length > 0
+}
+
 export function consoleReasoningActivities(message: ConsoleAssistantMessage): ThinkingActivity[] {
   if (message.status === 'stopped' || message.status === 'failed') {
     if (message.partialActivities)
       return message.partialActivities
         .map((activity) => ({ ...activity, text: consoleVisibleText(activity.text), live: false }))
-        .filter((activity) => !!activity.text)
+        .filter(hasVisibleThinkingText)
     const text = consoleVisibleText(message.partialThinking ?? '')
-    return text
-      ? [{ kind: 'thinking', id: `${message.id}:reasoning`, at: Date.parse(message.createdAt), text, live: false }]
-      : []
+    const activities: ThinkingActivity[] = [
+      { kind: 'thinking', id: `${message.id}:reasoning`, at: Date.parse(message.createdAt), text, live: false },
+    ]
+    return activities.filter(hasVisibleThinkingText)
   }
   return message.outputItems.flatMap((output, index): ThinkingActivity[] => {
     const item = record(output)
@@ -78,18 +83,16 @@ export function consoleReasoningActivities(message: ConsoleAssistantMessage): Th
     const text =
       consoleVisibleText(readableParts(item.summary)) ||
       consoleVisibleText(readableParts(item.content) || readableParts(item.text))
-    return text
-      ? [
-          {
-            kind: 'thinking',
-            id: typeof item.id === 'string' ? item.id : `${message.id}:reasoning:${index}`,
-            at: Date.parse(message.createdAt),
-            text,
-            live: false,
-          },
-        ]
-      : []
-  })
+    return [
+      {
+        kind: 'thinking',
+        id: typeof item.id === 'string' ? item.id : `${message.id}:reasoning:${index}`,
+        at: Date.parse(message.createdAt),
+        text,
+        live: false,
+      },
+    ]
+  }).filter(hasVisibleThinkingText)
 }
 
 function replay(messages: ConsoleMessage[]): unknown[] {
@@ -201,7 +204,7 @@ function updateReasoning(active: ActiveRequest, event: ConsoleResponsesEvent, at
       live: value.live,
       text: consoleVisibleText(orderedParts(value.summary)) || consoleVisibleText(orderedParts(value.content)),
     }))
-    .filter((activity) => !!activity.text)
+    .filter(hasVisibleThinkingText)
   return true
 }
 

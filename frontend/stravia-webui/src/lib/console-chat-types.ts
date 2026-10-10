@@ -41,6 +41,7 @@ export interface ConsoleAssistantMessage {
   status: 'completed' | 'incomplete' | 'stopped' | 'failed'
   routeId: string
   thinkingLevel: ConsoleThinkingSelection
+  /** 签名项用于后续上游回放，不能按展示文本是否为空过滤。 */
   outputItems: unknown[]
   partialText?: string
   partialThinking?: string
@@ -131,6 +132,7 @@ export interface ConsoleGeneration {
   text: string
   summary: string
   reasoning: string
+  /** 与原始推理文本分离，避免签名项或空白文本生成空折叠块。 */
   activities: ThinkingActivity[]
 }
 

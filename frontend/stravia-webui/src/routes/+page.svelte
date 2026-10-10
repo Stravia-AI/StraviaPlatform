@@ -23,7 +23,12 @@ import ObservationActivity from '$lib/components/observation-activity.svelte'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
 import MarkdownContent from '$lib/components/markdown-content.svelte'
 import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
-import { Button } from '$lib/components/ui/button'
+import { Button, buttonVariants } from '$lib/components/ui/button'
+import * as Tooltip from '$lib/components/ui/tooltip'
+import BrandMark from '$lib/components/brand-mark.svelte'
+import CopyIcon from '@lucide/svelte/icons/copy'
+import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import SquarePenIcon from '@lucide/svelte/icons/square-pen'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import * as Alert from '$lib/components/ui/alert'
 import * as Empty from '$lib/components/ui/empty'
@@ -33,6 +38,7 @@ const conversation: ConsoleConversation | null = $derived(snapshot.currentConver
 const generation = $derived(conversation ? snapshot.generations[conversation.id] : undefined)
 const lastMessage = $derived(conversation?.messages.at(-1))
 const title = $derived(conversation?.title ?? m.console_chat_new())
+const heading = $derived(snapshot.missingConversation ? m.console_chat_missing() : title)
 
 let text = $state('')
 let images = $state<ConsoleImageAttachment[]>([])
@@ -196,16 +202,26 @@ async function copy(value: string) {
 }
 </script>
 
+{#snippet iconAction(label: string, Icon: typeof CopyIcon, onclick: () => void, disabled = false)}
+  <Tooltip.Root>
+    <Tooltip.Trigger
+      aria-label={label}
+      {disabled}
+      {onclick}
+      class={buttonVariants({ variant: 'ghost', size: 'icon', class: 'text-muted-foreground hover:text-foreground' })}
+      ><Icon /></Tooltip.Trigger>
+    <Tooltip.Content>{label}</Tooltip.Content>
+  </Tooltip.Root>
+{/snippet}
+
 <svelte:head><title>{title} · Stravia</title></svelte:head>
 <section bind:this={surface} class="chat-surface">
   {#if isTauri}<DesktopPortNotice />{/if}
-  <header class="flex flex-col items-stretch gap-3 border-b pb-4 sm:flex-row sm:items-start sm:justify-between">
-    <h1 class="min-w-0 flex-1 font-structural text-[26px] font-semibold break-words sm:text-[30px]">
-      {snapshot.missingConversation ? m.console_chat_missing() : title}
-    </h1>
-    <div class="flex shrink-0 flex-wrap gap-1 self-end sm:self-auto">
-      <Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_new()}</Button
-      ><ConsoleChatActions {conversation} />
+  <header class="flex min-w-0 items-center gap-2">
+    <h1 class="min-w-0 flex-1 truncate text-base font-medium" title={heading}>{heading}</h1>
+    <div class="flex shrink-0 items-center gap-1">
+      {@render iconAction(m.console_chat_new(), SquarePenIcon, () => void newConversation())}<ConsoleChatActions
+        {conversation} />
     </div>
   </header>
   {#if snapshot.storageError}<p role="alert" class="text-destructive">
@@ -265,21 +281,24 @@ async function copy(value: string) {
                 </div>{/if}
 
               <div class="flex flex-wrap gap-1">
-                <Button variant="ghost" onclick={() => void copy(live ? generation.text : content.text)}
-                  >{m.console_chat_copy()}</Button>
+                {@render iconAction(m.console_chat_copy(), CopyIcon, () =>
+                  void copy(live ? generation.text : content.text),
+                )}
                 {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
                   {#if message.status === 'failed'}<Button
                       variant="outline"
                       disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
                       onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button
                     >{/if}
-                  <Button
-                    variant="ghost"
-                    disabled={!snapshot.selectedModelId ||
+                  {@render iconAction(
+                    m.console_chat_regenerate(),
+                    RefreshCwIcon,
+                    () => void command(() => chat.regenerate()),
+                    !snapshot.selectedModelId ||
                       Boolean(guide) ||
                       Boolean(snapshot.catalogError) ||
-                      (snapshot.historyHasImages && !snapshot.modelSupportsImages)}
-                    onclick={() => void command(() => chat.regenerate())}>{m.console_chat_regenerate()}</Button>
+                      (snapshot.historyHasImages && !snapshot.modelSupportsImages),
+                  )}
                 {/if}
               </div>
               {#snippet meta()}
@@ -305,7 +324,10 @@ async function copy(value: string) {
       </div>
     {:else if !guide && !snapshot.loadError && !snapshot.catalogError}
       <Empty.Root class="flex-1"
-        ><Empty.Header><Empty.Description>{m.console_chat_start_prompt()}</Empty.Description></Empty.Header
+        ><Empty.Header
+          ><Empty.Media><BrandMark class="size-10 text-muted-foreground" /></Empty.Media><Empty.Title
+            class="text-2xl font-medium text-balance">{m.console_chat_start_prompt()}</Empty.Title
+          ></Empty.Header
         ></Empty.Root>
     {/if}
     {#if snapshot.readOnlyReason}

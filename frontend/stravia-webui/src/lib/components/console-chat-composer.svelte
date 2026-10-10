@@ -1,5 +1,7 @@
 <script lang="ts">
 import PlusIcon from '@lucide/svelte/icons/plus'
+import KeyRoundIcon from '@lucide/svelte/icons/key-round'
+import LockIcon from '@lucide/svelte/icons/lock'
 import XIcon from '@lucide/svelte/icons/x'
 import SendIcon from '@lucide/svelte/icons/arrow-up'
 import StopIcon from '@lucide/svelte/icons/square'
@@ -98,33 +100,43 @@ function drop(event: DragEvent) {
 }
 </script>
 
-<div class="flex min-w-0 flex-col gap-2">
-  {#if conversation}
-    <p class="text-xs text-muted-foreground">
-      {m.console_chat_key()}: <span class="text-foreground">{conversation.apiKeyName}</span> · {m.console_chat_key_locked()}
-    </p>
-  {:else}
-    <Field.FieldGroup
-      ><Field.Field orientation="vertical">
-        <Field.FieldLabel for="chat-key">{m.console_chat_key()}</Field.FieldLabel>
-        <Select.Root
-          type="single"
-          value={snapshot.selectedKeyId ?? ''}
-          onValueChange={(value: string) => chat.selectKey(value || null)}>
-          <Select.Trigger id="chat-key" class="w-full sm:w-72"
+<div class="flex min-w-0 flex-col">
+  <!-- Key 归属贴在输入卡片上沿：选择时是 Select，首条消息后变为同位置的只读标签。 -->
+  <div
+    class="mx-3 flex max-w-[calc(100%-1.5rem)] min-w-0 items-center self-start rounded-t-xl border border-b-0 bg-muted/50 px-1 pt-1 dark:bg-muted/40">
+    {#if conversation}
+      <p class="flex h-9 min-w-0 items-center gap-1.5 px-2.5 text-sm text-muted-foreground">
+        <LockIcon class="size-3.5 shrink-0" aria-hidden="true" /><span class="sr-only">{m.console_chat_key()}:</span
+        ><span class="truncate text-foreground">{conversation.apiKeyName}</span><span class="sr-only"
+          >· {m.console_chat_key_locked()}</span>
+      </p>
+    {:else}
+      <label for="chat-key" class="sr-only">{m.console_chat_key()}</label>
+      <Select.Root
+        type="single"
+        value={snapshot.selectedKeyId ?? ''}
+        onValueChange={(value: string) => chat.selectKey(value || null)}>
+        <Select.Trigger
+          id="chat-key"
+          class="h-9! max-w-72 min-w-0 gap-1.5 border-0 bg-transparent px-2.5 shadow-none hover:bg-muted dark:bg-transparent dark:hover:bg-input/50"
+          ><KeyRoundIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /><span class="truncate"
             >{snapshot.keyCandidates.find((key) => key.id === snapshot.selectedKeyId)?.name ??
-              m.console_chat_choose_key()}</Select.Trigger>
-          <Select.Content
-            ><Select.Group
-              >{#each snapshot.keyCandidates as key (key.id)}<Select.Item value={key.id} label={key.name}
-                  >{key.name}</Select.Item
-                >{/each}</Select.Group
-            ></Select.Content>
-        </Select.Root>
-      </Field.Field></Field.FieldGroup>
-  {/if}
+              m.console_chat_choose_key()}</span
+          ></Select.Trigger>
+        <Select.Content
+          ><Select.Group
+            >{#each snapshot.keyCandidates as key (key.id)}<Select.Item value={key.id} label={key.name}
+                >{key.name}</Select.Item
+              >{/each}</Select.Group
+          ></Select.Content>
+      </Select.Root>
+    {/if}
+  </div>
   <form
-    class={['flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-4', dragging && 'outline-2 outline-primary']}
+    class={[
+      'flex min-w-0 flex-col gap-2 rounded-xl border bg-card px-3 pt-3 pb-2 transition-[border-color,box-shadow] duration-[140ms] focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50',
+      dragging && 'outline-2 outline-primary',
+    ]}
     onsubmit={(event) => {
       event.preventDefault()
       if (!incompatible && !reading) void onsend()
@@ -146,8 +158,8 @@ function drop(event: DragEvent) {
           bind:ref={composer}
           id="chat-message"
           bind:value={text}
-          rows={3}
-          class="max-h-56 resize-y"
+          rows={2}
+          class="max-h-56 min-h-12 resize-none rounded-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
           disabled={generating}
           placeholder={m.console_chat_message_placeholder()}
           onpaste={paste}
@@ -202,6 +214,7 @@ function drop(event: DragEvent) {
         type="button"
         variant="ghost"
         size="icon"
+        class="rounded-full"
         disabled={generating || reading}
         aria-busy={reading}
         aria-label={m.console_chat_add_images()}
@@ -209,19 +222,23 @@ function drop(event: DragEvent) {
       <div class="hidden min-w-0 flex-1 sm:block"></div>
       <ConsoleModelPicker />
       {#if generating}
-        <Button type="button" variant="outline" size="icon" aria-label={m.console_chat_stop()} onclick={onstop}
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          class="rounded-full"
+          aria-label={m.console_chat_stop()}
+          onclick={onstop}
           ><StopIcon /></Button>
       {:else}
         <Button
           type="submit"
           size="icon"
+          class="rounded-full"
           aria-label={m.console_chat_send()}
           disabled={!text.trim() || !snapshot.selectedKeyId || !snapshot.selectedModelId || incompatible || reading}
           ><SendIcon /></Button>
       {/if}
     </div>
   </form>
-  <p class="text-xs text-muted-foreground">
-    {images.length || snapshot.historyHasImages ? m.console_chat_image_notice() : m.console_chat_send_notice()}
-  </p>
 </div>

@@ -10,6 +10,7 @@
 
 ### Changed
 
+- Redesigned the Console Chat composer: the API Key sits as a tab above a single borderless, auto-growing input card, and the model/effort picker opens on a localized effort slider (with “Default” as its first stop), with the model list one click away. The header, empty state, and answer actions use compact icon controls, and the send notice below the composer has been removed.
 - Console Chat and request observations now share a flat assistant / muted user message layout. Chat has a docked composer, layered model/effort picker, and item-scoped thinking lifecycle; observations retain manual expansion and show tool activity only from execution, handoff, result, and authoritative Run evidence.
 - Usage analytics now features a “Latency and speed” chart with independent zero-based axes for time to first token (seconds) and full-call TPS (tok/s). Window summaries and same-bucket tooltips preserve unknown values and real zero output; missing hours remain gaps. TPS is weighted over successful Target attempts, includes first-token waiting, and requires complete output/duration coverage. Other duration metrics and existing observation records remain unchanged; no migration or backfill is required.
 - Replaced the Overview landing page with Console Chat. Traffic, latency, errors, and model/service statistics remain available in Usage analytics; the Overview dashboard and Request Spine have been removed.
@@ -28,6 +29,8 @@
 
 ### Fixed
 
+- Console Chat no longer shows empty “Thinking” blocks for reasoning items whose summary is blank, whitespace-only, or only hidden comments, during streaming, after completion, or after stop/failure. Signed reasoning items are still stored and replayed unchanged.
+- The navigation sidebar now highlights only one Chat item at a time: the open recent conversation, “All conversations”, or Chat itself when no more specific item is visible.
 - CI regressions now follow the current contracts: Vendor pre-network rejection covers unrepresentable tool-call arguments without rejecting advisory `strict`; the protocol matrix waits for persisted `run_finished` at its fixed event watermark; Windows desktop smoke covers Console Chat at the landing page, charts in Usage analytics, and persistence after a new authenticated document has loaded. Native clipboard assertions explicitly require real WebView foreground focus without granting additional window permissions. WebUI/Rust formatting and warning-free static checks are restored; compatibility policy is unchanged.
 - SQLite performance attribution tests now release worker-held spans before exporting telemetry, preserving exact query counts and avoiding incomplete samples caused by the test's debug shutdown.
 - Function tools from Chat Completions or Anthropic Messages clients that omit `strict` are now sent to Open Responses targets with explicit `strict: false`, so upstream no longer auto-strictifies them and turns optional parameters into required ones. Both owned and borrowed request encoding preserve this default. Chat Completions targets now preserve explicit `strict`. Rebuild and re-import affected standalone plugins (for example `openai-codex`) to receive the fix.

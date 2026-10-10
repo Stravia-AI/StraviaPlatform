@@ -74,6 +74,21 @@ const gatewayTone = $derived(
   gatewayRunning ? ('healthy' as const) : statusQuery.isError ? ('error' as const) : ('neutral' as const),
 )
 const currentPath = $derived(page.url.pathname)
+const showRecentConversations = $derived(!sidebarCollapsed || !isDesktopNavigation)
+const recentConversations = $derived(chat.snapshot.conversations.slice(0, 5))
+const showAllConversations = $derived(chat.snapshot.conversations.length > 5)
+// 对话区只高亮当前可见的最具体一项；子项被折叠隐藏或当前对话不在最近列表时，回退到父项。
+const activeConversationId = $derived.by(() => {
+  if (currentPath !== '/' || !showRecentConversations) return null
+  const id = page.url.searchParams.get('conversation')
+  return recentConversations.some((conversation) => conversation.id === id) ? id : null
+})
+const allConversationsActive = $derived(
+  currentPath === '/conversations' && showRecentConversations && showAllConversations,
+)
+const chatNavigationActive = $derived(
+  (currentPath === '/' || currentPath === '/conversations') && !activeConversationId && !allConversationsActive,
+)
 const breadcrumbProviderId = $derived(page.route.id === '/providers/[id]' ? (page.params.id ?? '') : '')
 const navigationTriggerLabel = $derived(
   isDesktopNavigation
@@ -279,16 +294,14 @@ onMount(() => {
           <Sidebar.Menu>
             <Sidebar.MenuItem>
               <Sidebar.MenuButton
-                isActive={currentPath === '/' || currentPath === '/conversations'}
+                isActive={chatNavigationActive}
                 tooltipContent={m.console_chat_chat()}>
                 {#snippet child({ props })}
                   <a
                     {...props}
                     href={resolve('/')}
                     aria-label={m.console_chat_chat()}
-                    aria-current={currentPath === '/' && !page.url.searchParams.has('conversation')
-                      ? 'page'
-                      : undefined}
+                    aria-current={chatNavigationActive ? 'page' : undefined}
                     onclick={() => (navigationOpen = false)}>
                     <MessageSquareIcon /><span>{m.console_chat_chat()}</span>
                   </a>
@@ -296,21 +309,17 @@ onMount(() => {
               </Sidebar.MenuButton>
             </Sidebar.MenuItem>
           </Sidebar.Menu>
-          {#if !sidebarCollapsed || !isDesktopNavigation}
+          {#if showRecentConversations}
             <ul class="mt-1 flex flex-col gap-1 ps-3">
-              {#each chat.snapshot.conversations.slice(0, 5) as conversation (conversation.id)}
+              {#each recentConversations as conversation (conversation.id)}
                 <li>
                   <a
                     class={[
                       'flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-sm hover:bg-sidebar-accent',
-                      currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id
-                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                        : '',
+                      activeConversationId === conversation.id ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
                     ]}
                     href={resolve(`/?conversation=${encodeURIComponent(conversation.id)}`)}
-                    aria-current={currentPath === '/' && page.url.searchParams.get('conversation') === conversation.id
-                      ? 'page'
-                      : undefined}
+                    aria-current={activeConversationId === conversation.id ? 'page' : undefined}
                     onclick={() => (navigationOpen = false)}>
                     <span class="min-w-0 flex-1 truncate">{conversation.title}</span>
                     {#if chat.snapshot.generations[conversation.id]}<span
@@ -321,11 +330,15 @@ onMount(() => {
                   </a>
                 </li>
               {/each}
-              {#if chat.snapshot.conversations.length > 5}
+              {#if showAllConversations}
                 <li>
                   <a
                     href={resolve('/conversations')}
-                    class="flex min-h-10 items-center rounded-md px-3 text-sm hover:bg-sidebar-accent"
+                    class={[
+                      'flex min-h-10 items-center rounded-md px-3 text-sm hover:bg-sidebar-accent',
+                      allConversationsActive ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
+                    ]}
+                    aria-current={allConversationsActive ? 'page' : undefined}
                     onclick={() => (navigationOpen = false)}>{m.console_chat_all()}</a>
                 </li>
               {/if}

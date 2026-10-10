@@ -621,15 +621,16 @@ describe('Stravia desktop smoke', () => {
       await browser.keys('Enter')
       await expect($('#chat-key')).toHaveText(expect.stringContaining(keyName))
       await $('button[aria-label="Model and reasoning effort"]').click()
-      await $('#chat-model').click()
-      await browser.keys('ArrowDown')
+      // 唯一候选自动选中，面板默认停在强度层；从模型名进入列表并用键盘确认后回到强度层。
+      await expect($('[role="slider"]')).toBeDisplayed()
+      await $('//button[starts-with(normalize-space(), "Model:")]').click()
       await expect($(`//*[@role="option" and contains(normalize-space(), "Native chat ${suffix}")]`)).toBeDisplayed()
-      await browser.keys(`Native chat ${suffix}`)
       await browser.keys('Enter')
-      await expect($('#chat-model')).toHaveText(expect.stringContaining(`Native chat ${suffix}`))
-      await $('button*=Reasoning effort').click()
       await expect($('[role="slider"]')).toBeDisplayed()
       await browser.keys('Escape')
+      await expect($('button[aria-label="Model and reasoning effort"]')).toHaveText(
+        expect.stringContaining(`Native chat ${suffix}`),
+      )
       const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9l8AAAAASUVORK5CYII='
       await browser.execute((encoded) => {
         const clipboard = new DataTransfer()

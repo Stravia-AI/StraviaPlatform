@@ -351,6 +351,60 @@ describe('request and presentation', () => {
       expect(JSON.stringify(h.store.conversations)).not.toContain('ephemeral-secret')
     },
   )
+  test.each(['completed', 'incomplete'] as const)('终态 %s 隐藏空思考但原样持久化并回放签名项', async (status) => {
+    const raw = [
+      { type: 'reasoning', id: 'signature-only', encrypted_content: 'opaque-empty', summary: [] },
+      { type: 'reasoning', id: 'whitespace', encrypted_content: 'opaque-space', summary: [{ text: ' \n\t ' }] },
+      { type: 'reasoning', id: 'readable', summary: [{ text: '  思考原文\n' }] },
+      { type: 'reasoning', id: 'hidden', summary: [{ text: ' <!--private-->\t' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '回答' }] },
+    ]
+    const snapshots: ConsoleChatSnapshot[] = []
+    const h = harness({
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      script: function* () {
+        yield { type: status === 'incomplete' ? 'response.incomplete' : 'response.completed', response: { status, output: raw } }
+      },
+    })
+    await h.controller.start()
+    await h.controller.send('first')
+    const answer = h.store.conversations[0].messages[1]
+    if (answer.role !== 'assistant') throw new Error('Expected assistant')
+    expect(answer.outputItems).toEqual(raw)
+    expect(consoleReasoningActivities(answer).map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: 'readable', text: '  思考原文\n' },
+    ])
+    expect(consoleAssistantContent(answer)).toEqual({ text: '回答', thinking: '  思考原文\n' })
+    expect(snapshots.flatMap((snapshot) => Object.values(snapshot.generations)).at(-1)?.activities.map(({ id }) => id)).toEqual(['readable'])
+    const refreshed = harness({ store: h.store })
+    await refreshed.controller.start()
+    refreshed.controller.openConversation(h.store.conversations[0].id)
+    await refreshed.controller.send('second')
+    expect(refreshed.requests[0].request.input).toEqual([
+      { role: 'user', content: 'first' },
+      ...raw,
+      { role: 'user', content: 'second' },
+    ])
+  })
+  test.each(['stopped', 'failed'] as const)('历史 %s 仅过滤展示活动并保留原始部分文本', (status) => {
+    const message = {
+      id: 'history', role: 'assistant' as const, status, routeId: 'model-a', thinkingLevel: 'default' as const,
+      outputItems: [{ type: 'reasoning', encrypted_content: 'opaque', summary: [] }],
+      createdAt: '2026-01-01T00:00:00Z', partialThinking: ' \n\t',
+      partialActivities: [
+        { kind: 'thinking' as const, id: 'empty', at: 0, text: ' <!--private-->\n\t', live: false },
+        { kind: 'thinking' as const, id: 'readable', at: 1, text: '  原文\n', live: false },
+        { kind: 'thinking' as const, id: 'trailing', at: 2, text: '\t', live: false },
+      ],
+    }
+    const original = structuredClone(message)
+    expect(consoleReasoningActivities(message).map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: 'readable', text: '  原文\n' },
+    ])
+    expect(consoleAssistantContent(message).thinking).toBe('  原文\n')
+    expect(consoleReasoningActivities({ ...message, partialActivities: undefined })).toEqual([])
+    expect(message).toEqual(original)
+  })
   test('completed output is authoritative, raw reasoning and markers replay without interpretation', async () => {
     const raw = [
       {
@@ -464,6 +518,31 @@ describe('request and presentation', () => {
 })
 
 describe('stream lifecycle and races', () => {
+  test('流式思考在非空 delta 后才显示并保持公开 id 与逐项生命周期', async () => {
+    const h = harness({
+      script: function* () {
+        const activities = () => Object.values(h.controller.snapshot.generations)[0].activities
+        yield { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'first' } }
+        expect(activities()).toEqual([])
+        yield { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: ' \n\t' }
+        expect(activities()).toEqual([])
+        expect(Object.values(h.controller.snapshot.generations)[0].summary).toBe(' \n\t')
+        yield { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: '思考' }
+        expect(activities()).toMatchObject([{ id: 'first', text: ' \n\t思考', live: true }])
+        yield { type: 'response.output_item.done', output_index: 0, item: { type: 'reasoning', id: 'first', summary: [{ text: ' \n\t思考' }] } }
+        yield { type: 'response.output_item.added', output_index: 2, item: { type: 'reasoning', id: 'latest', encrypted_content: 'opaque', summary: [{ text: '\t ' }] } }
+        expect(activities()).toMatchObject([{ id: 'first', live: false }])
+        yield { type: 'response.reasoning_summary_text.delta', output_index: 2, item_id: 'latest', delta: '最新思考' }
+        expect(activities()).toMatchObject([
+          { id: 'first', live: false },
+          { id: 'latest', text: '\t 最新思考', live: true },
+        ])
+        yield complete()
+      },
+    })
+    await h.controller.start()
+    expect(await h.controller.send('Explain')).toBe(true)
+  })
   test('reasoning items retain public identity, output order, per-item completion and authoritative fallback', async () => {
     const snapshots: ConsoleChatSnapshot[] = []
     const h = harness({
@@ -568,6 +647,11 @@ describe('stream lifecycle and races', () => {
           }
           yield { type: 'response.output_item.added', output_index: 1, item: { type: 'reasoning', id: 'r2' } }
           yield { type: 'response.reasoning_text.delta', output_index: 1, item_id: 'r2', delta: 'Second<!--private-->' }
+          yield {
+            type: 'response.output_item.added',
+            output_index: 2,
+            item: { type: 'reasoning', id: 'empty-signature', encrypted_content: 'opaque', summary: [{ text: ' \n\t' }] },
+          }
           yield { type: 'response.output_text.delta', delta: 'Partial answer' }
           entered.resolve()
           await resume.promise
