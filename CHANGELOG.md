@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Markdown in Console Chat and request observations now closes bold/italic emphasis next to CJK text, such as `**名称（别名）**之后`, which CommonMark previously left as literal asterisks. Emphasis follows the CJK-friendly CommonMark draft via `marked-cjk-friendly`.
 - Console Chat no longer shows empty “Thinking” blocks for reasoning items whose summary is blank, whitespace-only, or only hidden comments, during streaming, after completion, or after stop/failure. Signed reasoning items are still stored and replayed unchanged.
 - The navigation sidebar now highlights only one Chat item at a time: the open recent conversation, “All conversations”, or Chat itself when no more specific item is visible.
 - CI regressions now follow the current contracts: Vendor pre-network rejection covers unrepresentable tool-call arguments without rejecting advisory `strict`; the protocol matrix waits for persisted `run_finished` at its fixed event watermark; Windows desktop smoke covers Console Chat at the landing page, charts in Usage analytics, and persistence after a new authenticated document has loaded. Native clipboard assertions explicitly require real WebView foreground focus without granting additional window permissions. WebUI/Rust formatting and warning-free static checks are restored; compatibility policy is unchanged.

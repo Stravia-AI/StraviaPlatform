@@ -9,6 +9,14 @@ function html(text: string): string {
 }
 
 describe('markdown HTML', () => {
+  test('closes strong emphasis between full-width punctuation and CJK text', () => {
+    expect(html('这是一张**二次元虚拟主播（VTuber / VUP）**或原创角色')).toContain(
+      '<strong>二次元虚拟主播（VTuber / VUP）</strong>或原创角色',
+    )
+    expect(html('**強調。**のテスト')).toContain('<strong>強調。</strong>のテスト')
+    expect(html('a**b**c and 2 * 3 * 4')).toContain('a<strong>b</strong>c and 2 * 3 * 4')
+  })
+
   test('recognizes all math delimiters without interpreting ordinary code or escaped dollars', () => {
     const blocks = markdownBlocks('Inline $x^2$ and \\(y\\).\n\n$$z$$\n\n\\[w\\]\n\n`$code$` and \\$5.')
     expect(

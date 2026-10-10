@@ -1,5 +1,6 @@
 import { Marked, Renderer, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
+import markedCjkFriendly from 'marked-cjk-friendly'
 
 const MARKED_OPTIONS = { async: false, gfm: true, breaks: true } as const
 
@@ -158,6 +159,8 @@ export function markdownBlocks(text: string, minimumHeadingLevel: 1 | 2 = 1): Ma
       },
     ],
   })
+  // CommonMark 不把汉字视为标点，`）**或` 这类全角标点后紧跟汉字的 `**` 无法闭合；按 CJK 友好草案放宽界定。
+  markdown.use(markedCjkFriendly())
   markdown.setOptions({ renderer })
   let offset = 0
   return markdown.lexer(text).map((token) => {
